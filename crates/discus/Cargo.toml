@@ -10,6 +10,7 @@ workspace = true
 bytes = "1"
 discus-resp = { path = "../discus-resp" }
 discus-store = { path = "../discus-store" }
+discus-telemetry = { path = "../discus-telemetry" }
 fastrand = "2"
 subtle = "2"
 clap = { version = "4", features = ["derive"] }
@@ -23,17 +24,20 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 [dev-dependencies]
 redis = { version = "0.27", features = ["tokio-comp"] }
 reqwest = { version = "0.12", default-features = false }
+discus-telemetry = { path = "../discus-telemetry", features = ["testing"] }
 
-# Build features, spec §15.5. The subsystems behind them arrive in later plans, so every feature
-# is a marker for now. Exactly one TLS backend and one trust root feature must be on.
+# Build features, spec §15.5. Exactly one TLS backend and one trust root feature must be on.
+# `otel` turns on the telemetry crate's OpenTelemetry code. The TLS and root features also select
+# the provider and the roots for TLS to the OTLP collector. The other subsystems arrive in later
+# plans, so their features are still markers.
 [features]
 default = ["otel", "oauth2", "k8s", "tls-aws-lc", "roots-system"]
-otel = []
+otel = ["discus-telemetry/otel"]
 oauth2 = []
 oauth2-introspection = ["oauth2"]
 k8s = []
-tls-aws-lc = []
-tls-ring = []
-tls-openssl = []
-roots-system = []
-roots-webpki = []
+tls-aws-lc = ["discus-telemetry/tls-aws-lc"]
+tls-ring = ["discus-telemetry/tls-ring"]
+tls-openssl = ["discus-telemetry/tls-openssl"]
+roots-system = ["discus-telemetry/roots-system"]
+roots-webpki = ["discus-telemetry/roots-webpki"]

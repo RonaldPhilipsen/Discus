@@ -8,8 +8,11 @@ description = "Lint the Markdown documentation with rumdl"
 run = "rumdl check docs/ README.md"
 
 [tasks.test]
-description = "Run all Rust tests"
-run = "cargo test --workspace"
+description = "Run all Rust tests, then the telemetry tests without the otel feature"
+run = [
+  "cargo test --workspace",
+  "cargo test -p discus-telemetry",
+]
 
 [tasks.lint]
 description = "Run rustfmt, clippy, and the documentation lint"
