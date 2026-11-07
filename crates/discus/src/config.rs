@@ -72,6 +72,13 @@ pub struct Config {
     /// Memory budget in bytes.
     #[arg(long, default_value_t = 1 << 30)]
     pub max_memory: u64,
+    /// How long a delete marker (tombstone) lives, in milliseconds.
+    #[arg(long, default_value_t = discus_store::DEFAULT_TOMBSTONE_TTL_MS)]
+    pub tombstone_ttl_ms: u64,
+    /// The share of the memory budget for tombstones, in percent. Past it, the oldest
+    /// tombstones are dropped and their shards marked for refill.
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=100))]
+    pub tombstone_reserve_percent: u64,
     /// Maximum key size in bytes.
     #[arg(long, default_value_t = 65536)]
     pub max_key_bytes: usize,

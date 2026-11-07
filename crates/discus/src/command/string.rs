@@ -388,7 +388,7 @@ fn strlen(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 }
 
 fn del(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    // A stamped write, not `Store::remove`, so plan 4 can turn it into a tombstone.
+    // A stamped write, not `Store::remove`, so the delete leaves a tombstone.
     let stamp = node.stamp()?;
     let removed = cmd[1..]
         .iter()

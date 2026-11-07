@@ -16,6 +16,9 @@ pub struct Entry {
     pub last_access_ms: u64,
     /// The HLC timestamp and origin of the last write. Conflicts resolve by this version.
     pub version: Version,
+    /// A delete marker. It reads as absent, and its deadline is the delete time plus the
+    /// tombstone TTL (spec section 8.1).
+    pub tombstone: bool,
 }
 
 impl Entry {
@@ -26,6 +29,7 @@ impl Entry {
             expires_at_ms,
             last_access_ms: 0,
             version: Version::zero(),
+            tombstone: false,
         }
     }
 

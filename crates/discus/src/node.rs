@@ -108,6 +108,8 @@ impl Node {
                 shards: config.shards,
                 max_memory: config.max_memory,
                 seed: HASH_SEED,
+                tombstone_ttl_ms: config.tombstone_ttl_ms,
+                tombstone_reserve: config.max_memory / 100 * config.tombstone_reserve_percent,
             },
             wall,
         );

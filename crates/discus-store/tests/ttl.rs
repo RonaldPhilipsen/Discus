@@ -9,6 +9,7 @@ fn sweep_removes_a_share_of_expired_entries_without_touching_live_ones() {
         shards: 4,
         max_memory: 1 << 30,
         seed: HASH_SEED,
+        ..StoreConfig::default()
     };
     let s = Store::new(cfg, clock.clone());
     for i in 0..400 {
@@ -34,6 +35,7 @@ fn repeated_sweeps_eventually_cover_every_expired_entry() {
         shards: 2,
         max_memory: 1 << 30,
         seed: HASH_SEED,
+        ..StoreConfig::default()
     };
     let s = Store::new(cfg, clock.clone());
     for i in 0..300 {

@@ -93,3 +93,38 @@ async fn scan_rejects_a_bad_cursor_and_skips_expired_keys() {
         .unwrap();
     assert_eq!(keys, vec!["kept"]);
 }
+
+#[tokio::test]
+async fn del_then_exists_type_dbsize_ignore_the_tombstone() {
+    let mut c = common::connect(&[]).await;
+    let _: () = c.set("gone", "v").await.unwrap();
+    let _: () = c.set("kept", "v").await.unwrap();
+    let n: i64 = c.del("gone").await.unwrap();
+    assert_eq!(n, 1);
+    let n: i64 = c.del("gone").await.unwrap();
+    assert_eq!(n, 0);
+    let n: i64 = c.exists("gone").await.unwrap();
+    assert_eq!(n, 0);
+    let t: String = redis::cmd("TYPE")
+        .arg("gone")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(t, "none");
+    let n: i64 = redis::cmd("DBSIZE").query_async(&mut c).await.unwrap();
+    assert_eq!(n, 1);
+    let info: String = redis::cmd("INFO")
+        .arg("discus")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert!(info.contains("discus_tombstones:1"), "{info}");
+    let (_, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+        .arg(0)
+        .arg("COUNT")
+        .arg(100)
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(keys, vec!["kept".to_string()]);
+}

@@ -13,6 +13,7 @@ fn reserve_evicts_oldest_first_and_stays_under_budget() {
         shards: 1,
         max_memory: 10_000,
         seed: HASH_SEED,
+        ..StoreConfig::default()
     };
     let s = Store::new(cfg, clock.clone());
     for i in 0..8u64 {
@@ -35,6 +36,7 @@ fn a_value_larger_than_maxmemory_is_rejected_not_evicted_for() {
         shards: 1,
         max_memory: 10_000,
         seed: HASH_SEED,
+        ..StoreConfig::default()
     };
     let s = Store::new(cfg, clock.clone());
     s.write(b"keep", Version::zero(), |slot| *slot = Some(entry(100)));
@@ -50,6 +52,7 @@ fn reserve_on_an_empty_store_does_not_loop() {
         shards: 4,
         max_memory: 10_000,
         seed: HASH_SEED,
+        ..StoreConfig::default()
     };
     let s = Store::new(cfg, clock);
     assert_eq!(s.reserve(9_000), Admit::Ok);

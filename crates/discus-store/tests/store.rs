@@ -7,6 +7,7 @@ fn store(clock: &Arc<ManualClock>) -> Store {
         shards: 16,
         max_memory: 1 << 30,
         seed: HASH_SEED,
+        ..StoreConfig::default()
     };
     Store::new(cfg, clock.clone())
 }

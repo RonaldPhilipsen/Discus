@@ -4,7 +4,6 @@ use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
 
-use crate::entry::estimate_size;
 use crate::Store;
 
 /// Entries that one eviction step samples from a shard.
@@ -19,7 +18,9 @@ pub enum Admit {
 }
 
 impl Store {
-    /// Make room for `bytes` more, evicting sampled least-recently-used entries.
+    /// Make room for `bytes` more. The order is the one of spec section 11: sampled
+    /// least-recently-used entries, then the pressure hook (the oldest hints), then the oldest
+    /// tombstones, which marks their shards `needs_refill`.
     ///
     /// A request larger than `max_memory` is refused up front, so one huge value cannot flush
     /// the whole store. Callers must not hold a store lock while they call this.
@@ -29,15 +30,22 @@ impl Store {
             return Admit::TooLarge;
         }
         while self.used_memory() + bytes > max {
-            if !self.evict_one() {
+            if self.evict_one() {
+                continue;
+            }
+            let want = self.used_memory() + bytes - max;
+            if self.pressure.get().is_some_and(|free| free(want) > 0) {
+                continue;
+            }
+            if !self.drop_oldest_tombstone() {
                 break;
             }
         }
         Admit::Ok
     }
 
-    /// Evict the oldest of a small sample from the next non-empty shard. Returns false when the
-    /// store holds nothing to evict.
+    /// Evict the oldest of a small sample of live entries from the next shard that has one.
+    /// Tombstones are never sampled. Returns false when the store holds no live entry.
     pub fn evict_one(&self) -> bool {
         let n = self.shards.len();
         let first = self.evict_shard.fetch_add(1, Ordering::Relaxed);
@@ -45,7 +53,7 @@ impl Store {
             let shard = &self.shards[(first + offset) % n];
             let mut guard = shard.inner.write();
             let len = guard.map.len();
-            if len == 0 {
+            if len == guard.tombs.len() {
                 continue;
             }
             let start = shard.cursor.fetch_add(EVICTION_SAMPLES, Ordering::Relaxed) % len;
@@ -54,13 +62,13 @@ impl Store {
                 .iter()
                 .skip(start)
                 .chain(guard.map.iter())
-                .take(EVICTION_SAMPLES.min(len))
+                .take(len)
+                .filter(|(_, e)| !e.tombstone)
+                .take(EVICTION_SAMPLES)
                 .min_by_key(|(_, e)| e.last_access_ms)
                 .map(|(k, _)| k.clone());
             if let Some(k) = victim {
-                if let Some(e) = guard.map.remove(&k) {
-                    self.adjust_used(estimate_size(&k, &e), 0);
-                    self.drop_len(1);
+                if self.take(&mut guard, &k).is_some() {
                     self.evicted.fetch_add(1, Ordering::Relaxed);
                     return true;
                 }

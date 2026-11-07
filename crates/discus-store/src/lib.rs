@@ -17,7 +17,7 @@ pub use discus_placement::{NodeId, Version, NTP64};
 pub use entry::{estimate_size, Entry};
 pub use evict::Admit;
 pub use glob::glob_match;
-pub use store::{Store, StoreConfig, HASH_SEED};
+pub use store::{refill_bucket, Pressure, Store, StoreConfig, DEFAULT_TOMBSTONE_TTL_MS, HASH_SEED};
 pub use ttl::spawn_sweeper;
 pub use value::Value;
 pub use zset::ZSet;

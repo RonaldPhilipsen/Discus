@@ -8,13 +8,12 @@ use bytes::Bytes;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::entry::estimate_size;
 use crate::Store;
 
 impl Store {
-    /// Sample up to `samples_per_shard` entries in each shard and remove the expired ones.
-    /// Returns the number of entries removed. Each shard keeps a cursor, so repeated sweeps
-    /// cover the whole shard over time.
+    /// Sample up to `samples_per_shard` entries in each shard and remove the expired ones, and
+    /// remove every expired tombstone. Returns the number of entries removed. Each shard keeps a
+    /// cursor, so repeated sweeps cover the whole shard over time.
     ///
     /// The sample skips over the cursor position each call, which is O(cursor) per shard. A later
     /// plan can replace the map with an indexed one if this shows up in profiles.
@@ -23,6 +22,13 @@ impl Store {
         let mut removed_total = 0;
         for shard in &self.shards {
             let mut guard = shard.inner.write();
+            while let Some((deadline, key)) = guard.tombs.first().cloned() {
+                if deadline > now {
+                    break;
+                }
+                self.take(&mut guard, &key);
+                removed_total += 1;
+            }
             let start = shard.cursor.load(Ordering::Relaxed);
             let mut seen = 0;
             let mut expired: Vec<Bytes> = Vec::new();
@@ -40,9 +46,7 @@ impl Store {
             };
             shard.cursor.store(next, Ordering::Relaxed);
             for k in expired {
-                if let Some(e) = guard.map.remove(&k) {
-                    self.adjust_used(estimate_size(&k, &e), 0);
-                    self.drop_len(1);
+                if self.take(&mut guard, &k).is_some() {
                     removed_total += 1;
                 }
             }
