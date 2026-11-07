@@ -1,7 +1,8 @@
 //! The crypto provider, trust roots, and `rustls` configuration.
 //!
 //! The TLS backend feature picks the provider (spec §15.5). Every `rustls` config in Discus is
-//! built with `builder_with_provider(provider())`, so no process-wide default is needed.
+//! built with `builder_with_provider(provider())`. `main` also installs the provider as the
+//! process-wide default, because the OTLP exporter builds its own config.
 
 use std::io;
 use std::path::Path;

@@ -59,10 +59,9 @@ against one set of trust roots:
 
 For mTLS, also pass `--otel-cert-file` and `--otel-key-file`.
 
-The TLS backend feature selects the cryptography. The `tls-aws-lc` and `tls-ring` builds support
-TLS to the collector now. A `tls-openssl` build needs the process-wide `rustls` provider, which a
-later release installs. Until then, a `tls-openssl` build refuses to start with `--otel` and an
-`https://` endpoint, and the error names the cause.
+The TLS backend feature selects the cryptography. Every backend supports TLS to the collector. The
+node installs the provider of its TLS backend as the process-wide `rustls` default before it starts
+telemetry. A `tls-openssl` build uses that provider for the collector connection.
 
 ## Sampling
 

@@ -83,11 +83,6 @@ pub enum TelemetryError {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error(
-        "OTLP over TLS needs a rustls crypto provider: this build uses tls-openssl and no \
-         provider is installed"
-    )]
-    NoCryptoProvider,
 }
 
 #[cfg(feature = "otel")]
@@ -266,11 +261,8 @@ mod otel {
             tls = tls.identity(Identity::from_pem(read(cert)?, read(key)?));
         }
         // tonic falls back to the provider of tls-aws-lc or tls-ring. Under tls-openssl it uses
-        // the process default provider, which the security setup installs.
-        let fallback = cfg!(any(feature = "tls-aws-lc", feature = "tls-ring"));
-        if !fallback && rustls::crypto::CryptoProvider::get_default().is_none() {
-            return Err(TelemetryError::NoCryptoProvider);
-        }
+        // the process default provider. The node installs that provider before it starts
+        // telemetry.
         Ok(Some(tls))
     }
 

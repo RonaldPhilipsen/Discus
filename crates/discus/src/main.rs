@@ -5,6 +5,9 @@ use tokio_util::sync::CancellationToken;
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let config = Config::parse();
+    // The backend provider becomes the process-wide rustls default before anything builds a TLS
+    // config. Under tls-openssl, TLS to the OTLP collector needs it.
+    discus::security::tls::install_default();
     // Logging, metrics, and traces. A flag that needs a missing build feature stops the start.
     let _telemetry = match discus::telemetry::init(&config) {
         Ok(guard) => guard,
