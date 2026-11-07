@@ -9,6 +9,7 @@ use bytes::Bytes;
 use discus_resp::Protocol;
 use discus_store::{Store, StoreConfig, SystemClock, HASH_SEED};
 
+use crate::security::{ConnAuth, Security};
 use crate::Config;
 
 /// Where the node is in its life.
@@ -34,13 +35,14 @@ pub struct Node {
     pub config: Config,
     pub started_at: Instant,
     pub store: Arc<Store>,
+    pub security: Arc<Security>,
     next_conn_id: AtomicU64,
     connected: AtomicUsize,
     phase: AtomicU8,
 }
 
 impl Node {
-    pub fn new(config: Config) -> Node {
+    pub fn new(config: Config, security: Arc<Security>) -> Node {
         let store = Store::new(
             StoreConfig {
                 shards: config.shards,
@@ -53,6 +55,7 @@ impl Node {
             config,
             started_at: Instant::now(),
             store: Arc::new(store),
+            security,
             next_conn_id: AtomicU64::new(1),
             connected: AtomicUsize::new(0),
             phase: AtomicU8::new(Phase::Starting as u8),
@@ -95,7 +98,7 @@ impl Node {
 #[derive(Debug)]
 pub struct ConnState {
     pub protocol: Protocol,
-    pub authenticated: bool,
+    pub auth: ConnAuth,
     pub name: Option<Bytes>,
     pub id: u64,
     /// Set by `QUIT`: close the connection after the reply is flushed.
@@ -103,10 +106,10 @@ pub struct ConnState {
 }
 
 impl ConnState {
-    pub fn new(id: u64, authenticated: bool) -> ConnState {
+    pub fn new(id: u64, auth: ConnAuth) -> ConnState {
         ConnState {
             protocol: Protocol::Resp2,
-            authenticated,
+            auth,
             name: None,
             id,
             closing: false,

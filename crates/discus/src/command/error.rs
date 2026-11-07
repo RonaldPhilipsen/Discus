@@ -15,6 +15,8 @@ pub enum CommandError {
     KeyTooLarge,
     ValueTooLarge,
     Unsupported(String),
+    /// The scopes of the connection do not allow the command (lower-case name).
+    NoPerm(String),
     /// Raw error text, including its prefix such as `ERR` or `OOM`.
     Custom(String),
 }
@@ -40,6 +42,9 @@ impl CommandError {
             CommandError::KeyTooLarge => "ERR key too large".into(),
             CommandError::ValueTooLarge => "ERR value too large".into(),
             CommandError::Unsupported(_) => "ERR command not supported by Discus".into(),
+            CommandError::NoPerm(n) => {
+                format!("NOPERM this user has no permissions to run the '{n}' command")
+            }
             CommandError::Custom(s) => s.clone(),
         }
     }

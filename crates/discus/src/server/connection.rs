@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::command::dispatch;
 use crate::node::{ConnState, Node};
+use crate::security::ConnAuth;
 
 /// Flush when this many reply bytes are pending.
 const FLUSH_BYTES: usize = 1 << 20;
@@ -31,7 +32,12 @@ async fn flush(stream: &mut TcpStream, out: &mut BytesMut, hard_stop: &Cancellat
     sent
 }
 
-pub async fn serve(mut stream: TcpStream, node: Arc<Node>, hard_stop: CancellationToken) {
+pub async fn serve(
+    mut stream: TcpStream,
+    auth: ConnAuth,
+    node: Arc<Node>,
+    hard_stop: CancellationToken,
+) {
     let _guard = node.track_connection();
     let cfg = &node.config;
     // The parser limit is looser than the value limit so a moderately oversize value gets a clean
@@ -44,7 +50,7 @@ pub async fn serve(mut stream: TcpStream, node: Arc<Node>, hard_stop: Cancellati
         ..Limits::default()
     };
     let mut parser = Parser::new(limits);
-    let mut conn = ConnState::new(node.next_conn_id(), cfg.shared_token.is_none());
+    let mut conn = ConnState::new(node.next_conn_id(), auth);
     let mut out = BytesMut::new();
     let mut chunk = vec![0u8; READ_CHUNK];
     let mut in_flight = 0usize;

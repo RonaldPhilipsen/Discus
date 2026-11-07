@@ -118,8 +118,8 @@ fn run(node: &Node, conn: &mut ConnState, cmd: &Command) -> Result<Value, Comman
     if !arity_ok {
         return Err(CommandError::WrongArity(spec.name.into()));
     }
-    if spec.needs_auth && !conn.authenticated {
-        return Err(CommandError::NoAuth);
+    if spec.needs_auth {
+        node.security.authorize(conn, spec.name)?;
     }
     (spec.handler)(node, conn, cmd)
 }

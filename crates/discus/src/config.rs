@@ -44,6 +44,8 @@ pub struct Config {
     /// Shared token that clients must send with AUTH.
     #[arg(long)]
     pub shared_token: Option<String>,
+    #[command(flatten)]
+    pub security: crate::security::SecurityArgs,
 }
 
 impl Config {

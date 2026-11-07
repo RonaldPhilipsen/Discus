@@ -54,6 +54,15 @@ else
 fi
 check "tls-aws-lc,roots-webpki"
 
+# A binary without a subsystem refuses a configuration that needs it, and names the feature.
+if cargo test -q -p discus --no-default-features --features "$base" --test security_config \
+  >/dev/null 2>&1; then
+  echo "ok      $base refuses configurations that need a missing feature"
+else
+  echo "FAILED  $base refuses configurations that need a missing feature"
+  failures=$((failures + 1))
+fi
+
 # Rejected combinations.
 reject "roots-system" "enable exactly one TLS backend feature"
 reject "tls-aws-lc,tls-ring,roots-system" "enable only one TLS backend feature"

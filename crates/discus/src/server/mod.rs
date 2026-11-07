@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::admin::serve_admin;
+use crate::security::Security;
 use crate::{Config, Node, Phase};
 
 mod connection;
@@ -24,12 +25,14 @@ pub struct Server {
 impl Server {
     /// Bind the client and admin listeners.
     pub async fn bind(config: Config) -> io::Result<Server> {
+        let security = Security::from_config(&config)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         let listener = TcpListener::bind(config.listen).await?;
         let admin = TcpListener::bind(config.admin_listen).await?;
         Ok(Server {
             listener,
             admin,
-            node: Arc::new(Node::new(config)),
+            node: Arc::new(Node::new(config, Arc::new(security))),
         })
     }
 
@@ -79,9 +82,10 @@ impl Server {
             tokio::select! {
                 _ = shutdown.cancelled() => break Ok(()),
                 accepted = listener.accept() => match accepted {
-                    Ok((stream, _)) => {
+                    Ok((stream, peer)) => {
                         let _ = stream.set_nodelay(true);
-                        tracker.spawn(connection::serve(stream, node.clone(), hard_stop.clone()));
+                        let auth = node.security.plain_conn(Some(peer.ip()));
+                        tracker.spawn(connection::serve(stream, auth, node.clone(), hard_stop.clone()));
                     }
                     Err(e) => break Err(e),
                 },
