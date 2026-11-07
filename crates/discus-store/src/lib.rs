@@ -5,12 +5,14 @@
 
 pub mod clock;
 pub mod entry;
+pub mod evict;
 pub mod store;
 pub mod ttl;
 pub mod value;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use entry::{estimate_size, Entry};
+pub use evict::Admit;
 pub use store::{Store, StoreConfig, HASH_SEED};
 pub use ttl::spawn_sweeper;
 pub use value::Value;

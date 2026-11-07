@@ -6,7 +6,7 @@ use discus_store::{Entry, Value as Stored};
 
 use super::error::CommandError;
 use super::table::CommandSpec;
-use super::util::{check_key, check_value, parse_f64, parse_i64, upper};
+use super::util::{admit, check_key, check_value, parse_f64, parse_i64, upper};
 use crate::node::{ConnState, Node};
 
 pub const COMMANDS: &[CommandSpec] = &[
@@ -181,6 +181,7 @@ fn set(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     if nx && xx {
         return Err(CommandError::Syntax);
     }
+    admit(node, cmd[1].len() + cmd[2].len())?;
     let value = cmd[2].clone();
     node.store.write(&cmd[1], |slot| {
         let old = match slot.as_ref() {
@@ -282,6 +283,7 @@ fn mset(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         check_value(node, &pair[1])?;
     }
     for pair in cmd[1..].chunks(2) {
+        admit(node, pair[0].len() + pair[1].len())?;
         node.store.write(&pair[0], |slot| {
             *slot = Some(new_entry(pair[1].clone(), None))
         });
@@ -354,6 +356,7 @@ fn incrbyfloat(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 
 fn append(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     check_key(node, &cmd[1])?;
+    admit(node, cmd[2].len())?;
     node.store.write(&cmd[1], |slot| {
         let (mut bytes, expires) = match slot.as_ref() {
             None => (Vec::new(), None),

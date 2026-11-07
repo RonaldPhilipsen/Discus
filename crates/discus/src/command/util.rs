@@ -45,3 +45,16 @@ pub fn check_value(node: &Node, value: &[u8]) -> Result<(), CommandError> {
     }
     Ok(())
 }
+
+/// Make room for a write of about `bytes`. A value larger than the whole budget is refused.
+pub fn admit(node: &Node, bytes: usize) -> Result<(), CommandError> {
+    match node
+        .store
+        .reserve(bytes as u64 + discus_store::entry::ENTRY_OVERHEAD)
+    {
+        discus_store::Admit::Ok => Ok(()),
+        discus_store::Admit::TooLarge => Err(CommandError::Custom(
+            "OOM value larger than maxmemory".into(),
+        )),
+    }
+}

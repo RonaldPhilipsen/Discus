@@ -42,6 +42,8 @@ pub struct Store {
     pub(crate) config: StoreConfig,
     used: AtomicU64,
     len: AtomicUsize,
+    pub(crate) evict_shard: AtomicUsize,
+    pub(crate) evicted: AtomicU64,
 }
 
 impl Store {
@@ -59,6 +61,8 @@ impl Store {
             config,
             used: AtomicU64::new(0),
             len: AtomicUsize::new(0),
+            evict_shard: AtomicUsize::new(0),
+            evicted: AtomicU64::new(0),
         }
     }
 
