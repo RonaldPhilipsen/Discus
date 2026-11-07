@@ -10,7 +10,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+use futures::FutureExt;
 
 use bytes::Bytes;
 use discus_placement::{
@@ -18,7 +21,8 @@ use discus_placement::{
 };
 use discus_wire::{Capacity, Gossip, Liveness, MemberInfo, Rumor};
 
-use crate::{Action, Host, Millis, Outcome, Swim, SwimConfig};
+use crate::lease::{LeaseHolder, LeaseProvider, LeaseState, MemoryLease};
+use crate::{provisional_epoch, Action, Event, Host, Millis, Outcome, Phase, Swim, SwimConfig};
 
 /// The time step of the simulator.
 pub const STEP_MS: Millis = 10;
@@ -36,7 +40,7 @@ pub struct SimHost {
 impl SimHost {
     fn new(id: NodeId) -> SimHost {
         SimHost {
-            history: EpochHistory::new(provisional(id)),
+            history: EpochHistory::new(provisional_epoch(id)),
             hlc: 0,
             clock_offset: 0,
             lease_cluster: None,
@@ -47,19 +51,6 @@ impl SimHost {
     fn wall(&self) -> u64 {
         self.now + self.clock_offset
     }
-}
-
-/// The epoch of a node that is not in a cluster: generation 0, no members.
-pub fn provisional(id: NodeId) -> Epoch {
-    Epoch::new(
-        EpochId {
-            generation: 0,
-            origin: id,
-        },
-        ClusterId::NIL,
-        Vec::new(),
-    )
-    .unwrap()
 }
 
 impl Host for SimHost {
@@ -108,6 +99,17 @@ pub struct SimNode {
     waiting: BTreeSet<u64>,
     /// Relay tokens: the requester and its token.
     relays: HashMap<u64, (NodeId, u64)>,
+    events: Vec<Event>,
+    lease_requests: u64,
+    /// The cluster ID that this node mints if it wins the lease.
+    candidate: ClusterId,
+    next_renew: Millis,
+}
+
+enum SimLease {
+    Absent,
+    None,
+    Memory(MemoryLease),
 }
 
 enum Delivery {
@@ -139,6 +141,10 @@ pub struct Sim {
     queue: BTreeMap<(Millis, u64), Delivery>,
     seq: u64,
     groups: Option<Vec<BTreeSet<NodeId>>>,
+    lease: SimLease,
+    clock: Arc<AtomicU64>,
+    renew_ms: Millis,
+    formed: usize,
 }
 
 impl Sim {
@@ -152,7 +158,63 @@ impl Sim {
             queue: BTreeMap::new(),
             seq: 0,
             groups: None,
+            lease: SimLease::Absent,
+            clock: Arc::new(AtomicU64::new(0)),
+            renew_ms: 0,
+            formed: 0,
         }
+    }
+
+    /// Use an in-memory lease of `duration_ms` on the virtual clock, renewed every third of it.
+    pub fn with_lease(&mut self, duration_ms: Millis) {
+        let clock = self.clock.clone();
+        self.lease = SimLease::Memory(MemoryLease::new(
+            Arc::new(move || clock.load(Ordering::Relaxed)),
+            duration_ms,
+        ));
+        self.renew_ms = duration_ms / 3;
+    }
+
+    /// Use the provider `none`: every node that wants the lease gets it.
+    pub fn with_none_lease(&mut self) {
+        self.lease = SimLease::None;
+        self.renew_ms = 1_000;
+    }
+
+    pub fn lease(&self) -> &MemoryLease {
+        match &self.lease {
+            SimLease::Memory(l) => l,
+            _ => panic!("the simulation has no memory lease"),
+        }
+    }
+
+    /// Clusters formed through the lease.
+    pub fn formed(&self) -> usize {
+        self.formed
+    }
+
+    /// Start seeking with the addresses of `seeds` as discovery seeds.
+    pub fn start(&mut self, id: NodeId, seeds: &[NodeId]) {
+        let addrs: Vec<SocketAddr> = seeds.iter().map(|s| self.nodes[s].swim.me().addr).collect();
+        self.node_mut(id).swim.set_seeds(addrs);
+    }
+
+    pub fn events(&self, id: NodeId) -> &[Event] {
+        &self.nodes[&id].events
+    }
+
+    pub fn lease_requests(&self, id: NodeId) -> u64 {
+        self.nodes[&id].lease_requests
+    }
+
+    pub fn is_normal(&self, id: NodeId) -> bool {
+        let n = &self.nodes[&id];
+        n.swim.is_normal(&n.host)
+    }
+
+    /// Offer `epoch` to the host of `id`, as the forward path would.
+    pub fn adopt(&mut self, id: NodeId, epoch: Epoch) {
+        let _ = self.node_mut(id).host.adopt(epoch);
     }
 
     pub fn now(&self) -> Millis {
@@ -170,7 +232,7 @@ impl Sim {
             state: MemberState::Joining,
             incarnation: 0,
             weight: Weight::default(),
-            epoch: provisional(id).id(),
+            epoch: provisional_epoch(id).id(),
             capabilities: discus_wire::caps::KNOWN,
             capacity: Capacity::default(),
             leader_hints: Bytes::new(),
@@ -188,6 +250,10 @@ impl Sim {
             sent: 0,
             waiting: BTreeSet::new(),
             relays: HashMap::new(),
+            events: Vec::new(),
+            lease_requests: 0,
+            candidate: ClusterId::from_u128(self.rng.u128(1..)),
+            next_renew: 0,
         };
         self.by_addr.insert(addr, id);
         self.nodes.insert(id, node);
@@ -405,8 +471,53 @@ impl Sim {
         }
     }
 
-    /// A hook for later parts of the simulator, such as the lease.
-    fn after_tick(&mut self) {}
+    /// Collect events, answer lease requests, and renew the lease of members.
+    fn after_tick(&mut self) {
+        let now = self.now;
+        self.clock.store(now, Ordering::Relaxed);
+        for id in self.alive_ids() {
+            let renew_ms = self.renew_ms;
+            let node = self.nodes.get_mut(&id).unwrap();
+            let events = node.swim.take_events();
+            let wanted = events.contains(&Event::LeaseWanted);
+            node.events.extend(events);
+            let member = node.swim.phase() != Phase::Seeking;
+            let renew = member && renew_ms > 0 && now >= node.next_renew;
+            if !wanted && !renew {
+                continue;
+            }
+            if wanted {
+                node.lease_requests += 1;
+            }
+            if renew {
+                node.next_renew = now + renew_ms;
+            }
+            let cluster = if member {
+                node.swim.cluster_id()
+            } else {
+                node.candidate
+            };
+            let me = LeaseHolder {
+                identity: id.to_string(),
+                address: node.swim.me().addr,
+                cluster_id: cluster,
+            };
+            let result = match &self.lease {
+                SimLease::Absent => continue,
+                SimLease::None => Ok(LeaseState::Held(me.clone())),
+                SimLease::Memory(l) => l.acquire_or_renew(&me).now_or_never().unwrap(),
+            };
+            if let Ok(LeaseState::Held(h) | LeaseState::HeldByOther(h)) = &result {
+                node.host.lease_cluster = Some(h.cluster_id);
+            }
+            let before = node.swim.cluster_id();
+            node.host.now = now;
+            node.swim.lease_result(now, result, &mut node.host);
+            if before == ClusterId::NIL && node.swim.cluster_id() != ClusterId::NIL {
+                self.formed += 1;
+            }
+        }
+    }
 
     fn deliver_until(&mut self, end: Millis) {
         while let Some(entry) = self.queue.first_entry() {
@@ -435,9 +546,10 @@ impl Sim {
                 if !self.reachable(from, target) || self.nodes[&target].silenced {
                     return;
                 }
+                let src = self.nodes[&from].swim.me().addr;
                 let node = self.node_mut(target);
                 node.host.now = now;
-                let handled = node.swim.handle(now, to, msg, &mut node.host);
+                let handled = node.swim.handle(now, src, msg, &mut node.host);
                 match handled.relay {
                     Some(relay) => {
                         self.node_mut(target)

@@ -1,23 +1,39 @@
-//! The sans-IO SWIM core (spec section 6.1).
+//! The sans-IO SWIM core (spec sections 5.1, 6.1 to 6.3).
 //!
 //! The caller supplies the time and the inbound messages, and sends the actions that the core
 //! returns. Each action is one request with one reply. The caller reports the result with
 //! [`Swim::outcome`], or with [`Swim::relayed`] for the ping that a `PING_REQ` asked for.
+//!
+//! Epoch changes are pending deltas, not a recomputed view: each observed transition of a member
+//! records the presence that the member needs in the epoch. When the jitter timer fires, the node
+//! drops the deltas that the current epoch already shows and creates the next epoch from the
+//! current members with the rest applied. So a node never undoes a change that it has not seen,
+//! and a losing creator applies its change again in the next epoch.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use bytes::Bytes;
-use discus_placement::{ClusterId, Epoch, MemberState, NodeId};
+use discus_placement::{ClusterId, Epoch, EpochId, Member, MemberState, NodeId};
 use discus_wire::{Capacity, Gossip, GossipKind, Liveness, MemberInfo, Rumor};
 
+use crate::lease::{LeaseError, LeaseState};
+use crate::merge::{winner, JoinLimiter};
 use crate::view::{retransmit_limit, supersedes, Broadcasts, Record};
 use crate::{Detector, Event, Host, Millis, SwimConfig};
 
-/// One request to send.
+/// A join reply takes the highest HLC heard from members within this window into account.
+const HLC_WINDOW_MS: Millis = 30_000;
+
+/// Join requests per period while seeking.
+const JOIN_FANOUT: usize = 3;
+
+/// Members that receive the final `LEAVE`.
+const LEAVE_FANOUT: usize = 3;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Action {
-    /// Report the result under this token.
     pub token: u64,
     pub to: SocketAddr,
     /// The node that the core expects at `to`, if it knows one.
@@ -26,7 +42,6 @@ pub struct Action {
     pub timeout_ms: Millis,
 }
 
-/// The result of one action.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
     Reply(Box<Gossip>),
@@ -35,29 +50,35 @@ pub enum Outcome {
     Silent {
         in_cluster: bool,
     },
-    /// No connection.
     Unreachable,
 }
 
-/// The answer to an inbound message.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Handled {
     pub reply: Gossip,
-    /// A ping to send before the reply. Report its result with [`Swim::relayed`], which gives
-    /// the final reply.
+    /// A ping to send before the reply. Its result goes to [`Swim::relayed`], which gives the
+    /// final reply.
     pub relay: Option<Action>,
 }
 
-/// What a token waits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Looking for a cluster, or joining one again after a rejoin. The node is `JOINING`.
+    Seeking,
+    Member,
+    Leaving,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pending {
     Direct { target: NodeId },
     Indirect { target: NodeId },
     Relay { target: NodeId },
     Sync,
+    Join,
+    Leave,
 }
 
-/// The probe of the current period.
 #[derive(Debug, Clone, Copy)]
 struct Probe {
     target: NodeId,
@@ -69,6 +90,7 @@ pub struct Swim {
     cfg: SwimConfig,
     me: MemberInfo,
     cluster_id: ClusterId,
+    phase: Phase,
     members: BTreeMap<NodeId, Record>,
     broadcasts: Broadcasts,
     rng: fastrand::Rng,
@@ -80,15 +102,34 @@ pub struct Swim {
     next_sync: Millis,
     next_reconnect: Millis,
     events: Vec<Event>,
+    seeds: Vec<SocketAddr>,
+    seek_started: Option<Millis>,
+    last_normal_seen: Option<Millis>,
+    next_join: Millis,
+    join_cursor: usize,
+    next_lease: Millis,
+    /// The presence each member needs in the next epoch: `Some` member (`NORMAL` or `LEAVING`)
+    /// or `None` (absent).
+    deltas: BTreeMap<NodeId, Option<Member>>,
+    epoch_timer: Option<Millis>,
+    /// The epoch that the core processed last. It notices epochs adopted elsewhere, for example
+    /// on the forward path.
+    last_epoch: Option<Arc<Epoch>>,
+    limiter: JoinLimiter,
+    /// The cluster size that the detectors expect. They are rebuilt when the size doubles or
+    /// halves.
+    detector_n: usize,
 }
 
 impl Swim {
+    /// A node that is not in a cluster yet. It starts seeking at its first tick.
     pub fn new(cfg: SwimConfig, me: MemberInfo) -> Swim {
         let rng = fastrand::Rng::with_seed(cfg.seed);
         Swim {
             cfg,
             me,
             cluster_id: ClusterId::NIL,
+            phase: Phase::Seeking,
             members: BTreeMap::new(),
             broadcasts: Broadcasts::default(),
             rng,
@@ -100,6 +141,17 @@ impl Swim {
             next_sync: 0,
             next_reconnect: 0,
             events: Vec::new(),
+            seeds: Vec::new(),
+            seek_started: None,
+            last_normal_seen: None,
+            next_join: 0,
+            join_cursor: 0,
+            next_lease: 0,
+            deltas: BTreeMap::new(),
+            epoch_timer: None,
+            last_epoch: None,
+            limiter: JoinLimiter::default(),
+            detector_n: 1,
         }
     }
 
@@ -107,7 +159,6 @@ impl Swim {
         &self.cfg
     }
 
-    /// The local member.
     pub fn me(&self) -> &MemberInfo {
         &self.me
     }
@@ -116,14 +167,18 @@ impl Swim {
         self.cluster_id
     }
 
-    /// Make this node a member of `cluster_id` in `state` without a join. The simulator uses it
-    /// to start from a formed cluster.
+    pub fn phase(&self) -> Phase {
+        self.phase
+    }
+
+    /// Make this node a member of `cluster_id` in `state` without a join. The simulator and the
+    /// static membership mode use it.
     pub fn set_static_member(&mut self, cluster_id: ClusterId, state: MemberState) {
         self.cluster_id = cluster_id;
         self.me.state = state;
+        self.phase = Phase::Member;
     }
 
-    /// Every other member that the view holds, with its liveness.
     pub fn members(&self) -> Vec<(MemberInfo, Liveness)> {
         self.members
             .values()
@@ -131,17 +186,14 @@ impl Swim {
             .collect()
     }
 
-    /// The liveness of `id` in the view.
     pub fn liveness(&self, id: NodeId) -> Option<Liveness> {
         self.members.get(&id).map(|r| r.liveness)
     }
 
-    /// The record of `id` in the view.
     pub fn member(&self, id: NodeId) -> Option<&MemberInfo> {
         self.members.get(&id).map(|r| &r.info)
     }
 
-    /// The detector score of `id` at `now`.
     pub fn score(&self, now: Millis, id: NodeId) -> f64 {
         self.members
             .get(&id)
@@ -149,26 +201,61 @@ impl Swim {
             .unwrap_or(0.0)
     }
 
-    /// The events since the last call.
     pub fn take_events(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.events)
     }
 
-    /// Publish new counter leader hints. They spread with a new incarnation.
+    /// Discovery seeds: static seeds, headless Service addresses, and lease holders. The own
+    /// address is dropped.
+    pub fn set_seeds(&mut self, seeds: Vec<SocketAddr>) {
+        self.seeds.clear();
+        for s in seeds {
+            self.add_seed(s);
+        }
+    }
+
+    pub fn add_seed(&mut self, seed: SocketAddr) {
+        if seed != self.me.addr && !self.seeds.contains(&seed) {
+            self.seeds.push(seed);
+        }
+    }
+
+    /// True when the node serves: it is `NORMAL`, and the current epoch lists it as `NORMAL`.
+    pub fn is_normal(&self, host: &dyn Host) -> bool {
+        self.phase == Phase::Member
+            && self.me.state == MemberState::Normal
+            && host.epoch().member(self.me.id).map(|m| m.state) == Some(MemberState::Normal)
+    }
+
+    /// Counter leader hints spread with a new incarnation.
     pub fn set_leader_hints(&mut self, hints: Bytes) {
         self.me.leader_hints = hints;
         self.bump();
     }
 
-    /// Update the capacity hints. They travel in the sender part of every message.
+    /// Capacity hints travel in the sender part of every message, without a new incarnation.
     pub fn set_capacity(&mut self, capacity: Capacity) {
         self.me.capacity = capacity;
     }
 
-    /// Raise the own incarnation and queue the own record.
     fn bump(&mut self) {
         self.me.incarnation += 1;
         self.broadcasts.push(self.me.id);
+    }
+
+    fn set_state(&mut self, now: Millis, state: MemberState, phase: Phase) {
+        self.me.state = state;
+        self.phase = phase;
+        self.bump();
+        self.events.push(Event::StateChanged {
+            state,
+            incarnation: self.me.incarnation,
+        });
+        if phase == Phase::Seeking {
+            self.seek_started = Some(now);
+            self.next_join = now;
+        }
+        self.on_change(now, self.me.id);
     }
 
     /// Data-path evidence against `peer`: a forward timeout, a reset, or a failed handshake.
@@ -193,7 +280,6 @@ impl Swim {
             .count()
     }
 
-    /// The rumor of `id` as this node would send it.
     fn rumor_of(&self, id: NodeId) -> Option<Rumor> {
         if id == self.me.id {
             return Some(Rumor {
@@ -213,7 +299,6 @@ impl Swim {
         })
     }
 
-    /// Every record, for a full state exchange.
     fn full_view(&self) -> Vec<Rumor> {
         std::iter::once(self.me.id)
             .chain(self.members.keys().copied())
@@ -221,20 +306,32 @@ impl Swim {
             .collect()
     }
 
-    /// Build a message of `kind` for `to`.
-    pub(crate) fn message(
-        &mut self,
-        kind: GossipKind,
-        to: Option<NodeId>,
-        host: &dyn Host,
-    ) -> Gossip {
+    /// A message with only the sender part: for seekers and for foreign clusters, which never
+    /// receive this node's view.
+    fn bare(&mut self, kind: GossipKind, host: &dyn Host) -> Gossip {
         let epoch = host.epoch();
         self.me.epoch = epoch.id();
+        Gossip {
+            kind,
+            from: self.me.clone(),
+            cluster_id: self.cluster_id,
+            cluster_size: normal_count(&epoch) as u32,
+            epoch_body: None,
+            hlc: host.hlc(),
+            target: None,
+            rumors: Vec::new(),
+            retry_after_ms: 0,
+        }
+    }
+
+    fn message(&mut self, kind: GossipKind, to: Option<NodeId>, host: &dyn Host) -> Gossip {
+        let mut g = self.bare(kind, host);
+        let epoch = host.epoch();
         let full = matches!(
             kind,
             GossipKind::Sync | GossipKind::SyncReply | GossipKind::Join | GossipKind::JoinReply
         );
-        let rumors = if full {
+        g.rumors = if full {
             self.full_view()
         } else {
             let limit = retransmit_limit(self.cfg.retransmit_mult, self.alive_count() + 1);
@@ -244,37 +341,30 @@ impl Swim {
         let stale = to
             .and_then(|t| self.members.get(&t))
             .is_some_and(|r| r.info.epoch < epoch.id());
-        let in_cluster = epoch.id().generation >= 1 && !self.cluster_id_is_nil();
-        Gossip {
-            kind,
-            from: self.me.clone(),
-            cluster_id: self.cluster_id,
-            cluster_size: normal_count(&epoch) as u32,
-            epoch_body: (in_cluster && (full || stale)).then(|| (*epoch).clone()),
-            hlc: host.hlc(),
-            target: None,
-            rumors,
-            retry_after_ms: 0,
+        let in_cluster = epoch.id().generation >= 1 && self.cluster_id != ClusterId::NIL;
+        if in_cluster && (full || stale) {
+            g.epoch_body = Some((*epoch).clone());
         }
+        g
     }
 
-    fn cluster_id_is_nil(&self) -> bool {
-        self.cluster_id == ClusterId::NIL
-    }
-
-    /// Merge one rumor into the view. `direct` is true for the sender part of a message, which
-    /// also counts as a heartbeat.
+    /// Merge one rumor into the view. `direct` marks the sender part of a message, which also
+    /// counts as a heartbeat.
     pub fn learn(&mut self, now: Millis, rumor: Rumor, direct: bool) {
         let id = rumor.info.id;
         if id == self.me.id {
             if rumor.liveness != Liveness::Alive && rumor.info.incarnation >= self.me.incarnation {
-                // Refute: only this node raises its incarnation.
+                // Refute. Only this node raises its incarnation. A rumor never changes the own
+                // state: only an adopted epoch makes the node rejoin (spec section 6.3).
                 self.me.incarnation = rumor.info.incarnation;
                 self.bump();
             }
             return;
         }
         let new = (rumor.info.incarnation, rumor.liveness);
+        let accuser = rumor
+            .accuser
+            .filter(|_| rumor.liveness == Liveness::Suspect);
         let mut changed = None;
         match self.members.get_mut(&id) {
             None => {
@@ -283,15 +373,10 @@ impl Swim {
                     liveness: rumor.liveness,
                     since: now,
                     accusers: BTreeSet::new(),
-                    detector: Detector::new(&self.cfg, now),
+                    detector: Detector::new(&self.cfg, now, self.detector_n),
                     hlc: None,
                 };
-                if let Some(a) = rumor
-                    .accuser
-                    .filter(|_| rumor.liveness == Liveness::Suspect)
-                {
-                    record.accusers.insert(a);
-                }
+                record.accusers.extend(accuser);
                 changed = Some((rumor.info.state, rumor.liveness));
                 self.members.insert(id, record);
                 self.broadcasts.push(id);
@@ -306,24 +391,19 @@ impl Swim {
                         r.since = now;
                     }
                     r.accusers.clear();
-                    if let Some(a) = rumor
-                        .accuser
-                        .filter(|_| rumor.liveness == Liveness::Suspect)
-                    {
-                        r.accusers.insert(a);
-                    }
+                    r.accusers.extend(accuser);
                     r.info = rumor.info;
                     r.liveness = rumor.liveness;
                     self.broadcasts.push(id);
                 } else if new == old && rumor.liveness == Liveness::Suspect {
-                    if let Some(a) = rumor.accuser {
+                    // Lifeguard: independent accusers shorten the suspicion timeout. Only the
+                    // first confirmations are worth spreading.
+                    if let Some(a) = accuser {
                         if r.accusers.insert(a) && r.accusers.len() <= self.cfg.suspicion_k + 1 {
                             self.broadcasts.push(id);
                         }
                     }
                 } else if direct && new.0 == old.0 {
-                    // The member speaks for itself: refresh the fields that change without a new
-                    // incarnation.
                     r.info.epoch = rumor.info.epoch;
                     r.info.capacity = rumor.info.capacity;
                     r.info.addr = rumor.info.addr;
@@ -345,12 +425,163 @@ impl Swim {
         }
     }
 
-    /// A member changed its state or liveness. Task 4 hooks the epoch deltas here.
-    fn on_change(&mut self, _now: Millis, _id: NodeId) {}
+    /// The presence that member `id` needs in the epoch, from the view.
+    fn wanted(&self, id: NodeId) -> Option<Member> {
+        let state = if id == self.me.id {
+            let listed = self
+                .last_epoch
+                .as_ref()
+                .and_then(|e| e.member(id))
+                .is_some();
+            match self.phase {
+                Phase::Member if self.me.state == MemberState::Normal => MemberState::Normal,
+                // A drain during a join never puts the node into an epoch.
+                Phase::Leaving if listed => MemberState::Leaving,
+                _ => return None,
+            }
+        } else {
+            let r = self.members.get(&id)?;
+            match (r.liveness, r.info.state) {
+                (Liveness::Dead, _) => return None,
+                (_, MemberState::Normal) => MemberState::Normal,
+                (_, MemberState::Leaving) => MemberState::Leaving,
+                _ => return None,
+            }
+        };
+        let info = if id == self.me.id {
+            &self.me
+        } else {
+            &self.members.get(&id)?.info
+        };
+        Some(Member {
+            id,
+            addr: info.addr,
+            state,
+            weight: info.weight,
+        })
+    }
+
+    fn on_change(&mut self, now: Millis, id: NodeId) {
+        let want = self.wanted(id);
+        let shown = self
+            .last_epoch
+            .as_ref()
+            .and_then(|e| e.member(id))
+            .map(|m| m.state);
+        if want.as_ref().map(|m| m.state) == shown {
+            self.deltas.remove(&id);
+        } else {
+            self.deltas.insert(id, want);
+            self.arm(now);
+        }
+    }
+
+    fn arm(&mut self, now: Millis) {
+        if self.epoch_timer.is_none() {
+            let jitter = self.rng.u64(0..=self.cfg.epoch_jitter_ms);
+            self.epoch_timer = Some(now + jitter);
+        }
+    }
+
+    fn drop_shown_deltas(&mut self, epoch: &Epoch) {
+        self.deltas.retain(|id, want| {
+            want.as_ref().map(|m| m.state) != epoch.member(*id).map(|m| m.state)
+        });
+    }
+
+    /// Create the next epoch from the current one with the pending deltas applied (spec section
+    /// 5.1). The jitter has already passed.
+    fn create_epoch(&mut self, now: Millis, host: &mut dyn Host) {
+        if !matches!(self.phase, Phase::Member | Phase::Leaving)
+            || self.cluster_id == ClusterId::NIL
+        {
+            return;
+        }
+        let current = host.epoch();
+        if current.id().generation == 0 {
+            return;
+        }
+        self.drop_shown_deltas(&current);
+        if self.deltas.is_empty() {
+            return;
+        }
+        let mut members: Vec<Member> = current
+            .members()
+            .iter()
+            .filter(|m| !self.deltas.contains_key(&m.id))
+            .cloned()
+            .collect();
+        members.extend(self.deltas.values().flatten().cloned());
+        let id = EpochId {
+            generation: host.next_generation(),
+            origin: self.me.id,
+        };
+        match Epoch::new(id, self.cluster_id, members) {
+            Ok(epoch) => {
+                if let Err(e) = host.adopt(epoch) {
+                    tracing::warn!(error = %e, "could not adopt an own epoch");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "could not build an epoch"),
+        }
+        self.sync_epoch(now, host);
+    }
+
+    /// Process an epoch change, wherever it came from.
+    fn sync_epoch(&mut self, now: Millis, host: &mut dyn Host) {
+        let current = host.epoch();
+        let same =
+            |e: &Arc<Epoch>| e.id() == current.id() && e.cluster_id() == current.cluster_id();
+        if self.last_epoch.as_ref().is_some_and(same) {
+            return;
+        }
+        let old = self.last_epoch.replace(current.clone());
+        if let Some(old) = old.filter(|o| o.cluster_id() == current.cluster_id()) {
+            self.events.push(Event::EpochAdopted {
+                old: old.id(),
+                new: current.id(),
+            });
+            let gained = gained_owners(&old, &current, self.cfg.replication_factor);
+            if !gained.is_empty() {
+                self.events.push(Event::OwnershipGained {
+                    old: old.id(),
+                    new: current.id(),
+                    gained,
+                });
+            }
+            let me = self.me.id;
+            let normal = |e: &Epoch| e.member(me).map(|m| m.state) == Some(MemberState::Normal);
+            // The rejoin rule needs the node to have been placed. A joiner that adopts an epoch
+            // made before its own change keeps its pending delta instead.
+            if self.phase == Phase::Member && normal(&old) && !normal(&current) {
+                self.set_state(now, MemberState::Joining, Phase::Seeking);
+                self.events.push(Event::Rejoining {
+                    incarnation: self.me.incarnation,
+                });
+            }
+        }
+        self.drop_shown_deltas(&current);
+        if !self.deltas.is_empty() {
+            self.arm(now);
+        }
+    }
 
     /// Merge a whole message: the sender, its rumors, and its epoch.
     fn absorb(&mut self, now: Millis, g: &Gossip, host: &mut dyn Host) {
         if g.from.id == self.me.id {
+            return;
+        }
+        if g.cluster_id != ClusterId::NIL {
+            self.last_normal_seen = Some(now);
+        }
+        if g.cluster_id != ClusterId::NIL
+            && self.cluster_id != ClusterId::NIL
+            && g.cluster_id != self.cluster_id
+        {
+            self.foreign(now, g, host);
+            return;
+        }
+        if g.cluster_id == ClusterId::NIL || self.cluster_id == ClusterId::NIL {
             return;
         }
         self.learn(
@@ -375,17 +606,148 @@ impl Swim {
                 }
             }
         }
+        self.sync_epoch(now, host);
     }
 
-    /// Advance the timers. Returns the requests to send.
+    /// A message from another cluster (spec section 6.3). The loser discards its cluster and
+    /// joins the winner through the sender.
+    fn foreign(&mut self, now: Millis, g: &Gossip, host: &mut dyn Host) {
+        if self.phase != Phase::Member {
+            return;
+        }
+        let size = self
+            .last_epoch
+            .as_ref()
+            .map(|e| normal_count(e))
+            .unwrap_or(0) as u32;
+        let won = winner(
+            (self.cluster_id, size),
+            (g.cluster_id, g.cluster_size),
+            host.lease_cluster(),
+        );
+        if won != g.cluster_id {
+            return;
+        }
+        tracing::warn!(ours = %self.cluster_id, winner = %won, "lost a merge, joining the winner");
+        self.events.push(Event::ClusterLost {
+            old: self.cluster_id,
+            winner: won,
+        });
+        host.reset_cluster(provisional_epoch(self.me.id));
+        self.cluster_id = ClusterId::NIL;
+        self.members.clear();
+        self.deltas.clear();
+        self.epoch_timer = None;
+        self.order.clear();
+        self.pending.clear();
+        self.probe = None;
+        self.broadcasts = Broadcasts::default();
+        self.last_epoch = Some(host.epoch());
+        self.last_normal_seen = Some(now);
+        self.add_seed(g.from.addr);
+        self.set_state(now, MemberState::Joining, Phase::Seeking);
+    }
+
+    fn may_form(&self, now: Millis) -> bool {
+        let deadline = self.cfg.bootstrap_deadline_ms;
+        self.phase == Phase::Seeking
+            && self.cluster_id == ClusterId::NIL
+            && self
+                .seek_started
+                .is_some_and(|s| now.saturating_sub(s) >= deadline)
+            && self
+                .last_normal_seen
+                .is_none_or(|t| now.saturating_sub(t) >= deadline)
+    }
+
+    /// Form a new cluster: epoch `(1, self)`, the HLC stays on the wall clock (spec section 6.2).
+    pub fn form(&mut self, now: Millis, cluster_id: ClusterId, host: &mut dyn Host) {
+        if self.phase != Phase::Seeking || self.cluster_id != ClusterId::NIL {
+            return;
+        }
+        let me = Member {
+            id: self.me.id,
+            addr: self.me.addr,
+            state: MemberState::Normal,
+            weight: self.me.weight,
+        };
+        host.reset_cluster(Epoch::bootstrap(me, cluster_id));
+        self.cluster_id = cluster_id;
+        self.last_epoch = Some(host.epoch());
+        tracing::info!(cluster = %cluster_id, "formed a new cluster");
+        self.set_state(now, MemberState::Normal, Phase::Member);
+    }
+
+    pub fn lease_result(
+        &mut self,
+        now: Millis,
+        result: Result<LeaseState, LeaseError>,
+        host: &mut dyn Host,
+    ) {
+        match result {
+            Ok(LeaseState::Held(h)) => {
+                if h.identity == self.me.id.to_string() && self.may_form(now) {
+                    self.form(now, h.cluster_id, host);
+                }
+            }
+            Ok(LeaseState::HeldByOther(h)) => self.add_seed(h.address),
+            Err(e) => tracing::debug!(error = %e, "the lease call failed"),
+        }
+    }
+
+    /// Start the drain: `LEAVING` leaves placement in the next epoch, and the node keeps serving.
+    pub fn leave(&mut self, now: Millis) {
+        if self.phase == Phase::Leaving {
+            return;
+        }
+        self.set_state(now, MemberState::Leaving, Phase::Leaving);
+    }
+
+    /// The final messages before the node leaves gossip: its own death, to a few members.
+    pub fn depart(&mut self, host: &dyn Host) -> Vec<Action> {
+        let mut targets: Vec<(NodeId, SocketAddr)> = self
+            .members
+            .iter()
+            .filter(|(_, r)| r.liveness == Liveness::Alive)
+            .map(|(id, r)| (*id, r.info.addr))
+            .collect();
+        self.rng.shuffle(&mut targets);
+        targets.truncate(LEAVE_FANOUT);
+        let mut out = Vec::new();
+        for (id, addr) in targets {
+            let mut msg = self.bare(GossipKind::Leave, host);
+            msg.rumors = vec![Rumor {
+                info: self.me.clone(),
+                liveness: Liveness::Dead,
+                accuser: None,
+            }];
+            let token = self.token(Pending::Leave);
+            out.push(Action {
+                token,
+                to: addr,
+                expected: Some(id),
+                msg,
+                timeout_ms: self.cfg.probe_timeout_ms,
+            });
+        }
+        out
+    }
+
     pub fn tick(&mut self, now: Millis, host: &mut dyn Host) -> Vec<Action> {
         let mut out = Vec::new();
+        self.sync_epoch(now, host);
+        if self.epoch_timer.is_some_and(|t| now >= t) {
+            self.epoch_timer = None;
+            self.create_epoch(now, host);
+        }
+        self.rescale_detectors(now);
         self.check_failures(now);
         if now >= self.next_probe {
             self.next_probe = now + self.cfg.period_ms;
-            if let Some(a) = self.start_probe(host) {
-                out.push(a);
-            }
+            out.extend(self.start_probe(host));
+        }
+        if self.phase == Phase::Seeking {
+            self.seek(now, host, &mut out);
         }
         if now >= self.next_sync {
             self.next_sync = now + self.cfg.sync_interval_ms;
@@ -399,20 +761,87 @@ impl Swim {
                 out.extend(self.sync_to(target, host));
             }
         }
-        if now >= self.next_reconnect {
+        if now >= self.next_reconnect && self.phase != Phase::Seeking {
             self.next_reconnect = now + self.cfg.reconnect_interval_ms;
-            let dead: Vec<NodeId> = self
-                .members
-                .iter()
-                .filter(|(_, r)| r.liveness == Liveness::Dead)
-                .map(|(id, _)| *id)
-                .collect();
-            if let Some(&target) = pick(&mut self.rng, &dead) {
-                out.extend(self.sync_to(target, host));
-            }
+            out.extend(self.reconnect(host));
         }
         self.prune(now);
         out
+    }
+
+    fn seek(&mut self, now: Millis, host: &dyn Host, out: &mut Vec<Action>) {
+        self.seek_started.get_or_insert(now);
+        if now >= self.next_join {
+            self.next_join = now + self.cfg.period_ms;
+            let targets = self.join_targets();
+            for i in 0..targets.len().min(JOIN_FANOUT) {
+                let to = targets[(self.join_cursor + i) % targets.len()];
+                let msg = self.message(GossipKind::Join, None, host);
+                let token = self.token(Pending::Join);
+                out.push(Action {
+                    token,
+                    to,
+                    expected: None,
+                    msg,
+                    timeout_ms: self.cfg.period_ms,
+                });
+            }
+            self.join_cursor = self.join_cursor.wrapping_add(JOIN_FANOUT);
+        }
+        if self.may_form(now) && now >= self.next_lease {
+            self.next_lease = now + self.cfg.period_ms;
+            self.events.push(Event::LeaseWanted);
+        }
+    }
+
+    /// Seeds, the members of the known epoch, and the live members of the view.
+    fn join_targets(&self) -> Vec<SocketAddr> {
+        let mut targets = self.seeds.clone();
+        if let Some(e) = self.last_epoch.as_ref().filter(|e| e.id().generation >= 1) {
+            targets.extend(e.members().iter().map(|m| m.addr));
+        }
+        targets.extend(
+            self.members
+                .values()
+                .filter(|r| r.liveness != Liveness::Dead)
+                .map(|r| r.info.addr),
+        );
+        let mut seen = BTreeSet::new();
+        targets.retain(|a| *a != self.me.addr && seen.insert(*a));
+        targets
+    }
+
+    /// A sync with a dead member or a seed that is not a live member. This is how a healed
+    /// partition and a second cluster find each other.
+    fn reconnect(&mut self, host: &dyn Host) -> Option<Action> {
+        let live: BTreeSet<SocketAddr> = self
+            .members
+            .values()
+            .filter(|r| r.liveness != Liveness::Dead)
+            .map(|r| r.info.addr)
+            .collect();
+        let mut targets: Vec<(Option<NodeId>, SocketAddr)> = self
+            .members
+            .iter()
+            .filter(|(_, r)| r.liveness == Liveness::Dead)
+            .map(|(id, r)| (Some(*id), r.info.addr))
+            .collect();
+        targets.extend(
+            self.seeds
+                .iter()
+                .filter(|s| !live.contains(s))
+                .map(|s| (None, *s)),
+        );
+        let &(expected, to) = pick(&mut self.rng, &targets)?;
+        let msg = self.message(GossipKind::Sync, expected, host);
+        let token = self.token(Pending::Sync);
+        Some(Action {
+            token,
+            to,
+            expected,
+            msg,
+            timeout_ms: self.cfg.period_ms,
+        })
     }
 
     fn sync_to(&mut self, target: NodeId, host: &dyn Host) -> Option<Action> {
@@ -428,8 +857,16 @@ impl Swim {
         })
     }
 
-    /// Suspect members whose score passed the threshold, and declare dead the suspects whose
-    /// timeout ended.
+    fn rescale_detectors(&mut self, now: Millis) {
+        let n = self.alive_count() + 1;
+        if n > self.detector_n * 2 || n * 2 < self.detector_n {
+            self.detector_n = n;
+            for r in self.members.values_mut() {
+                r.detector = Detector::new(&self.cfg, now, n);
+            }
+        }
+    }
+
     fn check_failures(&mut self, now: Millis) {
         let me = self.me.id;
         let mut changes = Vec::new();
@@ -490,7 +927,7 @@ impl Swim {
         }
     }
 
-    /// The next probe target in a shuffled round-robin over the members that are not dead.
+    /// Shuffled round-robin over the members that are not dead.
     fn next_target(&mut self) -> Option<NodeId> {
         loop {
             if self.order.is_empty() {
@@ -535,7 +972,6 @@ impl Swim {
         })
     }
 
-    /// The probe of `target` failed directly and through every helper.
     fn missed(&mut self, now: Millis, target: NodeId) {
         let weight = self.cfg.missed_ping_weight;
         if let Some(r) = self.members.get_mut(&target) {
@@ -552,7 +988,6 @@ impl Swim {
         }
     }
 
-    /// Report the result of an action.
     pub fn outcome(
         &mut self,
         now: Millis,
@@ -590,8 +1025,55 @@ impl Swim {
                 }
                 Vec::new()
             }
-            Pending::Relay { .. } | Pending::Sync => Vec::new(),
+            Pending::Join => {
+                match outcome {
+                    Outcome::Reply(g) if g.kind == GossipKind::JoinReply => {
+                        self.join_reply(now, *g, host)
+                    }
+                    Outcome::Silent { in_cluster: true } => self.last_normal_seen = Some(now),
+                    _ => {}
+                }
+                Vec::new()
+            }
+            Pending::Relay { .. } | Pending::Sync | Pending::Leave => Vec::new(),
         }
+    }
+
+    /// Take the epoch and the HLC maximum, then become `NORMAL` (spec sections 6.2 and 8.1).
+    fn join_reply(&mut self, now: Millis, g: Gossip, host: &mut dyn Host) {
+        if g.retry_after_ms > 0 {
+            self.next_join = now + Millis::from(g.retry_after_ms);
+            return;
+        }
+        if g.cluster_id == ClusterId::NIL || self.phase != Phase::Seeking {
+            return;
+        }
+        let Some(body) = g
+            .epoch_body
+            .clone()
+            .filter(|b| b.cluster_id() == g.cluster_id)
+        else {
+            return;
+        };
+        if self.cluster_id == ClusterId::NIL {
+            host.reset_cluster(body);
+            self.cluster_id = g.cluster_id;
+            self.last_epoch = Some(host.epoch());
+        } else if self.cluster_id == g.cluster_id {
+            if body.id() > host.epoch().id() {
+                if let Err(e) = host.adopt(body) {
+                    tracing::debug!(error = %e, "refused a joined epoch");
+                }
+            }
+        } else {
+            return;
+        }
+        if !host.set_hlc_floor(g.hlc) {
+            tracing::warn!("the cluster HLC is too far ahead of the wall clock, not joining yet");
+            return;
+        }
+        self.absorb(now, &g, host);
+        self.set_state(now, MemberState::Normal, Phase::Member);
     }
 
     fn start_indirect(&mut self, now: Millis, target: NodeId, host: &dyn Host) -> Vec<Action> {
@@ -638,15 +1120,30 @@ impl Swim {
         out
     }
 
-    /// Answer an inbound message.
+    /// Answer an inbound message from `src`.
     pub fn handle(
         &mut self,
         now: Millis,
-        _src: SocketAddr,
+        src: SocketAddr,
         msg: Gossip,
         host: &mut dyn Host,
     ) -> Handled {
+        self.sync_epoch(now, host);
         self.absorb(now, &msg, host);
+        if msg.kind == GossipKind::Join {
+            return Handled {
+                reply: self.answer_join(now, src, &msg, host),
+                relay: None,
+            };
+        }
+        // Seekers and foreign clusters get only the sender part. A merge loser has already
+        // switched to the provisional cluster in `absorb`.
+        if msg.cluster_id == ClusterId::NIL || msg.cluster_id != self.cluster_id {
+            return Handled {
+                reply: self.bare(GossipKind::Ack, host),
+                relay: None,
+            };
+        }
         let sender = Some(msg.from.id);
         match msg.kind {
             GossipKind::PingReq => {
@@ -670,6 +1167,50 @@ impl Swim {
             GossipKind::Sync => self.reply(GossipKind::SyncReply, sender, host),
             _ => self.reply(GossipKind::Ack, sender, host),
         }
+    }
+
+    fn answer_join(
+        &mut self,
+        now: Millis,
+        src: SocketAddr,
+        msg: &Gossip,
+        host: &dyn Host,
+    ) -> Gossip {
+        if self.phase != Phase::Member || self.cluster_id == ClusterId::NIL {
+            let mut g = self.bare(GossipKind::JoinReply, host);
+            g.cluster_id = ClusterId::NIL;
+            return g;
+        }
+        if msg.cluster_id != ClusterId::NIL && msg.cluster_id != self.cluster_id {
+            return self.bare(GossipKind::JoinReply, host);
+        }
+        if let Err(wait) = self.limiter.admit(src.ip(), now) {
+            let mut g = self.bare(GossipKind::JoinReply, host);
+            g.retry_after_ms = wait.max(1);
+            return g;
+        }
+        self.learn(
+            now,
+            Rumor {
+                info: msg.from.clone(),
+                liveness: Liveness::Alive,
+                accuser: None,
+            },
+            true,
+        );
+        let mut g = self.message(GossipKind::JoinReply, Some(msg.from.id), host);
+        g.hlc = self.cluster_max_hlc(now, host);
+        g
+    }
+
+    /// The highest HLC that this node issued, observed, or heard from a member recently.
+    fn cluster_max_hlc(&self, now: Millis, host: &dyn Host) -> u64 {
+        self.members
+            .values()
+            .filter_map(|r| r.hlc)
+            .filter(|(_, at)| now.saturating_sub(*at) < HLC_WINDOW_MS)
+            .map(|(h, _)| h)
+            .fold(host.hlc(), u64::max)
     }
 
     fn reply(&mut self, kind: GossipKind, to: Option<NodeId>, host: &dyn Host) -> Handled {
@@ -714,13 +1255,42 @@ pub fn suspicion_timeout(cfg: &SwimConfig, others: usize) -> Millis {
     t.max(min) as Millis
 }
 
-/// The `NORMAL` members of an epoch.
 pub fn normal_count(epoch: &Epoch) -> usize {
     epoch
         .members()
         .iter()
         .filter(|m| m.state == MemberState::Normal)
         .count()
+}
+
+/// The epoch of a node that is not in a cluster: generation 0, `ClusterId::NIL`, no members. Its
+/// owner sets are empty, and `HELLO` reports generation 0.
+pub fn provisional_epoch(id: NodeId) -> Epoch {
+    let id = EpochId {
+        generation: 0,
+        origin: id,
+    };
+    Epoch::new(id, ClusterId::NIL, Vec::new()).expect("an empty member list has no duplicates")
+}
+
+/// The members `NORMAL` in `new` that gain an owner slot for some key. An added member gains.
+/// When a `NORMAL` member left and the old epoch had more than `rf` of them, every remaining
+/// member gains, because the keys of the departed member move to them. With `rf` or fewer, every
+/// member already owned every key.
+pub fn gained_owners(old: &Epoch, new: &Epoch, rf: usize) -> Vec<NodeId> {
+    let normal = |e: &Epoch| -> BTreeSet<NodeId> {
+        e.members()
+            .iter()
+            .filter(|m| m.state == MemberState::Normal)
+            .map(|m| m.id)
+            .collect()
+    };
+    let (o, n) = (normal(old), normal(new));
+    let mut gained: BTreeSet<NodeId> = n.difference(&o).copied().collect();
+    if o.difference(&n).next().is_some() && o.len() > rf {
+        gained.extend(n.intersection(&o).copied());
+    }
+    gained.into_iter().collect()
 }
 
 fn pick<'a, T>(rng: &mut fastrand::Rng, items: &'a [T]) -> Option<&'a T> {

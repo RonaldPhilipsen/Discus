@@ -2,9 +2,11 @@
 //! evidence (spec section 6.1).
 //!
 //! The phi part comes from `phi-accrual-failure-detector`. A heartbeat is any message from the
-//! member and any direct or indirect ack. Evidence adds weight for a failed probe and, with a
-//! larger weight, for a data-path failure. It halves every `evidence_half_life_ms`. Evidence alone
-//! stays below the death threshold, so a death always needs silence or the suspicion timeout too.
+//! member and any direct or indirect ack. One node hears from one given member only about every
+//! `n / 2` periods in a cluster of `n`, so the expected interval and the acceptable pause scale
+//! with `n`. Evidence adds weight for a failed probe and, with a larger weight, for a data-path
+//! failure. It halves every `evidence_half_life_ms`. Evidence alone stays below the death
+//! threshold, so a death always needs silence or the suspicion timeout too.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -43,16 +45,17 @@ pub struct Detector {
 }
 
 impl Detector {
-    /// A detector that starts monitoring with a heartbeat at `now`.
-    pub fn new(cfg: &SwimConfig, now: Millis) -> Detector {
+    /// A detector for a cluster of `n` members that starts monitoring with a heartbeat at `now`.
+    pub fn new(cfg: &SwimConfig, now: Millis, n: usize) -> Detector {
         let clock = Arc::new(AtomicU64::new(now));
         let period = Duration::from_millis(cfg.period_ms.max(1));
+        let n = u32::try_from(n).unwrap_or(u32::MAX).max(1);
         let phi = Builder::<UnsyncState<_>>::new()
             .threshold(cfg.phi_suspect.max(f64::MIN_POSITIVE))
             .max_sample_size(100)
             .min_std_deviation((period / 2).max(Duration::from_millis(1)))
-            .acceptable_heartbeat_pause(period * 2)
-            .first_heartbeat_estimate(period)
+            .acceptable_heartbeat_pause(period * n.max(2))
+            .first_heartbeat_estimate(period * (n / 2).max(1))
             .clock(CallerClock(clock.clone()))
             .build()
             .unwrap_or_else(|_| {

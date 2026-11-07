@@ -8,7 +8,7 @@ fn phi_grows_with_silence() {
         seed: 1,
         ..SwimConfig::default()
     };
-    let mut d = Detector::new(&cfg, 0);
+    let mut d = Detector::new(&cfg, 0, 1);
     for beat in 1..=10 {
         d.heartbeat(beat * 1000);
     }
@@ -21,7 +21,7 @@ fn phi_grows_with_silence() {
 #[test]
 fn a_member_without_history_starts_monitored() {
     let cfg = SwimConfig::default();
-    let d = Detector::new(&cfg, 0);
+    let d = Detector::new(&cfg, 0, 1);
     assert!(d.score(0) < 1.0);
     assert!(d.score(60_000) > cfg.phi_dead);
 }
@@ -30,13 +30,13 @@ fn a_member_without_history_starts_monitored() {
 fn data_path_events_weigh_more_than_missed_pings() {
     let cfg = SwimConfig::default();
     assert!(cfg.data_path_weight > cfg.missed_ping_weight);
-    let mut d = Detector::new(&cfg, 0);
+    let mut d = Detector::new(&cfg, 0, 1);
     d.evidence(0, cfg.data_path_weight);
     assert!((d.evidence_at(0) - cfg.data_path_weight).abs() < 1e-9);
     let half = d.evidence_at(cfg.evidence_half_life_ms);
     assert!((half - cfg.data_path_weight / 2.0).abs() < 1e-6, "{half}");
 
-    let mut m = Detector::new(&cfg, 0);
+    let mut m = Detector::new(&cfg, 0, 1);
     m.evidence(0, cfg.missed_ping_weight);
     assert!(m.evidence_at(0) < d.evidence_at(0));
 }
@@ -44,7 +44,7 @@ fn data_path_events_weigh_more_than_missed_pings() {
 #[test]
 fn evidence_alone_never_reaches_death() {
     let cfg = SwimConfig::default();
-    let mut d = Detector::new(&cfg, 0);
+    let mut d = Detector::new(&cfg, 0, 1);
     for _ in 0..100 {
         d.evidence(0, cfg.data_path_weight);
     }

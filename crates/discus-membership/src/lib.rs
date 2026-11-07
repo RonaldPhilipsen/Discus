@@ -8,6 +8,8 @@
 mod config;
 mod detector;
 mod host;
+pub mod lease;
+pub mod merge;
 mod swim;
 mod view;
 
@@ -17,5 +19,9 @@ pub mod sim;
 pub use config::{Millis, SwimConfig};
 pub use detector::Detector;
 pub use host::{Event, Host};
-pub use swim::{normal_count, suspicion_timeout, Action, Handled, Outcome, Swim};
+pub use lease::{LeaseError, LeaseHolder, LeaseProvider, LeaseState, MemoryLease, NoneLease};
+pub use swim::{
+    gained_owners, normal_count, provisional_epoch, suspicion_timeout, Action, Handled, Outcome,
+    Phase, Swim,
+};
 pub use view::{retransmit_limit, supersedes};

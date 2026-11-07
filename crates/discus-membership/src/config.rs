@@ -30,7 +30,8 @@ pub struct SwimConfig {
     pub phi_dead: f64,
     /// Evidence added by one data-path failure (forward timeout, reset, failed handshake).
     pub data_path_weight: f64,
-    /// Evidence added by one failed probe (direct and indirect).
+    /// Evidence added by one failed probe (direct and indirect). The default equals
+    /// `phi_suspect`, so one failed probe makes the member suspect, as in plain SWIM.
     pub missed_ping_weight: f64,
     /// Evidence halves after this time.
     pub evidence_half_life_ms: Millis,
@@ -44,6 +45,8 @@ pub struct SwimConfig {
     pub epoch_jitter_ms: Millis,
     /// A starting node looks for a NORMAL peer this long before it tries the lease.
     pub bootstrap_deadline_ms: Millis,
+    /// The replication factor, for the ownership-gained event.
+    pub replication_factor: usize,
     /// The seed of the random source. Production uses a random seed.
     pub seed: u64,
 }
@@ -62,14 +65,15 @@ impl Default for SwimConfig {
             max_dead: 1024,
             phi_suspect: 8.0,
             phi_dead: 16.0,
-            data_path_weight: 6.0,
-            missed_ping_weight: 4.0,
+            data_path_weight: 10.0,
+            missed_ping_weight: 8.0,
             evidence_half_life_ms: 10_000,
             suspicion_min_ms: 3_000,
             suspicion_max_ms: 10_000,
             suspicion_k: 3,
             epoch_jitter_ms: 50,
             bootstrap_deadline_ms: 10_000,
+            replication_factor: discus_placement::DEFAULT_RF,
             seed: fastrand::u64(..),
         }
     }
