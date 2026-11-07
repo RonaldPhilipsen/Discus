@@ -2,10 +2,14 @@
 //!
 //! This crate depends on no other Discus crate. The store and the node build on it.
 
+pub mod epoch;
+pub mod history;
 pub mod hrw;
 pub mod id;
 pub mod member;
 
+pub use epoch::{Epoch, EpochError, EpochId};
+pub use history::{Adopt, EpochHistory, MIN_HISTORY};
 pub use hrw::{owners, DEFAULT_RF, PLACEMENT_SEED};
 pub use id::{ClusterId, NodeId, ParseIdError};
 pub use member::{Member, MemberState, Weight};
