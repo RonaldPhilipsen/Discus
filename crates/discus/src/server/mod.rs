@@ -73,6 +73,12 @@ impl Server {
         let tracker = TaskTracker::new();
         let hard_stop = CancellationToken::new();
         node.set_phase(Phase::Serving);
+        tracing::info!(
+            node_id = %node.id,
+            cluster_id = %node.cluster_id(),
+            epoch = %node.epochs().current().id(),
+            "bootstrapped"
+        );
         tracing::info!(addr = ?listener.local_addr().ok(), "serving");
 
         let result = loop {

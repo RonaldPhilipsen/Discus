@@ -41,6 +41,12 @@ pub struct Config {
     /// Seconds to wait for connections to drain on shutdown.
     #[arg(long, default_value_t = 30)]
     pub shutdown_timeout_secs: u64,
+    /// Number of owners per key: the primary plus its secondaries. At least 1.
+    #[arg(long, default_value_t = discus_placement::DEFAULT_RF, value_parser = parse_rf)]
+    pub replication_factor: usize,
+    /// Placement weight of this node. Finite and greater than zero.
+    #[arg(long, default_value_t = 1.0, value_parser = parse_weight)]
+    pub weight: f64,
     /// Shared token that clients must send with AUTH.
     #[arg(long)]
     pub shared_token: Option<String>,
@@ -55,4 +61,19 @@ impl Config {
     {
         <Config as Parser>::try_parse_from(args)
     }
+}
+
+fn parse_rf(s: &str) -> Result<usize, String> {
+    match s.parse::<usize>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err("the replication factor is a whole number of at least 1".into()),
+    }
+}
+
+fn parse_weight(s: &str) -> Result<f64, String> {
+    s.parse::<f64>()
+        .ok()
+        .and_then(discus_placement::Weight::new)
+        .map(|w| w.get())
+        .ok_or_else(|| "the weight is a finite number greater than zero".into())
 }

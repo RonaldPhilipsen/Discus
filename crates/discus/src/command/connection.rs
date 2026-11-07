@@ -283,6 +283,16 @@ fn info(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
             format!("discus_features:{}", build::FEATURES.join(",")),
             format!("discus_tls_backend:{}", build::TLS_BACKEND),
             format!("discus_trust_roots:{}", build::TRUST_ROOTS),
+            format!("discus_node_id:{}", node.id),
+            format!("discus_cluster_id:{}", node.cluster_id()),
+            format!("discus_epoch:{}", node.epochs().current().id()),
+            format!("discus_members:{}", node.epochs().current().members().len()),
+            format!(
+                "discus_replication_factor:{}",
+                node.config.replication_factor
+            ),
+            format!("discus_hlc_pinned:{}", u8::from(node.hlc.is_pinned())),
+            format!("discus_hlc_refusals:{}", node.hlc.refusals()),
         ],
     );
     Ok(Value::Bulk(Bytes::from(out)))

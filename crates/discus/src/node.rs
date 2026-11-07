@@ -6,9 +6,12 @@ use std::time::Instant;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use discus_placement::{Clock, Hlc, NodeId, Version};
+use discus_placement::{
+    Clock, ClusterId, Epoch, EpochHistory, Hlc, Member, MemberState, NodeId, Version, Weight,
+};
 use discus_resp::Protocol;
 use discus_store::{Store, StoreConfig, SystemClock, HASH_SEED};
+use parking_lot::{RwLock, RwLockReadGuard};
 
 use crate::command::CommandError;
 
@@ -39,6 +42,7 @@ pub struct Node {
     pub id: NodeId,
     /// The clock that stamps every write.
     pub hlc: Hlc,
+    epochs: RwLock<EpochHistory>,
     pub started_at: Instant,
     pub store: Arc<Store>,
     next_conn_id: AtomicU64,
@@ -62,10 +66,21 @@ impl Node {
             clock.clone(),
         );
         let id = NodeId::random();
+        // This plan has one node, so it always bootstraps: it mints the cluster ID, forms epoch
+        // (1, self), and starts the HLC from the wall clock. Plan 2 replaces the client address
+        // with the node-to-node address.
+        let me = Member {
+            id,
+            addr: config.listen,
+            state: MemberState::Normal,
+            weight: Weight::new(config.weight).unwrap_or_default(),
+        };
+        let epochs = EpochHistory::new(Epoch::bootstrap(me, ClusterId::mint()));
         Node {
             config,
             id,
             hlc: Hlc::new(id, clock),
+            epochs: RwLock::new(epochs),
             started_at: Instant::now(),
             store: Arc::new(store),
             next_conn_id: AtomicU64::new(1),
@@ -99,6 +114,23 @@ impl Node {
 
     pub fn set_phase(&self, phase: Phase) {
         self.phase.store(phase as u8, Ordering::Release);
+    }
+
+    /// The epoch history. The current epoch decides placement.
+    pub fn epochs(&self) -> RwLockReadGuard<'_, EpochHistory> {
+        self.epochs.read()
+    }
+
+    pub fn cluster_id(&self) -> ClusterId {
+        self.epochs.read().cluster_id()
+    }
+
+    /// The owner set of `key` in the current epoch with the configured replication factor.
+    pub fn owners(&self, key: &[u8]) -> Vec<NodeId> {
+        self.epochs
+            .read()
+            .current()
+            .owners(key, self.config.replication_factor)
     }
 
     /// A fresh HLC version for one write command. A clock pinned at its drift bound refuses, and
