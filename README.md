@@ -107,6 +107,8 @@ and multi-tenancy.
 
 Design phase for v0.1. This README records the goal and the reasoning behind the design.
 
+Operator guides: [command compatibility](docs/compatibility.md) and [telemetry](docs/telemetry.md).
+
 ## License
 
 TBD. The intent is a permissive license, and every dependency on the critical path must also be

@@ -46,6 +46,9 @@ pub struct Config {
     pub shared_token: Option<String>,
     #[command(flatten)]
     pub security: crate::security::SecurityArgs,
+    /// Telemetry flags (spec §15.4).
+    #[command(flatten)]
+    pub telemetry: crate::telemetry::TelemetryArgs,
 }
 
 impl Config {

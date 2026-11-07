@@ -10,7 +10,6 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 
-use crate::command::dispatch;
 use crate::node::{ConnState, Node};
 use crate::security::ConnAuth;
 
@@ -93,7 +92,7 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
                     if node.security.wants_prefetch(&cmd) {
                         node.security.prefetch(&conn, &cmd).await;
                     }
-                    let reply = dispatch(&node, &mut conn, &cmd);
+                    let reply = crate::telemetry::dispatch(&node, &mut conn, &cmd);
                     encode(&reply, conn.protocol, &mut out);
                     in_flight += 1;
                     if conn.closing {

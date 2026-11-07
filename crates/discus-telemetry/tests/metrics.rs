@@ -1,0 +1,153 @@
+#![cfg(all(feature = "otel", feature = "testing"))]
+
+use std::time::Duration;
+
+use discus_telemetry::attrs::{check, CommandLabel, MemberState, NodeLabel, Status, ALLOWED_KEYS};
+use discus_telemetry::metrics::{StoreStats, LATENCY_BUCKETS_MS};
+use discus_telemetry::testing::{MetricHarness, Point};
+
+fn find<'a>(points: &'a [Point], name: &str, attr: Option<(&str, &str)>) -> Option<&'a Point> {
+    points.iter().find(|p| {
+        p.name == name
+            && attr.is_none_or(|(k, v)| p.attrs.iter().any(|(pk, pv)| pk == k && pv == v))
+    })
+}
+
+fn assert_bounded(points: &[Point]) {
+    for p in points {
+        for (k, _) in &p.attrs {
+            assert!(ALLOWED_KEYS.contains(&k.as_str()), "{}: {k}", p.name);
+        }
+        if let Err(e) = check(p.attrs.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
+            panic!("{}: {e}", p.name);
+        }
+    }
+}
+
+#[test]
+fn command_metrics_use_only_allowed_attributes_and_the_spec_buckets() {
+    let h = MetricHarness::new();
+    h.metrics.command(
+        CommandLabel::new("GET"),
+        Status::Ok,
+        Duration::from_micros(300),
+    );
+    h.metrics.command(
+        CommandLabel::new("GET"),
+        Status::Ok,
+        Duration::from_micros(200),
+    );
+    h.metrics.command(
+        CommandLabel::new("SET"),
+        Status::Error,
+        Duration::from_millis(3),
+    );
+    let points = h.points();
+
+    let get = find(&points, "discus.commands", Some(("command", "GET"))).unwrap();
+    assert_eq!(get.value, 2.0);
+    assert!(get.attrs.contains(&("status".into(), "ok".into())));
+    let set = find(&points, "discus.commands", Some(("command", "SET"))).unwrap();
+    assert!(set.attrs.contains(&("status".into(), "error".into())));
+
+    let dur = find(&points, "discus.command.duration", Some(("command", "GET"))).unwrap();
+    assert_eq!(dur.bounds, LATENCY_BUCKETS_MS);
+    assert_eq!(dur.value, 2.0);
+    assert_bounded(&points);
+}
+
+#[test]
+fn auth_results_are_counted_by_status() {
+    let h = MetricHarness::new();
+    h.metrics.auth(false);
+    h.metrics.auth(false);
+    h.metrics.auth(true);
+    let points = h.points();
+    let fail = find(&points, "discus.auth.attempts", Some(("status", "failure"))).unwrap();
+    let ok = find(&points, "discus.auth.attempts", Some(("status", "success"))).unwrap();
+    assert_eq!((fail.value, ok.value), (2.0, 1.0));
+}
+
+#[test]
+fn store_stats_are_observed() {
+    let h = MetricHarness::new();
+    h.metrics.observe_store(|| StoreStats {
+        hits: 7,
+        misses: 2,
+        evictions: 3,
+        used_memory: 1024,
+        max_memory: 4096,
+        keys: 5,
+    });
+    let points = h.points();
+    for (name, value) in [
+        ("discus.keyspace.hits", 7.0),
+        ("discus.keyspace.misses", 2.0),
+        ("discus.evictions", 3.0),
+        ("discus.memory.used", 1024.0),
+        ("discus.memory.limit", 4096.0),
+        ("discus.keys", 5.0),
+    ] {
+        assert_eq!(find(&points, name, None).unwrap().value, value, "{name}");
+    }
+    assert_bounded(&points);
+}
+
+#[test]
+fn later_plan_instruments_record_with_bounded_attributes() {
+    let h = MetricHarness::new();
+    let peer = NodeLabel::new("ab").unwrap();
+    let m = &h.metrics;
+    m.epoch(4);
+    m.members(MemberState::Normal, 3);
+    m.replication_depth(&peer, 10);
+    m.replication_lag(&peer, Duration::from_millis(5));
+    m.hint_recorded(&peer);
+    m.hint_replayed(&peer, 2);
+    m.hint_evicted(&peer, 1);
+    m.gossip_rtt(&peer, Duration::from_millis(1));
+    m.peer_error(&peer, Status::Timeout);
+    m.forward(CommandLabel::new("GET"), Status::Ok, 1);
+    m.quic_failure(&peer, Status::Handshake);
+    m.tombstones(9);
+    let points = h.points();
+    for name in [
+        "discus.ring.epoch",
+        "discus.members",
+        "discus.replication.queue.depth",
+        "discus.replication.lag",
+        "discus.hints.recorded",
+        "discus.hints.replayed",
+        "discus.hints.evicted",
+        "discus.gossip.rtt",
+        "discus.peer.errors",
+        "discus.forwards",
+        "discus.forward.hops",
+        "discus.quic.failures",
+        "discus.tombstones",
+    ] {
+        assert!(find(&points, name, None).is_some(), "{name}");
+    }
+    assert_eq!(find(&points, "discus.ring.epoch", None).unwrap().value, 4.0);
+    let rtt = find(&points, "discus.gossip.rtt", None).unwrap();
+    assert_eq!(rtt.bounds, LATENCY_BUCKETS_MS);
+    assert_bounded(&points);
+}
+
+#[test]
+fn telemetry_counters_are_exported() {
+    let h = MetricHarness::new();
+    h.counters
+        .spans_dropped
+        .fetch_add(3, std::sync::atomic::Ordering::Relaxed);
+    let points = h.points();
+    let dropped = find(&points, "discus.telemetry.spans.dropped", None).unwrap();
+    assert_eq!(dropped.value, 3.0);
+    for name in [
+        "discus.telemetry.spans.export_failures",
+        "discus.telemetry.metrics.export_failures",
+        "discus.logs.suppressed",
+    ] {
+        assert!(find(&points, name, None).is_some(), "{name}");
+    }
+}

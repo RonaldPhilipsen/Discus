@@ -72,6 +72,22 @@ else
   failures=$((failures + 1))
 fi
 
+# Telemetry with the other TLS backends and trust roots (TLS to the OTLP collector).
+check "tls-ring,roots-webpki,otel"
+if pkg-config --exists openssl 2>/dev/null; then
+  check "tls-openssl,roots-system,otel"
+else
+  echo "skipped tls-openssl,roots-system,otel (OpenSSL development headers not found)"
+fi
+
+# Without otel, no OpenTelemetry crate is compiled into the binary (spec §15.5).
+if cargo tree -q -p discus -e normal --no-default-features --features "$base" | grep -q opentelemetry; then
+  echo "FAILED  $base pulls in an OpenTelemetry crate without otel"
+  failures=$((failures + 1))
+else
+  echo "ok      $base has no OpenTelemetry crate"
+fi
+
 # Rejected combinations.
 reject "roots-system" "enable exactly one TLS backend feature"
 reject "tls-aws-lc,tls-ring,roots-system" "enable only one TLS backend feature"

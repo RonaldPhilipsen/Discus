@@ -10,6 +10,7 @@ workspace = true
 bytes = "1"
 discus-resp = { path = "../discus-resp" }
 discus-store = { path = "../discus-store" }
+discus-telemetry = { path = "../discus-telemetry" }
 fastrand = "2"
 subtle = "2"
 clap = { version = "4", features = ["derive"] }
@@ -41,16 +42,19 @@ rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "
 tempfile = "3"
 base64 = "0.22"
 serde_json = "1"
+discus-telemetry = { path = "../discus-telemetry", features = ["testing"] }
 
 # Build features, spec §15.5. Exactly one TLS backend and one trust root feature must be on.
+# `otel` turns on the telemetry crate's OpenTelemetry code. The TLS and root features also select
+# the provider and the roots for TLS to the OTLP collector.
 [features]
 default = ["otel", "oauth2", "k8s", "tls-aws-lc", "roots-system"]
-otel = []
+otel = ["discus-telemetry/otel"]
 oauth2 = ["dep:jsonwebtoken", "dep:reqwest", "dep:serde_json"]
 oauth2-introspection = ["oauth2"]
 k8s = []
-tls-aws-lc = ["rustls/aws_lc_rs", "jsonwebtoken?/aws_lc_rs"]
-tls-ring = ["rustls/ring", "jsonwebtoken?/rust_crypto"]
-tls-openssl = ["dep:rustls-openssl", "jsonwebtoken?/rust_crypto"]
-roots-system = ["dep:rustls-native-certs"]
-roots-webpki = ["dep:webpki-roots"]
+tls-aws-lc = ["rustls/aws_lc_rs", "jsonwebtoken?/aws_lc_rs", "discus-telemetry/tls-aws-lc"]
+tls-ring = ["rustls/ring", "jsonwebtoken?/rust_crypto", "discus-telemetry/tls-ring"]
+tls-openssl = ["dep:rustls-openssl", "jsonwebtoken?/rust_crypto", "discus-telemetry/tls-openssl"]
+roots-system = ["dep:rustls-native-certs", "discus-telemetry/roots-system"]
+roots-webpki = ["dep:webpki-roots", "discus-telemetry/roots-webpki"]

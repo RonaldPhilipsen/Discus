@@ -55,3 +55,24 @@ fn used_memory_tracks_inserts_and_removes() {
     assert!(s.remove(b"big"));
     assert_eq!(s.used_memory(), before);
 }
+
+#[test]
+fn reads_count_hits_and_misses() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let s = store(&clock);
+    s.write(b"k", |slot| {
+        *slot = Some(Entry {
+            value: Value::Str("v".into()),
+            expires_at_ms: Some(2_000),
+            last_access_ms: 0,
+        });
+    });
+    s.read(b"k", |_| ());
+    s.read(b"k", |_| ());
+    s.read(b"absent", |_| ());
+    assert_eq!((s.hits(), s.misses()), (2, 1));
+    // An expired entry reads as a miss.
+    clock.advance(5_000);
+    s.read(b"k", |_| ());
+    assert_eq!((s.hits(), s.misses()), (2, 2));
+}

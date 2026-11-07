@@ -4,12 +4,15 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    let config = Config::parse();
+    // Logging, metrics, and traces. A flag that needs a missing build feature stops the start.
+    let _telemetry = match discus::telemetry::init(&config) {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("discus: {e}");
+            std::process::exit(2);
+        }
+    };
     tracing::info!(
         build = discus::build::BUILD_ID,
         features = discus::build::FEATURES.join(","),
@@ -17,8 +20,8 @@ async fn main() -> std::io::Result<()> {
         trust_roots = discus::build::TRUST_ROOTS,
         "starting"
     );
-    let config = Config::parse();
     let server = Server::bind(config).await?;
+    discus::telemetry::observe_store(server.node());
     tracing::info!(client = %server.local_addr(), admin = %server.admin_addr(), "bound");
 
     let shutdown = CancellationToken::new();

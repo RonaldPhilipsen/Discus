@@ -90,7 +90,8 @@ const UNSUPPORTED: &[&str] = &[
     "WATCH",
 ];
 
-fn is_unsupported(upper: &str) -> bool {
+/// True for a name that Discus rejects on purpose. `upper` is the upper case name.
+pub fn is_unsupported(upper: &str) -> bool {
     UNSUPPORTED.contains(&upper) || upper.starts_with('X') || upper.starts_with("GEO")
 }
 
