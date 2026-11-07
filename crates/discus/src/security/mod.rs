@@ -3,6 +3,7 @@
 //! `Security` owns every decision. The server calls it at accept time, the `AUTH` and `HELLO`
 //! handlers call `authenticate`, and the dispatcher calls `authorize` before each command.
 
+pub mod admin;
 pub mod args;
 pub mod file;
 pub mod identity;
@@ -65,6 +66,9 @@ pub struct Security {
     shared_token: Option<String>,
     max_conn_failures: u32,
     limiter: FailureLimiter,
+    admin_tls: Option<Arc<rustls::ServerConfig>>,
+    admin_identities: Vec<String>,
+    dev_insecure: bool,
     #[cfg(feature = "oauth2")]
     oauth: Option<oauth2::OAuth2>,
 }
@@ -134,6 +138,22 @@ impl Security {
                 .map_err(|e| format!("--auth-config client_cert {:?}: {e}", rule.identity))?;
             cert_rules.push((rule.identity.clone(), scopes));
         }
+        let admin_tls = if args.admin_tls {
+            let (Some(cert), Some(key)) = (&args.tls_cert, &args.tls_key) else {
+                return fail("--admin-tls needs --tls-cert and --tls-key");
+            };
+            Some(Arc::new(
+                tls::server_config(cert, key, args.tls_client_ca.as_deref(), false)
+                    .map_err(|e| e.to_string())?,
+            ))
+        } else {
+            None
+        };
+        if !file.admin.cert_identities.is_empty()
+            && (!args.admin_tls || args.tls_client_ca.is_none())
+        {
+            return fail("[admin] cert_identities needs --admin-tls and --tls-client-ca");
+        }
         let server_tls = match (&args.tls_cert, &args.tls_key) {
             (Some(cert), Some(key)) if tls_on => Some(Arc::new(
                 tls::server_config(cert, key, args.tls_client_ca.as_deref(), required)
@@ -155,6 +175,9 @@ impl Security {
                 args.auth_max_failures_per_source.max(1),
                 Duration::from_secs(args.auth_failure_window_secs),
             ),
+            admin_tls,
+            admin_identities: file.admin.cert_identities.clone(),
+            dev_insecure: args.dev_insecure_oauth2,
             #[cfg(feature = "oauth2")]
             oauth,
         })
@@ -243,6 +266,69 @@ impl Security {
         }
         #[cfg(not(feature = "oauth2"))]
         drop(stop);
+    }
+
+    /// The TLS config of the admin port, with `--admin-tls`.
+    pub fn admin_tls(&self) -> Option<Arc<rustls::ServerConfig>> {
+        self.admin_tls.clone()
+    }
+
+    /// Whether an admin request may pass: an admin certificate, or a bearer token with
+    /// `discus.admin`. A bearer token over plaintext needs `--dev-insecure-oauth2`.
+    pub async fn admin_allowed(&self, peer: &admin::AdminPeer, bearer: Option<&str>) -> bool {
+        if let Some(id) = &peer.identity {
+            if self
+                .admin_identities
+                .iter()
+                .any(|p| identity::pattern_matches(p, id))
+            {
+                return true;
+            }
+        }
+        let Some(token) = bearer else {
+            return false;
+        };
+        if !peer.tls && !self.dev_insecure {
+            tracing::debug!("admin bearer token over plaintext refused");
+            return false;
+        }
+        #[cfg(feature = "oauth2")]
+        if let Some(o) = &self.oauth {
+            o.prefetch(token.as_bytes()).await;
+            return match o.check(token.as_bytes(), oauth2::unix_now()) {
+                Ok(c) => c.scopes.is_admin(),
+                Err(reject) => {
+                    tracing::debug!(reason = %reject, "admin token refused");
+                    false
+                }
+            };
+        }
+        let _ = token;
+        false
+    }
+
+    /// The security status for the admin page.
+    pub fn status(&self) -> admin::SecurityStatus {
+        #[cfg_attr(not(feature = "oauth2"), allow(unused_mut))]
+        let mut issuers = Vec::new();
+        #[cfg(feature = "oauth2")]
+        if let Some(o) = &self.oauth {
+            let now = oauth2::unix_now();
+            for s in o.sources() {
+                let t = &s.trusted;
+                issuers.push(admin::IssuerStatus {
+                    issuer: t.name(),
+                    loaded: t.loaded(),
+                    last_refresh_unix: t.loaded_at().map(|at| now - at.elapsed().as_secs() as i64),
+                });
+            }
+        }
+        admin::SecurityStatus {
+            tls_mode: self.mode.name(),
+            policy: self.policy.to_string(),
+            ready: self.ready(),
+            issuers,
+        }
     }
 
     /// True for a command that `prefetch` must see before it runs.

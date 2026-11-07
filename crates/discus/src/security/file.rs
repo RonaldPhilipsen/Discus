@@ -19,6 +19,18 @@ pub struct AuthFile {
     pub issuer: Vec<IssuerFile>,
     /// The service account issuer of the cluster.
     pub kubernetes: Option<KubernetesFile>,
+    /// Admin port settings.
+    #[serde(default)]
+    pub admin: AdminFile,
+}
+
+/// Admin port settings.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminFile {
+    /// Certificate identity patterns that open the admin routes. Needs `--admin-tls`.
+    #[serde(default)]
+    pub cert_identities: Vec<String>,
 }
 
 fn default_api_server() -> String {
