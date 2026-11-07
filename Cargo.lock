@@ -634,6 +634,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "discus-membership"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "discus-membership",
+ "discus-placement",
+ "discus-wire",
+ "fastrand",
+ "futures",
+ "parking_lot",
+ "phi-accrual-failure-detector",
+ "proptest",
+ "tracing",
+]
+
+[[package]]
 name = "discus-placement"
 version = "0.0.0"
 dependencies = [
@@ -1830,6 +1846,15 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "phi-accrual-failure-detector"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a17e92239adff6bff617bf20f858704505272069d8785be40d5662dbf8bdaa51"
+dependencies = [
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "pin-project"
