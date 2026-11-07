@@ -1,10 +1,11 @@
 //! The Discus node: a RESP server over a sharded in-memory store.
 
+pub mod admin;
 pub mod command;
 pub mod config;
 pub mod node;
 pub mod server;
 
 pub use config::Config;
-pub use node::{ConnState, Node};
+pub use node::{ConnState, Node, Phase};
 pub use server::Server;

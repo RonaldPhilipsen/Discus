@@ -49,3 +49,43 @@ pub async fn roundtrip(addr: SocketAddr, wire: &[u8]) -> String {
     let n = s.read(&mut buf).await.unwrap();
     String::from_utf8_lossy(&buf[..n]).into_owned()
 }
+
+/// A node with both listeners, plus the handles that a test needs to stop it.
+pub struct Running {
+    pub addr: SocketAddr,
+    pub admin: SocketAddr,
+    pub handle: tokio::task::JoinHandle<std::io::Result<()>>,
+    pub shutdown: CancellationToken,
+}
+
+/// Start a node and return both of its addresses and its shutdown handles.
+pub async fn start_node_full(args: &[&str]) -> Running {
+    let mut argv = vec![
+        "discus",
+        "--listen",
+        "127.0.0.1:0",
+        "--admin-listen",
+        "127.0.0.1:0",
+    ];
+    argv.extend_from_slice(args);
+    let config = discus::Config::parse_from(argv).expect("valid test arguments");
+    let server = discus::Server::bind(config).await.expect("bind");
+    let (addr, admin) = (server.local_addr(), server.admin_addr());
+    let shutdown = CancellationToken::new();
+    let handle = tokio::spawn(server.run(shutdown.clone()));
+    Running {
+        addr,
+        admin,
+        handle,
+        shutdown,
+    }
+}
+
+/// GET a path from the admin port and return the status code.
+pub async fn status(admin: SocketAddr, path: &str) -> u16 {
+    reqwest::get(format!("http://{admin}{path}"))
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}

@@ -1,6 +1,6 @@
 //! State shared by every connection on a node.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use std::sync::Arc;
@@ -11,6 +11,24 @@ use discus_store::{Store, StoreConfig, SystemClock, HASH_SEED};
 
 use crate::Config;
 
+/// Where the node is in its life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Starting,
+    Serving,
+    Leaving,
+}
+
+impl Phase {
+    pub fn name(self) -> &'static str {
+        match self {
+            Phase::Starting => "starting",
+            Phase::Serving => "serving",
+            Phase::Leaving => "leaving",
+        }
+    }
+}
+
 /// The node. Shared as `Arc<Node>`.
 pub struct Node {
     pub config: Config,
@@ -18,6 +36,7 @@ pub struct Node {
     pub store: Arc<Store>,
     next_conn_id: AtomicU64,
     connected: AtomicUsize,
+    phase: AtomicU8,
 }
 
 impl Node {
@@ -36,6 +55,7 @@ impl Node {
             store: Arc::new(store),
             next_conn_id: AtomicU64::new(1),
             connected: AtomicUsize::new(0),
+            phase: AtomicU8::new(Phase::Starting as u8),
         }
     }
 
@@ -52,6 +72,18 @@ impl Node {
     /// Connections accepted since start.
     pub fn total_connections(&self) -> u64 {
         self.next_conn_id.load(Ordering::Relaxed) - 1
+    }
+
+    pub fn phase(&self) -> Phase {
+        match self.phase.load(Ordering::Acquire) {
+            0 => Phase::Starting,
+            1 => Phase::Serving,
+            _ => Phase::Leaving,
+        }
+    }
+
+    pub fn set_phase(&self, phase: Phase) {
+        self.phase.store(phase as u8, Ordering::Release);
     }
 
     pub fn next_conn_id(&self) -> u64 {

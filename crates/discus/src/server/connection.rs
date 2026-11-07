@@ -6,6 +6,7 @@ use bytes::BytesMut;
 use discus_resp::{encode, Limits, Parser, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio_util::sync::CancellationToken;
 
 use crate::command::dispatch;
 use crate::node::{ConnState, Node};
@@ -19,7 +20,7 @@ const READ_CHUNK: usize = 64 * 1024;
 /// Backpressure: the loop reads only after it flushed every reply for the previous read, and it
 /// flushes at least every `max_pipeline` commands. A client that does not read its replies stalls
 /// the flush, which stalls the next read, so memory stays bounded.
-pub async fn serve(mut stream: TcpStream, node: Arc<Node>) {
+pub async fn serve(mut stream: TcpStream, node: Arc<Node>, hard_stop: CancellationToken) {
     let _guard = node.track_connection();
     let cfg = &node.config;
     // The parser limit is looser than the value limit so a moderately oversize value gets a clean
@@ -38,9 +39,12 @@ pub async fn serve(mut stream: TcpStream, node: Arc<Node>) {
     let mut in_flight = 0usize;
 
     loop {
-        let n = match stream.read(&mut chunk).await {
-            Ok(0) | Err(_) => return,
-            Ok(n) => n,
+        let n = tokio::select! {
+            _ = hard_stop.cancelled() => return,
+            read = stream.read(&mut chunk) => match read {
+                Ok(0) | Err(_) => return,
+                Ok(n) => n,
+            },
         };
         parser.feed(&chunk[..n]);
         loop {
