@@ -12,7 +12,6 @@ use std::sync::Arc;
 /// The only attribute keys that a metric can carry.
 pub const ALLOWED_KEYS: [&str; 5] = ["command", "status", "node", "peer", "state"];
 
-/// The longest command label.
 const MAX_COMMAND_LEN: usize = 32;
 /// The longest node label: a 128-bit node ID in hex.
 const MAX_NODE_LEN: usize = 32;
@@ -106,7 +105,6 @@ label_enum! {
     }
 }
 
-/// One metric attribute.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Attribute {
     Command(CommandLabel),

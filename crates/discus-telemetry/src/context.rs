@@ -7,9 +7,7 @@
 
 use std::fmt;
 
-/// The `traceparent` header name.
 pub const TRACEPARENT: &str = "traceparent";
-/// The `tracestate` header name.
 pub const TRACESTATE: &str = "tracestate";
 
 /// A parsed `traceparent` value, version `00`.

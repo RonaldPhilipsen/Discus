@@ -10,9 +10,7 @@ use std::time::Duration;
 pub const DEFAULT_ENDPOINT: &str = "http://otel-collector:4317";
 /// The default head sampling ratio for root spans.
 pub const DEFAULT_SAMPLING_RATIO: f64 = 0.01;
-/// The default metric export interval.
 pub const DEFAULT_EXPORT_INTERVAL: Duration = Duration::from_secs(10);
-/// The default span queue size.
 pub const DEFAULT_SPAN_QUEUE: usize = 2048;
 
 /// The Downward API variables and the resource attribute that each one sets.
