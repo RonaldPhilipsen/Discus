@@ -58,6 +58,7 @@ impl Service for TestService {
                         applied: 0,
                         want: Vec::new(),
                         epoch: b.epoch,
+                        idle: false,
                     })
                 }
                 _ => Message::Unsupported { message_type: 0 },

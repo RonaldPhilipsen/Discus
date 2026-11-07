@@ -219,6 +219,10 @@ pub struct Config {
     /// Time for a peer to acknowledge a replication batch, in milliseconds.
     #[arg(long, default_value_t = 1_000)]
     pub replication_timeout_ms: u64,
+    /// Time that a write to a failed primary waits for a new primary, in milliseconds. Then it
+    /// returns `-TRYAGAIN`.
+    #[arg(long, default_value_t = 3_000)]
+    pub hold_budget_ms: u64,
     /// Keys in the write set of one connection, at most.
     #[arg(long, default_value_t = 4_096)]
     pub write_set_keys: usize,
@@ -391,6 +395,10 @@ impl Config {
 
     pub fn forward_write_timeout(&self) -> Duration {
         Duration::from_millis(self.forward_write_timeout_ms)
+    }
+
+    pub fn hold_budget(&self) -> Duration {
+        Duration::from_millis(self.hold_budget_ms)
     }
 }
 

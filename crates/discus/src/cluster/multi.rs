@@ -7,7 +7,10 @@ use discus_resp::{Command, Value};
 use discus_wire::ForwardMode;
 use futures::future::join_all;
 
-use super::{allowed, candidates, forward, local, spent, Dispatch, Hop, Job, Reply, Writes};
+use super::route::Route;
+use super::{
+    allowed, candidates, forward, hold, local, spent, Dispatch, Failure, Hop, Job, Reply, Writes,
+};
 use std::time::Instant;
 
 use crate::command::util::{check_key, check_value};
@@ -58,27 +61,32 @@ fn group(
 }
 
 /// Run one group: inline when local, forwarded otherwise, or the spent-budget rule.
+/// Run one group: inline when local, forwarded otherwise, or the spent-budget rule. A failed
+/// forward of a write part holds on the entry node, like a single-key write (spec section 7.5).
 async fn run_group(node: &Arc<Node>, g: &Group, hop: &Hop, write: bool) -> Option<Reply> {
     if g.target == node.id {
         return Some(local(node, &g.cmd));
     }
+    let pairs = g.cmd[0].eq_ignore_ascii_case(b"MSET");
     if allowed(node, hop, vec![g.target]).is_empty() {
         let keys: Vec<&[u8]> = g
             .cmd
             .iter()
             .skip(1)
-            .step_by(if g.cmd[0].eq_ignore_ascii_case(b"MSET") {
-                2
-            } else {
-                1
-            })
+            .step_by(if pairs { 2 } else { 1 })
             .map(|k| &k[..])
             .collect();
         return Some(spent(node, &g.cmd, &keys, write));
     }
-    forward::send(node, g.target, &g.cmd, hop, ForwardMode::Route, write)
-        .await
-        .ok()
+    match forward::send(node, g.target, &g.cmd, hop, ForwardMode::Route, write).await {
+        Ok(reply) => Some(reply),
+        Err(_) if !write => None,
+        Err(e) if hop.hops == 0 && !hop.held => {
+            let route = Route::MultiWrite { pairs };
+            Some(hold::held(node, g.cmd.clone(), route, hop.clone(), Failure::of(&e)).await)
+        }
+        Err(e) => Some(Failure::of(&e).reply()),
+    }
 }
 
 /// The newest applied stamp of the parts.
@@ -151,6 +159,12 @@ pub fn multi(
                 note(&g.cmd[1..], r);
             }
         }
+        // A held retry of this command learns whether every failed part was never sent.
+        let failures: Vec<Failure> = parts.iter().flatten().filter_map(|r| r.failed).collect();
+        if !failures.is_empty() {
+            let unsent = failures.iter().all(|f| f.unsent);
+            return Failure { unsent }.reply();
+        }
         let mut replies = Vec::with_capacity(parts.len());
         for part in parts {
             match part {
@@ -190,6 +204,7 @@ pub fn multi(
             applied,
             observed: None,
             settled: false,
+            failed: None,
         }
     }))
 }

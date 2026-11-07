@@ -110,6 +110,8 @@ pub struct BatchAck {
     /// `HANDOFF`: offered keys that the receiver wants in full.
     pub want: Vec<Bytes>,
     pub epoch: EpochId,
+    /// The answer to an empty `HANDOFF`: no handoff scan runs or waits on the sender.
+    pub idle: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

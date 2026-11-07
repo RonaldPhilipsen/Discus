@@ -3683,7 +3683,8 @@ impl ::core::fmt::Debug for KeyVersion<'_> {
 pub enum EntryBatchOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
-/// The body of REPLICATE, HINT_REPLAY, HANDOFF, and ENTRIES.
+/// The body of REPLICATE, HINT_REPLAY, HANDOFF, and ENTRIES. A HANDOFF with no entries, no
+/// offers, and no done range asks the receiver whether it is idle.
 pub struct EntryBatch<'a> {
   pub _tab: ::flatbuffers::Table<'a>,
 }
@@ -3885,6 +3886,7 @@ impl<'a> BatchAck<'a> {
   pub const VT_APPLIED: ::flatbuffers::VOffsetT = 4;
   pub const VT_WANT: ::flatbuffers::VOffsetT = 6;
   pub const VT_EPOCH: ::flatbuffers::VOffsetT = 8;
+  pub const VT_IDLE: ::flatbuffers::VOffsetT = 10;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -3899,6 +3901,7 @@ impl<'a> BatchAck<'a> {
     if let Some(x) = args.epoch { builder.add_epoch(x); }
     if let Some(x) = args.want { builder.add_want(x); }
     builder.add_applied(args.applied);
+    builder.add_idle(args.idle);
     builder.finish()
   }
 
@@ -3925,6 +3928,14 @@ impl<'a> BatchAck<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<EpochId>(BatchAck::VT_EPOCH, None)}
   }
+  /// The answer to an empty HANDOFF: the sender has no handoff scan running or waiting.
+  #[inline]
+  pub fn idle(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(BatchAck::VT_IDLE, Some(false)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for BatchAck<'_> {
@@ -3936,6 +3947,7 @@ impl ::flatbuffers::Verifiable for BatchAck<'_> {
      .visit_field::<u32>("applied", Self::VT_APPLIED, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<Blob>>>>("want", Self::VT_WANT, false)?
      .visit_field::<EpochId>("epoch", Self::VT_EPOCH, false)?
+     .visit_field::<bool>("idle", Self::VT_IDLE, false)?
      .finish();
     Ok(())
   }
@@ -3944,6 +3956,7 @@ pub struct BatchAckArgs<'a> {
     pub applied: u32,
     pub want: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<Blob<'a>>>>>,
     pub epoch: Option<&'a EpochId>,
+    pub idle: bool,
 }
 impl<'a> Default for BatchAckArgs<'a> {
   #[inline]
@@ -3952,6 +3965,7 @@ impl<'a> Default for BatchAckArgs<'a> {
       applied: 0,
       want: None,
       epoch: None,
+      idle: false,
     }
   }
 }
@@ -3974,6 +3988,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BatchAckBuilder<'a, 'b, A> {
     self.fbb_.push_slot_always::<&EpochId>(BatchAck::VT_EPOCH, epoch);
   }
   #[inline]
+  pub fn add_idle(&mut self, idle: bool) {
+    self.fbb_.push_slot::<bool>(BatchAck::VT_IDLE, idle, false);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> BatchAckBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     BatchAckBuilder {
@@ -3994,6 +4012,7 @@ impl ::core::fmt::Debug for BatchAck<'_> {
       ds.field("applied", &self.applied());
       ds.field("want", &self.want());
       ds.field("epoch", &self.epoch());
+      ds.field("idle", &self.idle());
       ds.finish()
   }
 }

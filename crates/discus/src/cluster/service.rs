@@ -72,6 +72,9 @@ impl Service for NodeService {
                         message_type: discus_wire::fb::MessageType::FORWARD.0,
                     }
                 }
+                Message::Forward(_) if node.faults.stall_forwards.load(Ordering::Relaxed) => {
+                    futures::future::pending::<Message>().await
+                }
                 Message::Forward(f) => {
                     let span =
                         telemetry::forwarded_span(discus_telemetry::global(), &inbound.trace);
@@ -173,6 +176,7 @@ async fn run_forwarded(
         path: f.path,
         trace,
         track: f.track,
+        held: false,
     };
     let job = Job {
         cmd,

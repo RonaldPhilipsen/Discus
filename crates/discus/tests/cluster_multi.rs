@@ -82,6 +82,9 @@ async fn mset_partial_failure_returns_tryagain() {
             "300",
             "--forward-write-timeout-ms",
             "500",
+            // The failed part holds for a new primary first, which never comes here.
+            "--hold-budget-ms",
+            "500",
         ],
     )
     .await;

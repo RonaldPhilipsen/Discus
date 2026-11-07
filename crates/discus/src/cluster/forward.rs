@@ -99,6 +99,7 @@ async fn send_in_span(
                 applied: reply.applied,
                 observed: reply.observed,
                 settled: reply.settled && replicates,
+                failed: None,
             })
         }
         other => Err(TransportError::Frame(format!(

@@ -612,6 +612,7 @@ fn encode_body(message: &Message) -> Vec<u8> {
                     applied: a.applied,
                     want: Some(want),
                     epoch: Some(&epoch_id_to(a.epoch)),
+                    idle: a.idle,
                 },
             );
             fbb.finish_minimal(t);
@@ -789,6 +790,7 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
                 applied: a.applied(),
                 want: blobs_of(a.want()),
                 epoch: epoch_id_of(a.epoch().ok_or_else(|| invalid("ack without an epoch"))?),
+                idle: a.idle(),
             })
         }
         T::FETCH => {

@@ -37,6 +37,8 @@ use queue::{PeerQueue, Pushed};
 const BATCH_BYTES: u64 = 4 << 20;
 /// Hints in one `HINT_REPLAY` batch.
 const REPLAY_BATCH: usize = 256;
+/// An incoming handoff this old asks its sources whether they are idle.
+const PROBE_AFTER: Duration = Duration::from_secs(2);
 /// How often the replicator reports its gauges and ages out hints.
 const TICK: Duration = Duration::from_secs(1);
 
@@ -97,6 +99,7 @@ pub struct Replicator {
     scan_wake: tokio::sync::Notify,
     scans: AtomicU64,
     ready: AtomicBool,
+    probing: AtomicBool,
 }
 
 impl Replicator {
@@ -118,6 +121,7 @@ impl Replicator {
             scan_wake: tokio::sync::Notify::new(),
             scans: AtomicU64::new(0),
             ready: AtomicBool::new(false),
+            probing: AtomicBool::new(false),
         });
         // Under memory pressure the store frees the oldest hints after its normal entries
         // (spec section 11).
@@ -187,7 +191,40 @@ impl Replicator {
         if let Some(node) = self.node.upgrade() {
             let current = node.epochs().current().clone();
             self.prune_handoffs(&current);
+            self.probe_sources(&node);
         }
+    }
+
+    /// Ask the sources of incoming handoffs older than [`PROBE_AFTER`] whether they are idle. A
+    /// source that adopted the epoch of the change and has no scan left will never send a done
+    /// batch, for example after it gave up on this node, so it no longer counts.
+    fn probe_sources(&self, node: &Arc<Node>) {
+        let waiting: Vec<(NodeId, u64)> = {
+            let st = self.handoff.lock();
+            st.incoming
+                .iter()
+                .filter(|inc| inc.started.elapsed() >= PROBE_AFTER)
+                .flat_map(|inc| inc.sources.iter().map(|s| (*s, inc.new.generation)))
+                .collect()
+        };
+        if waiting.is_empty() || self.probing.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (Some(me), node) = (self.me.upgrade(), node.clone()) else {
+            return;
+        };
+        tokio::spawn(async move {
+            for (source, generation) in waiting {
+                let probe = Message::Handoff(Batch::new(node.epoch_id()));
+                if let Ok(Message::BatchAck(a)) = me.send(&node, source, probe).await {
+                    if a.idle && a.epoch.generation >= generation {
+                        let finished = me.handoff.lock().done(source, a.epoch);
+                        drop(finished);
+                    }
+                }
+            }
+            me.probing.store(false, Ordering::Release);
+        });
     }
 
     /// Register the handoffs of an adoption from `old` to `new`. `Node::adopt_epoch` calls
@@ -716,6 +753,16 @@ impl Replicator {
                 let applied = self.apply_entries(&node, b.entries);
                 ack(&node, applied, Vec::new())
             }
+            Message::Handoff(b)
+                if b.entries.is_empty() && b.offers.is_empty() && b.done.is_none() =>
+            {
+                Message::BatchAck(BatchAck {
+                    applied: 0,
+                    want: Vec::new(),
+                    epoch: node.epoch_id(),
+                    idle: !self.scanning(),
+                })
+            }
             Message::Handoff(b) => {
                 let want: Vec<Bytes> = b
                     .offers
@@ -808,5 +855,6 @@ fn ack(node: &Node, applied: u32, want: Vec<Bytes>) -> Message {
         applied,
         want,
         epoch: node.epoch_id(),
+        idle: false,
     })
 }

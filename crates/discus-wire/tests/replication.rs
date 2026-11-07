@@ -92,6 +92,7 @@ fn a_batch_ack_round_trips() {
         applied: 12,
         want: vec![Bytes::from("k1"), Bytes::from("k2")],
         epoch: epoch(3),
+        idle: true,
     });
     assert_eq!(round_trip(m.clone()), m);
 }
@@ -121,6 +122,7 @@ fn new_types_are_9_to_15() {
             applied: 0,
             want: vec![],
             epoch: epoch(1),
+            idle: false,
         })
         .type_code(),
         Message::Fetch { keys: vec![] }.type_code(),

@@ -186,6 +186,15 @@ async fn fallback_ends_when_the_handoff_is_abandoned() {
 }
 
 #[tokio::test]
+async fn a_handoff_ends_when_its_sources_give_up() {
+    let net = Net::new();
+    let (_nodes, joiner, _) = stalled_join(&net, &["--replication-timeout-ms", "200"]).await;
+    let rep = joiner.node.replicator().unwrap();
+    assert!(rep.handoff_pending());
+    assert!(wait_until(Duration::from_secs(15), || !rep.handoff_pending()).await);
+}
+
+#[tokio::test]
 async fn a_rolling_restart_keeps_the_data_and_a_short_history() {
     let net = Net::new();
     let args = ["--replication-factor", "2", "--shutdown-timeout-secs", "5"];

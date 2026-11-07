@@ -40,7 +40,8 @@ table KeyVersion {
   version: Version (id: 1);
 }
 
-/// The body of REPLICATE, HINT_REPLAY, HANDOFF, and ENTRIES.
+/// The body of REPLICATE, HINT_REPLAY, HANDOFF, and ENTRIES. A HANDOFF with no entries, no
+/// offers, and no done range asks the receiver whether it is idle.
 table EntryBatch {
   /// The epoch of the sender.
   epoch: EpochId (id: 0);
@@ -59,6 +60,8 @@ table BatchAck {
   /// HANDOFF: offered keys that the receiver wants in full.
   want: [Blob] (id: 1);
   epoch: EpochId (id: 2);
+  /// The answer to an empty HANDOFF: the sender has no handoff scan running or waiting.
+  idle: bool (id: 3);
 }
 
 /// Read repair and previous-epoch fallback. The reply is ENTRIES.

@@ -1,6 +1,7 @@
 //! Routing: plan each command as local or forwarded, and run it (spec section 7).
 
 pub mod forward;
+pub mod hold;
 pub mod multi;
 pub mod route;
 pub mod service;
@@ -71,6 +72,30 @@ pub struct Reply {
     pub observed: Option<Version>,
     /// A tracked read: every replica holds that version.
     pub settled: bool,
+    /// The forward of a write failed. Set only when no hold covers it.
+    pub failed: Option<Failure>,
+}
+
+/// How a forwarded write failed (spec section 7.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Failure {
+    /// The request never left this node, so a resend is always safe.
+    pub unsent: bool,
+}
+
+impl Failure {
+    pub fn of(e: &discus_transport::TransportError) -> Failure {
+        Failure {
+            unsent: e.is_unsent(),
+        }
+    }
+
+    pub fn reply(self) -> Reply {
+        Reply {
+            failed: Some(self),
+            ..Reply::try_again()
+        }
+    }
 }
 
 impl Reply {
@@ -80,6 +105,7 @@ impl Reply {
             applied: None,
             observed: None,
             settled: false,
+            failed: None,
         }
     }
 
@@ -100,6 +126,8 @@ pub struct Hop {
     pub trace: TraceContext,
     /// The entry node keeps the key in a write set and wants `observed` and `settled`.
     pub track: bool,
+    /// A retry of a held command. It does not hold again.
+    pub held: bool,
 }
 
 /// A data command that passed the entry checks, ready to run once its keys are free.
@@ -189,6 +217,7 @@ pub fn local(node: &Node, cmd: &Command) -> Reply {
         applied,
         observed: None,
         settled: false,
+        failed: None,
     }
 }
 
@@ -403,9 +432,14 @@ fn single_planned(
         for target in targets {
             match forward::send(&node, target, &cmd, &hop, ForwardMode::Route, write).await {
                 Ok(reply) => return reply,
-                // A read tries the next owner. A write fails at once: plan 4 adds hold-and-retry.
+                // A read tries the next owner.
                 Err(_) if !write => continue,
-                Err(_) => break,
+                // A write waits for a new primary, on the entry node only.
+                Err(e) if hop.hops == 0 && !hop.held => {
+                    let route = Route::Single { write: true };
+                    return hold::held(&node, cmd, route, hop, Failure::of(&e)).await;
+                }
+                Err(e) => return Failure::of(&e).reply(),
             }
         }
         Reply::try_again()
