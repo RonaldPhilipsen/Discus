@@ -1,7 +1,7 @@
 //! The sharded in-memory data plane.
 //!
-//! The key hash is xxh3 with [`HASH_SEED`]. It is part of the placement contract: a change to the
-//! hash or the seed is a breaking change.
+//! The key hash is xxh3 with [`HASH_SEED`]. It only picks the local shard. Placement uses its own
+//! hash and seed in `discus-placement`.
 
 pub mod entry;
 pub mod evict;
