@@ -8,6 +8,6 @@ pub mod config;
 pub mod node;
 pub mod server;
 
-pub use config::Config;
+pub use config::{Config, Peer};
 pub use node::{ConnState, Node, Phase};
 pub use server::Server;

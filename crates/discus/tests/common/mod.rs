@@ -4,6 +4,8 @@ use std::net::SocketAddr;
 
 use tokio_util::sync::CancellationToken;
 
+pub mod cluster;
+
 /// Start a node on free ports and return its client address.
 pub async fn start_node(args: &[&str]) -> SocketAddr {
     start_node_raw(args).await.0

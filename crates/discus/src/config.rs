@@ -1,8 +1,18 @@
 //! Node configuration, parsed from command-line flags.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::Parser;
+use discus_placement::{ClusterId, NodeId};
+
+/// A static peer: `<node-id>@<quic-addr>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Peer {
+    pub id: NodeId,
+    pub addr: SocketAddr,
+}
 
 /// Configuration for one Discus node.
 #[derive(Debug, Clone, Parser)]
@@ -50,6 +60,55 @@ pub struct Config {
     /// Shared token that clients must send with AUTH.
     #[arg(long)]
     pub shared_token: Option<String>,
+
+    /// This node's ID, 32 hex digits. Random by default. Required with --peer.
+    #[arg(long)]
+    pub node_id: Option<NodeId>,
+    /// The cluster ID, 32 hex digits. Minted by default. Required with --peer.
+    #[arg(long)]
+    pub cluster_id: Option<ClusterId>,
+    /// Node-to-node (QUIC, UDP) listen address.
+    #[arg(long, default_value = "0.0.0.0:7379")]
+    pub cluster_listen: SocketAddr,
+    /// A static peer as `<node-id>@<address>`. Repeat for each other member.
+    #[arg(long = "peer", value_parser = parse_peer)]
+    pub peers: Vec<Peer>,
+    /// PEM file with the CA that issues node certificates.
+    #[arg(long)]
+    pub cluster_ca: Option<PathBuf>,
+    /// PEM file with this node's certificate chain.
+    #[arg(long)]
+    pub cluster_cert: Option<PathBuf>,
+    /// PEM file with this node's private key.
+    #[arg(long)]
+    pub cluster_key: Option<PathBuf>,
+    /// The URI SAN that every peer certificate must carry.
+    #[arg(long, default_value = "spiffe://cluster.local/ns/default/sa/discus")]
+    pub cluster_san: String,
+    /// Forward timeout for reads, in milliseconds. Then the next owner is tried.
+    #[arg(long, default_value_t = 20)]
+    pub forward_read_timeout_ms: u64,
+    /// Forward timeout for writes, in milliseconds.
+    #[arg(long, default_value_t = 200)]
+    pub forward_write_timeout_ms: u64,
+    /// Timeout for a QUIC connect plus HELLO, in milliseconds.
+    #[arg(long, default_value_t = 2000)]
+    pub cluster_handshake_timeout_ms: u64,
+    /// QUIC idle timeout, in milliseconds.
+    #[arg(long, default_value_t = 30_000)]
+    pub cluster_idle_timeout_ms: u64,
+    /// QUIC keep-alive interval, in milliseconds.
+    #[arg(long, default_value_t = 5_000)]
+    pub cluster_keep_alive_ms: u64,
+    /// Largest node-to-node frame this node accepts, in bytes.
+    #[arg(long, default_value_t = discus_wire::DEFAULT_MAX_FRAME)]
+    pub cluster_max_frame_bytes: usize,
+    /// Read from any owner instead of the primary. Off until replication exists.
+    #[arg(long)]
+    pub read_from_replicas: bool,
+    /// Capability bits offered in HELLO. For tests of mixed builds.
+    #[arg(long, hide = true, default_value_t = discus_wire::caps::KNOWN)]
+    pub cluster_capabilities: u64,
 }
 
 impl Config {
@@ -61,6 +120,83 @@ impl Config {
     {
         <Config as Parser>::try_parse_from(args)
     }
+
+    fn cert_flags(&self) -> [(&'static str, bool); 3] {
+        [
+            ("--cluster-ca", self.cluster_ca.is_some()),
+            ("--cluster-cert", self.cluster_cert.is_some()),
+            ("--cluster-key", self.cluster_key.is_some()),
+        ]
+    }
+
+    /// True when the node runs the QUIC transport: it has peers or certificates.
+    pub fn cluster_enabled(&self) -> bool {
+        !self.peers.is_empty() || self.cert_flags().iter().all(|(_, set)| *set)
+    }
+
+    /// Check the flags that depend on each other. The message names the flags to fix.
+    pub fn validate(&self) -> Result<(), String> {
+        let certs = self.cert_flags();
+        let set = certs.iter().filter(|(_, s)| *s).count();
+        if !self.peers.is_empty() {
+            let mut missing: Vec<&str> = Vec::new();
+            if self.node_id.is_none() {
+                missing.push("--node-id");
+            }
+            if self.cluster_id.is_none() {
+                missing.push("--cluster-id");
+            }
+            missing.extend(certs.iter().filter(|(_, s)| !*s).map(|(f, _)| *f));
+            if !missing.is_empty() {
+                return Err(format!(
+                    "--peer needs {}. Node-to-node traffic always uses mTLS",
+                    missing.join(", ")
+                ));
+            }
+            if self.weight != 1.0 {
+                return Err(
+                    "--weight must be 1 with --peer, because every static member has weight 1"
+                        .into(),
+                );
+            }
+            for (i, p) in self.peers.iter().enumerate() {
+                if Some(p.id) == self.node_id {
+                    return Err(format!("--peer {} is this node's own ID", p.id));
+                }
+                if self.peers[..i].iter().any(|q| q.id == p.id) {
+                    return Err(format!("--peer {} is listed twice", p.id));
+                }
+            }
+        } else if set != 0 && set != certs.len() {
+            let missing: Vec<&str> = certs.iter().filter(|(_, s)| !*s).map(|(f, _)| *f).collect();
+            return Err(format!(
+                "the cluster certificate flags need {}",
+                missing.join(", ")
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn forward_read_timeout(&self) -> Duration {
+        Duration::from_millis(self.forward_read_timeout_ms)
+    }
+
+    pub fn forward_write_timeout(&self) -> Duration {
+        Duration::from_millis(self.forward_write_timeout_ms)
+    }
+}
+
+fn parse_peer(s: &str) -> Result<Peer, String> {
+    let (id, addr) = s
+        .split_once('@')
+        .ok_or_else(|| "a peer is <node-id>@<address>".to_string())?;
+    let id = id
+        .parse::<NodeId>()
+        .map_err(|_| "a peer node ID is 32 hex digits".to_string())?;
+    let addr = addr
+        .parse::<SocketAddr>()
+        .map_err(|_| "a peer address is <ip>:<port>".to_string())?;
+    Ok(Peer { id, addr })
 }
 
 fn parse_rf(s: &str) -> Result<usize, String> {

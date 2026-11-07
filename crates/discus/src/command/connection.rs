@@ -293,6 +293,12 @@ fn info(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
             ),
             format!("discus_hlc_pinned:{}", u8::from(node.hlc.is_pinned())),
             format!("discus_hlc_refusals:{}", node.hlc.refusals()),
+            format!(
+                "discus_cluster_addr:{}",
+                node.link()
+                    .map_or("none".to_string(), |l| l.transport.local_addr().to_string())
+            ),
+            format!("discus_peers:{}", node.config.peers.len()),
         ],
     );
     Ok(Value::Bulk(Bytes::from(out)))

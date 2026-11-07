@@ -1,22 +1,28 @@
 //! State shared by every connection on a node.
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
-
-use std::sync::Arc;
 
 use bytes::Bytes;
 use discus_placement::{
-    hlc, Clock, ClusterId, Epoch, EpochHistory, Hlc, Member, MemberState, NodeId, Version, Weight,
-    NTP64,
+    hlc, Adopt, Clock, ClusterId, Epoch, EpochError, EpochHistory, EpochId, Hlc, Member,
+    MemberState, NodeId, Version, Weight, NTP64,
 };
 use discus_resp::Protocol;
 use discus_store::{Store, StoreConfig, SystemClock, HASH_SEED};
 use parking_lot::{RwLock, RwLockReadGuard};
 
+use crate::cluster::ClusterLink;
 use crate::command::CommandError;
-
 use crate::Config;
+
+thread_local! {
+    /// The last stamp that `Node::stamp` issued on this thread. Local execution reads it back to
+    /// report the applied HLC of a command.
+    static APPLIED: Cell<Option<Version>> = const { Cell::new(None) };
+}
 
 /// Where the node is in its life.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +55,7 @@ pub struct Node {
     next_conn_id: AtomicU64,
     connected: AtomicUsize,
     phase: AtomicU8,
+    link: OnceLock<ClusterLink>,
 }
 
 impl Node {
@@ -67,17 +74,15 @@ impl Node {
             },
             wall,
         );
-        let id = NodeId::random();
-        // This plan has one node, so it always bootstraps: it mints the cluster ID, forms epoch
-        // (1, self), and starts the HLC from the wall clock. Plan 2 replaces the client address
-        // with the node-to-node address.
+        let id = config.node_id.unwrap_or_else(NodeId::random);
+        let cluster_id = config.cluster_id.unwrap_or_else(ClusterId::mint);
         let me = Member {
             id,
-            addr: config.listen,
+            addr: config.cluster_listen,
             state: MemberState::Normal,
             weight: Weight::new(config.weight).unwrap_or_default(),
         };
-        let epochs = EpochHistory::new(Epoch::bootstrap(me, ClusterId::mint()));
+        let epochs = EpochHistory::new(static_epoch(me, &config, cluster_id));
         Node {
             config,
             id,
@@ -88,7 +93,46 @@ impl Node {
             next_conn_id: AtomicU64::new(1),
             connected: AtomicUsize::new(0),
             phase: AtomicU8::new(Phase::Starting as u8),
+            link: OnceLock::new(),
         }
+    }
+
+    /// The node-to-node link, when the transport runs.
+    pub fn link(&self) -> Option<&ClusterLink> {
+        self.link.get()
+    }
+
+    /// Attach the node-to-node link. Only the first call has an effect.
+    pub fn set_link(&self, link: ClusterLink) {
+        let _ = self.link.set(link);
+    }
+
+    /// Adopt a newer epoch of this cluster. A stale epoch changes nothing.
+    pub fn adopt_epoch(&self, epoch: Epoch) -> Result<Adopt, EpochError> {
+        let id = epoch.id();
+        let result = self.epochs.write().adopt(epoch);
+        if matches!(result, Ok(Adopt::Newer)) {
+            tracing::info!(epoch = %id, "adopted a newer epoch");
+        }
+        result
+    }
+
+    /// The current epoch ID.
+    pub fn epoch_id(&self) -> EpochId {
+        self.epochs.read().current().id()
+    }
+
+    /// The owner set of `key` in the previous epoch, if the history holds one.
+    pub fn previous_owners(&self, key: &[u8]) -> Option<Vec<NodeId>> {
+        self.epochs
+            .read()
+            .previous()
+            .map(|e| e.owners(key, self.config.replication_factor))
+    }
+
+    /// The stamp that the last command on this thread took, and clear it.
+    pub fn take_applied() -> Option<Version> {
+        APPLIED.with(Cell::take)
     }
 
     /// Count a new client. The returned guard decrements the count when dropped.
@@ -138,12 +182,38 @@ impl Node {
     /// A fresh HLC version for one write command. A clock pinned at its drift bound refuses, and
     /// the command returns `-TRYAGAIN`.
     pub fn stamp(&self) -> Result<Version, CommandError> {
-        self.hlc.tick().map_err(|_| CommandError::TryAgain)
+        let stamp = self.hlc.tick().map_err(|_| CommandError::TryAgain)?;
+        APPLIED.with(|a| a.set(Some(stamp)));
+        Ok(stamp)
     }
 
     pub fn next_conn_id(&self) -> u64 {
         self.next_conn_id.fetch_add(1, Ordering::Relaxed)
     }
+}
+
+/// The first epoch. With static peers, every member is `NORMAL` with weight 1 and the epoch is
+/// `(1, lowest NodeId)`, so every node forms the same epoch. Alone, the node bootstraps `(1, self)`.
+fn static_epoch(me: Member, config: &Config, cluster_id: ClusterId) -> Epoch {
+    if config.peers.is_empty() {
+        return Epoch::bootstrap(me, cluster_id);
+    }
+    let my_id = me.id;
+    let mut members = vec![me];
+    members.extend(config.peers.iter().map(|p| Member {
+        id: p.id,
+        addr: p.addr,
+        state: MemberState::Normal,
+        weight: Weight::default(),
+    }));
+    let origin = members.iter().map(|m| m.id).min().unwrap_or(my_id);
+    let id = EpochId {
+        generation: 1,
+        origin,
+    };
+    // Config::validate refuses duplicate IDs, so this only fails for a config that skipped it.
+    Epoch::new(id, cluster_id, members.clone())
+        .unwrap_or_else(|_| Epoch::bootstrap(members[0].clone(), cluster_id))
 }
 
 /// Per-connection state.

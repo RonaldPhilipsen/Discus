@@ -17,6 +17,8 @@ pub enum CommandError {
     Unsupported(String),
     /// The HLC is pinned at its drift bound, so the node refuses writes for now.
     TryAgain,
+    /// Routing failed: an owner is unreachable, or the hop budget ran out during an epoch change.
+    ClusterTryAgain,
     /// Raw error text, including its prefix such as `ERR` or `OOM`.
     Custom(String),
 }
@@ -44,6 +46,9 @@ impl CommandError {
             CommandError::Unsupported(_) => "ERR command not supported by Discus".into(),
             CommandError::TryAgain => {
                 "TRYAGAIN the node clock is at its drift bound, try again later".into()
+            }
+            CommandError::ClusterTryAgain => {
+                "TRYAGAIN the cluster is changing, try again later".into()
             }
             CommandError::Custom(s) => s.clone(),
         }
