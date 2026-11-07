@@ -85,6 +85,36 @@ async fn one_trace_id_covers_the_forward() {
         .find(|kv| kv.key.as_str() == "db.operation.name")
         .unwrap();
     assert_eq!(op.value.as_str(), "SET");
+
+    // The entry node routes in a `route` child span. The owner routes and runs the command in
+    // `route` and `store` children of its own command span.
+    macro_rules! child_of {
+        ($name:expr, $parent:expr) => {
+            spans
+                .iter()
+                .any(|s| s.name == $name && s.parent_span_id == $parent.span_context.span_id())
+        };
+    }
+    assert!(child_of!("route", entry_cmd));
+    assert!(child_of!("route", remote_cmd));
+    assert!(child_of!("store", remote_cmd));
+    assert!(!child_of!("store", entry_cmd));
+
+    // The forward, epoch, and member metrics have real sources now.
+    let points = h.points();
+    let sum = |name: &str, attr: Option<(&str, &str)>| -> f64 {
+        points
+            .iter()
+            .filter(|p| p.name == name)
+            .filter(|p| attr.is_none_or(|(k, v)| p.attrs.iter().any(|a| a.0 == k && a.1 == v)))
+            .map(|p| p.value)
+            .sum()
+    };
+    assert!(sum("discus.forwards", Some(("command", "SET"))) >= 1.0);
+    assert!(sum("discus.forwards", Some(("status", "ok"))) >= 1.0);
+    assert!(sum("discus.forward.hops", None) >= 1.0);
+    assert_eq!(sum("discus.ring.epoch", None), 1.0);
+    assert_eq!(sum("discus.members", Some(("state", "normal"))), 2.0);
     for n in &c.nodes {
         n.stop();
     }

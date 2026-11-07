@@ -233,7 +233,7 @@ impl CommandTrace {
     pub fn begin(metrics: &Metrics, cmd: &Command) -> CommandTrace {
         #[cfg(feature = "otel")]
         if metrics.is_enabled() {
-            let label = label(cmd);
+            let label = command_label(cmd);
             let span = tracing::info_span!(
                 "command",
                 otel.status_code = tracing::field::Empty,
@@ -262,20 +262,13 @@ impl CommandTrace {
         &self.span
     }
 
-    /// Run the routing step inside the `route` child span.
-    pub fn route<T>(&self, f: impl FnOnce() -> T) -> T {
+    /// A new `route` child span. The caller runs the entry checks and the owner choice in it,
+    /// and drops it before the command runs or forwards. Disabled when export is off.
+    pub fn route_span(&self) -> tracing::Span {
         if self.span.is_none() {
-            return f();
+            return tracing::Span::none();
         }
-        tracing::info_span!(parent: &self.span, "route").in_scope(f)
-    }
-
-    /// Run the store access inside the `store` child span.
-    pub fn store<T>(&self, f: impl FnOnce() -> T) -> T {
-        if self.span.is_none() {
-            return f();
-        }
-        tracing::info_span!(parent: &self.span, "store").in_scope(f)
+        tracing::info_span!(parent: &self.span, "route")
     }
 
     /// Record the reply: the span status and the command metrics.
@@ -294,9 +287,8 @@ impl CommandTrace {
     }
 }
 
-/// The metric label: the table name, never the name the client sent.
-#[cfg(feature = "otel")]
-fn label(cmd: &Command) -> discus_telemetry::attrs::CommandLabel {
+/// The metric label of a command: the table name, never the name the client sent.
+pub fn command_label(cmd: &Command) -> discus_telemetry::attrs::CommandLabel {
     use discus_telemetry::attrs::CommandLabel;
     let Some(name) = cmd.first() else {
         return CommandLabel::UNKNOWN;
@@ -324,11 +316,12 @@ pub fn dispatch_with(metrics: &Metrics, node: &Node, conn: &mut ConnState, cmd: 
     let trace = CommandTrace::begin(metrics, cmd);
     let span = trace.span().clone();
     let _entered = span.enter();
-    let value = match trace.route(|| crate::cluster::prepare(node, conn, cmd.clone())) {
+    let prepared = trace
+        .route_span()
+        .in_scope(|| crate::cluster::prepare(node, conn, cmd.clone()));
+    let value = match prepared {
         crate::cluster::Prepared::Done(value) => value,
-        crate::cluster::Prepared::Data(job) => {
-            trace.store(|| crate::cluster::local(node, &job.cmd)).value
-        }
+        crate::cluster::Prepared::Data(job) => crate::cluster::local(node, &job.cmd).value,
     };
     trace.finish(&value);
     value
@@ -361,12 +354,103 @@ pub fn outbound(inbound: &discus_wire::TraceContext) -> discus_wire::TraceContex
     to_wire(&discus_telemetry::context::outbound(&from_wire(inbound)))
 }
 
-/// The `forward` child span of the current command span. It opens only under a command span.
+/// The `forward` child span of the current span. It opens only under a command span, so a
+/// node without export opens no span.
 pub fn forward_span() -> tracing::Span {
     if tracing::Span::current().is_none() {
         return tracing::Span::none();
     }
     tracing::info_span!("forward")
+}
+
+/// The `store` child span of the current span. It opens only under a command span.
+pub fn store_span() -> tracing::Span {
+    if tracing::Span::current().is_none() {
+        return tracing::Span::none();
+    }
+    tracing::info_span!("store")
+}
+
+/// The `route` child span of the current span. A node that receives a forward routes in it. It
+/// opens only under a command span.
+pub fn route_span() -> tracing::Span {
+    if tracing::Span::current().is_none() {
+        return tracing::Span::none();
+    }
+    tracing::info_span!("route")
+}
+
+/// Record one forward: the command, the outcome, and the hop count of the forward.
+pub fn record_forward(
+    metrics: &Metrics,
+    cmd: &Command,
+    result: &Result<crate::cluster::Reply, discus_transport::TransportError>,
+    hops: u8,
+) {
+    use discus_telemetry::attrs::Status;
+    let status = match result {
+        Ok(_) => Status::Ok,
+        Err(discus_transport::TransportError::Timeout) => Status::Timeout,
+        Err(_) => Status::Error,
+    };
+    metrics.forward(command_label(cmd), status, hops);
+}
+
+/// Record the epoch gauge and the member count of each state.
+pub fn record_epoch(metrics: &Metrics, epoch: &discus_placement::Epoch) {
+    use discus_placement::MemberState as Placement;
+    use discus_telemetry::attrs::MemberState;
+    metrics.epoch(epoch.id().generation);
+    for state in MemberState::ALL {
+        let ours = match state {
+            MemberState::Joining => Placement::Joining,
+            MemberState::Normal => Placement::Normal,
+            MemberState::Leaving => Placement::Leaving,
+            MemberState::Dead => Placement::Dead,
+        };
+        let count = epoch.members().iter().filter(|m| m.state == ours).count();
+        metrics.members(state, count as u64);
+    }
+}
+
+/// Record one transport event. A failed handshake and a lost connection are QUIC failures. A
+/// request without a reply in time is a peer error. An event without a known peer has no label,
+/// so it is not recorded.
+pub fn record_peer_event(metrics: &Metrics, event: &discus_transport::PeerEvent) {
+    use discus_telemetry::attrs::Status;
+    use discus_transport::PeerEventKind;
+    let Some(peer) = event.peer.and_then(node_label) else {
+        return;
+    };
+    match event.kind {
+        PeerEventKind::HandshakeFailed(_) => metrics.quic_failure(&peer, Status::Handshake),
+        PeerEventKind::Reset(_) => metrics.quic_failure(&peer, Status::Reset),
+        PeerEventKind::ForwardTimeout { .. } => metrics.peer_error(&peer, Status::Timeout),
+    }
+}
+
+/// Record every event of `transport` until `stop`. Membership (plan 3) reads the same events on
+/// its own receiver.
+pub async fn observe_peer_events(
+    metrics: &'static Metrics,
+    transport: &discus_transport::Transport,
+    stop: tokio_util::sync::CancellationToken,
+) {
+    use tokio::sync::broadcast::error::RecvError;
+    let mut events = transport.events();
+    loop {
+        let event = tokio::select! {
+            _ = stop.cancelled() => return,
+            event = events.recv() => event,
+        };
+        match event {
+            Ok(event) => record_peer_event(metrics, &event),
+            Err(RecvError::Lagged(missed)) => {
+                tracing::debug!(missed, "telemetry missed transport events");
+            }
+            Err(RecvError::Closed) => return,
+        }
+    }
 }
 
 /// The command span of a command that another node forwarded. Its parent is the span context
@@ -390,7 +474,7 @@ pub fn forwarded_span(metrics: &Metrics, inbound: &discus_wire::TraceContext) ->
 /// Record the table name of a forwarded command on the current command span.
 pub fn record_operation(cmd: &Command) {
     #[cfg(feature = "otel")]
-    tracing::Span::current().record("db.operation.name", label(cmd).as_str());
+    tracing::Span::current().record("db.operation.name", command_label(cmd).as_str());
     let _ = cmd;
 }
 

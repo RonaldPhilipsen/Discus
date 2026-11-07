@@ -146,6 +146,12 @@ impl Server {
         tracing::info!(addr = ?listener.local_addr().ok(), "serving");
         if let Some(link) = node.link() {
             tracing::info!(cluster = %link.transport.local_addr(), "node-to-node transport");
+            // The transport events feed the peer error and QUIC failure metrics.
+            let (transport, stop) = (link.transport.clone(), stop_background.clone());
+            tokio::spawn(async move {
+                crate::telemetry::observe_peer_events(discus_telemetry::global(), &transport, stop)
+                    .await;
+            });
             // Dial every peer early, so the first forward does not pay the handshake.
             let epoch = node.epochs().current().clone();
             for m in epoch.members().iter().filter(|m| m.id != node.id) {

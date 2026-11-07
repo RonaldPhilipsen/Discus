@@ -24,9 +24,16 @@ pub async fn send(
     mode: ForwardMode,
     write: bool,
 ) -> Result<Reply, TransportError> {
-    send_in_span(node, target, cmd, hop, mode, write)
+    let result = send_in_span(node, target, cmd, hop, mode, write)
         .instrument(telemetry::forward_span())
-        .await
+        .await;
+    telemetry::record_forward(
+        discus_telemetry::global(),
+        cmd,
+        &result,
+        hop.hops.saturating_add(1),
+    );
+    result
 }
 
 async fn send_in_span(

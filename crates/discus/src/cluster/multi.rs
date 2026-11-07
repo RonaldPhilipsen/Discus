@@ -83,6 +83,7 @@ pub enum Merge {
 }
 
 /// Plan and run a multi-key command. With every key local, the original command runs inline.
+/// The grouping by owner runs in the `route` span.
 pub fn multi(
     node: &Arc<Node>,
     cmd: Command,
@@ -90,6 +91,7 @@ pub fn multi(
     rr: u64,
     merge: Merge,
     write: bool,
+    route: tracing::Span,
 ) -> Dispatch {
     let width = if merge == Merge::AllOk { 2 } else { 1 };
     if width == 2 {
@@ -102,7 +104,9 @@ pub fn multi(
             }
         }
     }
-    let Some(groups) = group(node, &cmd, width, write, rr) else {
+    let groups = route.in_scope(|| group(node, &cmd, width, write, rr));
+    drop(route);
+    let Some(groups) = groups else {
         return Dispatch::Ready(Reply::try_again());
     };
     if groups.iter().all(|g| g.target == node.id) {

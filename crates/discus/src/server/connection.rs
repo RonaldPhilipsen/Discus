@@ -118,7 +118,10 @@ impl Pipeline {
         let trace = CommandTrace::begin(self.metrics, &cmd);
         let span = trace.span().clone();
         let _entered = span.enter();
-        let prepared = trace.route(|| cluster::prepare(&self.node, &mut self.conn, cmd));
+        // The route span covers the entry checks and the owner choice. A command that waits for
+        // an earlier one on the same key ends it and opens another when it runs.
+        let route = trace.route_span();
+        let prepared = route.in_scope(|| cluster::prepare(&self.node, &mut self.conn, cmd));
         let job = match prepared {
             Prepared::Done(value) => {
                 trace.finish(&value);
@@ -134,7 +137,7 @@ impl Pipeline {
         let protocol = self.conn.protocol;
         let (wait, done) = self.order.admit(&job.keys());
         if wait.is_ready() {
-            match trace.store(|| cluster::run(&self.node, job)) {
+            match cluster::run(&self.node, job, route) {
                 Dispatch::Ready(reply) => {
                     drop(done);
                     trace.finish(&reply.value);
@@ -160,11 +163,12 @@ impl Pipeline {
             }
             return;
         }
+        drop(route);
         let node = self.node.clone();
         self.pending.push_back(Box::pin(
             async move {
                 wait.wait().await;
-                let reply = trace.store(|| cluster::run(&node, job)).finish().await;
+                let reply = cluster::run(&node, job, trace.route_span()).finish().await;
                 drop(done);
                 trace.finish(&reply.value);
                 Slot {

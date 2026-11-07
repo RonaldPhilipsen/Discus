@@ -90,7 +90,7 @@ impl Node {
             weight: Weight::new(config.weight).unwrap_or_default(),
         };
         let epochs = EpochHistory::new(static_epoch(me, &config, cluster_id));
-        discus_telemetry::global().epoch(epochs.current().id().generation);
+        crate::telemetry::record_epoch(discus_telemetry::global(), epochs.current());
         Node {
             config,
             id,
@@ -119,10 +119,11 @@ impl Node {
     /// Adopt a newer epoch of this cluster. A stale epoch changes nothing.
     pub fn adopt_epoch(&self, epoch: Epoch) -> Result<Adopt, EpochError> {
         let id = epoch.id();
-        let result = self.epochs.write().adopt(epoch);
+        let mut epochs = self.epochs.write();
+        let result = epochs.adopt(epoch);
         if matches!(result, Ok(Adopt::Newer)) {
             tracing::info!(epoch = %id, "adopted a newer epoch");
-            discus_telemetry::global().epoch(id.generation);
+            crate::telemetry::record_epoch(discus_telemetry::global(), epochs.current());
         }
         result
     }

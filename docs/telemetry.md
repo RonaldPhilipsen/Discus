@@ -75,7 +75,8 @@ sample by tail in the collector.
 
 Each command gets a span named `command`. It has these child spans:
 
-- `route` covers the choice of where the command runs.
+- `route` covers the entry checks and the choice of the owner. The entry checks are the lookup,
+  the arguments, the authentication, and the scopes.
 - `store` covers the work on the store.
 - `forward` covers one forward to another node.
 
@@ -118,24 +119,27 @@ and 100.
 | `discus.telemetry.spans.export_failures` | counter | none | Failed span exports. |
 | `discus.telemetry.metrics.export_failures` | counter | none | Failed metric exports. |
 | `discus.logs.suppressed` | counter | none | Log lines dropped by the rate limit. |
+| `discus.ring.epoch` | gauge | none | The generation of the current epoch. |
+| `discus.members` | gauge | `state` | Members of the current epoch in each state. |
+| `discus.forwards` | counter | `command`, `status` | Forwards to other nodes, with `status` `ok`, `timeout`, or `error`. |
+| `discus.forward.hops` | histogram | none | The hop count of each forward, 1 or 2. |
+| `discus.peer.errors` | counter | `peer`, `status` | Requests to a peer without a reply in time, with `status` `timeout`. |
+| `discus.quic.failures` | counter | `peer`, `status` | Failed handshakes (`handshake`) and lost connections (`reset`). |
+
+The `peer` attribute is the node ID of the peer in hex. A transport event without a known peer is
+not counted.
 
 These metrics belong to subsystems that later releases add. The node defines them now, and they
 stay empty until their subsystem exists:
 
 | Metric | Type | Attributes |
 | --- | --- | --- |
-| `discus.ring.epoch` | gauge | none |
-| `discus.members` | gauge | `state` |
 | `discus.replication.queue.depth` | gauge | `peer` |
 | `discus.replication.lag` | gauge (ms) | `peer` |
 | `discus.hints.recorded` | counter | `peer` |
 | `discus.hints.replayed` | counter | `peer` |
 | `discus.hints.evicted` | counter | `peer` |
 | `discus.gossip.rtt` | histogram (ms) | `peer` |
-| `discus.peer.errors` | counter | `peer`, `status` |
-| `discus.forwards` | counter | `command`, `status` |
-| `discus.forward.hops` | histogram | none |
-| `discus.quic.failures` | counter | `peer`, `status` |
 | `discus.tombstones` | gauge | none |
 
 ## Resource attributes

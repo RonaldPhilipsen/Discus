@@ -137,5 +137,7 @@ async fn run_forwarded(
         trace,
     };
     let job = Job { cmd, route, rr: 0 };
-    run_hop(node, job, hop).finish().await
+    run_hop(node, job, hop, telemetry::route_span())
+        .finish()
+        .await
 }

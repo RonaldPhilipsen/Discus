@@ -247,4 +247,88 @@ mod otel {
         assert_eq!(value("discus.keys"), 1.0);
         assert_eq!(value("discus.memory.limit"), (1u64 << 30) as f64);
     }
+
+    #[test]
+    fn transport_events_feed_the_peer_metrics() {
+        use discus_transport::{PeerEvent, PeerEventKind};
+        let _serial = serial();
+        let h = TraceHarness::new(0.0);
+        let m = h.telemetry.metrics();
+        let peer = discus_placement::NodeId::random();
+        let addr = "127.0.0.1:7379".parse().unwrap();
+        let event = |peer, kind| PeerEvent { peer, addr, kind };
+        for e in [
+            event(Some(peer), PeerEventKind::HandshakeFailed("bad SAN".into())),
+            event(Some(peer), PeerEventKind::Reset("closed".into())),
+            event(Some(peer), PeerEventKind::Reset("closed".into())),
+            event(Some(peer), PeerEventKind::ForwardTimeout { write: false }),
+            // Without a known peer there is no label, so nothing is recorded.
+            event(None, PeerEventKind::HandshakeFailed("unknown".into())),
+        ] {
+            discus::telemetry::record_peer_event(&m, &e);
+        }
+        let points = h.points();
+        let hex = peer.to_string();
+        let on_peer = |name: &str, status: &str| -> f64 {
+            points
+                .iter()
+                .filter(|p| p.name == name)
+                .filter(|p| p.attrs.iter().any(|(k, v)| k == "peer" && *v == hex))
+                .filter(|p| p.attrs.iter().any(|(k, v)| k == "status" && v == status))
+                .map(|p| p.value)
+                .sum()
+        };
+        assert_eq!(on_peer("discus.quic.failures", "handshake"), 1.0);
+        assert_eq!(on_peer("discus.quic.failures", "reset"), 2.0);
+        assert_eq!(on_peer("discus.peer.errors", "timeout"), 1.0);
+        let all: f64 = points
+            .iter()
+            .filter(|p| p.name == "discus.quic.failures")
+            .map(|p| p.value)
+            .sum();
+        assert_eq!(all, 3.0);
+    }
+
+    #[test]
+    fn the_epoch_reports_the_generation_and_the_members_per_state() {
+        use discus_placement::{Epoch, EpochId, Member, MemberState, NodeId, Weight};
+        let _serial = serial();
+        let h = TraceHarness::new(0.0);
+        let m = h.telemetry.metrics();
+        let member = |state| Member {
+            id: NodeId::random(),
+            addr: "127.0.0.1:7379".parse().unwrap(),
+            state,
+            weight: Weight::default(),
+        };
+        let members = vec![
+            member(MemberState::Normal),
+            member(MemberState::Normal),
+            member(MemberState::Leaving),
+        ];
+        let id = EpochId {
+            generation: 7,
+            origin: members[0].id,
+        };
+        let epoch = Epoch::new(id, discus_placement::ClusterId::mint(), members).unwrap();
+        discus::telemetry::record_epoch(&m, &epoch);
+        let points = h.points();
+        let members = |state: &str| -> f64 {
+            points
+                .iter()
+                .filter(|p| p.name == "discus.members")
+                .find(|p| p.attrs.iter().any(|(k, v)| k == "state" && v == state))
+                .map(|p| p.value)
+                .unwrap()
+        };
+        assert_eq!(members("normal"), 2.0);
+        assert_eq!(members("leaving"), 1.0);
+        assert_eq!(members("joining"), 0.0);
+        assert_eq!(members("dead"), 0.0);
+        let gauge = points
+            .iter()
+            .find(|p| p.name == "discus.ring.epoch")
+            .unwrap();
+        assert_eq!(gauge.value, 7.0);
+    }
 }

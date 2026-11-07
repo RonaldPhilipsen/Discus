@@ -15,9 +15,11 @@ use discus_transport::Transport;
 use discus_wire::{ForwardMode, TraceContext};
 use futures::future::BoxFuture;
 use parking_lot::Mutex;
+use tracing::Span;
 
 use crate::command::{self, CommandError};
 use crate::node::{ConnState, Node};
+use crate::telemetry;
 use crate::Config;
 use route::{keys_of, route_of, Keys, Route};
 
@@ -151,8 +153,10 @@ pub fn prepare(node: &Node, conn: &mut ConnState, cmd: Command) -> Prepared {
     })
 }
 
-/// Execute on this node and report the stamp that the command took.
+/// Execute on this node and report the stamp that the command took. The work runs in the `store`
+/// span.
 pub fn local(node: &Node, cmd: &Command) -> Reply {
+    let _store = telemetry::store_span().entered();
     Node::take_applied();
     let value = command::execute_local(node, cmd);
     Reply {
@@ -161,25 +165,27 @@ pub fn local(node: &Node, cmd: &Command) -> Reply {
     }
 }
 
-/// Run a data command from the entry node.
-pub fn run(node: &Arc<Node>, job: Job) -> Dispatch {
-    run_hop(node, job, Hop::default())
+/// Run a data command from the entry node. `route` is the `route` span: the owner choice runs
+/// in it, and it ends before the command runs or forwards.
+pub fn run(node: &Arc<Node>, job: Job, route: Span) -> Dispatch {
+    run_hop(node, job, Hop::default(), route)
 }
 
 /// Run a data command at any hop. A command that needs no other node runs inline.
-pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop) -> Dispatch {
+pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
     if node.link().is_none() {
+        drop(route);
         return Dispatch::Ready(local(node, &job.cmd));
     }
     match job.route {
-        Route::Single { write } => single(node, job, hop, write),
+        Route::Single { write } => single(node, job, hop, write, route),
         Route::MultiRead { sum } => {
             let merge = if sum {
                 multi::Merge::Sum
             } else {
                 multi::Merge::InOrder
             };
-            multi::multi(node, job.cmd, hop, job.rr, merge, false)
+            multi::multi(node, job.cmd, hop, job.rr, merge, false, route)
         }
         Route::MultiWrite { pairs } => {
             let merge = if pairs {
@@ -187,12 +193,20 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop) -> Dispatch {
             } else {
                 multi::Merge::Sum
             };
-            multi::multi(node, job.cmd, hop, job.rr, merge, true)
+            multi::multi(node, job.cmd, hop, job.rr, merge, true, route)
         }
-        // Only the entry node fans out. A forwarded copy runs locally.
-        Route::Fanout if hop.hops == 0 => multi::dbsize(node, job.cmd),
-        Route::Broadcast if hop.hops == 0 => multi::flush(node, job.cmd),
+        // Only the entry node fans out. A forwarded copy runs locally. These routes need no
+        // owner, so the route span ends at once.
+        Route::Fanout if hop.hops == 0 => {
+            drop(route);
+            multi::dbsize(node, job.cmd)
+        }
+        Route::Broadcast if hop.hops == 0 => {
+            drop(route);
+            multi::flush(node, job.cmd)
+        }
         Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => {
+            drop(route);
             Dispatch::Ready(local(node, &job.cmd))
         }
     }
@@ -243,16 +257,31 @@ fn allowed(node: &Node, hop: &Hop, targets: Vec<NodeId>) -> Vec<NodeId> {
         .collect()
 }
 
-fn single(node: &Arc<Node>, job: Job, hop: Hop, write: bool) -> Dispatch {
+/// Where a single-key command goes.
+enum Plan {
+    /// No member is `NORMAL`.
+    Retry,
+    Local,
+    /// The targets that this hop may still forward to. Empty when the budget is spent.
+    Forward(Vec<NodeId>),
+}
+
+fn single(node: &Arc<Node>, job: Job, hop: Hop, write: bool, route: Span) -> Dispatch {
     let key = job.cmd[1].clone();
-    let targets = candidates(node, &key, write, job.rr);
-    if targets.is_empty() {
-        return Dispatch::Ready(Reply::try_again());
-    }
-    if targets[0] == node.id {
-        return Dispatch::Ready(local(node, &job.cmd));
-    }
-    let targets = allowed(node, &hop, targets);
+    let plan = route.in_scope(|| {
+        let targets = candidates(node, &key, write, job.rr);
+        match targets.first() {
+            None => Plan::Retry,
+            Some(first) if *first == node.id => Plan::Local,
+            Some(_) => Plan::Forward(allowed(node, &hop, targets)),
+        }
+    });
+    drop(route);
+    let targets = match plan {
+        Plan::Retry => return Dispatch::Ready(Reply::try_again()),
+        Plan::Local => return Dispatch::Ready(local(node, &job.cmd)),
+        Plan::Forward(targets) => targets,
+    };
     if targets.is_empty() {
         return Dispatch::Ready(spent(node, &job.cmd, &[&key], write));
     }
