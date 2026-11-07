@@ -268,7 +268,7 @@ Follow these rules:
 | `--cluster-idle-timeout-ms` | 30000 | A quiet connection closes after this time. |
 | `--cluster-keep-alive-ms` | 5000 | Interval of keep-alive packets on a quiet connection. |
 | `--cluster-max-frame-bytes` | 135266304 | The largest message this node accepts from a peer. |
-| `--read-from-replicas` | off | Read from any owner. Keep it off until replication exists. |
+| `--read-from-replicas` | `true` | Read from any owner. With `false`, every read goes to the primary. |
 
 A node with `--peer` and without the three certificate flags does not start. The error names the
 missing flags. With `static`, `--weight` must be 1, because every member has weight 1.
@@ -338,9 +338,9 @@ openssl x509 -req -in node.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -day
 The members form one epoch. Every node computes the same owners for a key from the epoch.
 
 - A write goes to the primary of the key.
-- A read also goes to the primary for now. Secondaries hold no data until replication exists. With
-  `--read-from-replicas`, a node that owns the key serves the read itself. Otherwise it asks the
-  owners in turn and moves to the next owner after the read timeout.
+- A node that owns the key serves a read itself. Otherwise it asks the owners in turn, starting at
+  a different owner for each command of the connection. It moves to the next owner after the read
+  timeout.
 - A forwarded command carries the epoch of the sender. A receiver with an older epoch adopts the
   newer one before it acts.
 - A command hops at most twice. After two hops, a node that owned the key in its previous epoch

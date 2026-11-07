@@ -7,6 +7,7 @@ pub mod command;
 pub mod config;
 pub mod membership;
 pub mod node;
+pub mod replication;
 pub mod security;
 pub mod server;
 pub mod telemetry;

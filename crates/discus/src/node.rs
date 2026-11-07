@@ -17,6 +17,7 @@ use parking_lot::{RwLock, RwLockReadGuard};
 use crate::cluster::ClusterLink;
 use crate::command::CommandError;
 use crate::membership::Membership;
+use crate::replication::Replicator;
 use crate::security::{ConnAuth, Security};
 use crate::Config;
 
@@ -60,7 +61,22 @@ pub struct Node {
     phase: AtomicU8,
     link: OnceLock<ClusterLink>,
     membership: OnceLock<Arc<Membership>>,
+    replicator: OnceLock<Arc<Replicator>>,
+    epoch_tx: tokio::sync::watch::Sender<EpochId>,
     drain: tokio_util::sync::CancellationToken,
+    /// Test-only faults. Production code never sets them.
+    #[doc(hidden)]
+    pub faults: Faults,
+}
+
+/// Faults that tests inject into one node.
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct Faults {
+    /// Delay inbound `REPLICATE`, `HINT_REPLAY`, and `HANDOFF` by this many milliseconds.
+    pub stall_bulk_ms: AtomicU64,
+    /// Never answer a forwarded command.
+    pub stall_forwards: std::sync::atomic::AtomicBool,
 }
 
 /// Keeps one epoch in the history until it is dropped (spec section 5.1). Handoff (plan 4)
@@ -129,6 +145,7 @@ impl Node {
         };
         let epochs = EpochHistory::new(first);
         crate::telemetry::record_epoch(discus_telemetry::global(), epochs.current());
+        let (epoch_tx, _) = tokio::sync::watch::channel(epochs.current().id());
         Node {
             config,
             id,
@@ -142,7 +159,10 @@ impl Node {
             phase: AtomicU8::new(Phase::Starting as u8),
             link: OnceLock::new(),
             membership: OnceLock::new(),
+            replicator: OnceLock::new(),
+            epoch_tx,
             drain: tokio_util::sync::CancellationToken::new(),
+            faults: Faults::default(),
         }
     }
 
@@ -189,6 +209,8 @@ impl Node {
         *epochs = EpochHistory::new(epoch);
         tracing::info!(epoch = %id, cluster = %epochs.cluster_id(), "took a new cluster history");
         crate::telemetry::record_epoch(discus_telemetry::global(), epochs.current());
+        drop(epochs);
+        self.epoch_tx.send_replace(id);
     }
 
     /// Keep epoch `id` in the history until the pin is dropped.
@@ -198,6 +220,21 @@ impl Node {
             epochs: Arc::downgrade(&self.epochs),
             id,
         })
+    }
+
+    /// The replicator, when the transport runs.
+    pub fn replicator(&self) -> Option<&Arc<Replicator>> {
+        self.replicator.get()
+    }
+
+    /// Attach the replicator. Only the first call has an effect.
+    pub fn set_replicator(&self, replicator: Arc<Replicator>) {
+        let _ = self.replicator.set(replicator);
+    }
+
+    /// Changes of the current epoch: every adoption and every reset of the history.
+    pub fn subscribe_epoch(&self) -> tokio::sync::watch::Receiver<EpochId> {
+        self.epoch_tx.subscribe()
     }
 
     /// The node-to-node link, when the transport runs.
@@ -214,11 +251,19 @@ impl Node {
     pub fn adopt_epoch(&self, epoch: Epoch) -> Result<Adopt, EpochError> {
         let id = epoch.id();
         let mut epochs = self.epochs.write();
+        let old = epochs.current().clone();
         let result = epochs.adopt(epoch);
-        if matches!(result, Ok(Adopt::Newer)) {
-            tracing::info!(epoch = %id, "adopted a newer epoch");
-            crate::telemetry::record_epoch(discus_telemetry::global(), epochs.current());
+        if !matches!(result, Ok(Adopt::Newer)) {
+            return result;
         }
+        tracing::info!(epoch = %id, "adopted a newer epoch");
+        let new = epochs.current().clone();
+        crate::telemetry::record_epoch(discus_telemetry::global(), &new);
+        drop(epochs);
+        if let Some(r) = self.replicator() {
+            r.on_epoch(&old, &new);
+        }
+        self.epoch_tx.send_replace(id);
         result
     }
 

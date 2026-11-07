@@ -1,6 +1,8 @@
 //! The inbound side: execute commands that other nodes forward.
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use discus_placement::EpochId;
 use discus_resp::{Limits, Parser, Value};
@@ -44,6 +46,24 @@ impl Service for NodeService {
                     },
                 },
                 // The gossip HELLO admits other clusters and joiners, so it never carries data.
+                m @ (Message::Replicate(_)
+                | Message::HintReplay(_)
+                | Message::Handoff(_)
+                | Message::Fetch { .. }
+                | Message::Digest { .. })
+                    if inbound.peer.channel == Channel::Rpc =>
+                {
+                    let Some(replicator) = node.replicator().cloned() else {
+                        return Message::Unsupported {
+                            message_type: m.type_code(),
+                        };
+                    };
+                    let stall = node.faults.stall_bulk_ms.load(Ordering::Relaxed);
+                    if stall > 0 && !matches!(m, Message::Fetch { .. } | Message::Digest { .. }) {
+                        tokio::time::sleep(Duration::from_millis(stall)).await;
+                    }
+                    replicator.handle(inbound.peer.node_id, m).await
+                }
                 Message::Forward(_) if inbound.peer.channel == Channel::Gossip => {
                     Message::Unsupported {
                         message_type: discus_wire::fb::MessageType::FORWARD.0,

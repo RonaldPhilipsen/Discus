@@ -154,15 +154,38 @@ pub fn prepare(node: &Node, conn: &mut ConnState, cmd: Command) -> Prepared {
 }
 
 /// Execute on this node and report the stamp that the command took. The work runs in the `store`
-/// span.
+/// span. A command that took a stamp is queued for replication to the other owners of its keys
+/// (spec section 8.2).
 pub fn local(node: &Node, cmd: &Command) -> Reply {
     let _store = telemetry::store_span().entered();
     Node::take_applied();
     let value = command::execute_local(node, cmd);
-    Reply {
-        value,
-        applied: Node::take_applied(),
+    let applied = Node::take_applied();
+    if applied.is_some() {
+        if let Some(replicator) = node.replicator() {
+            if let Some(spec) = command::lookup(&cmd[0]) {
+                if let Keys::Some(keys) = keys_of(route_of(spec.name), cmd) {
+                    replicator.written(&keys);
+                }
+            }
+        }
     }
+    Reply { value, applied }
+}
+
+/// Serve a single-key command on this node. A replica without an entry for the key first asks
+/// the other owners (read repair).
+pub fn serve_here(node: &Arc<Node>, cmd: Command, write: bool) -> Dispatch {
+    let key = cmd[1].clone();
+    let sources = crate::replication::repair::sources(node, &key, write);
+    if sources.is_empty() {
+        return Dispatch::Ready(local(node, &cmd));
+    }
+    let node = node.clone();
+    Dispatch::Pending(Box::pin(async move {
+        crate::replication::repair::fetch(&node, &key, sources).await;
+        local(&node, &cmd)
+    }))
 }
 
 /// Run a data command from the entry node. `route` is the `route` span: the owner choice runs
@@ -279,7 +302,7 @@ fn single(node: &Arc<Node>, job: Job, hop: Hop, write: bool, route: Span) -> Dis
     drop(route);
     let targets = match plan {
         Plan::Retry => return Dispatch::Ready(Reply::try_again()),
-        Plan::Local => return Dispatch::Ready(local(node, &job.cmd)),
+        Plan::Local => return serve_here(node, job.cmd, write),
         Plan::Forward(targets) => targets,
     };
     if targets.is_empty() {

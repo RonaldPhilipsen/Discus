@@ -145,6 +145,7 @@ impl Server {
                 node.set_membership(membership);
             }
             node.set_link(ClusterLink::new(transport, &node.config));
+            node.set_replicator(crate::replication::Replicator::new(&node));
         }
         Ok(Server {
             listener,
@@ -209,6 +210,9 @@ impl Server {
         tracing::info!(addr = ?listener.local_addr().ok(), "serving");
         if let Some(membership) = node.membership() {
             membership.spawn(stop_background.clone());
+        }
+        if let Some(replicator) = node.replicator() {
+            replicator.spawn(stop_background.clone());
         }
         if let Some(link) = node.link() {
             tracing::info!(cluster = %link.transport.local_addr(), "node-to-node transport");

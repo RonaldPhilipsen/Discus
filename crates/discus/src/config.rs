@@ -205,9 +205,23 @@ pub struct Config {
     /// Largest node-to-node frame this node accepts, in bytes.
     #[arg(long, default_value_t = discus_wire::DEFAULT_MAX_FRAME)]
     pub cluster_max_frame_bytes: usize,
-    /// Read from any owner instead of the primary. Off until replication exists.
-    #[arg(long)]
+    /// Read from any owner, with this node first when it owns the key (spec section 7). With
+    /// `false`, every read goes to the primary.
+    #[arg(long, default_value_t = true, num_args = 0..=1, default_missing_value = "true",
+          action = clap::ArgAction::Set)]
     pub read_from_replicas: bool,
+    /// Keys that wait in the replication queue of one peer. Past it, the oldest go to hints.
+    #[arg(long, default_value_t = 65_536)]
+    pub replication_queue_keys: usize,
+    /// Keys in one replication batch.
+    #[arg(long, default_value_t = 512)]
+    pub replication_batch_keys: usize,
+    /// Time for a peer to acknowledge a replication batch, in milliseconds.
+    #[arg(long, default_value_t = 1_000)]
+    pub replication_timeout_ms: u64,
+    /// Time between probes of a peer that missed a batch, in milliseconds.
+    #[arg(long, default_value_t = 1_000)]
+    pub replication_retry_ms: u64,
     /// Capability bits offered in HELLO. For tests of mixed builds.
     #[arg(long, hide = true, default_value_t = discus_wire::caps::KNOWN)]
     pub cluster_capabilities: u64,

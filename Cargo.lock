@@ -694,6 +694,7 @@ dependencies = [
  "futures",
  "ipnet",
  "jsonwebtoken",
+ "lru",
  "parking_lot",
  "ppp",
  "proptest",
@@ -818,6 +819,7 @@ dependencies = [
  "bytes",
  "discus-placement",
  "discus-resp",
+ "discus-store",
  "flatbuffers",
  "thiserror 2.0.21",
 ]
@@ -1250,6 +1252,9 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "foldhash",
+]
 
 [[package]]
 name = "heck"
@@ -1806,6 +1811,15 @@ name = "log"
 version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
+
+[[package]]
+name = "lru"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a9f71e3591c7ec44d3e563e87bf14ddc2bada8519dca046e5b0e560cd004e2d"
+dependencies = [
+ "hashbrown 0.17.1",
+]
 
 [[package]]
 name = "lru-slab"
