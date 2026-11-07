@@ -3,6 +3,7 @@
 //! has a process of its own.
 
 #![cfg(feature = "otel")]
+#![allow(clippy::unwrap_used)]
 
 use std::sync::Arc;
 
