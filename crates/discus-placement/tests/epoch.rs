@@ -108,7 +108,9 @@ fn next_generation_is_max_seen_plus_one() {
     assert_eq!(h.next_generation(), 8);
     assert_eq!(h.adopt(epoch(3)).unwrap(), Adopt::Stale);
     assert_eq!(h.next_generation(), 8);
-    let p = h.propose(NodeId::from_u128(5), vec![member(1), member(5)]).unwrap();
+    let p = h
+        .propose(NodeId::from_u128(5), vec![member(1), member(5)])
+        .unwrap();
     assert_eq!(p.id(), id(8, 5));
     assert_eq!(p.cluster_id(), CLUSTER);
 }

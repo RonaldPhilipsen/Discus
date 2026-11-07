@@ -32,7 +32,10 @@ impl fmt::Display for EpochError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EpochError::ForeignCluster { ours, theirs } => {
-                write!(f, "epoch of cluster {theirs} does not belong to cluster {ours}")
+                write!(
+                    f,
+                    "epoch of cluster {theirs} does not belong to cluster {ours}"
+                )
             }
             EpochError::DuplicateMember(id) => write!(f, "member {id} appears twice"),
             EpochError::Unknown(id) => write!(f, "epoch {id} is not in the history"),
