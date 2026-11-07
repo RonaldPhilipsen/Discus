@@ -1,4 +1,5 @@
 [tools]
+"conda:redis-server" = "latest"
 rumdl = "latest"
 rust = "stable"
 
@@ -21,3 +22,7 @@ run = [
 [tasks.compat]
 description = "Run the redis-cli compatibility matrix against a fresh node"
 run = "bash scripts/compat.sh"
+
+[tasks.bench]
+description = "Benchmark smoke with redis-benchmark against a release build"
+run = "bash scripts/bench.sh"
