@@ -46,7 +46,12 @@ check "$base,otel,oauth2-introspection,k8s"
 
 # Each TLS backend and each trust root feature. The base case above covers tls-aws-lc.
 check "tls-ring,roots-system"
-check "tls-openssl,roots-system"
+# tls-openssl links the system OpenSSL, so it needs the development headers.
+if pkg-config --exists openssl 2>/dev/null; then
+  check "tls-openssl,roots-system"
+else
+  echo "skipped tls-openssl,roots-system (OpenSSL development headers not found)"
+fi
 check "tls-aws-lc,roots-webpki"
 
 # Rejected combinations.

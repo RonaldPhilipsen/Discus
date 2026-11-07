@@ -5,6 +5,7 @@ pub mod build;
 pub mod command;
 pub mod config;
 pub mod node;
+pub mod security;
 pub mod server;
 
 pub use config::Config;

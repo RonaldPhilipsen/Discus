@@ -19,21 +19,28 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 axum = "0.8"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-pki-types = { version = "1.9", features = ["std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
+rustls-openssl = { version = "0.4", default-features = false, features = ["tls12"], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+webpki-roots = { version = "1", optional = true }
 
 [dev-dependencies]
 redis = { version = "0.27", features = ["tokio-comp"] }
 reqwest = { version = "0.12", default-features = false }
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+tempfile = "3"
 
-# Build features, spec §15.5. The subsystems behind them arrive in later plans, so every feature
-# is a marker for now. Exactly one TLS backend and one trust root feature must be on.
+# Build features, spec §15.5. Exactly one TLS backend and one trust root feature must be on.
 [features]
 default = ["otel", "oauth2", "k8s", "tls-aws-lc", "roots-system"]
 otel = []
 oauth2 = []
 oauth2-introspection = ["oauth2"]
 k8s = []
-tls-aws-lc = []
-tls-ring = []
-tls-openssl = []
-roots-system = []
-roots-webpki = []
+tls-aws-lc = ["rustls/aws_lc_rs"]
+tls-ring = ["rustls/ring"]
+tls-openssl = ["dep:rustls-openssl"]
+roots-system = ["dep:rustls-native-certs"]
+roots-webpki = ["dep:webpki-roots"]
