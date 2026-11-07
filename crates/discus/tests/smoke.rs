@@ -1,6 +1,13 @@
 #[tokio::test]
 async fn server_binds_and_accepts_a_connection() {
-    let config = discus::Config::parse_from(["discus", "--listen", "127.0.0.1:0"]).unwrap();
+    let config = discus::Config::parse_from([
+        "discus",
+        "--listen",
+        "127.0.0.1:0",
+        "--admin-listen",
+        "127.0.0.1:0",
+    ])
+    .unwrap();
     let server = discus::Server::bind(config).await.unwrap();
     let addr = server.local_addr();
     let shutdown = tokio_util::sync::CancellationToken::new();
