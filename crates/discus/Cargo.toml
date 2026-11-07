@@ -29,6 +29,7 @@ ipnet = "2"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 x509-parser = "0.18"
+ppp = "2"
 
 [dev-dependencies]
 redis = { version = "0.27", features = ["tokio-comp"] }

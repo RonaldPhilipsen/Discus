@@ -8,6 +8,7 @@ pub mod file;
 pub mod identity;
 pub mod limiter;
 pub mod policy;
+pub mod proxy;
 pub mod session;
 pub mod stream;
 pub mod tls;
@@ -55,6 +56,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct Security {
     mode: TlsMode,
     server_tls: Option<Arc<rustls::ServerConfig>>,
+    lb_sources: Vec<ipnet::IpNet>,
+    lb_identity_tlv: Option<u8>,
     cert_rules: Vec<(String, Scopes)>,
     policy: Policy,
     shared_token: Option<String>,
@@ -107,7 +110,15 @@ impl Security {
         if policy.uses(Factor::Oauth2) {
             Self::check_oauth2(args, tls_on)?;
         }
-        let required = args.tls_client_auth == ClientAuth::Required;
+        let lb = args.tls_mode == TlsMode::Lb;
+        if lb && (args.lb_trusted_source.is_empty() || args.tls_client_ca.is_none()) {
+            return fail(
+                "--tls-mode lb needs --lb-trusted-source and --tls-client-ca, so the node trusts \
+                 a forwarded identity only from the load balancer over mTLS",
+            );
+        }
+        // In lb mode the load balancer must always present its certificate.
+        let required = lb || args.tls_client_auth == ClientAuth::Required;
         if required && args.tls_client_ca.is_none() {
             return fail("--tls-client-auth required needs --tls-client-ca");
         }
@@ -128,6 +139,8 @@ impl Security {
         Ok(Security {
             mode: args.tls_mode,
             server_tls,
+            lb_sources: args.lb_trusted_source.clone(),
+            lb_identity_tlv: args.lb_identity_tlv,
             cert_rules,
             policy,
             shared_token: config.shared_token.clone(),
@@ -172,20 +185,53 @@ impl Security {
     }
 
     /// Run the transport setup of a new client connection: nothing in `off` mode, the TLS
-    /// handshake in `node` mode. Returns the stream and what the node knows about the client.
+    /// handshake in `node` mode, and the PROXY header plus the load balancer handshake in `lb`
+    /// mode. Returns the stream and what the node knows about the client.
     pub async fn accept(
         &self,
         tcp: TcpStream,
+        peer: SocketAddr,
+    ) -> io::Result<(ClientStream, ConnAuth)> {
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, self.setup(tcp, peer))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "connection setup timeout"))?
+    }
+
+    async fn setup(
+        &self,
+        mut tcp: TcpStream,
         peer: SocketAddr,
     ) -> io::Result<(ClientStream, ConnAuth)> {
         let mut auth = ConnAuth::new(Some(peer.ip()));
         let Some(config) = &self.server_tls else {
             return Ok((ClientStream::Plain(tcp), auth));
         };
+        let forwarded = if self.mode == TlsMode::Lb {
+            if !self.lb_sources.iter().any(|n| n.contains(&peer.ip())) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "lb mode: the peer is not a trusted load balancer source",
+                ));
+            }
+            Some(proxy::read_proxy_header(&mut tcp, self.lb_identity_tlv).await?)
+        } else {
+            None
+        };
         let acceptor = tokio_rustls::TlsAcceptor::from(config.clone());
-        let tls = tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp))
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timeout"))??;
+        let tls = acceptor.accept(tcp).await?;
+        if let Some(header) = forwarded {
+            // The handshake verified the load balancer certificate, so the header is trusted.
+            if let Some(source) = header.source {
+                auth.peer = Some(source.ip());
+            }
+            auth.tls = header.client_tls != Some(false);
+            if let Some(identity) = header.identity {
+                let scopes = self.cert_scopes(&identity);
+                tracing::debug!(%identity, "forwarded client identity");
+                auth.cert = Some(CertGrant { identity, scopes });
+            }
+            return Ok((ClientStream::Tls(Box::new(tls)), auth));
+        }
         auth.tls = true;
         if let Some(leaf) = tls.get_ref().1.peer_certificates().and_then(|c| c.first()) {
             let identity = identity::cert_identity(leaf).unwrap_or_default();
