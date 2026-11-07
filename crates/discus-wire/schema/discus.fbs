@@ -1,0 +1,6 @@
+// The Discus wire contract. This file includes every schema, and `scripts/gen-wire.sh`
+// generates the Rust code from it.
+
+include "common.fbs";
+include "envelope.fbs";
+include "rpc.fbs";

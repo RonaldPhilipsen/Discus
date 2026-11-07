@@ -1,4 +1,5 @@
 [tools]
+flatc = "25.12.19"
 "conda:redis-server" = "latest"
 rumdl = "latest"
 rust = "stable"
@@ -17,7 +18,12 @@ run = [
   "cargo fmt --check",
   "cargo clippy --workspace --all-targets -- -D warnings",
   "rumdl check docs/ README.md",
+  "bash scripts/gen-wire.sh --check",
 ]
+
+[tasks.gen-wire]
+description = "Regenerate the Rust code for the FlatBuffers wire contract"
+run = "bash scripts/gen-wire.sh"
 
 [tasks.compat]
 description = "Run the redis-cli compatibility matrix against a fresh node"

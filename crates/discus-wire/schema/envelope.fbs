@@ -1,0 +1,29 @@
+// The frame envelope. A stream carries 4-byte big-endian length-prefixed frames, and each frame
+// is one Envelope. The payload holds a nested FlatBuffers body whose root type the message type
+// names.
+
+namespace discus.wire;
+
+/// Append-only. Later plans add STATS, SCAN, HANDOFF, HINT_REPLAY, RAFT_LEADER, RAFT_CONFIG.
+enum MessageType: ushort {
+  NONE = 0,
+  HELLO = 1,
+  HANDSHAKE_FAILED = 2,
+  UNSUPPORTED = 3,
+  FORWARD = 4,
+  FORWARD_REPLY = 5,
+  PING = 6,
+  PONG = 7,
+}
+
+table Envelope {
+  type: MessageType (id: 0);
+  request_id: ulong (id: 1);
+  /// W3C Trace Context, copied unchanged across every hop.
+  traceparent: string (id: 2);
+  tracestate: string (id: 3);
+  /// The nested body. Its root type follows from `type`.
+  payload: [ubyte] (id: 4);
+}
+
+root_type Envelope;
