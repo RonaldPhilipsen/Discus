@@ -90,6 +90,32 @@ async fn introspection_names_the_missing_feature() {
     assert!(e.contains("\"oauth2-introspection\" feature"), "{e}");
 }
 
+#[cfg(not(all(feature = "oauth2", feature = "k8s")))]
+#[tokio::test]
+async fn the_kubernetes_section_names_the_missing_feature() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("auth.toml");
+    std::fs::write(
+        &file,
+        "[kubernetes]\n[[kubernetes.account]]\nmatch = \"system:serviceaccount:a:b\"\nscopes = [\"discus.read\"]\n",
+    )
+    .unwrap();
+    let e = bind_error(&[
+        "--auth-policy",
+        "any:oauth2",
+        "--dev-insecure-oauth2",
+        "--auth-config",
+        file.to_str().unwrap(),
+    ])
+    .await;
+    let named = if cfg!(feature = "oauth2") {
+        "\"k8s\" feature"
+    } else {
+        "\"oauth2\" feature"
+    };
+    assert!(e.contains(named), "{e}");
+}
+
 #[cfg(not(feature = "oauth2"))]
 #[tokio::test]
 async fn issuers_name_the_missing_feature() {

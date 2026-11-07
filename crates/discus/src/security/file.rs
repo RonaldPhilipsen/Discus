@@ -17,6 +17,50 @@ pub struct AuthFile {
     /// Trusted OAuth 2.0 issuers.
     #[serde(default)]
     pub issuer: Vec<IssuerFile>,
+    /// The service account issuer of the cluster.
+    pub kubernetes: Option<KubernetesFile>,
+}
+
+fn default_api_server() -> String {
+    "https://kubernetes.default.svc".into()
+}
+fn default_ca_file() -> PathBuf {
+    "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt".into()
+}
+fn default_token_file() -> PathBuf {
+    "/var/run/secrets/kubernetes.io/serviceaccount/token".into()
+}
+fn default_audience() -> String {
+    "discus".into()
+}
+
+/// The Kubernetes service account issuer (spec §14.4).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KubernetesFile {
+    #[serde(default = "default_api_server")]
+    pub api_server: String,
+    /// The cluster CA.
+    #[serde(default = "default_ca_file")]
+    pub ca_file: PathBuf,
+    /// The node's own service account token, for discovery when anonymous access is off. Used
+    /// only when the file exists.
+    #[serde(default = "default_token_file")]
+    pub token_file: PathBuf,
+    #[serde(default = "default_audience")]
+    pub audience: String,
+    /// The expected `iss`. Default: the `issuer` of the discovery document.
+    pub issuer: Option<String>,
+    pub algorithms: Option<Vec<String>>,
+    #[serde(default = "d300")]
+    pub jwks_refresh_secs: u64,
+    #[serde(default = "d30")]
+    pub jwks_min_refetch_secs: u64,
+    #[serde(default = "d3600")]
+    pub jwks_max_stale_secs: u64,
+    /// Scopes per service account. Unmatched accounts are refused.
+    #[serde(default)]
+    pub account: Vec<SubjectFile>,
 }
 
 /// One client certificate rule.

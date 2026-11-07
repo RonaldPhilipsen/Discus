@@ -173,6 +173,9 @@ impl Security {
         if !file.issuer.is_empty() {
             return missing("the [[issuer]] section of --auth-config");
         }
+        if file.kubernetes.is_some() {
+            return missing("the [kubernetes] section of --auth-config");
+        }
         Ok(())
     }
 
@@ -183,8 +186,15 @@ impl Security {
         file: &AuthFile,
         tls_on: bool,
     ) -> Result<Option<oauth2::OAuth2>, SecurityError> {
+        #[cfg(not(feature = "k8s"))]
+        if file.kubernetes.is_some() {
+            return fail(
+                "the [kubernetes] section of --auth-config needs the service account issuer, but \
+                 this binary was built without the \"k8s\" feature",
+            );
+        }
         if !policy.uses(Factor::Oauth2) {
-            if !file.issuer.is_empty() {
+            if !file.issuer.is_empty() || file.kubernetes.is_some() {
                 return fail(format!(
                     "--auth-config lists trusted issuers, but the policy {policy} does not use \
                      oauth2"
@@ -198,11 +208,18 @@ impl Security {
                  --dev-insecure-oauth2 for development",
             );
         }
-        let oauth = oauth2::OAuth2::from_file(
+        #[cfg_attr(not(feature = "k8s"), allow(unused_mut))]
+        let mut oauth = oauth2::OAuth2::from_file(
             &file.issuer,
             args.auth_clock_skew_secs,
             args.dev_insecure_oauth2,
         )?;
+        #[cfg(feature = "k8s")]
+        if let Some(k) = &file.kubernetes {
+            let source =
+                oauth2::k8s::source(k, oauth.generation_handle(), args.dev_insecure_oauth2)?;
+            oauth.extend(vec![source]);
+        }
         if oauth.is_empty() {
             return fail("the policy uses oauth2, but --auth-config lists no trusted issuer");
         }

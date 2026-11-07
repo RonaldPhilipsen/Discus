@@ -7,6 +7,8 @@
 pub mod introspect;
 pub mod issuer;
 pub mod jwks;
+#[cfg(feature = "k8s")]
+pub mod k8s;
 
 use std::collections::HashSet;
 use std::fmt;
