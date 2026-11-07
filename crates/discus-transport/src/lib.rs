@@ -17,7 +17,8 @@ mod tls;
 pub mod testing;
 
 pub use endpoint::{
-    Channel, GossipError, Inbound, PeerInfo, Service, Transport, TransportConfig, TransportError,
+    Channel, GossipError, Inbound, Lane, PeerInfo, Service, Transport, TransportConfig,
+    TransportError,
 };
 pub use events::{PeerEvent, PeerEventKind, StatsSnapshot, TransportStats, EVENT_CAPACITY};
 pub use provider::{crypto_provider, PROVIDER_NAME};

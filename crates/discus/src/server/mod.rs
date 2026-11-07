@@ -212,6 +212,7 @@ impl Server {
         }
         if let Some(link) = node.link() {
             tracing::info!(cluster = %link.transport.local_addr(), "node-to-node transport");
+            crate::telemetry::observe_transport(discus_telemetry::global(), &link.transport);
             // The transport events feed the peer error and QUIC failure metrics.
             let (transport, stop) = (link.transport.clone(), stop_background.clone());
             tokio::spawn(async move {

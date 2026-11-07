@@ -9,7 +9,7 @@ use std::time::Duration;
 use common::{config, epoch, start, TestService};
 use discus_placement::{ClusterId, NodeId};
 use discus_transport::testing::{quic_client, TestCa, TEST_SAN};
-use discus_transport::{frame, PeerEventKind, Transport, TransportError, ALPN_RPC};
+use discus_transport::{frame, Lane, PeerEventKind, Transport, TransportError, ALPN_RPC};
 use discus_wire::{
     caps, decode_frame, encode_envelope, encode_frame, Frame, Hello, Limits, Message, TraceContext,
 };
@@ -301,4 +301,126 @@ async fn a_closed_peer_reports_a_reset_and_reconnects() {
         .await
         .unwrap();
     assert_eq!(reply.message, Message::Pong { nonce: 3 });
+}
+
+#[tokio::test]
+async fn bulk_and_command_lanes_use_two_connections() {
+    let ca = TestCa::new();
+    let cluster = ClusterId::mint();
+    let b_id = NodeId::random();
+    let (a, _) = start(config(&ca, NodeId::random(), cluster)).await;
+    let (b, _) = start(config(&ca, b_id, cluster)).await;
+    for lane in [Lane::Command, Lane::Bulk] {
+        let reply = a
+            .request_on(
+                lane,
+                b_id,
+                b.local_addr(),
+                Message::Ping { nonce: 1 },
+                TraceContext::default(),
+                Duration::from_secs(2),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.message, Message::Pong { nonce: 1 });
+    }
+    assert_eq!(a.pooled(b_id), 2);
+}
+
+#[tokio::test]
+async fn a_stalled_bulk_request_does_not_block_a_command() {
+    let ca = TestCa::new();
+    let cluster = ClusterId::mint();
+    let b_id = NodeId::random();
+    let (a, _) = start(config(&ca, NodeId::random(), cluster)).await;
+    let (b, _) = start(config(&ca, b_id, cluster)).await;
+    let addr = b.local_addr();
+    a.peer(b_id, addr).await.unwrap();
+    let bulk = {
+        let a = a.clone();
+        tokio::spawn(async move {
+            a.request_on(
+                Lane::Bulk,
+                b_id,
+                addr,
+                Message::Replicate(discus_wire::Batch::new(epoch(1, b_id))),
+                TraceContext::default(),
+                Duration::from_secs(5),
+                false,
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let started = std::time::Instant::now();
+    let reply = a
+        .request(
+            b_id,
+            addr,
+            Message::Ping { nonce: 2 },
+            TraceContext::default(),
+            Duration::from_secs(2),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply.message, Message::Pong { nonce: 2 });
+    assert!(started.elapsed() < Duration::from_millis(200));
+    assert!(!bulk.is_finished());
+    assert!(matches!(
+        bulk.await.unwrap().unwrap().message,
+        Message::BatchAck(_)
+    ));
+}
+
+#[tokio::test]
+async fn a_bulk_timeout_is_not_evidence() {
+    let ca = TestCa::new();
+    let cluster = ClusterId::mint();
+    let b_id = NodeId::random();
+    let (a, _) = start(config(&ca, NodeId::random(), cluster)).await;
+    let (b, _) = start(config(&ca, b_id, cluster)).await;
+    a.peer(b_id, b.local_addr()).await.unwrap();
+    let mut events = a.events();
+    let err = a
+        .request_on(
+            Lane::Bulk,
+            b_id,
+            b.local_addr(),
+            Message::Replicate(discus_wire::Batch::new(epoch(1, b_id))),
+            TraceContext::default(),
+            Duration::from_millis(50),
+            true,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err, TransportError::Timeout);
+    assert!(!err.is_unsent());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(events.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn an_unreachable_peer_is_unsent() {
+    let ca = TestCa::new();
+    let cluster = ClusterId::mint();
+    let mut cfg = config(&ca, NodeId::random(), cluster);
+    cfg.handshake_timeout = Duration::from_millis(300);
+    let (a, _) = start(cfg).await;
+    let closed = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let addr = closed.local_addr().unwrap();
+    drop(closed);
+    let err = a
+        .request(
+            NodeId::random(),
+            addr,
+            Message::Ping { nonce: 1 },
+            TraceContext::default(),
+            Duration::from_secs(1),
+            true,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.is_unsent(), "{err:?}");
 }

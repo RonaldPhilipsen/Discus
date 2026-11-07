@@ -28,6 +28,16 @@ pub struct StoreStats {
     pub keys: u64,
 }
 
+/// A snapshot of the transport counters, read at each metric collection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TransportCounts {
+    pub frames_rejected: u64,
+    pub unsupported: u64,
+    pub handshake_failures: u64,
+    pub requests_in: u64,
+    pub requests_out: u64,
+}
+
 /// Counters that the export pipeline updates and the metrics read.
 #[derive(Debug, Default)]
 pub struct Counters {
@@ -74,6 +84,12 @@ mod imp {
         #[inline]
         pub fn observe_store(&self, source: impl Fn() -> StoreStats + Send + Sync + 'static) {}
         #[inline]
+        pub fn observe_transport(
+            &self,
+            source: impl Fn() -> TransportCounts + Send + Sync + 'static,
+        ) {
+        }
+        #[inline]
         pub fn epoch(&self, generation: u64) {}
         #[inline]
         pub fn members(&self, state: MemberState, count: u64) {}
@@ -112,6 +128,7 @@ mod imp {
     use crate::attrs::{check, Attribute};
 
     type Source = Box<dyn Fn() -> StoreStats + Send + Sync>;
+    type TransportSource = Box<dyn Fn() -> TransportCounts + Send + Sync>;
 
     /// The metrics handle. Cheap to clone.
     #[derive(Clone, Default)]
@@ -145,6 +162,7 @@ mod imp {
         quic_failures: Counter<u64>,
         tombstones: Gauge<u64>,
         store: Arc<RwLock<Option<Source>>>,
+        transport: Arc<RwLock<Option<TransportSource>>>,
         // The observable instruments stay registered while these handles live.
         _observers: Vec<Box<dyn std::any::Any + Send + Sync>>,
     }
@@ -278,6 +296,47 @@ mod imp {
                 Box::new(crate::logging::suppressed),
             )));
 
+            let transport: Arc<RwLock<Option<TransportSource>>> = Arc::new(RwLock::new(None));
+            let transport_counter =
+                |name: &'static str, desc: &'static str, pick: fn(&TransportCounts) -> u64| {
+                    let transport = transport.clone();
+                    meter
+                        .u64_observable_counter(name)
+                        .with_description(desc)
+                        .with_callback(move |o| {
+                            let slot = transport.read().ok();
+                            if let Some(f) = slot.as_ref().and_then(|s| s.as_ref()) {
+                                o.observe(pick(&f()), &[]);
+                            }
+                        })
+                        .build()
+                };
+            observers.push(Box::new(transport_counter(
+                "discus.transport.frames.rejected",
+                "Frames that failed the verifier",
+                |t| t.frames_rejected,
+            )));
+            observers.push(Box::new(transport_counter(
+                "discus.transport.unsupported",
+                "Requests of a message type this build does not know",
+                |t| t.unsupported,
+            )));
+            observers.push(Box::new(transport_counter(
+                "discus.transport.handshake.failures",
+                "Failed QUIC handshakes and HELLO exchanges",
+                |t| t.handshake_failures,
+            )));
+            observers.push(Box::new(transport_counter(
+                "discus.transport.requests.in",
+                "Node-to-node requests served",
+                |t| t.requests_in,
+            )));
+            observers.push(Box::new(transport_counter(
+                "discus.transport.requests.out",
+                "Node-to-node requests sent",
+                |t| t.requests_out,
+            )));
+
             let latency = |name: &'static str, desc: &'static str| {
                 meter
                     .f64_histogram(name)
@@ -322,6 +381,7 @@ mod imp {
                 quic_failures: counter("discus.quic.failures", "QUIC connection failures"),
                 tombstones: gauge("discus.tombstones", "Stored tombstones"),
                 store,
+                transport,
                 _observers: observers,
             };
             Metrics {
@@ -358,6 +418,19 @@ mod imp {
         pub fn observe_store(&self, source: impl Fn() -> StoreStats + Send + Sync + 'static) {
             self.with(|i| {
                 if let Ok(mut slot) = i.store.write() {
+                    *slot = Some(Box::new(source));
+                }
+            });
+        }
+
+        /// Read the transport counters from `source` at each collection. A later call replaces
+        /// the source.
+        pub fn observe_transport(
+            &self,
+            source: impl Fn() -> TransportCounts + Send + Sync + 'static,
+        ) {
+            self.with(|i| {
+                if let Ok(mut slot) = i.transport.write() {
                     *slot = Some(Box::new(source));
                 }
             });

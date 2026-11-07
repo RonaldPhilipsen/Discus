@@ -24,6 +24,16 @@ use crate::hello;
 use crate::tls::TlsMaterial;
 use crate::{ALPN_GOSSIP, ALPN_RPC, CLOSE_HANDSHAKE_FAILED, CLOSE_SHUTDOWN, RESET_BAD_FRAME};
 
+/// Which pooled connection a request takes. Each peer has one connection per lane, so a slow
+/// replication stream does not hold up forwarded commands (spec section 13.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Lane {
+    /// Forwarded commands and other small request-reply traffic.
+    Command,
+    /// Replication, hints, handoff, and repair. A timeout here is not data-path evidence.
+    Bulk,
+}
+
 /// The ALPN of a connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Channel {
@@ -124,6 +134,40 @@ pub enum TransportError {
     Frame(String),
     #[error("the peer does not support message type {0}")]
     PeerUnsupported(u16),
+    /// The request never left this node: the stream did not open.
+    #[error("the request was not sent: {0}")]
+    NotSent(String),
+}
+
+impl TransportError {
+    /// True when the peer cannot have seen the request, so a resend is always safe (spec
+    /// section 7.5).
+    pub fn is_unsent(&self) -> bool {
+        matches!(
+            self,
+            TransportError::Connect(_)
+                | TransportError::Handshake { .. }
+                | TransportError::NotSent(_)
+        )
+    }
+}
+
+/// Why one request-reply exchange on a stream failed.
+enum ExchangeError {
+    /// The stream did not open, so nothing was sent.
+    NotSent(String),
+    /// The connection is lost.
+    Lost(String),
+    /// The stream failed but the connection can live on.
+    Stream(String),
+}
+
+impl ExchangeError {
+    fn reason(self) -> String {
+        match self {
+            ExchangeError::NotSent(r) | ExchangeError::Lost(r) | ExchangeError::Stream(r) => r,
+        }
+    }
 }
 
 /// Why a gossip request failed. Gossip failures are not data-path evidence, so they never reach
@@ -159,6 +203,7 @@ struct Inner {
     handshake_timeout: Duration,
     service: Arc<dyn Service>,
     pool: Mutex<HashMap<NodeId, Slot>>,
+    bulk_pool: Mutex<HashMap<NodeId, Slot>>,
     /// Gossip connections by address, because a seed has no known node ID.
     gossip_pool: Mutex<HashMap<SocketAddr, Slot>>,
     events: broadcast::Sender<PeerEvent>,
@@ -232,6 +277,7 @@ impl Transport {
             handshake_timeout: config.handshake_timeout,
             service,
             pool: Mutex::new(HashMap::new()),
+            bulk_pool: Mutex::new(HashMap::new()),
             gossip_pool: Mutex::new(HashMap::new()),
             events,
             stats: TransportStats::default(),
@@ -263,6 +309,7 @@ impl Transport {
     pub fn set_cluster_id(&self, cluster_id: ClusterId) {
         *self.0.cluster_id.write() = cluster_id;
         self.0.pool.lock().clear();
+        self.0.bulk_pool.lock().clear();
     }
 
     /// Send one gossip message to `addr` on the gossip channel and wait for the reply. `expected`
@@ -290,7 +337,8 @@ impl Transport {
         };
         let bytes = match tokio::time::timeout(timeout, exchange(&conn, &info, &frame)).await {
             Err(_) => return Err(GossipError::Silent(Box::new(info))),
-            Ok(Err((_, reason))) => {
+            Ok(Err(e)) => {
+                let reason = e.reason();
                 if conn.close_reason().is_some() {
                     forget(&self.0.gossip_pool, addr, &conn);
                     return Err(GossipError::Unreachable(reason));
@@ -364,11 +412,24 @@ impl Transport {
 
     /// Connect to `node` at `addr` and run `HELLO`, unless a live connection exists.
     pub async fn peer(&self, node: NodeId, addr: SocketAddr) -> Result<PeerInfo, TransportError> {
-        self.connection(node, addr).await.map(|(_, info)| info)
+        self.connection(Lane::Command, node, addr)
+            .await
+            .map(|(_, info)| info)
     }
 
-    /// Send one request on a new stream and wait for its reply frame. `timeout` covers the
-    /// request after the connection exists. `write` labels a timeout in the evidence channel.
+    /// Live pooled connections to `node` over both lanes.
+    pub fn pooled(&self, node: NodeId) -> usize {
+        [&self.0.pool, &self.0.bulk_pool]
+            .iter()
+            .filter_map(|pool| pool.lock().get(&node).cloned())
+            .filter(|slot| {
+                slot.try_lock()
+                    .is_ok_and(|c| c.as_ref().is_some_and(|c| c.conn.close_reason().is_none()))
+            })
+            .count()
+    }
+
+    /// Send one request on the command lane. See [`Transport::request_on`].
     pub async fn request(
         &self,
         node: NodeId,
@@ -378,7 +439,26 @@ impl Transport {
         timeout: Duration,
         write: bool,
     ) -> Result<Frame, TransportError> {
-        let (conn, info) = self.connection(node, addr).await?;
+        self.request_on(Lane::Command, node, addr, message, trace, timeout, write)
+            .await
+    }
+
+    /// Send one request on a new stream of `lane` and wait for its reply frame. `timeout`
+    /// covers the request after the connection exists. `write` labels a timeout in the evidence
+    /// channel. A bulk timeout is not evidence, because a large batch can be slow on a healthy
+    /// peer.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn request_on(
+        &self,
+        lane: Lane,
+        node: NodeId,
+        addr: SocketAddr,
+        message: Message,
+        trace: TraceContext,
+        timeout: Duration,
+        write: bool,
+    ) -> Result<Frame, TransportError> {
+        let (conn, info) = self.connection(lane, node, addr).await?;
         let frame = Frame {
             request_id: self.0.next_request.fetch_add(1, Ordering::Relaxed),
             trace,
@@ -388,14 +468,23 @@ impl Transport {
         TransportStats::bump(&self.0.stats.requests_out);
         let bytes = match tokio::time::timeout(timeout, exchange(&conn, &info, &frame)).await {
             Err(_) => {
-                self.emit(Some(node), addr, PeerEventKind::ForwardTimeout { write });
+                if lane == Lane::Command {
+                    self.emit(Some(node), addr, PeerEventKind::ForwardTimeout { write });
+                }
                 return Err(TransportError::Timeout);
             }
-            Ok(Err((lost, reason))) => {
+            Ok(Err(e)) => {
+                let lost = matches!(e, ExchangeError::NotSent(_) | ExchangeError::Lost(_));
+                let unsent = matches!(e, ExchangeError::NotSent(_));
+                let reason = e.reason();
                 if lost || conn.close_reason().is_some() {
-                    self.forget(node, &conn);
+                    self.forget(lane, node, &conn);
                     self.emit(Some(node), addr, PeerEventKind::Reset(reason.clone()));
-                    return Err(TransportError::Reset(reason));
+                    return Err(if unsent {
+                        TransportError::NotSent(reason)
+                    } else {
+                        TransportError::Reset(reason)
+                    });
                 }
                 return Err(TransportError::Frame(reason));
             }
@@ -422,23 +511,31 @@ impl Transport {
         emit(&self.0, peer, addr, kind);
     }
 
-    fn slot(&self, node: NodeId) -> Slot {
-        self.0.pool.lock().entry(node).or_default().clone()
+    fn pool(&self, lane: Lane) -> &Mutex<HashMap<NodeId, Slot>> {
+        match lane {
+            Lane::Command => &self.0.pool,
+            Lane::Bulk => &self.0.bulk_pool,
+        }
     }
 
-    fn forget(&self, node: NodeId, conn: &quinn::Connection) {
-        forget(&self.0.pool, node, conn);
+    fn slot(&self, lane: Lane, node: NodeId) -> Slot {
+        self.pool(lane).lock().entry(node).or_default().clone()
+    }
+
+    fn forget(&self, lane: Lane, node: NodeId, conn: &quinn::Connection) {
+        forget(self.pool(lane), node, conn);
     }
 
     async fn connection(
         &self,
+        lane: Lane,
         node: NodeId,
         addr: SocketAddr,
     ) -> Result<(quinn::Connection, PeerInfo), TransportError> {
         if self.0.closed.is_cancelled() {
             return Err(TransportError::Connect("the transport is closed".into()));
         }
-        let slot = self.slot(node);
+        let slot = self.slot(lane, node);
         let mut guard = slot.lock().await;
         if let Some(c) = guard.as_ref() {
             if c.conn.close_reason().is_none() {
@@ -551,25 +648,27 @@ impl Transport {
     }
 }
 
-/// Write one request frame on a new stream and read the reply frame. The flag of an error says
-/// whether the connection is lost.
+/// Write one request frame on a new stream and read the reply frame.
 async fn exchange(
     conn: &quinn::Connection,
     info: &PeerInfo,
     frame: &Frame,
-) -> Result<bytes::Bytes, (bool, String)> {
-    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| (true, e.to_string()))?;
+) -> Result<bytes::Bytes, ExchangeError> {
+    let (mut send, mut recv) = conn
+        .open_bi()
+        .await
+        .map_err(|e| ExchangeError::NotSent(e.to_string()))?;
     write_frame(&mut send, &encode_frame(frame))
         .await
-        .map_err(|e| (true, e.to_string()))?;
+        .map_err(|e| ExchangeError::Lost(e.to_string()))?;
     let _ = send.finish();
     match read_frame(&mut recv, info.max_frame).await {
         Ok(Some(bytes)) => Ok(bytes),
-        Ok(None) => Err((
-            false,
+        Ok(None) => Err(ExchangeError::Stream(
             "the peer ended the stream without a reply".to_string(),
         )),
-        Err(e) => Err((conn.close_reason().is_some(), e.to_string())),
+        Err(e) if conn.close_reason().is_some() => Err(ExchangeError::Lost(e.to_string())),
+        Err(e) => Err(ExchangeError::Stream(e.to_string())),
     }
 }
 

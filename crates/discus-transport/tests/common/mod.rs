@@ -51,6 +51,15 @@ impl Service for TestService {
             self.active.fetch_sub(1, Ordering::SeqCst);
             match inbound.message {
                 Message::Ping { nonce } => Message::Pong { nonce },
+                // Replication stalls, so a test can see that it does not hold up a command.
+                Message::Replicate(b) => {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    Message::BatchAck(discus_wire::BatchAck {
+                        applied: 0,
+                        want: Vec::new(),
+                        epoch: b.epoch,
+                    })
+                }
                 _ => Message::Unsupported { message_type: 0 },
             }
         })

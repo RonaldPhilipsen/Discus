@@ -213,6 +213,21 @@ pub fn observe_store_on(metrics: &Metrics, node: &Arc<Node>) {
     });
 }
 
+/// Report the transport counters of `transport` through `metrics`.
+pub fn observe_transport(metrics: &Metrics, transport: &discus_transport::Transport) {
+    let transport = transport.clone();
+    metrics.observe_transport(move || {
+        let s = transport.stats().snapshot();
+        discus_telemetry::metrics::TransportCounts {
+            frames_rejected: s.frames_rejected,
+            unsupported: s.unsupported,
+            handshake_failures: s.handshake_failures,
+            requests_in: s.requests_in,
+            requests_out: s.requests_out,
+        }
+    });
+}
+
 /// The telemetry of one command, from the entry checks to the reply (spec §15.4). With export
 /// off it holds no span, and `route` and `store` only run their closure.
 pub struct CommandTrace {

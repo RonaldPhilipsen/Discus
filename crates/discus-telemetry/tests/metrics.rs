@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use discus_telemetry::attrs::{check, CommandLabel, MemberState, NodeLabel, Status, ALLOWED_KEYS};
-use discus_telemetry::metrics::{StoreStats, LATENCY_BUCKETS_MS};
+use discus_telemetry::metrics::{StoreStats, TransportCounts, LATENCY_BUCKETS_MS};
 use discus_telemetry::testing::{MetricHarness, Point};
 
 fn find<'a>(points: &'a [Point], name: &str, attr: Option<(&str, &str)>) -> Option<&'a Point> {
@@ -87,6 +87,29 @@ fn store_stats_are_observed() {
         ("discus.memory.used", 1024.0),
         ("discus.memory.limit", 4096.0),
         ("discus.keys", 5.0),
+    ] {
+        assert_eq!(find(&points, name, None).unwrap().value, value, "{name}");
+    }
+    assert_bounded(&points);
+}
+
+#[test]
+fn transport_counters_export() {
+    let h = MetricHarness::new();
+    h.metrics.observe_transport(|| TransportCounts {
+        frames_rejected: 1,
+        unsupported: 2,
+        handshake_failures: 3,
+        requests_in: 4,
+        requests_out: 5,
+    });
+    let points = h.points();
+    for (name, value) in [
+        ("discus.transport.frames.rejected", 1.0),
+        ("discus.transport.unsupported", 2.0),
+        ("discus.transport.handshake.failures", 3.0),
+        ("discus.transport.requests.in", 4.0),
+        ("discus.transport.requests.out", 5.0),
     ] {
         assert_eq!(find(&points, name, None).unwrap().value, value, "{name}");
     }

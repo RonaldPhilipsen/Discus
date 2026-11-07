@@ -125,6 +125,11 @@ and 100.
 | `discus.forward.hops` | histogram | none | The hop count of each forward, 1 or 2. |
 | `discus.peer.errors` | counter | `peer`, `status` | Requests to a peer without a reply in time, with `status` `timeout`. |
 | `discus.quic.failures` | counter | `peer`, `status` | Failed handshakes (`handshake`) and lost connections (`reset`). |
+| `discus.transport.frames.rejected` | counter | none | Node-to-node frames that failed the verifier. |
+| `discus.transport.unsupported` | counter | none | Requests of a message type that this build does not know. |
+| `discus.transport.handshake.failures` | counter | none | Failed QUIC handshakes and `HELLO` exchanges. |
+| `discus.transport.requests.in` | counter | none | Node-to-node requests that this node served. |
+| `discus.transport.requests.out` | counter | none | Node-to-node requests that this node sent. |
 
 The `peer` attribute is the node ID of the peer in hex. A transport event without a known peer is
 not counted.
