@@ -1,0 +1,10 @@
+[package]
+name = "discus-resp"
+version = "0.0.0"
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes = "1"

@@ -139,6 +139,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "discus-resp"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+]
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
