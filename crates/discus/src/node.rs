@@ -90,6 +90,7 @@ impl Node {
             weight: Weight::new(config.weight).unwrap_or_default(),
         };
         let epochs = EpochHistory::new(static_epoch(me, &config, cluster_id));
+        discus_telemetry::global().epoch(epochs.current().id().generation);
         Node {
             config,
             id,
@@ -121,6 +122,7 @@ impl Node {
         let result = self.epochs.write().adopt(epoch);
         if matches!(result, Ok(Adopt::Newer)) {
             tracing::info!(epoch = %id, "adopted a newer epoch");
+            discus_telemetry::global().epoch(id.generation);
         }
         result
     }
@@ -216,7 +218,7 @@ fn static_epoch(me: Member, config: &Config, cluster_id: ClusterId) -> Epoch {
     }));
     let origin = members.iter().map(|m| m.id).min().unwrap_or(my_id);
     let id = EpochId {
-        generation: 1,
+        generation: discus_placement::FIRST_GENERATION,
         origin,
     };
     // Config::validate refuses duplicate IDs, so this only fails for a config that skipped it.

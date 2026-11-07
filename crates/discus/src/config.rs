@@ -183,6 +183,13 @@ impl Config {
         Ok(())
     }
 
+    /// Check the flags, then pick a random node ID when none is set. `main` calls it before
+    /// telemetry starts, so the telemetry resource and the node share one ID.
+    pub fn resolve_identity(&mut self) -> Result<NodeId, String> {
+        self.validate()?;
+        Ok(*self.node_id.get_or_insert_with(NodeId::random))
+    }
+
     pub fn forward_read_timeout(&self) -> Duration {
         Duration::from_millis(self.forward_read_timeout_ms)
     }

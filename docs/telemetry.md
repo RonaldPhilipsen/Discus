@@ -139,7 +139,7 @@ Every metric and span carries these resource attributes:
 | Attribute | Value |
 | --- | --- |
 | `service.name` | `discus` |
-| `service.instance.id` | The node ID. A new ID is made at each process start. |
+| `service.instance.id` | The node ID: the value of `--node-id`, else a new ID at each process start. |
 | `discus.ring.epoch` | The epoch at startup. The `discus.ring.epoch` gauge has the live value. |
 | `k8s.namespace.name` | From the `KUBERNETES_NAMESPACE` environment variable. |
 | `k8s.pod.name` | From the `POD_NAME` environment variable. |

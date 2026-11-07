@@ -4,7 +4,12 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let config = Config::parse();
+    let mut config = Config::parse();
+    // The node ID is fixed before telemetry starts, so the resource carries the real ID.
+    if let Err(e) = config.resolve_identity() {
+        eprintln!("discus: {e}");
+        std::process::exit(2);
+    }
     // The backend provider becomes the process-wide rustls default before anything builds a TLS
     // config. Under tls-openssl, TLS to the OTLP collector needs it.
     discus::security::tls::install_default();

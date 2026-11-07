@@ -2,11 +2,14 @@
 //! span and metrics (spec §15.4, §15.5). The telemetry itself lives in `discus-telemetry`.
 
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
+use discus_placement::NodeId;
 use discus_resp::{Command, Value};
+use discus_telemetry::attrs::NodeLabel;
 use discus_telemetry::pipeline::{
-    DEFAULT_ENDPOINT, DEFAULT_EXPORT_INTERVAL, DEFAULT_SAMPLING_RATIO, DEFAULT_SPAN_QUEUE,
+    ResourceInfo, DEFAULT_ENDPOINT, DEFAULT_EXPORT_INTERVAL, DEFAULT_SAMPLING_RATIO,
+    DEFAULT_SPAN_QUEUE,
 };
 use discus_telemetry::Metrics;
 
@@ -85,17 +88,31 @@ impl TelemetryArgs {
     }
 }
 
-/// The node ID for telemetry. Placeholder until the placement plan provides `NodeId`: 32 random
-/// hex digits, fixed for the life of the process.
-pub fn node_id() -> String {
-    static ID: OnceLock<String> = OnceLock::new();
-    ID.get_or_init(|| format!("{:032x}", fastrand::u128(..)))
-        .clone()
+/// The node ID for telemetry: the `NodeId` in 32 lower case hex digits.
+pub fn node_id(id: NodeId) -> String {
+    id.to_string()
 }
 
-/// The epoch generation for the resource. Placeholder until the placement plan merges.
-pub fn ring_epoch() -> u64 {
-    0
+/// The metric label of a node: its `NodeId` in hex.
+pub fn node_label(id: NodeId) -> Option<NodeLabel> {
+    NodeLabel::new(&node_id(id)).ok()
+}
+
+/// The generation of the current epoch of `node`. The `discus.ring.epoch` gauge reports it, and
+/// `Node::adopt_epoch` updates the gauge.
+pub fn ring_epoch(node: &Node) -> u64 {
+    node.epoch_id().generation
+}
+
+/// The resource attributes of the node that `config` starts. Call `Config::resolve_identity`
+/// first, so the node ID is the one the node uses. The epoch is the first one, because a
+/// resource cannot change. The live value is the gauge.
+pub fn resource(config: &Config) -> ResourceInfo {
+    ResourceInfo {
+        node_id: node_id(config.node_id.unwrap_or_default()),
+        ring_epoch: discus_placement::FIRST_GENERATION,
+        k8s: discus_telemetry::pipeline::k8s_from_env(),
+    }
 }
 
 /// Keeps the export pipeline alive. Dropping it flushes and stops the pipeline.
@@ -129,7 +146,7 @@ pub fn init(config: &Config) -> Result<TelemetryGuard, String> {
     #[cfg(feature = "otel")]
     if args.otel {
         use tracing_subscriber::Layer;
-        let telemetry = discus_telemetry::pipeline::Telemetry::otlp(&pipeline_config(args))
+        let telemetry = discus_telemetry::pipeline::Telemetry::otlp(&pipeline_config(config))
             .map_err(|e| e.to_string())?;
         // Only Discus spans become OpenTelemetry spans. The exporter's own crates (tonic, h2)
         // stay out, so an export never creates spans to export.
@@ -162,8 +179,9 @@ fn install(
 }
 
 #[cfg(feature = "otel")]
-fn pipeline_config(args: &TelemetryArgs) -> discus_telemetry::pipeline::TelemetryConfig {
-    use discus_telemetry::pipeline::{k8s_from_env, ResourceInfo, TelemetryConfig};
+fn pipeline_config(config: &Config) -> discus_telemetry::pipeline::TelemetryConfig {
+    use discus_telemetry::pipeline::TelemetryConfig;
+    let args = &config.telemetry;
     TelemetryConfig {
         endpoint: args.otel_endpoint.clone(),
         ca_file: args.otel_ca_file.clone(),
@@ -171,11 +189,7 @@ fn pipeline_config(args: &TelemetryArgs) -> discus_telemetry::pipeline::Telemetr
         sampling_ratio: args.otel_sampling_ratio,
         export_interval: std::time::Duration::from_secs(args.otel_export_interval_secs),
         span_queue: args.otel_span_queue,
-        resource: ResourceInfo {
-            node_id: node_id(),
-            ring_epoch: ring_epoch(),
-            k8s: k8s_from_env(),
-        },
+        resource: resource(config),
     }
 }
 

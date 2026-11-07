@@ -73,12 +73,46 @@ fn bad_telemetry_flags_are_rejected() {
 }
 
 #[test]
-fn the_placeholder_node_id_is_a_stable_node_label() {
-    let id = discus::telemetry::node_id();
-    assert_eq!(id.len(), 32);
-    assert_eq!(id, discus::telemetry::node_id());
-    assert!(discus_telemetry::attrs::NodeLabel::new(&id).is_ok());
-    assert_eq!(discus::telemetry::ring_epoch(), 0);
+fn the_resource_carries_the_node_id_that_the_node_uses() {
+    let mut config = args(&[]);
+    let id = config.resolve_identity().unwrap();
+    assert_eq!(
+        config.resolve_identity().unwrap(),
+        id,
+        "the ID is fixed once"
+    );
+    let resource = discus::telemetry::resource(&config);
+    assert_eq!(resource.node_id, id.to_string());
+    assert_eq!(resource.node_id.len(), 32);
+    assert_eq!(resource.ring_epoch, discus_placement::FIRST_GENERATION);
+    let node = node(config);
+    assert_eq!(node.id, id);
+    assert_eq!(discus::telemetry::node_id(node.id), resource.node_id);
+    assert_eq!(
+        discus::telemetry::node_label(node.id).unwrap().as_str(),
+        resource.node_id
+    );
+}
+
+#[test]
+fn resolve_identity_still_refuses_peers_without_a_node_id() {
+    let peer = format!("{}@127.0.0.1:7380", discus_placement::NodeId::random());
+    let mut config = args(&["--peer", &peer]);
+    assert!(config.resolve_identity().is_err());
+}
+
+#[test]
+fn ring_epoch_follows_the_adopted_epoch() {
+    let node = node(args(&[]));
+    assert_eq!(discus::telemetry::ring_epoch(&node), 1);
+    let members = node.epochs().current().members().to_vec();
+    let id = discus_placement::EpochId {
+        generation: 4,
+        origin: node.id,
+    };
+    let next = discus_placement::Epoch::new(id, node.cluster_id(), members).unwrap();
+    node.adopt_epoch(next).unwrap();
+    assert_eq!(discus::telemetry::ring_epoch(&node), 4);
 }
 
 #[test]

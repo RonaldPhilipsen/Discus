@@ -5,6 +5,9 @@ use std::fmt;
 
 use crate::{hrw, ClusterId, Member, NodeId};
 
+/// The generation of the first epoch of a cluster.
+pub const FIRST_GENERATION: u64 = 1;
+
 /// The identity of an epoch, ordered by generation and then by origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EpochId {
@@ -75,7 +78,7 @@ impl Epoch {
     pub fn bootstrap(member: Member, cluster_id: ClusterId) -> Epoch {
         Epoch {
             id: EpochId {
-                generation: 1,
+                generation: FIRST_GENERATION,
                 origin: member.id,
             },
             cluster_id,
