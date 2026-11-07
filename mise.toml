@@ -1,6 +1,23 @@
 [tools]
 rumdl = "latest"
+rust = "stable"
 
 [tasks.lint-docs]
 description = "Lint the Markdown documentation with rumdl"
 run = "rumdl check docs/ README.md"
+
+[tasks.test]
+description = "Run all Rust tests"
+run = "cargo test --workspace"
+
+[tasks.lint]
+description = "Run rustfmt, clippy, and the documentation lint"
+run = [
+  "cargo fmt --check",
+  "cargo clippy --workspace --all-targets -- -D warnings",
+  "rumdl check docs/ README.md",
+]
+
+[tasks.compat]
+description = "Run the redis-cli compatibility matrix against a fresh node"
+run = "bash scripts/compat.sh"
