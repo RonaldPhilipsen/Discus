@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="120" height="120" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Discus">
+  <style>
+    .bg{fill:#ffffff} .f1{fill:#333333} .s1{stroke:#333333} .f2{fill:#666666} .s2{stroke:#666666} .tag{fill:#666666} .mono{fill:#888888} .hole{fill:#ffffff;stroke:#666666}
+    @media (prefers-color-scheme: dark) { .bg{fill:#1e1e1e} .f1{fill:#f2f2f2} .s1{stroke:#f2f2f2} .f2{fill:#a8a8a8} .s2{stroke:#a8a8a8} .tag{fill:#b0b0b0} .mono{fill:#888888} .hole{fill:#1e1e1e;stroke:#a8a8a8} }
+  </style>
+  <rect width="120" height="120" rx="16" class="bg"/>
+  <g transform="translate(60 60) scale(0.78)">
+    <circle cx="0" cy="0" r="44" class="s1" stroke-width="4" fill="none"/>
+    <circle cx="0" cy="0" r="30" class="s2" stroke-width="3" fill="none"/>
+    <circle cx="0" cy="0" r="16" class="s2" stroke-width="3" fill="none"/>
+    <path d="M-66 -14 L-26.5 -14" class="s1" stroke-width="4" fill="none"/>
+    <path d="M66 14 L26.5 14" class="s1" stroke-width="4" fill="none"/>
+    <circle cx="0.0" cy="-44.0" r="5" class="f1"/>
+    <circle cx="38.1" cy="-22.0" r="5" class="f1"/>
+    <circle cx="-38.1" cy="22.0" r="5.5" class="hole" stroke-width="2.5" stroke-dasharray="3 2.5"/>
+    <circle cx="-15.0" cy="26.0" r="4" class="f2"/>
+    <circle cx="0.0" cy="16.0" r="3.5" class="f2"/>
+    <circle cx="-13.9" cy="-8.0" r="3.5" class="f2"/>
+    <circle cx="13.9" cy="-8.0" r="3.5" class="f2"/>
+    <circle cx="-66.0" cy="-14.0" r="5" class="f1"/>
+    <circle cx="-26.5" cy="-14.0" r="6" class="f1"/>
+    <circle cx="66.0" cy="14.0" r="5" class="f1"/>
+    <circle cx="26.5" cy="14.0" r="6" class="f1"/>
+  </g>
+</svg>

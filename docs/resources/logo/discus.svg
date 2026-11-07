@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="400" height="120" viewBox="0 0 400 120" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Discus: Connect to any node">
+  <style>
+    .bg{fill:#ffffff} .f1{fill:#333333} .s1{stroke:#333333} .f2{fill:#666666} .s2{stroke:#666666} .tag{fill:#666666} .mono{fill:#888888} .hole{fill:#ffffff;stroke:#666666}
+    @media (prefers-color-scheme: dark) { .bg{fill:#1e1e1e} .f1{fill:#f2f2f2} .s1{stroke:#f2f2f2} .f2{fill:#a8a8a8} .s2{stroke:#a8a8a8} .tag{fill:#b0b0b0} .mono{fill:#888888} .hole{fill:#1e1e1e;stroke:#a8a8a8} }
+  </style>
+
+  <!-- Background -->
+  <rect width="400" height="120" rx="8" class="bg"/>
+
+  <!-- App name on the LEFT -->
+  <g id="app-name">
+    <text x="20" y="45" font-family="Arial, sans-serif" font-size="32" font-weight="bold" class="f1">Discus</text>
+    <text x="20" y="65" font-family="Arial, sans-serif" font-size="12" class="tag">Connect to any node</text>
+    <text x="20" y="80" font-family="monospace" font-size="10" class="mono">no slots, no MOVED, no ASK</text>
+  </g>
+
+  <!-- Disc on the RIGHT: GET and SET reach different nodes, one node has dropped -->
+  <g id="disc">
+    <circle cx="290" cy="60" r="44" class="s1" stroke-width="4" fill="none"/>
+    <circle cx="290" cy="60" r="30" class="s2" stroke-width="3" fill="none"/>
+    <circle cx="290" cy="60" r="16" class="s2" stroke-width="3" fill="none"/>
+    <path d="M220 46 L263.5 46" class="s1" stroke-width="4" fill="none"/>
+    <path d="M360 74 L316.5 74" class="s1" stroke-width="4" fill="none"/>
+    <circle cx="290.0" cy="16.0" r="5" class="f1"/>
+    <circle cx="328.1" cy="38.0" r="5" class="f1"/>
+    <circle cx="251.9" cy="82.0" r="5.5" class="hole" stroke-width="2.5" stroke-dasharray="3 2.5"/>
+    <circle cx="275.0" cy="86.0" r="4" class="f2"/>
+    <circle cx="290.0" cy="76.0" r="3.5" class="f2"/>
+    <circle cx="276.1" cy="52.0" r="3.5" class="f2"/>
+    <circle cx="303.9" cy="52.0" r="3.5" class="f2"/>
+    <circle cx="220.0" cy="46.0" r="5" class="f1"/>
+    <circle cx="263.5" cy="46.0" r="6" class="f1"/>
+    <circle cx="360.0" cy="74.0" r="5" class="f1"/>
+    <circle cx="316.5" cy="74.0" r="6" class="f1"/>
+    <text x="220" y="36" text-anchor="middle" class="f1" font-family="monospace" font-size="9" font-weight="bold">GET</text>
+    <text x="360" y="93" text-anchor="middle" class="f1" font-family="monospace" font-size="9" font-weight="bold">SET</text>
+  </g>
+</svg>
