@@ -7,13 +7,29 @@ use discus_resp::Command;
 use discus_transport::TransportError;
 use discus_wire::{caps, encode_command, Forward, ForwardMode, Message};
 
+use tracing::Instrument;
+
 use super::{Hop, Reply};
 use crate::node::Node;
+use crate::telemetry;
 
 /// Forward `cmd` to `target`. The forward carries the current epoch, the full epoch when the
-/// peer has `EPOCH_PUSH` and last reported an older one, the hop count, and the path. The entry
-/// node observes the applied HLC of the reply.
+/// peer has `EPOCH_PUSH` and last reported an older one, the hop count, the path, and the trace
+/// context of the `forward` span. The entry node observes the applied HLC of the reply.
 pub async fn send(
+    node: &Arc<Node>,
+    target: NodeId,
+    cmd: &Command,
+    hop: &Hop,
+    mode: ForwardMode,
+    write: bool,
+) -> Result<Reply, TransportError> {
+    send_in_span(node, target, cmd, hop, mode, write)
+        .instrument(telemetry::forward_span())
+        .await
+}
+
+async fn send_in_span(
     node: &Arc<Node>,
     target: NodeId,
     cmd: &Command,
@@ -56,7 +72,7 @@ pub async fn send(
             target,
             addr,
             Message::Forward(forward),
-            hop.trace.clone(),
+            telemetry::outbound(&hop.trace),
             timeout,
             write,
         )

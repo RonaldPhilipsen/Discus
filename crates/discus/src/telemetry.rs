@@ -7,6 +7,7 @@ use std::sync::Arc;
 use discus_placement::NodeId;
 use discus_resp::{Command, Value};
 use discus_telemetry::attrs::NodeLabel;
+use discus_telemetry::context::{TraceContext, TRACEPARENT, TRACESTATE};
 use discus_telemetry::pipeline::{
     ResourceInfo, DEFAULT_ENDPOINT, DEFAULT_EXPORT_INTERVAL, DEFAULT_SAMPLING_RATIO,
     DEFAULT_SPAN_QUEUE,
@@ -331,4 +332,71 @@ pub fn dispatch_with(metrics: &Metrics, node: &Node, conn: &mut ConnState, cmd: 
     };
     trace.finish(&value);
     value
+}
+
+/// The wire form of a trace context, as the telemetry carrier. An invalid `traceparent` is
+/// dropped with its `tracestate`, so it is never forwarded.
+pub fn from_wire(wire: &discus_wire::TraceContext) -> TraceContext {
+    let parent = wire.traceparent.as_deref().map(|v| (TRACEPARENT, v));
+    let state = wire.tracestate.as_deref().map(|v| (TRACESTATE, v));
+    TraceContext::from_pairs(parent.into_iter().chain(state))
+}
+
+/// The telemetry carrier in its wire form.
+pub fn to_wire(cx: &TraceContext) -> discus_wire::TraceContext {
+    let mut wire = discus_wire::TraceContext::default();
+    for (name, value) in cx.to_pairs() {
+        match name {
+            TRACEPARENT => wire.traceparent = Some(value),
+            TRACESTATE => wire.tracestate = Some(value),
+            _ => {}
+        }
+    }
+    wire
+}
+
+/// The trace context for a forward (spec §15.4). With `otel`, it carries the context of the
+/// current span when that span records. Otherwise the inbound context passes through unchanged.
+pub fn outbound(inbound: &discus_wire::TraceContext) -> discus_wire::TraceContext {
+    to_wire(&discus_telemetry::context::outbound(&from_wire(inbound)))
+}
+
+/// The `forward` child span of the current command span. It opens only under a command span.
+pub fn forward_span() -> tracing::Span {
+    if tracing::Span::current().is_none() {
+        return tracing::Span::none();
+    }
+    tracing::info_span!("forward")
+}
+
+/// The command span of a command that another node forwarded. Its parent is the span context
+/// that the forward carries, so the trace continues across the hop. With export off it is
+/// disabled.
+pub fn forwarded_span(metrics: &Metrics, inbound: &discus_wire::TraceContext) -> tracing::Span {
+    if !metrics.is_enabled() {
+        return tracing::Span::none();
+    }
+    let span = tracing::info_span!(
+        "command",
+        otel.status_code = tracing::field::Empty,
+        db.system = "redis",
+        db.operation.name = tracing::field::Empty,
+        discus.forwarded = true,
+    );
+    discus_telemetry::context::set_parent(&span, &from_wire(inbound));
+    span
+}
+
+/// Record the table name of a forwarded command on the current command span.
+pub fn record_operation(cmd: &Command) {
+    #[cfg(feature = "otel")]
+    tracing::Span::current().record("db.operation.name", label(cmd).as_str());
+    let _ = cmd;
+}
+
+/// Mark the current command span as failed when the reply is an error.
+pub fn record_reply(reply: &Value) {
+    if matches!(reply, Value::Error(_)) {
+        tracing::Span::current().record("otel.status_code", "ERROR");
+    }
 }

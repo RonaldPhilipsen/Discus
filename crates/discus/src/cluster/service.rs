@@ -12,6 +12,8 @@ use super::route::{route_of, Route};
 use super::{local, run_hop, Hop, Job, Reply};
 use crate::command;
 use crate::node::Node;
+use crate::telemetry;
+use tracing::Instrument;
 
 /// The transport service of a node. It holds the node weakly, because the node holds the
 /// transport.
@@ -36,7 +38,11 @@ impl Service for NodeService {
             match inbound.message {
                 Message::Ping { nonce } => Message::Pong { nonce },
                 Message::Forward(f) => {
-                    let reply = forwarded(&node, inbound.peer.node_id, f, inbound.trace).await;
+                    let span =
+                        telemetry::forwarded_span(discus_telemetry::global(), &inbound.trace);
+                    let reply = forwarded(&node, inbound.peer.node_id, f, inbound.trace)
+                        .instrument(span)
+                        .await;
                     Message::ForwardReply(ForwardReply {
                         value: reply.value,
                         applied: reply.applied,
@@ -72,7 +78,19 @@ fn parse(node: &Node, raw: &[u8]) -> Result<discus_resp::Command, Value> {
     }
 }
 
+/// Run a forwarded command inside its command span, and mark the span on an error reply.
 async fn forwarded(
+    node: &Arc<Node>,
+    sender: discus_placement::NodeId,
+    f: Forward,
+    trace: TraceContext,
+) -> Reply {
+    let reply = run_forwarded(node, sender, f, trace).await;
+    telemetry::record_reply(&reply.value);
+    reply
+}
+
+async fn run_forwarded(
     node: &Arc<Node>,
     sender: discus_placement::NodeId,
     f: Forward,
@@ -97,6 +115,7 @@ async fn forwarded(
         Ok(cmd) => cmd,
         Err(value) => return Reply::value(value),
     };
+    telemetry::record_operation(&cmd);
     if f.mode == ForwardMode::Local {
         return local(node, &cmd);
     }
@@ -110,6 +129,8 @@ async fn forwarded(
     if route == Route::Connection {
         return local(node, &cmd);
     }
+    // The hop keeps the inbound context. A further forward sends the context of its own span
+    // with `otel`, else this context unchanged.
     let hop = Hop {
         hops: f.hops,
         path: f.path,

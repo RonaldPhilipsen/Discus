@@ -73,17 +73,23 @@ sample by tail in the collector.
 
 ## Traces
 
-Each command gets a span named `command`. It has two child spans:
+Each command gets a span named `command`. It has these child spans:
 
 - `route` covers the choice of where the command runs.
 - `store` covers the work on the store.
+- `forward` covers one forward to another node.
 
 The `command` span carries `db.system=redis` and `db.operation.name`, for example `GET`. A span
 never carries a key or a value. A command that returns an error sets the span status to error.
 
 Between nodes, the trace context travels in W3C Trace Context form (`traceparent` and
-`tracestate`). A build without `otel` creates no spans. It still forwards the trace context that it
-receives, so a trace stays connected across that node.
+`tracestate`) in each frame. The node that sends a forward puts the context of its `forward` span
+in the frame. The node that receives it opens a `command` span with that context as its parent.
+That span also carries `discus.forwarded=true`. So one trace ID covers the command on every node.
+
+A build without `otel` creates no spans, and neither does a node without `--otel`. Such a node
+forwards the trace context that it receives without a change, so a trace stays connected across
+that node. A node drops a malformed `traceparent` and its `tracestate`, and never forwards them.
 
 ## Metrics
 
