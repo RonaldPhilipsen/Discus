@@ -220,7 +220,10 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     let max_pipeline = cfg.max_pipeline.max(1);
     let max_request = cfg.max_request_bytes;
     let mut parser = Parser::new(limits);
-    let conn = ConnState::new(node.next_conn_id(), auth);
+    let mut conn = ConnState::new(node.next_conn_id(), auth);
+    if node.link().is_some() {
+        conn.writes = Some(Arc::new(parking_lot::Mutex::new(node.new_write_set())));
+    }
     let mut p = Pipeline {
         node: node.clone(),
         metrics: discus_telemetry::global(),

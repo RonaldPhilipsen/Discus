@@ -14,6 +14,7 @@ use discus_resp::Protocol;
 use discus_store::{Store, StoreConfig, SystemClock, HASH_SEED};
 use parking_lot::{RwLock, RwLockReadGuard};
 
+use crate::cluster::writeset::{WriteSet, WriteSetBudget, WriteSetLimits};
 use crate::cluster::ClusterLink;
 use crate::command::CommandError;
 use crate::membership::Membership;
@@ -63,6 +64,7 @@ pub struct Node {
     membership: OnceLock<Arc<Membership>>,
     replicator: OnceLock<Arc<Replicator>>,
     epoch_tx: tokio::sync::watch::Sender<EpochId>,
+    write_budget: Arc<WriteSetBudget>,
     drain: tokio_util::sync::CancellationToken,
     /// Test-only faults. Production code never sets them.
     #[doc(hidden)]
@@ -146,13 +148,19 @@ impl Node {
         let epochs = EpochHistory::new(first);
         crate::telemetry::record_epoch(discus_telemetry::global(), epochs.current());
         let (epoch_tx, _) = tokio::sync::watch::channel(epochs.current().id());
+        let store = Arc::new(store);
+        let write_budget = Arc::new(WriteSetBudget::new(
+            config.max_memory / 100 * config.write_set_memory_percent,
+            Some(store.clone()),
+        ));
         Node {
             config,
             id,
             hlc: Hlc::new(id, hlc_clock),
             epochs: Arc::new(RwLock::new(epochs)),
             started_at: Instant::now(),
-            store: Arc::new(store),
+            store,
+            write_budget,
             security,
             next_conn_id: AtomicU64::new(1),
             connected: AtomicUsize::new(0),
@@ -234,6 +242,31 @@ impl Node {
     /// Attach the replicator. Only the first call has an effect.
     pub fn set_replicator(&self, replicator: Arc<Replicator>) {
         let _ = self.replicator.set(replicator);
+    }
+
+    /// A new write set for a client connection (spec section 7.4).
+    pub fn new_write_set(&self) -> WriteSet {
+        let c = &self.config;
+        WriteSet::new(
+            WriteSetLimits {
+                keys: c.write_set_keys.max(1),
+                bytes: c.write_set_bytes,
+                max_age: std::time::Duration::from_millis(c.write_set_ttl_ms),
+                counter_prefix: Bytes::copy_from_slice(c.counter_prefix.as_bytes()),
+            },
+            self.write_budget.clone(),
+        )
+    }
+
+    /// Bytes that every write set of this node holds.
+    pub fn write_set_bytes(&self) -> u64 {
+        self.write_budget.used()
+    }
+
+    /// A strong counter key, by `--counter-prefix` (spec section 10). The prefix decides the
+    /// path before the value is read.
+    pub fn is_counter_key(&self, key: &[u8]) -> bool {
+        key.starts_with(self.config.counter_prefix.as_bytes())
     }
 
     /// Changes of the current epoch: every adoption and every reset of the history.
@@ -391,6 +424,8 @@ pub struct ConnState {
     pub closing: bool,
     /// The round-robin position for reads over replicas.
     rr: u64,
+    /// The recent writes of a client connection in a cluster. Internal execution has none.
+    pub writes: Option<Arc<parking_lot::Mutex<WriteSet>>>,
 }
 
 impl ConnState {
@@ -402,6 +437,7 @@ impl ConnState {
             id,
             closing: false,
             rr: id,
+            writes: None,
         }
     }
 

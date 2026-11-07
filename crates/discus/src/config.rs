@@ -219,6 +219,21 @@ pub struct Config {
     /// Time for a peer to acknowledge a replication batch, in milliseconds.
     #[arg(long, default_value_t = 1_000)]
     pub replication_timeout_ms: u64,
+    /// Keys in the write set of one connection, at most.
+    #[arg(long, default_value_t = 4_096)]
+    pub write_set_keys: usize,
+    /// Bytes in the write set of one connection, at most.
+    #[arg(long, default_value_t = 1_048_576)]
+    pub write_set_bytes: usize,
+    /// The share of the memory budget for the write sets of every connection, in percent.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=100))]
+    pub write_set_memory_percent: u64,
+    /// Time that a written key stays in the write set, in milliseconds.
+    #[arg(long, default_value_t = 5_000)]
+    pub write_set_ttl_ms: u64,
+    /// Keys with this prefix are strong counter keys. They never enter a write set.
+    #[arg(long, default_value = "cnt:")]
+    pub counter_prefix: String,
     /// Bytes per second that one handoff scan sends at most.
     #[arg(long, default_value_t = 33_554_432)]
     pub handoff_rate_bytes: u64,

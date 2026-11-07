@@ -7,10 +7,13 @@ use discus_resp::{Command, Value};
 use discus_wire::ForwardMode;
 use futures::future::join_all;
 
-use super::{allowed, candidates, forward, local, spent, Dispatch, Hop, Reply};
+use super::{allowed, candidates, forward, local, spent, Dispatch, Hop, Job, Reply, Writes};
+use std::time::Instant;
+
 use crate::command::util::{check_key, check_value};
 use crate::command::CommandError;
 use crate::node::Node;
+use bytes::Bytes;
 
 /// The keys of one target: the subcommand and the positions of its keys in the request.
 struct Group {
@@ -21,10 +24,22 @@ struct Group {
 
 /// Split `cmd` by the target of each key, in first-seen order. `width` is 1 for keys and 2 for
 /// key-value pairs.
-fn group(node: &Node, cmd: &Command, width: usize, write: bool, rr: u64) -> Option<Vec<Group>> {
+fn group(
+    node: &Node,
+    cmd: &Command,
+    width: usize,
+    write: bool,
+    rr: u64,
+    writes: Option<&Writes>,
+) -> Option<Vec<Group>> {
     let mut groups: Vec<Group> = Vec::new();
+    let now = Instant::now();
     for (pos, item) in cmd[1..].chunks(width).enumerate() {
-        let target = *candidates(node, &item[0], write, rr).first()?;
+        let need = match writes {
+            Some(w) if !write => w.lock().required(&item[0], now),
+            _ => None,
+        };
+        let target = *candidates(node, &item[0], write, rr, need).first()?;
         let g = match groups.iter().position(|g| g.target == target) {
             Some(i) => &mut groups[i],
             None => {
@@ -86,13 +101,15 @@ pub enum Merge {
 /// The grouping by owner runs in the `route` span.
 pub fn multi(
     node: &Arc<Node>,
-    cmd: Command,
+    job: Job,
     hop: Hop,
-    rr: u64,
     merge: Merge,
     write: bool,
     route: tracing::Span,
 ) -> Dispatch {
+    let Job {
+        cmd, rr, writes, ..
+    } = job;
     let width = if merge == Merge::AllOk { 2 } else { 1 };
     if width == 2 {
         if cmd.len().is_multiple_of(2) {
@@ -104,18 +121,36 @@ pub fn multi(
             }
         }
     }
-    let groups = route.in_scope(|| group(node, &cmd, width, write, rr));
+    let groups = route.in_scope(|| group(node, &cmd, width, write, rr, writes.as_ref()));
     drop(route);
     let Some(groups) = groups else {
         return Dispatch::Ready(Reply::try_again());
     };
+    // Each written key enters the write set with the stamp of its own part.
+    let note = move |keys: &[Bytes], reply: &Reply| {
+        if let (Some(w), Some(v)) = (&writes, reply.applied) {
+            if write && !matches!(reply.value, Value::Error(_)) {
+                let mut w = w.lock();
+                for k in keys.iter().step_by(width) {
+                    w.record(k, v, Instant::now());
+                }
+            }
+        }
+    };
     if groups.iter().all(|g| g.target == node.id) {
-        return Dispatch::Ready(local(node, &cmd));
+        let reply = local(node, &cmd);
+        note(&cmd[1..], &reply);
+        return Dispatch::Ready(reply);
     }
     let node = node.clone();
     let total = (cmd.len() - 1) / width;
     Dispatch::Pending(Box::pin(async move {
         let parts = join_all(groups.iter().map(|g| run_group(&node, g, &hop, write))).await;
+        for (g, part) in groups.iter().zip(&parts) {
+            if let Some(r) = part {
+                note(&g.cmd[1..], r);
+            }
+        }
         let mut replies = Vec::with_capacity(parts.len());
         for part in parts {
             match part {
@@ -150,7 +185,12 @@ pub fn multi(
             }
             Merge::AllOk => Value::ok(),
         };
-        Reply { value, applied }
+        Reply {
+            value,
+            applied,
+            observed: None,
+            settled: false,
+        }
     }))
 }
 

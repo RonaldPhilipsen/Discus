@@ -4,6 +4,7 @@ pub mod forward;
 pub mod multi;
 pub mod route;
 pub mod service;
+pub mod writeset;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -66,6 +67,10 @@ impl ClusterLink {
 pub struct Reply {
     pub value: Value,
     pub applied: Option<Version>,
+    /// A tracked read: the version that the read saw.
+    pub observed: Option<Version>,
+    /// A tracked read: every replica holds that version.
+    pub settled: bool,
 }
 
 impl Reply {
@@ -73,6 +78,8 @@ impl Reply {
         Reply {
             value,
             applied: None,
+            observed: None,
+            settled: false,
         }
     }
 
@@ -91,6 +98,8 @@ pub struct Hop {
     pub hops: u8,
     pub path: Vec<NodeId>,
     pub trace: TraceContext,
+    /// The entry node keeps the key in a write set and wants `observed` and `settled`.
+    pub track: bool,
 }
 
 /// A data command that passed the entry checks, ready to run once its keys are free.
@@ -100,7 +109,11 @@ pub struct Job {
     pub route: Route,
     /// The per-connection round-robin position for reads.
     pub rr: u64,
+    /// The write set of the client connection. Forwarded jobs have none.
+    pub writes: Option<Writes>,
 }
+
+pub type Writes = Arc<Mutex<writeset::WriteSet>>;
 
 impl Job {
     pub fn keys(&self) -> Keys {
@@ -150,6 +163,7 @@ pub fn prepare(node: &Node, conn: &mut ConnState, cmd: Command) -> Prepared {
         cmd,
         route,
         rr: conn.next_rr(),
+        writes: conn.writes.clone(),
     })
 }
 
@@ -170,7 +184,20 @@ pub fn local(node: &Node, cmd: &Command) -> Reply {
             }
         }
     }
-    Reply { value, applied }
+    Reply {
+        value,
+        applied,
+        observed: None,
+        settled: false,
+    }
+}
+
+/// Fill `observed` and `settled` of a read of `key` that ran here.
+fn track_here(node: &Node, key: &[u8], reply: &mut Reply) {
+    if reply.observed.is_none() {
+        reply.observed = node.store.version(key);
+        reply.settled = node.replicator().is_some_and(|r| r.settled(key));
+    }
 }
 
 /// Serve a single-key command on this node. A replica without an entry for the key first asks
@@ -208,7 +235,7 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
             } else {
                 multi::Merge::InOrder
             };
-            multi::multi(node, job.cmd, hop, job.rr, merge, false, route)
+            multi::multi(node, job, hop, merge, false, route)
         }
         Route::MultiWrite { pairs } => {
             let merge = if pairs {
@@ -216,7 +243,7 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
             } else {
                 multi::Merge::Sum
             };
-            multi::multi(node, job.cmd, hop, job.rr, merge, true, route)
+            multi::multi(node, job, hop, merge, true, route)
         }
         // Only the entry node fans out. A forwarded copy runs locally. These routes need no
         // owner, so the route span ends at once.
@@ -236,8 +263,23 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
 }
 
 /// The nodes that may serve `key`, in the order to try them. Empty when no member is `NORMAL`.
-pub fn candidates(node: &Node, key: &[u8], write: bool, rr: u64) -> Vec<NodeId> {
+///
+/// A read that must see `need` (a key in the write set, spec section 7.4) goes to the primary,
+/// unless this node owns the key and already holds a version at least as new.
+pub fn candidates(
+    node: &Node,
+    key: &[u8],
+    write: bool,
+    rr: u64,
+    need: Option<Version>,
+) -> Vec<NodeId> {
     let owners = node.owners(key);
+    if let Some(need) = need.filter(|_| !write) {
+        if owners.contains(&node.id) && node.store.version(key).is_some_and(|v| v >= need) {
+            return vec![node.id];
+        }
+        return owners.into_iter().take(1).collect();
+    }
     let replicas = !write && node.link().is_some_and(|l| l.read_from_replicas);
     if !replicas {
         return owners.into_iter().take(1).collect();
@@ -291,8 +333,50 @@ enum Plan {
 
 fn single(node: &Arc<Node>, job: Job, hop: Hop, write: bool, route: Span) -> Dispatch {
     let key = job.cmd[1].clone();
+    let need = match (&job.writes, write) {
+        (Some(w), false) => w.lock().required(&key, std::time::Instant::now()),
+        _ => None,
+    };
+    let dispatch = single_planned(node, job.cmd, hop, write, job.rr, need, route);
+    let Some(writes) = job.writes else {
+        return dispatch;
+    };
+    // The write set changes before the key order releases the next command on this key.
+    let note = move |reply: &Reply| {
+        let mut w = writes.lock();
+        match (write, reply.applied) {
+            (true, Some(v)) if !matches!(reply.value, Value::Error(_)) => {
+                w.record(&key, v, std::time::Instant::now())
+            }
+            (false, _) if need.is_some() => w.observed(&key, reply.observed, reply.settled),
+            _ => {}
+        }
+    };
+    match dispatch {
+        Dispatch::Ready(reply) => {
+            note(&reply);
+            Dispatch::Ready(reply)
+        }
+        Dispatch::Pending(f) => Dispatch::Pending(Box::pin(async move {
+            let reply = f.await;
+            note(&reply);
+            reply
+        })),
+    }
+}
+
+fn single_planned(
+    node: &Arc<Node>,
+    cmd: Command,
+    mut hop: Hop,
+    write: bool,
+    rr: u64,
+    need: Option<Version>,
+    route: Span,
+) -> Dispatch {
+    let key = cmd[1].clone();
     let plan = route.in_scope(|| {
-        let targets = candidates(node, &key, write, job.rr);
+        let targets = candidates(node, &key, write, rr, need);
         match targets.first() {
             None => Plan::Retry,
             Some(first) if *first == node.id => Plan::Local,
@@ -302,16 +386,22 @@ fn single(node: &Arc<Node>, job: Job, hop: Hop, write: bool, route: Span) -> Dis
     drop(route);
     let targets = match plan {
         Plan::Retry => return Dispatch::Ready(Reply::try_again()),
-        Plan::Local => return serve_here(node, job.cmd, write),
+        Plan::Local if need.is_some() || hop.track => {
+            let mut reply = local(node, &cmd);
+            track_here(node, &key, &mut reply);
+            return Dispatch::Ready(reply);
+        }
+        Plan::Local => return serve_here(node, cmd, write),
         Plan::Forward(targets) => targets,
     };
     if targets.is_empty() {
-        return Dispatch::Ready(spent(node, &job.cmd, &[&key], write));
+        return Dispatch::Ready(spent(node, &cmd, &[&key], write));
     }
+    hop.track |= need.is_some();
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
         for target in targets {
-            match forward::send(&node, target, &job.cmd, &hop, ForwardMode::Route, write).await {
+            match forward::send(&node, target, &cmd, &hop, ForwardMode::Route, write).await {
                 Ok(reply) => return reply,
                 // A read tries the next owner. A write fails at once: plan 4 adds hold-and-retry.
                 Err(_) if !write => continue,

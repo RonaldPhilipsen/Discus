@@ -67,7 +67,7 @@ async fn send_in_span(
         hops: hop.hops.saturating_add(1),
         path,
         mode,
-        track: false,
+        track: hop.track,
     };
     let timeout = if write {
         link.write_timeout
@@ -92,9 +92,13 @@ async fn send_in_span(
                 // A timestamp too far ahead is dropped by the HLC. The reply still counts.
                 let _ = node.hlc.observe(applied);
             }
+            // A peer without replication cannot know whether its replicas caught up.
+            let replicates = info.capabilities & caps::REPLICATION != 0;
             Ok(Reply {
                 value: reply.value,
                 applied: reply.applied,
+                observed: reply.observed,
+                settled: reply.settled && replicates,
             })
         }
         other => Err(TransportError::Frame(format!(

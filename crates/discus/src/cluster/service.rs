@@ -82,8 +82,8 @@ impl Service for NodeService {
                         value: reply.value,
                         applied: reply.applied,
                         epoch: node.epoch_id(),
-                        observed: None,
-                        settled: false,
+                        observed: reply.observed,
+                        settled: reply.settled,
                     })
                 }
                 other => Message::Unsupported {
@@ -172,8 +172,14 @@ async fn run_forwarded(
         hops: f.hops,
         path: f.path,
         trace,
+        track: f.track,
     };
-    let job = Job { cmd, route, rr: 0 };
+    let job = Job {
+        cmd,
+        route,
+        rr: 0,
+        writes: None,
+    };
     run_hop(node, job, hop, telemetry::route_span())
         .finish()
         .await
