@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code, clippy::unwrap_used)]
 
 use std::net::SocketAddr;
 
@@ -31,4 +31,11 @@ pub async fn start_node_raw(
     let shutdown = CancellationToken::new();
     let handle = tokio::spawn(server.run(shutdown.clone()));
     (addr, handle, shutdown)
+}
+
+/// Start a node and return a multiplexed redis-rs connection to it.
+pub async fn connect(args: &[&str]) -> redis::aio::MultiplexedConnection {
+    let addr = start_node(args).await;
+    let client = redis::Client::open(format!("redis://{addr}")).unwrap();
+    client.get_multiplexed_async_connection().await.unwrap()
 }

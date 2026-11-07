@@ -3,8 +3,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 use discus_resp::Protocol;
+use discus_store::{Store, StoreConfig, SystemClock, HASH_SEED};
 
 use crate::Config;
 
@@ -12,14 +15,24 @@ use crate::Config;
 pub struct Node {
     pub config: Config,
     pub started_at: Instant,
+    pub store: Arc<Store>,
     next_conn_id: AtomicU64,
 }
 
 impl Node {
     pub fn new(config: Config) -> Node {
+        let store = Store::new(
+            StoreConfig {
+                shards: config.shards,
+                max_memory: config.max_memory,
+                seed: HASH_SEED,
+            },
+            Arc::new(SystemClock),
+        );
         Node {
             config,
             started_at: Instant::now(),
+            store: Arc::new(store),
             next_conn_id: AtomicU64::new(1),
         }
     }
