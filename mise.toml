@@ -1,0 +1,6 @@
+[tools]
+rumdl = "latest"
+
+[tasks.lint-docs]
+description = "Lint the Markdown documentation with rumdl"
+run = "rumdl check docs/ README.md"

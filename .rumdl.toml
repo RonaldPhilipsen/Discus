@@ -1,0 +1,12 @@
+# rumdl configuration for the Discus documentation.
+# Prose wraps at 100 columns. `rumdl fmt` reflows paragraphs and list items to fit.
+# A line that fits once its inline code spans are excluded is allowed, because a code span cannot wrap.
+
+[global]
+line-length = 100
+
+[MD013]
+line-length = 100
+reflow = true
+reflow-mode = "default"
+code-spans = false
