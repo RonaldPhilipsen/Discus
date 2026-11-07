@@ -5,29 +5,38 @@
 //! [`Replicator::written`] queues the keys for every other current owner. One sender task per
 //! peer drains its queue in batches on the bulk lane. A replica applies an entry only if its
 //! version is newer, so replication is idempotent and order-tolerant.
+//!
+//! A write that cannot reach a peer becomes a hint: after a failed batch, while the peer is
+//! down, and when its queue overflows. The sender replays the hints in HLC order when a probe
+//! succeeds and the epoch lists the peer as `NORMAL`, or when a lagging queue drains.
 
+pub mod digest;
+mod hints;
 mod queue;
 pub mod repair;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use discus_placement::{Epoch, NodeId};
-use discus_store::{Entry, Store};
+use discus_placement::{Epoch, MemberState, NodeId, Version};
+use discus_store::{refill_bucket, Entry, Store};
 use discus_transport::{Lane, TransportError};
 use discus_wire::{caps, Batch, BatchAck, Message, TraceContext};
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::{Config, Node};
+use hints::{HintLimits, HintStore};
 use queue::{PeerQueue, Pushed};
 
 /// The most bytes of entries in one replication batch.
 const BATCH_BYTES: u64 = 4 << 20;
-
-/// How often the replicator reports its gauges.
+/// Hints in one `HINT_REPLAY` batch.
+const REPLAY_BATCH: usize = 256;
+/// How often the replicator reports its gauges and ages out hints.
 const TICK: Duration = Duration::from_secs(1);
 
 /// The replication settings from the flags.
@@ -38,6 +47,8 @@ pub struct Settings {
     pub timeout: Duration,
     pub retry: Duration,
     pub rf: usize,
+    pub tombstone_ttl: Duration,
+    pub hints: HintLimits,
 }
 
 impl Settings {
@@ -48,51 +59,101 @@ impl Settings {
             timeout: Duration::from_millis(c.replication_timeout_ms),
             retry: Duration::from_millis(c.replication_retry_ms.max(1)),
             rf: c.replication_factor,
+            tombstone_ttl: Duration::from_millis(c.tombstone_ttl_ms),
+            hints: HintLimits {
+                max_entries: c.hint_max_entries.max(1),
+                max_bytes: c.hint_max_bytes,
+                global_bytes: c.max_memory / 100 * c.hint_memory_percent,
+                max_age: Duration::from_millis(c.tombstone_ttl_ms),
+            },
         }
     }
 }
 
 pub struct Replicator {
+    me: Weak<Replicator>,
     node: Weak<Node>,
     id: NodeId,
     store: Arc<Store>,
     settings: Settings,
     peers: Mutex<HashMap<NodeId, Arc<PeerQueue>>>,
+    hints: Mutex<HintStore>,
+    /// The hint bytes charged to the store budget.
+    charged: AtomicU64,
+    /// The last message from each peer, to measure an absence on rejoin.
+    contacts: Mutex<HashMap<NodeId, Instant>>,
+    started: Instant,
     stop: CancellationToken,
-    me: Weak<Replicator>,
 }
 
 impl Replicator {
     pub fn new(node: &Arc<Node>) -> Arc<Replicator> {
-        Arc::new_cyclic(|me| Replicator {
+        let settings = Settings::from_config(&node.config);
+        let replicator = Arc::new_cyclic(|me| Replicator {
             me: me.clone(),
             node: Arc::downgrade(node),
             id: node.id,
             store: node.store.clone(),
-            settings: Settings::from_config(&node.config),
+            settings,
             peers: Mutex::new(HashMap::new()),
+            hints: Mutex::new(HintStore::new(settings.hints)),
+            charged: AtomicU64::new(0),
+            contacts: Mutex::new(HashMap::new()),
+            started: Instant::now(),
             stop: CancellationToken::new(),
-        })
+        });
+        // Under memory pressure the store frees the oldest hints after its normal entries
+        // (spec section 11).
+        let weak = Arc::downgrade(&replicator);
+        node.store.set_pressure(Box::new(move |want| {
+            weak.upgrade().map_or(0, |r| r.free_hints(want))
+        }));
+        replicator
     }
 
-    /// Run the gauge reporter until `stop`. Sender tasks start with their first key.
+    /// Run the gauge reporter and the rejoin listener until `stop`. Sender tasks start with
+    /// their first key.
     pub fn spawn(self: &Arc<Self>, stop: CancellationToken) {
         let me = self.clone();
+        let s = stop.clone();
         tokio::spawn(async move {
             let mut every = tokio::time::interval(TICK);
             loop {
                 tokio::select! {
-                    _ = stop.cancelled() => {
+                    _ = s.cancelled() => {
                         me.stop.cancel();
                         return;
                     }
-                    _ = every.tick() => me.report(),
+                    _ = every.tick() => me.tick(),
+                }
+            }
+        });
+        let Some(membership) = self.node.upgrade().and_then(|n| n.membership().cloned()) else {
+            return;
+        };
+        let me = self.clone();
+        let mut events = membership.subscribe();
+        tokio::spawn(async move {
+            use crate::membership::Event;
+            use tokio::sync::broadcast::error::RecvError;
+            loop {
+                let event = tokio::select! {
+                    _ = stop.cancelled() => return,
+                    e = events.recv() => e,
+                };
+                match event {
+                    Ok(Event::Core(discus_membership::Event::Rejoining { .. })) => {
+                        me.rejoining(me.absence());
+                    }
+                    Ok(Event::Core(discus_membership::Event::ClusterLost { .. })) => me.flush(),
+                    Ok(_) | Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => return,
                 }
             }
         });
     }
 
-    fn report(&self) {
+    fn tick(&self) {
         let metrics = discus_telemetry::global();
         metrics.tombstones(self.store.tombstones() as u64);
         for (peer, q) in self.peers.lock().iter() {
@@ -100,6 +161,56 @@ impl Replicator {
                 metrics.replication_depth(&label, q.len() as u64);
             }
         }
+        let evicted = self.hints.lock().expire(Instant::now());
+        self.count_evicted(&evicted);
+        self.sync_charge();
+    }
+
+    /// Keep the store charge equal to the hint bytes.
+    fn sync_charge(&self) {
+        let now = self.hints.lock().bytes();
+        let before = self.charged.swap(now, Ordering::Relaxed);
+        if now > before {
+            self.store.charge(now - before);
+        } else {
+            self.store.release(before - now);
+        }
+    }
+
+    fn free_hints(&self, want: u64) -> u64 {
+        let (freed, evicted) = match self.hints.try_lock() {
+            Some(mut h) => h.free(want),
+            None => return 0,
+        };
+        self.count_evicted(&evicted);
+        self.sync_charge();
+        freed
+    }
+
+    fn count_evicted(&self, evicted: &[(NodeId, u64)]) {
+        for (peer, n) in evicted {
+            if let Some(label) = crate::telemetry::node_label(*peer) {
+                discus_telemetry::global().hint_evicted(&label, *n);
+            }
+        }
+    }
+
+    /// Record a hint for `peer` with the current entry of `key`.
+    fn hint(&self, peer: NodeId, key: Bytes) {
+        let Some(entry) = self.store.entry(&key) else {
+            return;
+        };
+        let evicted = self.hints.lock().record(peer, key, entry, Instant::now());
+        if let Some(label) = crate::telemetry::node_label(peer) {
+            discus_telemetry::global().hint_recorded(&label);
+        }
+        self.count_evicted(&evicted);
+        self.sync_charge();
+    }
+
+    /// Hints held for `target`.
+    pub fn hints(&self, target: NodeId) -> usize {
+        self.hints.lock().count(target)
     }
 
     /// Queue `keys`, which a local write just stamped, for every other current owner.
@@ -113,10 +224,10 @@ impl Replicator {
                 if owner == self.id {
                     continue;
                 }
-                let q = self.queue(owner);
-                match q.push(key) {
+                match self.queue(owner).push(key) {
                     Pushed::Queued => {}
-                    Pushed::Overflow(_) => {}
+                    Pushed::Overflow(old) => self.hint(owner, old),
+                    Pushed::Down => self.hint(owner, key.clone()),
                 }
             }
         }
@@ -140,17 +251,18 @@ impl Replicator {
         self.peers.lock().get(&peer).map_or(0, |q| q.len())
     }
 
-    /// No queue and no batch in flight holds `key`: every replica acknowledged its latest write.
+    /// No queue, batch in flight, or hint holds `key`: every replica acknowledged its latest
+    /// write.
     pub fn settled(&self, key: &[u8]) -> bool {
-        self.peers.lock().values().all(|q| !q.holds(key))
+        self.peers.lock().values().all(|q| !q.holds(key)) && !self.hints.lock().holds(key)
     }
 
-    /// A newer epoch is current. Queues stop carrying keys that this node or the target no
-    /// longer owns (spec section 5.1), and peers that left the epoch lose their queue.
-    pub fn on_epoch(&self, _old: &Arc<Epoch>, new: &Arc<Epoch>) {
+    /// A newer epoch is current. Queues and hints stop carrying keys that the target no longer
+    /// owns, and queues stop carrying keys that this node no longer owns (spec sections 5.1 and
+    /// 9). A peer that left the epoch is `DEAD` or departed, so it loses its queue and hints.
+    pub fn on_epoch(&self, old: &Arc<Epoch>, new: &Arc<Epoch>) {
         let rf = self.settings.rf;
-        let mut peers = self.peers.lock();
-        peers.retain(|peer, q| {
+        self.peers.lock().retain(|peer, q| {
             if new.member(*peer).is_none() {
                 q.close();
                 return false;
@@ -161,6 +273,73 @@ impl Replicator {
             });
             true
         });
+        {
+            let mut hints = self.hints.lock();
+            for target in hints.targets() {
+                if new.member(target).is_none() {
+                    hints.drop_target(target);
+                }
+            }
+            hints.retain(|target, k| new.owners(k, rf).contains(&target));
+        }
+        self.sync_charge();
+        if !digest::removed(old, new).is_empty() && new.member(self.id).is_some() {
+            if let Some(node) = self.node.upgrade() {
+                tokio::spawn(digest::reconcile(node, old.clone(), new.clone()));
+            }
+        }
+    }
+
+    /// Drop every queue and hint: after a flush or a lost merge.
+    pub fn flush(&self) {
+        for q in self.peers.lock().values() {
+            q.clear();
+        }
+        self.hints.lock().clear();
+        self.sync_charge();
+    }
+
+    /// The time since the last message from a member of the current epoch.
+    fn absence(&self) -> Duration {
+        let Some(node) = self.node.upgrade() else {
+            return Duration::ZERO;
+        };
+        let epoch = node.epochs().current().clone();
+        let contacts = self.contacts.lock();
+        let last = epoch
+            .members()
+            .iter()
+            .filter(|m| m.id != self.id)
+            .filter_map(|m| contacts.get(&m.id))
+            .max()
+            .copied()
+            .unwrap_or(self.started);
+        last.elapsed()
+    }
+
+    /// Note a message from `peer`.
+    pub fn touch(&self, peer: NodeId) {
+        self.contacts.lock().insert(peer, Instant::now());
+    }
+
+    /// The node rejoins after `away` without its cluster (spec sections 6.3 and 8.2). After at
+    /// least the tombstone TTL, deletes it missed can be gone everywhere, so the store is
+    /// cleared. After a shorter absence, only the shards marked `needs_refill` are cleared.
+    pub fn rejoining(&self, away: Duration) {
+        self.flush();
+        if away >= self.settings.tombstone_ttl {
+            tracing::warn!(
+                ?away,
+                "rejoining after the tombstone TTL, discarding the store"
+            );
+            self.store.clear();
+            return;
+        }
+        let shards = self.store.needs_refill();
+        tracing::info!(?away, shards = shards.len(), "rejoining, keeping the store");
+        for shard in shards {
+            self.store.clear_shard(shard);
+        }
     }
 
     async fn send_loop(self: Arc<Self>, q: Arc<PeerQueue>) {
@@ -168,27 +347,32 @@ impl Replicator {
             if q.is_closed() || self.stop.is_cancelled() {
                 return;
             }
+            let Some(node) = self.node.upgrade() else {
+                return;
+            };
             if q.is_down() {
+                drop(node);
                 tokio::select! {
                     _ = self.stop.cancelled() => return,
                     _ = tokio::time::sleep(self.settings.retry) => {}
                 }
-                if self.probe(&q).await {
+                let Some(node) = self.node.upgrade() else {
+                    return;
+                };
+                if self.probe(&node, &q).await && self.replay(&node, q.peer).await {
                     q.set_up();
                 }
                 continue;
             }
             let keys = q.take(self.settings.batch_keys);
             if keys.is_empty() {
+                drop(node);
                 tokio::select! {
                     _ = self.stop.cancelled() => return,
                     _ = q.notify.notified() => {}
                 }
                 continue;
             }
-            let Some(node) = self.node.upgrade() else {
-                return;
-            };
             let mut batch = Batch::new(node.epoch_id());
             let mut bytes = 0;
             for k in keys {
@@ -204,33 +388,91 @@ impl Replicator {
             match self.send(&node, q.peer, Message::Replicate(batch)).await {
                 Ok(_) => {
                     q.acked();
+                    self.touch(q.peer);
                     if let Some(label) = crate::telemetry::node_label(q.peer) {
                         discus_telemetry::global().replication_lag(&label, started.elapsed());
+                    }
+                    if q.take_drained() && !self.replay(&node, q.peer).await {
+                        for k in q.failed() {
+                            self.hint(q.peer, k);
+                        }
                     }
                 }
                 Err(TransportError::PeerUnsupported(_)) => q.acked(),
                 Err(e) => {
                     tracing::debug!(peer = %q.peer, error = %e, "a replication batch failed");
-                    q.failed();
+                    for k in q.failed() {
+                        self.hint(q.peer, k);
+                    }
                 }
             }
         }
     }
 
     /// An empty batch tells whether the peer takes replication again.
-    async fn probe(&self, q: &PeerQueue) -> bool {
-        let Some(node) = self.node.upgrade() else {
-            return false;
-        };
+    async fn probe(&self, node: &Arc<Node>, q: &PeerQueue) -> bool {
         let batch = Batch::new(node.epoch_id());
-        self.send(&node, q.peer, Message::Replicate(batch))
+        self.send(node, q.peer, Message::Replicate(batch))
             .await
             .is_ok()
     }
 
-    /// Send one bulk message to `peer` and return its acknowledgement. A peer without the
-    /// replication capability gets nothing.
-    async fn send(
+    /// Replay the hints of `peer` in HLC order, one acknowledged batch at a time (spec section
+    /// 9). The first batch names the refill buckets of lost hints. Only a peer that the epoch
+    /// lists as `NORMAL` gets a replay. Returns false when a batch failed.
+    async fn replay(&self, node: &Arc<Node>, peer: NodeId) -> bool {
+        let normal = node
+            .epochs()
+            .current()
+            .member(peer)
+            .is_some_and(|m| m.state == MemberState::Normal);
+        if !normal {
+            return false;
+        }
+        let mut first = true;
+        loop {
+            let (entries, lost) = {
+                let h = self.hints.lock();
+                (h.batch(peer, REPLAY_BATCH), h.lost(peer))
+            };
+            if entries.is_empty() && (lost.is_empty() || !first) {
+                return true;
+            }
+            let sent: Vec<(Bytes, Version)> = entries
+                .iter()
+                .map(|(k, e)| (k.clone(), e.version))
+                .collect();
+            let mut batch = Batch::new(node.epoch_id());
+            batch.entries = entries;
+            if first {
+                batch.discard = lost;
+            }
+            match self.send(node, peer, Message::HintReplay(batch)).await {
+                Ok(_) => {
+                    {
+                        let mut h = self.hints.lock();
+                        h.confirm(peer, &sent);
+                        if first {
+                            h.clear_lost(peer);
+                        }
+                    }
+                    self.sync_charge();
+                    if let Some(label) = crate::telemetry::node_label(peer) {
+                        discus_telemetry::global().hint_replayed(&label, sent.len() as u64);
+                    }
+                    first = false;
+                }
+                Err(e) => {
+                    tracing::debug!(%peer, error = %e, "a hint replay batch failed");
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// Send one bulk message to `peer` and return its reply. A peer without the replication
+    /// capability gets nothing.
+    pub(crate) async fn send(
         &self,
         node: &Arc<Node>,
         peer: NodeId,
@@ -266,7 +508,7 @@ impl Replicator {
     }
 
     /// Answer an inbound bulk message from `from`.
-    pub async fn handle(&self, _from: NodeId, message: Message) -> Message {
+    pub async fn handle(&self, from: NodeId, message: Message) -> Message {
         let Some(node) = self.node.upgrade() else {
             return Message::Unsupported {
                 message_type: message.type_code(),
@@ -274,6 +516,13 @@ impl Replicator {
         };
         match message {
             Message::Replicate(b) => {
+                let applied = self.apply_entries(&node, b.entries);
+                ack(&node, applied, Vec::new())
+            }
+            Message::HintReplay(b) => {
+                if !b.discard.is_empty() {
+                    self.discard(&node, from, &b.discard);
+                }
                 let applied = self.apply_entries(&node, b.entries);
                 ack(&node, applied, Vec::new())
             }
@@ -286,10 +535,48 @@ impl Replicator {
                 }
                 Message::Entries(out)
             }
+            Message::Digest {
+                from: old,
+                to,
+                sums,
+            } => {
+                // A node that skipped the sender's new epoch uses its own current one, which
+                // has the same members once both nodes saw the same change.
+                let (old, new) = {
+                    let epochs = node.epochs();
+                    let current = epochs.current();
+                    let new = epochs
+                        .get(to)
+                        .or_else(|| (current.id() > to).then_some(current))
+                        .cloned();
+                    (epochs.get(old).cloned(), new)
+                };
+                let (Some(old), Some(new)) = (old, new) else {
+                    // The epochs are not here yet. The sender tries again.
+                    return ack(&node, 0, Vec::new());
+                };
+                let (store, rf, me) = (self.store.clone(), self.settings.rf, self.id);
+                let entries = tokio::task::spawn_blocking(move || {
+                    digest::answer(&store, &old, &new, rf, from, me, &sums)
+                })
+                .await
+                .unwrap_or_default();
+                let mut out = Batch::new(node.epoch_id());
+                out.entries = entries;
+                Message::Entries(out)
+            }
             other => Message::Unsupported {
                 message_type: other.type_code(),
             },
         }
+    }
+
+    /// Drop the keys of the lost refill buckets whose primary is `from`, before a replay
+    /// refills what it can (spec section 9).
+    fn discard(&self, node: &Node, from: NodeId, buckets: &[u8]) {
+        let epoch = node.epochs().current().clone();
+        self.store
+            .retain(|k| !(buckets.contains(&refill_bucket(k)) && epoch.primary(k) == Some(from)));
     }
 
     /// Apply entries that are newer than the local ones. An entry with a version too far ahead

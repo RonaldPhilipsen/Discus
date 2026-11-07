@@ -39,6 +39,8 @@ pub enum Pushed {
     Queued,
     /// The queue was full, so its oldest key dropped out.
     Overflow(Bytes),
+    /// The peer is down: the key goes to a hint instead.
+    Down,
 }
 
 impl PeerQueue {
@@ -60,6 +62,9 @@ impl PeerQueue {
     /// Queue `key`. A key already queued keeps one place.
     pub fn push(&self, key: &Bytes) -> Pushed {
         let mut s = self.state.lock();
+        if s.down {
+            return Pushed::Down;
+        }
         if s.keys.contains(key) {
             s.keys.promote(key);
             return Pushed::Queued;
@@ -98,18 +103,32 @@ impl PeerQueue {
         self.state.lock().inflight.clear();
     }
 
-    /// The batch in flight failed. Its keys go back to the front of the queue, and the peer is
-    /// down until a probe succeeds.
-    pub fn failed(&self) {
+    /// The batch in flight failed. Its keys and the queued keys come back for hints, and the
+    /// peer is down until a probe succeeds.
+    pub fn failed(&self) -> Vec<Bytes> {
         let mut s = self.state.lock();
         s.down = true;
-        let back: Vec<Bytes> = s.inflight.drain().collect();
-        for k in back {
-            if !s.keys.contains(&k) {
-                s.keys.push(k.clone(), ());
-                s.keys.demote(&k);
-            }
+        let mut out: Vec<Bytes> = s.inflight.drain().collect();
+        while let Some((k, ())) = s.keys.pop_lru() {
+            out.push(k);
         }
+        out
+    }
+
+    /// True once after the queue of a lagging peer drains below a quarter of its size.
+    pub fn take_drained(&self) -> bool {
+        let mut s = self.state.lock();
+        if s.lagging && s.keys.len() < self.cap / 4 {
+            s.lagging = false;
+            return true;
+        }
+        false
+    }
+
+    pub fn clear(&self) {
+        let mut s = self.state.lock();
+        s.keys.clear();
+        s.inflight.clear();
     }
 
     pub fn set_up(&self) {
@@ -176,15 +195,30 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_batch_goes_back_to_the_front_and_marks_the_peer_down() {
+    fn overflow_drops_the_oldest_and_marks_lagging() {
+        let q = PeerQueue::new(NodeId::from_u128(1), 4);
+        for i in 0..4 {
+            assert_eq!(q.push(&k(&i.to_string())), Pushed::Queued);
+        }
+        assert_eq!(q.push(&k("x")), Pushed::Overflow(k("0")));
+        assert!(!q.take_drained());
+        q.take(4);
+        assert!(q.take_drained());
+        assert!(!q.take_drained());
+    }
+
+    #[test]
+    fn a_failed_batch_returns_every_key_and_marks_the_peer_down() {
         let q = PeerQueue::new(NodeId::from_u128(1), 8);
         q.push(&k("a"));
         q.push(&k("b"));
         q.take(1);
-        q.failed();
-        assert!(q.is_down());
+        let mut back = q.failed();
+        back.sort();
+        assert_eq!(back, vec![k("a"), k("b")]);
+        assert_eq!(q.push(&k("c")), Pushed::Down);
         q.set_up();
-        assert_eq!(q.take(2), vec![k("a"), k("b")]);
+        assert_eq!(q.push(&k("c")), Pushed::Queued);
     }
 
     #[test]

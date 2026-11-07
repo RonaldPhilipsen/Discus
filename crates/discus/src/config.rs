@@ -219,6 +219,15 @@ pub struct Config {
     /// Time for a peer to acknowledge a replication batch, in milliseconds.
     #[arg(long, default_value_t = 1_000)]
     pub replication_timeout_ms: u64,
+    /// Hints held for one unreachable peer, at most.
+    #[arg(long, default_value_t = 262_144)]
+    pub hint_max_entries: usize,
+    /// Bytes of hints held for one unreachable peer, at most.
+    #[arg(long, default_value_t = 67_108_864)]
+    pub hint_max_bytes: u64,
+    /// The share of the memory budget for the hints of every peer, in percent.
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=100))]
+    pub hint_memory_percent: u64,
     /// Time between probes of a peer that missed a batch, in milliseconds.
     #[arg(long, default_value_t = 1_000)]
     pub replication_retry_ms: u64,

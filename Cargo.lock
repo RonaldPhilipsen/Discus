@@ -717,6 +717,7 @@ dependencies = [
  "tracing-subscriber",
  "webpki-roots",
  "x509-parser",
+ "xxhash-rust",
 ]
 
 [[package]]

@@ -37,6 +37,9 @@ impl Service for NodeService {
                     message_type: inbound.message.type_code(),
                 };
             };
+            if let Some(r) = node.replicator() {
+                r.touch(inbound.peer.node_id);
+            }
             match inbound.message {
                 Message::Ping { nonce } => Message::Pong { nonce },
                 Message::Gossip(g) => match node.membership().cloned() {
