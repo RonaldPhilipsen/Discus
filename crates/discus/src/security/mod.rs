@@ -5,13 +5,19 @@
 
 pub mod args;
 pub mod file;
+pub mod identity;
 pub mod limiter;
 pub mod policy;
 pub mod session;
+pub mod stream;
 pub mod tls;
 
-use std::net::IpAddr;
+use std::io;
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
+
+use tokio::net::TcpStream;
 
 use subtle::ConstantTimeEq;
 
@@ -19,6 +25,7 @@ pub use args::{ClientAuth, SecurityArgs, TlsMode};
 pub use file::AuthFile;
 pub use policy::{Factor, Policy, Scopes};
 pub use session::{CertGrant, ConnAuth, TokenGrant};
+pub use stream::ClientStream;
 
 use crate::command::access::{access, Access};
 use crate::command::CommandError;
@@ -41,9 +48,14 @@ fn fail<T>(msg: impl Into<String>) -> Result<T, SecurityError> {
     Err(SecurityError(msg.into()))
 }
 
+/// How long a client has to finish the TLS handshake.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// The security state of a node.
 pub struct Security {
     mode: TlsMode,
+    server_tls: Option<Arc<rustls::ServerConfig>>,
+    cert_rules: Vec<(String, Scopes)>,
     policy: Policy,
     shared_token: Option<String>,
     max_conn_failures: u32,
@@ -54,7 +66,7 @@ impl Security {
     /// Check the configuration and build the security state.
     pub fn from_config(config: &Config) -> Result<Security, SecurityError> {
         let args = &config.security;
-        let _file = match &args.auth_config {
+        let file = match &args.auth_config {
             Some(path) => AuthFile::load(path)?,
             None => AuthFile::default(),
         };
@@ -95,9 +107,28 @@ impl Security {
         if policy.uses(Factor::Oauth2) {
             Self::check_oauth2(args, tls_on)?;
         }
+        let required = args.tls_client_auth == ClientAuth::Required;
+        if required && args.tls_client_ca.is_none() {
+            return fail("--tls-client-auth required needs --tls-client-ca");
+        }
+        let mut cert_rules = Vec::new();
+        for rule in &file.client_cert {
+            let scopes = Scopes::parse_names(&rule.scopes)
+                .map_err(|e| format!("--auth-config client_cert {:?}: {e}", rule.identity))?;
+            cert_rules.push((rule.identity.clone(), scopes));
+        }
+        let server_tls = match (&args.tls_cert, &args.tls_key) {
+            (Some(cert), Some(key)) if tls_on => Some(Arc::new(
+                tls::server_config(cert, key, args.tls_client_ca.as_deref(), required)
+                    .map_err(|e| e.to_string())?,
+            )),
+            _ => None,
+        };
 
         Ok(Security {
             mode: args.tls_mode,
+            server_tls,
+            cert_rules,
             policy,
             shared_token: config.shared_token.clone(),
             max_conn_failures: args.auth_max_failures_per_connection.max(1),
@@ -132,9 +163,37 @@ impl Security {
         &self.policy
     }
 
-    /// The state of a new plaintext connection.
-    pub fn plain_conn(&self, peer: Option<IpAddr>) -> ConnAuth {
-        ConnAuth::new(peer)
+    /// The scopes of a verified certificate identity. Read-write without a matching rule.
+    pub fn cert_scopes(&self, identity: &str) -> Scopes {
+        self.cert_rules
+            .iter()
+            .find(|(pattern, _)| identity::pattern_matches(pattern, identity))
+            .map_or(Scopes::READ_WRITE, |(_, scopes)| *scopes)
+    }
+
+    /// Run the transport setup of a new client connection: nothing in `off` mode, the TLS
+    /// handshake in `node` mode. Returns the stream and what the node knows about the client.
+    pub async fn accept(
+        &self,
+        tcp: TcpStream,
+        peer: SocketAddr,
+    ) -> io::Result<(ClientStream, ConnAuth)> {
+        let mut auth = ConnAuth::new(Some(peer.ip()));
+        let Some(config) = &self.server_tls else {
+            return Ok((ClientStream::Plain(tcp), auth));
+        };
+        let acceptor = tokio_rustls::TlsAcceptor::from(config.clone());
+        let tls = tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timeout"))??;
+        auth.tls = true;
+        if let Some(leaf) = tls.get_ref().1.peer_certificates().and_then(|c| c.first()) {
+            let identity = identity::cert_identity(leaf).unwrap_or_default();
+            let scopes = self.cert_scopes(&identity);
+            tracing::debug!(%identity, "client certificate verified");
+            auth.cert = Some(CertGrant { identity, scopes });
+        }
+        Ok((ClientStream::Tls(Box::new(tls)), auth))
     }
 
     /// True when the connection meets the policy.

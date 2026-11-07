@@ -90,6 +90,40 @@ pub fn load_roots(path: &Path) -> io::Result<RootCertStore> {
     Ok(roots)
 }
 
+/// A server config for a listener. With `client_ca`, the listener asks for a client
+/// certificate and verifies it against that CA only. `require_client` refuses a client without
+/// one.
+pub fn server_config(
+    cert: &Path,
+    key: &Path,
+    client_ca: Option<&Path>,
+    require_client: bool,
+) -> io::Result<rustls::ServerConfig> {
+    let builder = rustls::ServerConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .map_err(io::Error::other)?;
+    let builder = match client_ca {
+        Some(ca) => {
+            let roots = Arc::new(load_roots(ca)?);
+            let verifier =
+                rustls::server::WebPkiClientVerifier::builder_with_provider(roots, provider());
+            let verifier = if require_client {
+                verifier
+            } else {
+                verifier.allow_unauthenticated()
+            };
+            let verifier = verifier
+                .build()
+                .map_err(|e| invalid(ca, "bad client CA", e))?;
+            builder.with_client_cert_verifier(verifier)
+        }
+        None => builder.with_no_client_auth(),
+    };
+    builder
+        .with_single_cert(load_certs(cert)?, load_key(key)?)
+        .map_err(|e| invalid(key, "the key does not match the certificate", e))
+}
+
 /// A client config for outbound HTTPS. A CA file replaces the trust roots.
 pub fn client_config(ca: Option<&Path>) -> io::Result<ClientConfig> {
     let roots = match ca {

@@ -84,8 +84,7 @@ impl Server {
                 accepted = listener.accept() => match accepted {
                     Ok((stream, peer)) => {
                         let _ = stream.set_nodelay(true);
-                        let auth = node.security.plain_conn(Some(peer.ip()));
-                        tracker.spawn(connection::serve(stream, auth, node.clone(), hard_stop.clone()));
+                        tracker.spawn(connection::accept(stream, peer, node.clone(), hard_stop.clone()));
                     }
                     Err(e) => break Err(e),
                 },

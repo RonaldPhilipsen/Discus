@@ -7,7 +7,20 @@ use serde::Deserialize;
 /// Lists that do not fit in flags.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AuthFile {}
+pub struct AuthFile {
+    /// Scopes per client certificate identity. The first match wins.
+    #[serde(default)]
+    pub client_cert: Vec<CertRule>,
+}
+
+/// One client certificate rule.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CertRule {
+    /// The identity pattern. A trailing `*` matches any suffix.
+    pub identity: String,
+    pub scopes: Vec<String>,
+}
 
 impl AuthFile {
     pub fn load(path: &Path) -> Result<AuthFile, String> {

@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use discus_resp::{encode, Limits, Parser, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::net::SocketAddr;
+
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 
@@ -23,7 +25,11 @@ const READ_CHUNK: usize = 64 * 1024;
 /// the flush, which stalls the next read, so memory stays bounded.
 /// Write `out` to the client, giving up when the node force-closes connections. A client that
 /// never reads would otherwise hold the write open forever. Returns false to end the connection.
-async fn flush(stream: &mut TcpStream, out: &mut BytesMut, hard_stop: &CancellationToken) -> bool {
+async fn flush<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    out: &mut BytesMut,
+    hard_stop: &CancellationToken,
+) -> bool {
     let sent = tokio::select! {
         _ = hard_stop.cancelled() => false,
         written = stream.write_all(out) => written.is_ok(),
@@ -32,8 +38,25 @@ async fn flush(stream: &mut TcpStream, out: &mut BytesMut, hard_stop: &Cancellat
     sent
 }
 
-pub async fn serve(
-    mut stream: TcpStream,
+/// Run the transport setup of a new connection, then serve it.
+pub async fn accept(
+    tcp: TcpStream,
+    peer: SocketAddr,
+    node: Arc<Node>,
+    hard_stop: CancellationToken,
+) {
+    let accepted = tokio::select! {
+        _ = hard_stop.cancelled() => return,
+        accepted = node.security.accept(tcp, peer) => accepted,
+    };
+    match accepted {
+        Ok((stream, auth)) => serve(stream, auth, node, hard_stop).await,
+        Err(e) => tracing::debug!(%peer, error = %e, "client connection setup failed"),
+    }
+}
+
+pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
     auth: ConnAuth,
     node: Arc<Node>,
     hard_stop: CancellationToken,
