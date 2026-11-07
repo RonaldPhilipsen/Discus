@@ -1,6 +1,8 @@
 //! The cluster lease (spec section 6.2). It decides which node forms a new cluster, and it names
 //! the winner of a merge between two independently formed clusters (spec section 6.3).
 
+#[cfg(feature = "k8s")]
+mod k8s;
 mod memory;
 
 use std::net::SocketAddr;
@@ -8,6 +10,8 @@ use std::net::SocketAddr;
 use discus_placement::ClusterId;
 use futures::future::BoxFuture;
 
+#[cfg(feature = "k8s")]
+pub use k8s::K8sLease;
 pub use memory::MemoryLease;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

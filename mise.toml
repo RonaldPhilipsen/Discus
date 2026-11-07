@@ -13,6 +13,7 @@ description = "Run all Rust tests, then the telemetry tests without the otel fea
 run = [
   "cargo test --workspace",
   "cargo test -p discus-membership --features testing",
+  "cargo test -p discus-membership --features testing,k8s --test k8s_lease",
   "cargo test -p discus-telemetry",
   "cargo test -p discus --no-default-features --features tls-aws-lc,roots-system --test telemetry --test cluster_trace",
 ]
