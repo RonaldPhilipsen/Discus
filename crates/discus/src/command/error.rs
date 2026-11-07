@@ -15,6 +15,8 @@ pub enum CommandError {
     KeyTooLarge,
     ValueTooLarge,
     Unsupported(String),
+    /// The HLC is pinned at its drift bound, so the node refuses writes for now.
+    TryAgain,
     /// Raw error text, including its prefix such as `ERR` or `OOM`.
     Custom(String),
 }
@@ -40,6 +42,9 @@ impl CommandError {
             CommandError::KeyTooLarge => "ERR key too large".into(),
             CommandError::ValueTooLarge => "ERR value too large".into(),
             CommandError::Unsupported(_) => "ERR command not supported by Discus".into(),
+            CommandError::TryAgain => {
+                "TRYAGAIN the node clock is at its drift bound, try again later".into()
+            }
             CommandError::Custom(s) => s.clone(),
         }
     }

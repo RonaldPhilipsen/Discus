@@ -97,12 +97,11 @@ pub fn mutate<C: Collection, R>(
     f: impl FnOnce(&mut C) -> Result<R, CommandError>,
 ) -> Result<R, CommandError> {
     admit(node, key.len() + grow_bytes)?;
-    node.store.write(key, |slot| {
-        let mut entry = slot.take().unwrap_or_else(|| Entry {
-            value: C::default().into_stored(),
-            expires_at_ms: None,
-            last_access_ms: 0,
-        });
+    let stamp = node.stamp()?;
+    node.store.write(key, stamp, |slot| {
+        let mut entry = slot
+            .take()
+            .unwrap_or_else(|| Entry::new(C::default().into_stored(), None));
         let Some(coll) = C::from_mut(&mut entry.value) else {
             *slot = Some(entry);
             return Err(CommandError::WrongType);

@@ -111,11 +111,7 @@ pub const COMMANDS: &[CommandSpec] = &[
 type Reply = Result<Value, CommandError>;
 
 fn new_entry(value: Bytes, expires_at_ms: Option<u64>) -> Entry {
-    Entry {
-        value: Stored::Str(value),
-        expires_at_ms,
-        last_access_ms: 0,
-    }
+    Entry::new(Stored::Str(value), expires_at_ms)
 }
 
 fn get(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
@@ -183,7 +179,7 @@ fn set(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     }
     admit(node, cmd[1].len() + cmd[2].len())?;
     let value = cmd[2].clone();
-    node.store.write(&cmd[1], |slot| {
+    node.store.write(&cmd[1], node.stamp()?, |slot| {
         let old = match slot.as_ref() {
             None => None,
             Some(Entry {
@@ -214,17 +210,18 @@ fn set(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 }
 
 fn getdel(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    node.store.write(&cmd[1], |slot| match slot.take() {
-        None => Ok(Value::Null),
-        Some(Entry {
-            value: Stored::Str(b),
-            ..
-        }) => Ok(Value::Bulk(b)),
-        Some(other) => {
-            *slot = Some(other);
-            Err(CommandError::WrongType)
-        }
-    })
+    node.store
+        .write(&cmd[1], node.stamp()?, |slot| match slot.take() {
+            None => Ok(Value::Null),
+            Some(Entry {
+                value: Stored::Str(b),
+                ..
+            }) => Ok(Value::Bulk(b)),
+            Some(other) => {
+                *slot = Some(other);
+                Err(CommandError::WrongType)
+            }
+        })
 }
 
 fn getex(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
@@ -241,7 +238,7 @@ fn getex(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         }
         _ => return Err(CommandError::Syntax),
     };
-    node.store.write(&cmd[1], |slot| match slot {
+    node.store.write(&cmd[1], node.stamp()?, |slot| match slot {
         None => Ok(Value::Null),
         Some(e) => {
             let Stored::Str(b) = &e.value else {
@@ -282,9 +279,11 @@ fn mset(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         check_key(node, &pair[0])?;
         check_value(node, &pair[1])?;
     }
+    // One stamp for the whole command. Each key still has its own version.
+    let stamp = node.stamp()?;
     for pair in cmd[1..].chunks(2) {
         admit(node, pair[0].len() + pair[1].len())?;
-        node.store.write(&pair[0], |slot| {
+        node.store.write(&pair[0], stamp, |slot| {
             *slot = Some(new_entry(pair[1].clone(), None))
         });
     }
@@ -295,7 +294,7 @@ fn mset(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 fn add_integer(node: &Node, key: &Bytes, delta: i64) -> Reply {
     check_key(node, key)?;
     admit(node, key.len() + 20)?;
-    node.store.write(key, |slot| {
+    node.store.write(key, node.stamp()?, |slot| {
         let current = match slot.as_ref() {
             None => 0,
             Some(Entry {
@@ -334,7 +333,7 @@ fn incrbyfloat(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     check_key(node, &cmd[1])?;
     admit(node, cmd[1].len() + 32)?;
     let delta = parse_f64(&cmd[2])?;
-    node.store.write(&cmd[1], |slot| {
+    node.store.write(&cmd[1], node.stamp()?, |slot| {
         let current = match slot.as_ref() {
             None => 0.0,
             Some(Entry {
@@ -359,7 +358,7 @@ fn incrbyfloat(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 fn append(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     check_key(node, &cmd[1])?;
     admit(node, cmd[2].len())?;
-    node.store.write(&cmd[1], |slot| {
+    node.store.write(&cmd[1], node.stamp()?, |slot| {
         let (mut bytes, expires) = match slot.as_ref() {
             None => (Vec::new(), None),
             Some(Entry {
@@ -389,7 +388,12 @@ fn strlen(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 }
 
 fn del(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    let removed = cmd[1..].iter().filter(|k| node.store.remove(k)).count();
+    // A stamped write, not `Store::remove`, so plan 4 can turn it into a tombstone.
+    let stamp = node.stamp()?;
+    let removed = cmd[1..]
+        .iter()
+        .filter(|k| node.store.write(k, stamp, |slot| slot.take().is_some()))
+        .count();
     Ok(Value::Integer(removed as i64))
 }
 

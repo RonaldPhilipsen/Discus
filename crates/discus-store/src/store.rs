@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 use crate::entry::estimate_size;
-use crate::{Clock, Entry};
+use crate::{Clock, Entry, Version};
 
 /// The seed of the key hash. A change to it or to the hash is a breaking change, because
 /// placement in later plans depends on it.
@@ -96,8 +96,14 @@ impl Store {
     }
 
     /// Modify an entry in place. An expired entry is deleted before `f` runs, so `f` sees `None`.
-    /// Setting the slot to `None` deletes the key.
-    pub fn write<R>(&self, key: &[u8], f: impl FnOnce(&mut Option<Entry>) -> R) -> R {
+    /// Setting the slot to `None` deletes the key. Every entry left in the slot gets `stamp` as
+    /// its version, also when `f` did not change it.
+    pub fn write<R>(
+        &self,
+        key: &[u8],
+        stamp: Version,
+        f: impl FnOnce(&mut Option<Entry>) -> R,
+    ) -> R {
         let shard = &self.shards[self.shard_index(key)];
         let now = self.clock.now_ms();
         let mut guard = shard.inner.write();
@@ -117,6 +123,7 @@ impl Store {
         let after = match slot {
             Some(mut e) => {
                 e.last_access_ms = now;
+                e.version = stamp;
                 let k = key_bytes.unwrap_or_else(|| Bytes::copy_from_slice(key));
                 let size = estimate_size(&k, &e);
                 guard.map.insert(k, e);
@@ -137,8 +144,10 @@ impl Store {
     }
 
     /// Delete a key. Returns true when a live entry was removed.
+    ///
+    /// This is for internal deletes that take no HLC stamp. A client `DEL` uses [`Store::write`].
     pub fn remove(&self, key: &[u8]) -> bool {
-        self.write(key, |slot| slot.take().is_some())
+        self.write(key, Version::ZERO, |slot| slot.take().is_some())
     }
 
     /// Number of stored entries, including expired entries that nobody reaped yet.

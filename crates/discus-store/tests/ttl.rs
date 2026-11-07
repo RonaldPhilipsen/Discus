@@ -1,3 +1,4 @@
+use discus_store::Version;
 use discus_store::{Entry, ManualClock, Store, StoreConfig, Value, HASH_SEED};
 use std::sync::Arc;
 
@@ -13,12 +14,8 @@ fn sweep_removes_a_share_of_expired_entries_without_touching_live_ones() {
     for i in 0..400 {
         let key = format!("k{i}");
         let expires = if i % 2 == 0 { Some(10) } else { None };
-        s.write(key.as_bytes(), |slot| {
-            *slot = Some(Entry {
-                value: Value::Str("v".into()),
-                expires_at_ms: expires,
-                last_access_ms: 0,
-            });
+        s.write(key.as_bytes(), Version::ZERO, |slot| {
+            *slot = Some(Entry::new(Value::Str("v".into()), expires));
         });
     }
     clock.advance(20);
@@ -40,12 +37,8 @@ fn repeated_sweeps_eventually_cover_every_expired_entry() {
     };
     let s = Store::new(cfg, clock.clone());
     for i in 0..300 {
-        s.write(format!("k{i}").as_bytes(), |slot| {
-            *slot = Some(Entry {
-                value: Value::Str("v".into()),
-                expires_at_ms: Some(5),
-                last_access_ms: 0,
-            });
+        s.write(format!("k{i}").as_bytes(), Version::ZERO, |slot| {
+            *slot = Some(Entry::new(Value::Str("v".into()), Some(5)));
         });
     }
     clock.advance(10);

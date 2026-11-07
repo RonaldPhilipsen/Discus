@@ -1,4 +1,6 @@
-//! A stored entry: a value with its expiry and access time.
+//! A stored entry: a value with its expiry, access time, and HLC version.
+
+use discus_placement::Version;
 
 use crate::Value;
 
@@ -12,9 +14,21 @@ pub struct Entry {
     pub expires_at_ms: Option<u64>,
     /// Last access in Unix milliseconds, at roughly one second of resolution on reads.
     pub last_access_ms: u64,
+    /// The HLC timestamp and origin of the last write. Conflicts resolve by this version.
+    pub version: Version,
 }
 
 impl Entry {
+    /// A new entry. The store sets the version and the access time when the write lands.
+    pub fn new(value: Value, expires_at_ms: Option<u64>) -> Entry {
+        Entry {
+            value,
+            expires_at_ms,
+            last_access_ms: 0,
+            version: Version::ZERO,
+        }
+    }
+
     pub fn is_expired(&self, now_ms: u64) -> bool {
         matches!(self.expires_at_ms, Some(t) if t <= now_ms)
     }

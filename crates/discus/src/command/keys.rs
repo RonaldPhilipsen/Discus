@@ -91,7 +91,7 @@ fn invalid(who: &str) -> CommandError {
 /// Set an absolute deadline. A deadline that is not in the future deletes the key.
 fn set_deadline(node: &Node, key: &[u8], deadline_ms: i128) -> Reply {
     let now = node.store.now_ms() as i128;
-    node.store.write(key, |slot| match slot {
+    node.store.write(key, node.stamp()?, |slot| match slot {
         None => Ok(Value::Integer(0)),
         Some(_) if deadline_ms <= now => {
             *slot = None;
@@ -153,7 +153,7 @@ fn pttl(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 }
 
 fn persist(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    node.store.write(&cmd[1], |slot| match slot {
+    node.store.write(&cmd[1], node.stamp()?, |slot| match slot {
         Some(e) if e.expires_at_ms.is_some() => {
             e.expires_at_ms = None;
             Ok(Value::Integer(1))

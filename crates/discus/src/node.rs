@@ -6,8 +6,11 @@ use std::time::Instant;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use discus_placement::{Clock, Hlc, NodeId, Version};
 use discus_resp::Protocol;
 use discus_store::{Store, StoreConfig, SystemClock, HASH_SEED};
+
+use crate::command::CommandError;
 
 use crate::Config;
 
@@ -32,6 +35,10 @@ impl Phase {
 /// The node. Shared as `Arc<Node>`.
 pub struct Node {
     pub config: Config,
+    /// This process's identity. A restart is a new node.
+    pub id: NodeId,
+    /// The clock that stamps every write.
+    pub hlc: Hlc,
     pub started_at: Instant,
     pub store: Arc<Store>,
     next_conn_id: AtomicU64,
@@ -41,16 +48,24 @@ pub struct Node {
 
 impl Node {
     pub fn new(config: Config) -> Node {
+        Node::with_clock(config, Arc::new(SystemClock))
+    }
+
+    /// A node on the given wall clock. The store and the HLC share it.
+    pub fn with_clock(config: Config, clock: Arc<dyn Clock>) -> Node {
         let store = Store::new(
             StoreConfig {
                 shards: config.shards,
                 max_memory: config.max_memory,
                 seed: HASH_SEED,
             },
-            Arc::new(SystemClock),
+            clock.clone(),
         );
+        let id = NodeId::random();
         Node {
             config,
+            id,
+            hlc: Hlc::new(id, clock),
             started_at: Instant::now(),
             store: Arc::new(store),
             next_conn_id: AtomicU64::new(1),
@@ -84,6 +99,12 @@ impl Node {
 
     pub fn set_phase(&self, phase: Phase) {
         self.phase.store(phase as u8, Ordering::Release);
+    }
+
+    /// A fresh HLC version for one write command. A clock pinned at its drift bound refuses, and
+    /// the command returns `-TRYAGAIN`.
+    pub fn stamp(&self) -> Result<Version, CommandError> {
+        self.hlc.tick().map_err(|_| CommandError::TryAgain)
     }
 
     pub fn next_conn_id(&self) -> u64 {

@@ -13,6 +13,7 @@ pub mod value;
 pub mod zset;
 
 pub use discus_placement::clock::{self, Clock, ManualClock, SystemClock};
+pub use discus_placement::{NodeId, Timestamp, Version};
 pub use entry::{estimate_size, Entry};
 pub use evict::Admit;
 pub use glob::glob_match;

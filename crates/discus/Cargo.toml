@@ -8,6 +8,7 @@ workspace = true
 
 [dependencies]
 bytes = "1"
+discus-placement = { path = "../discus-placement" }
 discus-resp = { path = "../discus-resp" }
 discus-store = { path = "../discus-store" }
 fastrand = "2"
