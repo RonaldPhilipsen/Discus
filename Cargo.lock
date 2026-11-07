@@ -446,6 +446,7 @@ dependencies = [
  "discus-store",
  "discus-transport",
  "fastrand",
+ "futures",
  "parking_lot",
  "redis",
  "reqwest",

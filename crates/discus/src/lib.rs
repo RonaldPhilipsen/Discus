@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod build;
+pub mod cluster;
 pub mod command;
 pub mod config;
 pub mod node;

@@ -13,6 +13,7 @@ use crate::admin::serve_admin;
 use crate::{Config, Node, Phase};
 
 mod connection;
+mod order;
 
 /// A node with both listeners bound.
 pub struct Server {

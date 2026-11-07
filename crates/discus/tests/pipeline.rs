@@ -57,3 +57,32 @@ async fn unknown_and_unsupported_commands_return_clear_errors() {
     assert!(text.starts_with("-ERR unknown command 'NOPE!'"));
     assert!(text.contains("-ERR command not supported by Discus\r\n"));
 }
+
+#[tokio::test]
+async fn quit_after_a_pipeline_flushes_every_reply() {
+    let addr = common::start_node(&[]).await;
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    s.write_all(b"*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n1\r\n*2\r\n$3\r\nGET\r\n$1\r\na\r\n*1\r\n$4\r\nQUIT\r\n")
+        .await
+        .unwrap();
+    let mut got = Vec::new();
+    s.read_to_end(&mut got).await.unwrap();
+    assert_eq!(got, b"+OK\r\n$1\r\n1\r\n+OK\r\n");
+}
+
+#[tokio::test]
+async fn hello_3_in_a_pipeline_switches_later_replies() {
+    let addr = common::start_node(&[]).await;
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    s.write_all(b"*2\r\n$5\r\nHELLO\r\n$1\r\n3\r\n*2\r\n$3\r\nGET\r\n$7\r\nmissing\r\n")
+        .await
+        .unwrap();
+    let mut text = Vec::new();
+    let mut buf = vec![0u8; 4096];
+    while !text.ends_with(b"_\r\n") {
+        let n = s.read(&mut buf).await.unwrap();
+        assert!(n > 0, "closed early: {:?}", String::from_utf8_lossy(&text));
+        text.extend_from_slice(&buf[..n]);
+    }
+    assert!(text.starts_with(b"%"));
+}

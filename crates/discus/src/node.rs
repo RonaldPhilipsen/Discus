@@ -155,6 +155,8 @@ pub struct ConnState {
     pub id: u64,
     /// Set by `QUIT`: close the connection after the reply is flushed.
     pub closing: bool,
+    /// The round-robin position for reads over replicas.
+    rr: u64,
 }
 
 impl ConnState {
@@ -165,7 +167,14 @@ impl ConnState {
             name: None,
             id,
             closing: false,
+            rr: id,
         }
+    }
+
+    /// The next round-robin position. Each data command takes one.
+    pub fn next_rr(&mut self) -> u64 {
+        self.rr = self.rr.wrapping_add(1);
+        self.rr
     }
 }
 

@@ -13,6 +13,7 @@ discus-resp = { path = "../discus-resp" }
 discus-store = { path = "../discus-store" }
 discus-transport = { path = "../discus-transport", default-features = false }
 fastrand = "2"
+futures = "0.3"
 parking_lot = "0.12"
 subtle = "2"
 clap = { version = "4", features = ["derive"] }

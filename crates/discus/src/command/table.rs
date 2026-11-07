@@ -96,10 +96,21 @@ fn is_unsupported(upper: &str) -> bool {
 
 /// Run one command and return its reply.
 pub fn dispatch(node: &Node, conn: &mut ConnState, cmd: &Command) -> Value {
-    run(node, conn, cmd).unwrap_or_else(|e| e.to_value())
+    match check(conn, cmd) {
+        Ok(spec) => (spec.handler)(node, conn, cmd).unwrap_or_else(|e| e.to_value()),
+        Err(e) => e.to_value(),
+    }
 }
 
-fn run(node: &Node, conn: &mut ConnState, cmd: &Command) -> Result<Value, CommandError> {
+/// Run a data command on this node with no authentication check. The entry node checked it, or
+/// the command arrived over mTLS from another node.
+pub fn execute_local(node: &Node, cmd: &Command) -> Value {
+    let mut internal = ConnState::new(0, true);
+    dispatch(node, &mut internal, cmd)
+}
+
+/// Look up a command and check its arity and the authentication of the connection.
+pub fn check(conn: &ConnState, cmd: &Command) -> Result<&'static CommandSpec, CommandError> {
     let name = &cmd[0];
     let Some(spec) = lookup(name) else {
         let upper = String::from_utf8_lossy(name).to_ascii_uppercase();
@@ -121,5 +132,5 @@ fn run(node: &Node, conn: &mut ConnState, cmd: &Command) -> Result<Value, Comman
     if spec.needs_auth && !conn.authenticated {
         return Err(CommandError::NoAuth);
     }
-    (spec.handler)(node, conn, cmd)
+    Ok(spec)
 }
