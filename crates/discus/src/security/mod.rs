@@ -7,6 +7,8 @@ pub mod args;
 pub mod file;
 pub mod identity;
 pub mod limiter;
+#[cfg(feature = "oauth2")]
+pub mod oauth2;
 pub mod policy;
 pub mod proxy;
 pub mod session;
@@ -69,6 +71,7 @@ impl Security {
     /// Check the configuration and build the security state.
     pub fn from_config(config: &Config) -> Result<Security, SecurityError> {
         let args = &config.security;
+        tls::install_default();
         let file = match &args.auth_config {
             Some(path) => AuthFile::load(path)?,
             None => AuthFile::default(),

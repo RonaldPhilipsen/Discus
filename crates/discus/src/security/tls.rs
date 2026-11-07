@@ -28,6 +28,12 @@ pub fn provider() -> Arc<CryptoProvider> {
         .clone()
 }
 
+/// Make the backend provider the process-wide `rustls` default, for libraries that build a TLS
+/// config on their own. Later calls do nothing.
+pub fn install_default() {
+    let _ = CryptoProvider::install_default(provider().as_ref().clone());
+}
+
 /// The trust roots for outbound HTTPS without a configured CA.
 pub fn trust_roots() -> RootCertStore {
     let mut roots = RootCertStore::empty();
