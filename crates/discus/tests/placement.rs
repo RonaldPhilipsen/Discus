@@ -2,13 +2,16 @@
 
 mod common;
 
+use discus::security::Security;
 use discus::{Config, Node};
 use discus_placement::{ClusterId, EpochId, MemberState};
 
 fn node(args: &[&str]) -> Node {
     let mut argv = vec!["discus"];
     argv.extend_from_slice(args);
-    Node::new(Config::parse_from(argv).unwrap())
+    let config = Config::parse_from(argv).unwrap();
+    let security = Security::from_config(&config).unwrap();
+    Node::new(config, std::sync::Arc::new(security))
 }
 
 #[test]

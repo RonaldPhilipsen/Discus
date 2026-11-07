@@ -46,13 +46,47 @@ check "$base,otel,oauth2-introspection,k8s"
 
 # Each TLS backend and each trust root feature. The base case above covers tls-aws-lc.
 check "tls-ring,roots-system"
-# tls-openssl links the system OpenSSL. Skip it only when the development headers are absent.
+# tls-openssl links the system OpenSSL, so it needs the development headers.
 if pkg-config --exists openssl 2>/dev/null; then
   check "tls-openssl,roots-system"
 else
-  echo "skip    tls-openssl,roots-system (OpenSSL development headers not found)"
+  echo "skipped tls-openssl,roots-system (OpenSSL development headers not found)"
 fi
 check "tls-aws-lc,roots-webpki"
+
+# A binary without a subsystem refuses a configuration that needs it, and names the feature.
+if cargo test -q -p discus --no-default-features --features "$base" --test security_config \
+  >/dev/null 2>&1; then
+  echo "ok      $base refuses configurations that need a missing feature"
+else
+  echo "FAILED  $base refuses configurations that need a missing feature"
+  failures=$((failures + 1))
+fi
+
+# Introspection is off by default, so `mise run test` does not run its tests.
+if cargo test -q -p discus --features oauth2-introspection --test introspection \
+  >/dev/null 2>&1; then
+  echo "ok      oauth2-introspection tests"
+else
+  echo "FAILED  oauth2-introspection tests"
+  failures=$((failures + 1))
+fi
+
+# Telemetry with the other TLS backends and trust roots (TLS to the OTLP collector).
+check "tls-ring,roots-webpki,otel"
+if pkg-config --exists openssl 2>/dev/null; then
+  check "tls-openssl,roots-system,otel"
+else
+  echo "skipped tls-openssl,roots-system,otel (OpenSSL development headers not found)"
+fi
+
+# Without otel, no OpenTelemetry crate is compiled into the binary (spec §15.5).
+if cargo tree -q -p discus -e normal --no-default-features --features "$base" | grep -q opentelemetry; then
+  echo "FAILED  $base pulls in an OpenTelemetry crate without otel"
+  failures=$((failures + 1))
+else
+  echo "ok      $base has no OpenTelemetry crate"
+fi
 
 # Rejected combinations.
 reject "roots-system" "enable exactly one TLS backend feature"

@@ -7,6 +7,7 @@ use discus_resp::{Command, Value};
 
 use super::error::CommandError;
 use crate::node::{ConnState, Node};
+use crate::security::ConnAuth;
 
 pub type Handler = fn(&Node, &mut ConnState, &Command) -> Result<Value, CommandError>;
 
@@ -90,27 +91,32 @@ const UNSUPPORTED: &[&str] = &[
     "WATCH",
 ];
 
-fn is_unsupported(upper: &str) -> bool {
+/// True for a name that Discus rejects on purpose. `upper` is the upper case name.
+pub fn is_unsupported(upper: &str) -> bool {
     UNSUPPORTED.contains(&upper) || upper.starts_with('X') || upper.starts_with("GEO")
 }
 
-/// Run one command and return its reply.
+/// Run one command and return its reply: the entry checks, then the handler. One node with no
+/// router runs every command this way.
 pub fn dispatch(node: &Node, conn: &mut ConnState, cmd: &Command) -> Value {
-    match check(conn, cmd) {
+    match check(cmd).and_then(|spec| authorize(node, conn, spec).map(|()| spec)) {
         Ok(spec) => (spec.handler)(node, conn, cmd).unwrap_or_else(|e| e.to_value()),
         Err(e) => e.to_value(),
     }
 }
 
-/// Run a data command on this node with no authentication check. The entry node checked it, or
+/// Run a data command on this node with no authorization check. The entry node checked it, or
 /// the command arrived over mTLS from another node.
 pub fn execute_local(node: &Node, cmd: &Command) -> Value {
-    let mut internal = ConnState::new(0, true);
-    dispatch(node, &mut internal, cmd)
+    let mut internal = ConnState::new(0, ConnAuth::default());
+    match check(cmd) {
+        Ok(spec) => (spec.handler)(node, &mut internal, cmd).unwrap_or_else(|e| e.to_value()),
+        Err(e) => e.to_value(),
+    }
 }
 
-/// Look up a command and check its arity and the authentication of the connection.
-pub fn check(conn: &ConnState, cmd: &Command) -> Result<&'static CommandSpec, CommandError> {
+/// Look up a command and check its arity.
+pub fn check(cmd: &Command) -> Result<&'static CommandSpec, CommandError> {
     let name = &cmd[0];
     let Some(spec) = lookup(name) else {
         let upper = String::from_utf8_lossy(name).to_ascii_uppercase();
@@ -129,8 +135,18 @@ pub fn check(conn: &ConnState, cmd: &Command) -> Result<&'static CommandSpec, Co
     if !arity_ok {
         return Err(CommandError::WrongArity(spec.name.into()));
     }
-    if spec.needs_auth && !conn.authenticated {
-        return Err(CommandError::NoAuth);
-    }
     Ok(spec)
+}
+
+/// Check the authentication and the scopes of the connection for a command. Only the entry node
+/// calls it (spec §15.3).
+pub fn authorize(
+    node: &Node,
+    conn: &mut ConnState,
+    spec: &CommandSpec,
+) -> Result<(), CommandError> {
+    if spec.needs_auth {
+        node.security.authorize(conn, spec.name)?;
+    }
+    Ok(())
 }

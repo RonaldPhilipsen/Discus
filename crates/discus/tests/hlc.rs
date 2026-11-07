@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use discus::command::dispatch;
+use discus::security::{ConnAuth, Security};
 use discus::{Config, ConnState, Node};
 use discus_placement::mock::MockClock;
 use discus_resp::Value;
@@ -16,7 +17,8 @@ fn node<const SLOT: usize>() -> Node {
     let clock = MockClock::<SLOT>;
     clock.set(START);
     let config = Config::parse_from(["discus"]).unwrap();
-    Node::with_clocks(config, Arc::new(clock), clock.hlc_clock())
+    let security = Arc::new(Security::from_config(&config).unwrap());
+    Node::with_clocks(config, security, Arc::new(clock), clock.hlc_clock())
 }
 
 fn ms(n: u64) -> NTP64 {
@@ -24,7 +26,7 @@ fn ms(n: u64) -> NTP64 {
 }
 
 fn run(node: &Node, args: &[&str]) -> Value {
-    let mut conn = ConnState::new(1, true);
+    let mut conn = ConnState::new(1, ConnAuth::default());
     let cmd: Vec<Bytes> = args
         .iter()
         .map(|a| Bytes::copy_from_slice(a.as_bytes()))

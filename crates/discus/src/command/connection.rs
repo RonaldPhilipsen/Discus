@@ -4,7 +4,6 @@ use std::fmt::Write;
 
 use bytes::Bytes;
 use discus_resp::{Command, Protocol, Value};
-use subtle::ConstantTimeEq;
 
 use super::error::CommandError;
 use super::table::{names, CommandSpec};
@@ -103,34 +102,14 @@ fn quit(_: &Node, conn: &mut ConnState, _: &Command) -> Result<Value, CommandErr
     Ok(Value::ok())
 }
 
-/// Check a token against the configured shared token in constant time.
-fn token_ok(node: &Node, given: &[u8]) -> bool {
-    match &node.config.shared_token {
-        Some(expected) => bool::from(expected.as_bytes().ct_eq(given)),
-        None => false,
-    }
-}
-
-fn wrong_pass() -> CommandError {
-    CommandError::Custom("WRONGPASS invalid username-password pair or user is disabled.".into())
-}
-
 fn auth(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     if cmd.len() > 3 {
         return Err(CommandError::Syntax);
     }
-    if node.config.shared_token.is_none() {
-        return Err(CommandError::Custom(
-            "ERR AUTH <password> called without any password configured for the default user. \
-             Are you sure your configuration is correct?"
-                .into(),
-        ));
-    }
     // The username is an identity hint. The token is the credential.
-    if !token_ok(node, &cmd[cmd.len() - 1]) {
-        return Err(wrong_pass());
-    }
-    conn.authenticated = true;
+    let user = (cmd.len() == 3).then(|| &cmd[1][..]);
+    node.security
+        .authenticate(conn, user, &cmd[cmd.len() - 1])?;
     Ok(Value::ok())
 }
 
@@ -149,15 +128,12 @@ fn hello(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
         };
         i = 2;
     }
-    let mut authed = conn.authenticated;
     let mut name = None;
     while i < cmd.len() {
         match upper(&cmd[i]).as_str() {
             "AUTH" if i + 2 < cmd.len() => {
-                if node.config.shared_token.is_none() || !token_ok(node, &cmd[i + 2]) {
-                    return Err(wrong_pass());
-                }
-                authed = true;
+                node.security
+                    .authenticate(conn, Some(&cmd[i + 1]), &cmd[i + 2])?;
                 i += 3;
             }
             "SETNAME" if i + 1 < cmd.len() => {
@@ -167,10 +143,9 @@ fn hello(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
             _ => return Err(CommandError::Syntax),
         }
     }
-    if !authed {
+    if !node.security.is_authenticated(&conn.auth) {
         return Err(CommandError::NoAuth);
     }
-    conn.authenticated = true;
     conn.protocol = protocol;
     if name.is_some() {
         conn.name = name;

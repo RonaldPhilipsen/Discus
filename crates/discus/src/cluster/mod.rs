@@ -129,10 +129,14 @@ impl Dispatch {
     }
 }
 
-/// Check a command on the entry node: lookup, arity, and authentication. Connection commands
-/// run here, because they read and change the connection state.
+/// Check a command on the entry node: lookup, arity, authentication, and authorization.
+/// Connection commands run here, because they read and change the connection state. Only the
+/// entry node authorizes. A forwarded command arrives over cluster mTLS and is not checked again.
 pub fn prepare(node: &Node, conn: &mut ConnState, cmd: Command) -> Prepared {
-    let spec = match command::check(conn, &cmd) {
+    let spec = match command::check(&cmd).and_then(|spec| {
+        command::authorize(node, conn, spec)?;
+        Ok(spec)
+    }) {
         Ok(spec) => spec,
         Err(e) => return Prepared::Done(e.to_value()),
     };

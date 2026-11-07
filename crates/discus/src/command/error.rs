@@ -19,6 +19,8 @@ pub enum CommandError {
     TryAgain,
     /// Routing failed: an owner is unreachable, or the hop budget ran out during an epoch change.
     ClusterTryAgain,
+    /// The scopes of the connection do not allow the command (lower-case name).
+    NoPerm(String),
     /// Raw error text, including its prefix such as `ERR` or `OOM`.
     Custom(String),
 }
@@ -49,6 +51,9 @@ impl CommandError {
             }
             CommandError::ClusterTryAgain => {
                 "TRYAGAIN the cluster is changing, try again later".into()
+            }
+            CommandError::NoPerm(n) => {
+                format!("NOPERM this user has no permissions to run the '{n}' command")
             }
             CommandError::Custom(s) => s.clone(),
         }

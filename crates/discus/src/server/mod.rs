@@ -14,6 +14,7 @@ use discus_transport::{TlsMaterial, Transport, TransportConfig};
 use crate::admin::serve_admin;
 use crate::cluster::service::NodeService;
 use crate::cluster::ClusterLink;
+use crate::security::Security;
 use crate::{Config, Node, Phase};
 
 mod connection;
@@ -63,9 +64,11 @@ impl Server {
         } else {
             None
         };
+        let security =
+            Arc::new(Security::from_config(&config).map_err(|e| invalid(e.to_string()))?);
         let listener = TcpListener::bind(config.listen).await?;
         let admin = TcpListener::bind(config.admin_listen).await?;
-        let node = Arc::new(Node::new(config));
+        let node = Arc::new(Node::new(config, security));
         if let Some(tls) = tls {
             let cfg = &node.config;
             let mut tc = TransportConfig::new(cfg.cluster_listen, tls, node.id, node.cluster_id());
@@ -129,6 +132,7 @@ impl Server {
             20,
             stop_background.clone(),
         );
+        node.security.start(stop_background.clone());
         let admin_task = tokio::spawn(serve_admin(node.clone(), admin, stop_background.clone()));
         let tracker = TaskTracker::new();
         let hard_stop = CancellationToken::new();
@@ -158,9 +162,9 @@ impl Server {
             tokio::select! {
                 _ = shutdown.cancelled() => break Ok(()),
                 accepted = listener.accept() => match accepted {
-                    Ok((stream, _)) => {
+                    Ok((stream, peer)) => {
                         let _ = stream.set_nodelay(true);
-                        tracker.spawn(connection::serve(stream, node.clone(), hard_stop.clone()));
+                        tracker.spawn(connection::accept(stream, peer, node.clone(), hard_stop.clone()));
                     }
                     Err(e) => break Err(e),
                 },

@@ -46,6 +46,16 @@ behave differently from Redis:
 
 See [Running a static cluster](cluster.md) for the details.
 
+## Authentication
+
+`AUTH` and `HELLO ... AUTH` accept the shared token or an OAuth 2.0 token. `AUTH OAUTH2 <token>`
+selects OAuth 2.0. The username is only a hint. A failed `AUTH` always returns the same
+`-WRONGPASS` error. A command that the scopes of the connection do not allow returns
+`-NOPERM this user has no permissions to run the '<command>' command`. An expired token turns the
+next command into `-NOAUTH`, and the client can send `AUTH` again on the same connection.
+
+See [security.md](security.md) for TLS, the authentication policy, scopes, and the admin port.
+
 ## Limits and defaults
 
 | Limit | Default | Flag |
@@ -66,10 +76,11 @@ random sample. A single value larger than the whole budget returns
 
 ## Build features
 
-Cargo features select optional subsystems and the TLS backend at compile time. The subsystems
-arrive in later releases, so today each feature changes only what `INFO` reports. The `discus`
-section of `INFO` and the first log line show the build identifier, the enabled features, the TLS
-backend, and the trust root source.
+Cargo features select optional subsystems and the TLS backend at compile time. The security
+features (`oauth2`, `oauth2-introspection`, `k8s`, the TLS backends, and the trust roots) work
+today, as [security.md](security.md) describes. `otel` and the Kubernetes `Lease` provider arrive
+in later releases. The `discus` section of `INFO` and the first log line show the build
+identifier, the enabled features, the TLS backend, and the trust root source.
 
 | Feature | Default | Adds |
 | --- | --- | --- |

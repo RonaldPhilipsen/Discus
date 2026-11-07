@@ -11,7 +11,7 @@ use futures::future::BoxFuture;
 use super::route::{route_of, Route};
 use super::{local, run_hop, Hop, Job, Reply};
 use crate::command;
-use crate::node::{ConnState, Node};
+use crate::node::Node;
 
 /// The transport service of a node. It holds the node weakly, because the node holds the
 /// transport.
@@ -100,7 +100,9 @@ async fn forwarded(
     if f.mode == ForwardMode::Local {
         return local(node, &cmd);
     }
-    let spec = match command::check(&ConnState::new(0, true), &cmd) {
+    // The sender authorized the command on its entry node, and cluster mTLS authenticated the
+    // sender, so only the lookup and the arity run here.
+    let spec = match command::check(&cmd) {
         Ok(spec) => spec,
         Err(e) => return Reply::error(e),
     };

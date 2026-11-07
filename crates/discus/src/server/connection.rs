@@ -1,28 +1,41 @@
 //! One client connection.
 //!
+//! `accept` runs the transport setup of the security mode first: TLS, the PROXY header, or
+//! nothing. Then `serve` runs the command loop over the resulting stream.
+//!
 //! Commands run concurrently but reply in request order (spec section 7.1). The loop keeps a
 //! `FuturesOrdered` of reply slots. A command that waits for nothing and needs no other node
 //! runs inline. When nothing is pending, its reply goes straight into the output buffer, so the
 //! single-node path allocates no future.
+//!
+//! Each command passes the entry checks in request order: lookup, arity, authentication, and
+//! authorization (`cluster::prepare`). Only then does it route. A command that another node
+//! forwards arrives over cluster mTLS and is not authorized again. Each command also carries its
+//! telemetry span and metrics from the entry checks to the reply.
 //!
 //! Backpressure: the loop reads only while fewer than `max_pipeline` slots are pending and the
 //! parser needs more bytes. It flushes when the buffer reaches 1 MiB and when no slot is pending.
 //! A client that does not read its replies stalls the flush, which stalls the next read, so memory
 //! stays bounded.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::BytesMut;
 use discus_resp::{encode, Command, Limits, Parser, Protocol, Value};
+use discus_telemetry::Metrics;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesOrdered, StreamExt};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use super::order::KeyOrder;
 use crate::cluster::{self, Dispatch, Prepared};
 use crate::node::{ConnState, Node};
+use crate::security::ConnAuth;
+use crate::telemetry::CommandTrace;
 
 /// Flush when this many reply bytes are pending.
 const FLUSH_BYTES: usize = 1 << 20;
@@ -38,7 +51,11 @@ struct Slot {
 
 /// Write `out` to the client, giving up when the node force-closes connections. A client that
 /// never reads would otherwise hold the write open forever. Returns false to end the connection.
-async fn flush(stream: &mut TcpStream, out: &mut BytesMut, hard_stop: &CancellationToken) -> bool {
+async fn flush<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    out: &mut BytesMut,
+    hard_stop: &CancellationToken,
+) -> bool {
     if out.is_empty() {
         return true;
     }
@@ -52,6 +69,7 @@ async fn flush(stream: &mut TcpStream, out: &mut BytesMut, hard_stop: &Cancellat
 
 struct Pipeline {
     node: Arc<Node>,
+    metrics: &'static Metrics,
     conn: ConnState,
     order: KeyOrder,
     pending: FuturesOrdered<BoxFuture<'static, Slot>>,
@@ -78,10 +96,32 @@ impl Pipeline {
         }
     }
 
+    /// The async part of `AUTH` and `HELLO ... AUTH` (a JWKS refresh). Earlier commands keep
+    /// running meanwhile, and their replies go into the output buffer in order.
+    async fn prefetch(&mut self, cmd: &Command) {
+        let node = self.node.clone();
+        let fetch = node.security.prefetch(&self.conn, cmd);
+        tokio::pin!(fetch);
+        loop {
+            tokio::select! {
+                () = &mut fetch => return,
+                Some(slot) = self.pending.next(), if !self.pending.is_empty() => {
+                    encode(&slot.value, slot.protocol, &mut self.out);
+                    self.finished |= slot.closes;
+                }
+            }
+        }
+    }
+
     /// Prepare one parsed command and queue its reply slot.
     fn submit(&mut self, cmd: Command) {
-        let job = match cluster::prepare(&self.node, &mut self.conn, cmd) {
+        let trace = CommandTrace::begin(self.metrics, &cmd);
+        let span = trace.span().clone();
+        let _entered = span.enter();
+        let prepared = trace.route(|| cluster::prepare(&self.node, &mut self.conn, cmd));
+        let job = match prepared {
             Prepared::Done(value) => {
+                trace.finish(&value);
                 let slot = Slot {
                     protocol: self.conn.protocol,
                     value,
@@ -94,45 +134,74 @@ impl Pipeline {
         let protocol = self.conn.protocol;
         let (wait, done) = self.order.admit(&job.keys());
         if wait.is_ready() {
-            match cluster::run(&self.node, job) {
+            match trace.store(|| cluster::run(&self.node, job)) {
                 Dispatch::Ready(reply) => {
                     drop(done);
+                    trace.finish(&reply.value);
                     self.ready(Slot {
                         protocol,
                         value: reply.value,
                         closes: false,
                     });
                 }
-                Dispatch::Pending(future) => self.pending.push_back(Box::pin(async move {
-                    let reply = future.await;
-                    drop(done);
-                    Slot {
-                        protocol,
-                        value: reply.value,
-                        closes: false,
+                Dispatch::Pending(future) => self.pending.push_back(Box::pin(
+                    async move {
+                        let reply = future.await;
+                        drop(done);
+                        trace.finish(&reply.value);
+                        Slot {
+                            protocol,
+                            value: reply.value,
+                            closes: false,
+                        }
                     }
-                })),
+                    .instrument(span.clone()),
+                )),
             }
             return;
         }
         let node = self.node.clone();
-        self.pending.push_back(Box::pin(async move {
-            wait.wait().await;
-            let reply = match cluster::run(&node, job) {
-                Dispatch::Ready(reply) => reply,
-                Dispatch::Pending(future) => future.await,
-            };
-            drop(done);
-            Slot {
-                protocol,
-                value: reply.value,
-                closes: false,
+        self.pending.push_back(Box::pin(
+            async move {
+                wait.wait().await;
+                let reply = trace.store(|| cluster::run(&node, job)).finish().await;
+                drop(done);
+                trace.finish(&reply.value);
+                Slot {
+                    protocol,
+                    value: reply.value,
+                    closes: false,
+                }
             }
-        }));
+            .instrument(span.clone()),
+        ));
     }
 }
 
-pub async fn serve(mut stream: TcpStream, node: Arc<Node>, hard_stop: CancellationToken) {
+/// Run the transport setup of a new connection (TLS or the PROXY header), then serve it.
+pub async fn accept(
+    tcp: TcpStream,
+    peer: SocketAddr,
+    node: Arc<Node>,
+    hard_stop: CancellationToken,
+) {
+    let accepted = tokio::select! {
+        _ = hard_stop.cancelled() => return,
+        accepted = node.security.accept(tcp, peer) => accepted,
+    };
+    match accepted {
+        Ok((stream, auth)) => serve(stream, auth, node, hard_stop).await,
+        Err(e) => tracing::debug!(%peer, error = %e, "client connection setup failed"),
+    }
+}
+
+/// Serve one connection until it closes.
+pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
+    auth: ConnAuth,
+    node: Arc<Node>,
+    hard_stop: CancellationToken,
+) {
     let _guard = node.track_connection();
     let cfg = &node.config;
     // The parser limit is looser than the value limit so a moderately oversize value gets a clean
@@ -147,9 +216,10 @@ pub async fn serve(mut stream: TcpStream, node: Arc<Node>, hard_stop: Cancellati
     let max_pipeline = cfg.max_pipeline.max(1);
     let max_request = cfg.max_request_bytes;
     let mut parser = Parser::new(limits);
-    let conn = ConnState::new(node.next_conn_id(), cfg.shared_token.is_none());
+    let conn = ConnState::new(node.next_conn_id(), auth);
     let mut p = Pipeline {
         node: node.clone(),
+        metrics: discus_telemetry::global(),
         conn,
         order: KeyOrder::new(),
         pending: FuturesOrdered::new(),
@@ -164,7 +234,12 @@ pub async fn serve(mut stream: TcpStream, node: Arc<Node>, hard_stop: Cancellati
         let mut starved = false;
         while !p.closing && p.pending.len() < max_pipeline {
             match parser.next() {
-                Ok(Some(cmd)) => p.submit(cmd),
+                Ok(Some(cmd)) => {
+                    if node.security.wants_prefetch(&cmd) {
+                        p.prefetch(&cmd).await;
+                    }
+                    p.submit(cmd);
+                }
                 Ok(None) => {
                     if parser.buffered() > max_request {
                         p.ready(Slot {

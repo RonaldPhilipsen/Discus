@@ -1,5 +1,6 @@
 //! Command parsing, dispatch, and handlers.
 
+pub mod access;
 pub mod coll;
 pub mod connection;
 pub mod error;
@@ -12,4 +13,4 @@ pub mod util;
 pub mod zset;
 
 pub use error::CommandError;
-pub use table::{check, dispatch, execute_local, lookup, names, CommandSpec, Handler};
+pub use table::{authorize, check, dispatch, execute_local, lookup, names, CommandSpec, Handler};

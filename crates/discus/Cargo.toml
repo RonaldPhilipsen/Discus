@@ -13,6 +13,7 @@ discus-resp = { path = "../discus-resp" }
 discus-store = { path = "../discus-store" }
 discus-transport = { path = "../discus-transport", default-features = false }
 discus-wire = { path = "../discus-wire" }
+discus-telemetry = { path = "../discus-telemetry" }
 fastrand = "2"
 futures = "0.3"
 parking_lot = "0.12"
@@ -24,6 +25,19 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 axum = "0.8"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-pki-types = { version = "1.9", features = ["std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
+rustls-native-certs = { version = "0.8", optional = true }
+webpki-roots = { version = "1", optional = true }
+ipnet = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+x509-parser = "0.18"
+ppp = "2"
+jsonwebtoken = { version = "11", default-features = false, features = ["use_pem"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots-no-provider", "json"], optional = true }
+serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 discus-placement = { path = "../discus-placement", features = ["mock-clock"] }
@@ -35,18 +49,24 @@ proptest = "1"
 tempfile = "3"
 redis = { version = "0.27", features = ["tokio-comp"] }
 reqwest = { version = "0.12", default-features = false }
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+base64 = "0.22"
+serde_json = "1"
+discus-telemetry = { path = "../discus-telemetry", features = ["testing"] }
 
-# Build features, spec §15.5. Most subsystems arrive in later plans, so those features are markers
-# for now. The TLS backend selects the QUIC cryptography provider in discus-transport. Exactly one
-# TLS backend and one trust root feature must be on.
+# Build features, spec §15.5. Exactly one TLS backend and one trust root feature must be on.
+# The TLS backend selects the one cryptography provider of the build. discus-transport owns it
+# (`discus_transport::crypto_provider()`), and the client listener, outbound HTTPS, and QUIC use it.
+# `otel` turns on the telemetry crate's OpenTelemetry code. The TLS and root features also select
+# the provider and the roots for TLS to the OTLP collector.
 [features]
 default = ["otel", "oauth2", "k8s", "tls-aws-lc", "roots-system"]
-otel = []
-oauth2 = []
+otel = ["discus-telemetry/otel"]
+oauth2 = ["dep:jsonwebtoken", "dep:reqwest", "dep:serde_json"]
 oauth2-introspection = ["oauth2"]
 k8s = []
-tls-aws-lc = ["discus-transport/tls-aws-lc"]
-tls-ring = ["discus-transport/tls-ring"]
-tls-openssl = ["discus-transport/tls-openssl"]
-roots-system = []
-roots-webpki = []
+tls-aws-lc = ["discus-transport/tls-aws-lc", "jsonwebtoken?/aws_lc_rs", "discus-telemetry/tls-aws-lc"]
+tls-ring = ["discus-transport/tls-ring", "jsonwebtoken?/rust_crypto", "discus-telemetry/tls-ring"]
+tls-openssl = ["discus-transport/tls-openssl", "jsonwebtoken?/rust_crypto", "discus-telemetry/tls-openssl"]
+roots-system = ["dep:rustls-native-certs", "discus-telemetry/roots-system"]
+roots-webpki = ["dep:webpki-roots", "discus-telemetry/roots-webpki"]

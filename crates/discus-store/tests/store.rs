@@ -68,3 +68,20 @@ fn write_stamps_the_entry() {
     });
     assert_eq!(s.read(b"k", |e| e.map(|e| e.version)), Some(v2));
 }
+
+#[test]
+fn reads_count_hits_and_misses() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let s = store(&clock);
+    s.write(b"k", Version::zero(), |slot| {
+        *slot = Some(Entry::new(Value::Str("v".into()), Some(2_000)));
+    });
+    s.read(b"k", |_| ());
+    s.read(b"k", |_| ());
+    s.read(b"absent", |_| ());
+    assert_eq!((s.hits(), s.misses()), (2, 1));
+    // An expired entry reads as a miss.
+    clock.advance(5_000);
+    s.read(b"k", |_| ());
+    assert_eq!((s.hits(), s.misses()), (2, 2));
+}

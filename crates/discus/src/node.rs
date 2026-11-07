@@ -16,6 +16,7 @@ use parking_lot::{RwLock, RwLockReadGuard};
 
 use crate::cluster::ClusterLink;
 use crate::command::CommandError;
+use crate::security::{ConnAuth, Security};
 use crate::Config;
 
 thread_local! {
@@ -52,6 +53,7 @@ pub struct Node {
     epochs: RwLock<EpochHistory>,
     pub started_at: Instant,
     pub store: Arc<Store>,
+    pub security: Arc<Security>,
     next_conn_id: AtomicU64,
     connected: AtomicUsize,
     phase: AtomicU8,
@@ -59,13 +61,18 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(config: Config) -> Node {
-        Node::with_clocks(config, Arc::new(SystemClock), hlc::system_clock)
+    pub fn new(config: Config, security: Arc<Security>) -> Node {
+        Node::with_clocks(config, security, Arc::new(SystemClock), hlc::system_clock)
     }
 
     /// A node on the given clocks: `wall` for TTL and eviction, `hlc_clock` for the HLC. Tests
     /// pass both halves of one mock clock slot, so the two agree.
-    pub fn with_clocks(config: Config, wall: Arc<dyn Clock>, hlc_clock: fn() -> NTP64) -> Node {
+    pub fn with_clocks(
+        config: Config,
+        security: Arc<Security>,
+        wall: Arc<dyn Clock>,
+        hlc_clock: fn() -> NTP64,
+    ) -> Node {
         let store = Store::new(
             StoreConfig {
                 shards: config.shards,
@@ -90,6 +97,7 @@ impl Node {
             epochs: RwLock::new(epochs),
             started_at: Instant::now(),
             store: Arc::new(store),
+            security,
             next_conn_id: AtomicU64::new(1),
             connected: AtomicUsize::new(0),
             phase: AtomicU8::new(Phase::Starting as u8),
@@ -220,7 +228,7 @@ fn static_epoch(me: Member, config: &Config, cluster_id: ClusterId) -> Epoch {
 #[derive(Debug)]
 pub struct ConnState {
     pub protocol: Protocol,
-    pub authenticated: bool,
+    pub auth: ConnAuth,
     pub name: Option<Bytes>,
     pub id: u64,
     /// Set by `QUIT`: close the connection after the reply is flushed.
@@ -230,10 +238,10 @@ pub struct ConnState {
 }
 
 impl ConnState {
-    pub fn new(id: u64, authenticated: bool) -> ConnState {
+    pub fn new(id: u64, auth: ConnAuth) -> ConnState {
         ConnState {
             protocol: Protocol::Resp2,
-            authenticated,
+            auth,
             name: None,
             id,
             closing: false,
