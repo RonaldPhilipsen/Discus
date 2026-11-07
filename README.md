@@ -45,8 +45,27 @@ Discus takes a different path: gossip-based membership, deterministic placement,
 - Rendezvous hashing over the member list, replication factor 3 by default.
 - Any node accepts any key; the entry node routes internally.
 - Async replication, read repair, and promotion reconciliation.
+- Bulk handoff on join: current owners stream moved entries to the joining node, with lazy refill as the fallback.
 - A small command surface: strings, hashes, sets, and sorted sets.
 - No transactions, Lua, pub/sub, streams, queues, or blocking commands.
+
+## Strong counters
+
+Counters are the one place where Discus offers a strong guarantee. Keys under the `cnt:` prefix (configurable) form a separate keyspace backed by Raft groups. `INCR`, `GET`, `SET`, `DEL`, and `EXPIRE` on those keys are linearizable: any node returns the same value, and the minority side of a partition rejects writes with `-TRYAGAIN`.
+
+The tradeoffs are explicit: strong counters pay a consensus round-trip, are CP during partitions, and are lost if the whole cluster restarts cold. Normal keys keep the fast, asynchronous, AP path.
+
+This is a keyspace rather than a per-command flag because `SET` and `GET` on the same key must follow the same path. A strong `INCR` mixed with an asynchronous `SET` would break the guarantee.
+
+## Decisions
+
+- **Deployment:** Kubernetes, single zone initially.
+- **Security:** mTLS enforced with cert-manager-issued certificates, including node-to-node traffic.
+- **Restarts:** cold restarts are acceptable; the cache starts empty.
+- **Latency targets:** local hit p99 ≤ 1 ms, remote hit p99 ≤ 2 ms, and p99 ≤ 5 ms during a membership change.
+- **Data types:** strings, hashes, sets, and sorted sets.
+- **Strong counters:** linearizable `INCR` on an opt-in counter keyspace (`cnt:` prefix), backed by per-group Raft with RF=3. CP during partitions, and counters are lost on a full cold restart. Normal keys stay AP.
+- **Handoff:** join handoff is in v0.1. Current owners stream the moved entries through a `HANDOFF` RPC. The new owner applies only newer HLC entries and falls back to the previous owners for misses. Drain streaming reuses the mechanism in a later release.
 
 ## Non-goals
 
@@ -54,7 +73,7 @@ Durability, persistence, transactions, Lua, pub/sub, streams, blocking commands,
 
 ## Status
 
-Design phase. This README records the goal and the reasoning behind the design.
+Design phase for v0.1. This README records the goal and the reasoning behind the design.
 
 ## License
 
