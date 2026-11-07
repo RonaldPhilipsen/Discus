@@ -29,6 +29,8 @@ const HLC_WINDOW_MS: Millis = 30_000;
 /// Join requests per period while seeking.
 const JOIN_FANOUT: usize = 3;
 
+const MAX_LEARNED: usize = 16;
+
 /// Members that receive the final `LEAVE`.
 const LEAVE_FANOUT: usize = 3;
 
@@ -103,6 +105,8 @@ pub struct Swim {
     next_reconnect: Millis,
     events: Vec<Event>,
     seeds: Vec<SocketAddr>,
+    /// Seeds from lease holders, merges, and the caller. A discovery refresh keeps them.
+    learned: Vec<SocketAddr>,
     seek_started: Option<Millis>,
     last_normal_seen: Option<Millis>,
     next_join: Millis,
@@ -142,6 +146,7 @@ impl Swim {
             next_reconnect: 0,
             events: Vec::new(),
             seeds: Vec::new(),
+            learned: Vec::new(),
             seek_started: None,
             last_normal_seen: None,
             next_join: 0,
@@ -205,19 +210,33 @@ impl Swim {
         std::mem::take(&mut self.events)
     }
 
-    /// Discovery seeds: static seeds, headless Service addresses, and lease holders. The own
+    /// Replace the discovery seeds: static seeds and headless Service addresses. The own
     /// address is dropped.
     pub fn set_seeds(&mut self, seeds: Vec<SocketAddr>) {
         self.seeds.clear();
         for s in seeds {
-            self.add_seed(s);
+            if s != self.me.addr && !self.seeds.contains(&s) {
+                self.seeds.push(s);
+            }
         }
     }
 
+    /// Add a seed that discovery does not know, such as a lease holder. The most recent
+    /// `MAX_LEARNED` are kept.
     pub fn add_seed(&mut self, seed: SocketAddr) {
-        if seed != self.me.addr && !self.seeds.contains(&seed) {
-            self.seeds.push(seed);
+        if seed != self.me.addr && !self.learned.contains(&seed) {
+            self.learned.push(seed);
+            if self.learned.len() > MAX_LEARNED {
+                self.learned.remove(0);
+            }
         }
+    }
+
+    /// The discovery seeds and the learned seeds.
+    pub fn seeds(&self) -> Vec<SocketAddr> {
+        let mut all = self.seeds.clone();
+        all.extend(self.learned.iter().filter(|s| !self.seeds.contains(s)));
+        all
     }
 
     /// True when the node serves: it is `NORMAL`, and the current epoch lists it as `NORMAL`.
@@ -796,7 +815,7 @@ impl Swim {
 
     /// Seeds, the members of the known epoch, and the live members of the view.
     fn join_targets(&self) -> Vec<SocketAddr> {
-        let mut targets = self.seeds.clone();
+        let mut targets = self.seeds();
         if let Some(e) = self.last_epoch.as_ref().filter(|e| e.id().generation >= 1) {
             targets.extend(e.members().iter().map(|m| m.addr));
         }
@@ -827,10 +846,10 @@ impl Swim {
             .map(|(id, r)| (Some(*id), r.info.addr))
             .collect();
         targets.extend(
-            self.seeds
-                .iter()
+            self.seeds()
+                .into_iter()
                 .filter(|s| !live.contains(s))
-                .map(|s| (None, *s)),
+                .map(|s| (None, s)),
         );
         let &(expected, to) = pick(&mut self.rng, &targets)?;
         let msg = self.message(GossipKind::Sync, expected, host);
@@ -885,7 +904,12 @@ impl Swim {
                     }
                     let others = r.accusers.iter().filter(|a| **a != me).count();
                     let timeout = suspicion_timeout(&self.cfg, others);
-                    if now.saturating_sub(r.since) >= timeout || score >= self.cfg.phi_dead {
+                    let elapsed = now.saturating_sub(r.since);
+                    // A high score ends the suspicion early, but never before the minimum: the
+                    // member always gets that long to refute, and the operator keeps DEAD slow
+                    // (spec section 17).
+                    let strong = score >= self.cfg.phi_dead && elapsed >= self.cfg.suspicion_min_ms;
+                    if elapsed >= timeout || strong {
                         r.liveness = Liveness::Dead;
                         r.since = now;
                         changes.push(*id);

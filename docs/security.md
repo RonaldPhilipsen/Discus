@@ -390,8 +390,9 @@ The admin port (`--admin-listen`) has two kinds of routes:
 
 - The probes `/healthz`, `/startupz`, and `/readyz` are open. The kubelet calls them without
   credentials. They show only the phase of the node.
-- Every route under `/admin/` needs admin credentials. Today this is `/admin/security`. It shows
-  the TLS mode, the policy, readiness, and the key status of each issuer.
+- Every route under `/admin/` needs admin credentials. `GET /admin/security` shows the TLS mode,
+  the policy, readiness, and the key status of each issuer. `POST /admin/drain` starts a drain
+  (see `docs/cluster.md`).
 
 An admin request passes in one of two ways:
 

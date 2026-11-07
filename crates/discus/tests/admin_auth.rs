@@ -19,10 +19,21 @@ async fn raw_get<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     path: &str,
     bearer: Option<&str>,
 ) -> (u16, String) {
+    raw_request(s, "GET", path, bearer).await
+}
+
+async fn raw_request<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    s: &mut S,
+    method: &str,
+    path: &str,
+    bearer: Option<&str>,
+) -> (u16, String) {
     let auth = bearer
         .map(|t| format!("Authorization: Bearer {t}\r\n"))
         .unwrap_or_default();
-    let req = format!("GET {path} HTTP/1.1\r\nHost: discus\r\n{auth}Connection: close\r\n\r\n");
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: discus\r\n{auth}Content-Length: 0\r\nConnection: close\r\n\r\n"
+    );
     s.write_all(req.as_bytes()).await.unwrap();
     let mut out = Vec::new();
     let _ = s.read_to_end(&mut out).await;
@@ -93,6 +104,37 @@ async fn an_admin_certificate_opens_the_admin_port() {
     assert!(body.contains("\"ready\":true"), "{body}");
     // The probes answer over TLS without a certificate.
     assert_eq!(tls_get(&node, &ca, None, "/healthz").await.0, 200);
+}
+
+#[tokio::test]
+async fn the_drain_route_needs_admin_credentials() {
+    let ca = TestCa::new();
+    let server = ca.server_cert();
+    let file = write_file(&ca, "auth.toml", ADMIN_TOML);
+    let node = start(&admin_tls_args(&ca, &server, &file)).await;
+    let mut s = tls_connect(node.admin, &ca, None).await.unwrap();
+    assert_eq!(
+        raw_request(&mut s, "POST", "/admin/drain", None).await.0,
+        401
+    );
+    assert_eq!(tls_get(&node, &ca, None, "/readyz").await.0, 200);
+    // An open client connection keeps the drain pending, so the admin port stays up.
+    let _client = tokio::net::TcpStream::connect(node.addr).await.unwrap();
+    let ops = ca.client_cert("spiffe://test/ops/alice");
+    let mut s = tls_connect(node.admin, &ca, Some(&ops)).await.unwrap();
+    assert_eq!(
+        raw_request(&mut s, "POST", "/admin/drain", None).await.0,
+        202
+    );
+    let mut ready = 200;
+    for _ in 0..50 {
+        ready = tls_get(&node, &ca, None, "/readyz").await.0;
+        if ready == 503 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(ready, 503);
 }
 
 #[tokio::test]

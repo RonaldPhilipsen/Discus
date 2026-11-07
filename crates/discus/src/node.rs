@@ -60,6 +60,7 @@ pub struct Node {
     phase: AtomicU8,
     link: OnceLock<ClusterLink>,
     membership: OnceLock<Arc<Membership>>,
+    drain: tokio_util::sync::CancellationToken,
 }
 
 /// Keeps one epoch in the history until it is dropped (spec section 5.1). Handoff (plan 4)
@@ -139,7 +140,13 @@ impl Node {
             phase: AtomicU8::new(Phase::Starting as u8),
             link: OnceLock::new(),
             membership: OnceLock::new(),
+            drain: tokio_util::sync::CancellationToken::new(),
         }
+    }
+
+    /// Cancelled by `POST /admin/drain`. `Server::run` then drains as on SIGTERM (spec §15.3).
+    pub fn drain_token(&self) -> tokio_util::sync::CancellationToken {
+        self.drain.clone()
     }
 
     pub fn membership(&self) -> Option<&Arc<Membership>> {

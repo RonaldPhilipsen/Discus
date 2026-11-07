@@ -201,3 +201,26 @@ fn memory_lease_semantics() {
     lease.set_available(false);
     assert!(call(&a).is_err());
 }
+
+#[test]
+fn a_discovery_refresh_keeps_learned_seeds() {
+    use discus_membership::Swim;
+    use discus_wire::{Capacity, MemberInfo};
+    let me = MemberInfo {
+        id: NodeId::from_u128(1),
+        addr: "10.0.0.1:7379".parse().unwrap(),
+        state: MemberState::Joining,
+        incarnation: 0,
+        weight: Default::default(),
+        epoch: discus_membership::provisional_epoch(NodeId::from_u128(1)).id(),
+        capabilities: 0,
+        capacity: Capacity::default(),
+        leader_hints: Default::default(),
+    };
+    let mut swim = Swim::new(cfg(), me);
+    let holder = "10.0.0.9:7379".parse().unwrap();
+    swim.add_seed(holder);
+    swim.set_seeds(vec!["10.0.0.2:7379".parse().unwrap()]);
+    assert!(swim.seeds().contains(&holder));
+    assert_eq!(swim.seeds().len(), 2);
+}

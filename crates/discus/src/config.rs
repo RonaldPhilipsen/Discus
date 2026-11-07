@@ -155,13 +155,14 @@ pub struct Config {
     /// The detector score that makes a member suspect.
     #[arg(long, default_value_t = 8.0)]
     pub phi_suspect: f64,
-    /// The detector score that makes a suspect member dead at once.
+    /// The detector score that makes a suspect member dead after the minimum suspicion time.
     #[arg(long, default_value_t = 16.0)]
     pub phi_dead: f64,
     /// Detector evidence of one data-path failure. One failed probe adds `--phi-suspect`.
     #[arg(long, default_value_t = 10.0)]
     pub data_path_weight: f64,
-    /// The suspicion timeout once enough nodes confirm a suspicion, in milliseconds.
+    /// The suspicion timeout once enough nodes confirm a suspicion, in milliseconds. No suspect
+    /// becomes dead sooner.
     #[arg(long, default_value_t = 3_000)]
     pub suspicion_min_ms: u64,
     /// The suspicion timeout without confirmations, in milliseconds.

@@ -10,7 +10,7 @@ use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
 use tokio::net::TcpListener;
@@ -86,9 +86,17 @@ async fn security_status(State(node): State<Arc<Node>>) -> Json<SecurityStatus> 
     Json(node.security.status())
 }
 
+/// Start the drain, as SIGTERM does (spec section 15.3).
+async fn drain(State(node): State<Arc<Node>>) -> (StatusCode, &'static str) {
+    tracing::info!("drain requested on the admin port");
+    node.drain_token().cancel();
+    (StatusCode::ACCEPTED, "draining\n")
+}
+
 /// The protected admin routes.
 pub fn routes(node: Arc<Node>) -> Router<Arc<Node>> {
     Router::new()
         .route("/admin/security", get(security_status))
+        .route("/admin/drain", post(drain))
         .route_layer(middleware::from_fn_with_state(node, require_admin))
 }

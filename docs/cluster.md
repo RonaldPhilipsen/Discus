@@ -126,6 +126,113 @@ roleRef:
 
 A join does not make the serving nodes unready.
 
+## Drain
+
+SIGTERM and `POST /admin/drain` start a drain. The drain route needs admin credentials, like every
+route under `/admin/`.
+
+1. The node turns unready and marks itself `LEAVING`. The next epoch keeps it out of placement,
+   so its keys move to other members.
+2. The node stops accepting connections. It keeps serving the open connections until they close
+   or `--shutdown-timeout-secs` (default 30 s) ends.
+3. The node tells three members that it is gone, leaves gossip, and stops. The other members
+   remove it from the epoch at once, without the suspicion timeout.
+
+## Deploy on Kubernetes
+
+Run Discus as a plain Deployment. Each pod is a new node with a new node ID. A pod needs no
+volume and no stable name.
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: discus-peers
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: discus
+  ports:
+    - name: cluster
+      port: 7379
+      protocol: UDP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: discus
+spec:
+  selector:
+    app: discus
+  ports:
+    - name: resp
+      port: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: discus
+spec:
+  replicas: 3
+  minReadySeconds: 10
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: discus
+  template:
+    metadata:
+      labels:
+        app: discus
+    spec:
+      serviceAccountName: discus
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: discus
+          image: discus:latest
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          args:
+            - --discovery-dns=discus-peers
+            - --cluster-advertise=$(POD_IP):7379
+            - --cluster-ca=/tls/ca.crt
+            - --cluster-cert=/tls/tls.crt
+            - --cluster-key=/tls/tls.key
+            - --shutdown-timeout-secs=30
+          startupProbe:
+            httpGet:
+              path: /startupz
+              port: 9100
+            failureThreshold: 60
+            periodSeconds: 1
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 9100
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9100
+```
+
+Follow these rules:
+
+- The headless Service sets `publishNotReadyAddresses: true`. A joining node is not ready, and
+  the other nodes still find it.
+- `maxSurge: 1` with `maxUnavailable: 0` starts the new pod before the old pod drains.
+  `minReadySeconds` makes one replacement finish before the next one begins.
+- `terminationGracePeriodSeconds` is longer than `--shutdown-timeout-secs`, so the drain ends
+  before Kubernetes kills the container.
+- The service account `discus` needs the Role of the cluster lease above.
+- Mount the node certificate at `/tls`, for example from a cert-manager `Certificate` with the URI
+  SAN `spiffe://cluster.local/ns/<namespace>/sa/discus`. Set `--cluster-san` to the same value.
+
 ## Flags
 
 | Flag | Default | Meaning |
@@ -147,9 +254,9 @@ A join does not make the serving nodes unready.
 | `--gossip-probe-timeout-ms` | 500 | Time to wait for a direct probe. |
 | `--gossip-indirect-probes` | 3 | Members that probe a target that missed a direct probe. |
 | `--phi-suspect` | 8 | The detector score that makes a member suspect. One failed probe adds this much. |
-| `--phi-dead` | 16 | The score that makes a suspect member `DEAD` at once. |
+| `--phi-dead` | 16 | The score that makes a suspect member `DEAD` after the minimum suspicion time. |
 | `--data-path-weight` | 10 | The score that one forward timeout, reset, or failed handshake adds. |
-| `--suspicion-min-ms` | 3000 | The suspicion timeout once enough nodes confirm a suspicion. |
+| `--suspicion-min-ms` | 3000 | The suspicion timeout once enough nodes confirm a suspicion. No suspect member becomes `DEAD` sooner. |
 | `--suspicion-max-ms` | 10000 | The suspicion timeout without confirmations. |
 | `--cluster-ca` | none | PEM file with the CA certificate. |
 | `--cluster-cert` | none | PEM file with this node's certificate chain. |

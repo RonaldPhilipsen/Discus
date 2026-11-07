@@ -26,7 +26,7 @@ pub struct SwimConfig {
     pub max_dead: usize,
     /// A score at or above this makes a member suspect.
     pub phi_suspect: f64,
-    /// A suspect member with a score at or above this is dead at once.
+    /// A suspect member with a score at or above this is dead once `suspicion_min_ms` passed.
     pub phi_dead: f64,
     /// Evidence added by one data-path failure (forward timeout, reset, failed handshake).
     pub data_path_weight: f64,
@@ -35,7 +35,8 @@ pub struct SwimConfig {
     pub missed_ping_weight: f64,
     /// Evidence halves after this time.
     pub evidence_half_life_ms: Millis,
-    /// The suspicion timeout with `suspicion_k` confirmations or more.
+    /// The suspicion timeout with `suspicion_k` confirmations or more. No suspect becomes dead
+    /// sooner.
     pub suspicion_min_ms: Millis,
     /// The suspicion timeout without confirmations.
     pub suspicion_max_ms: Millis,

@@ -176,11 +176,12 @@ impl Server {
         &self.node
     }
 
-    /// Serve until the token is cancelled, then drain.
+    /// Serve until the token or the drain token of the node is cancelled, then drain.
     ///
-    /// Draining sets the phase to `Leaving` (so `/readyz` turns false), stops accepting, and
-    /// lets open connections finish their commands. After `shutdown_timeout_secs` the remaining
-    /// connections are closed.
+    /// Draining sets the phase to `Leaving` (so `/readyz` turns false), marks the node `LEAVING`
+    /// in gossip, stops accepting, and lets open connections finish their commands. After
+    /// `shutdown_timeout_secs` the remaining connections are closed, and the node says goodbye
+    /// to a few members and leaves gossip.
     pub async fn run(self, shutdown: CancellationToken) -> io::Result<()> {
         let Server {
             listener,
@@ -229,9 +230,11 @@ impl Server {
             }
         }
 
+        let drain = node.drain_token();
         let result = loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break Ok(()),
+                _ = drain.cancelled() => break Ok(()),
                 accepted = listener.accept() => match accepted {
                     Ok((stream, peer)) => {
                         let _ = stream.set_nodelay(true);
@@ -243,6 +246,11 @@ impl Server {
         };
 
         node.set_phase(Phase::Leaving);
+        // LEAVING leaves placement in the next epoch, and the node keeps serving its open
+        // connections as a handoff source until the deadline (spec section 15.3).
+        if let Some(membership) = node.membership() {
+            membership.drain();
+        }
         tracing::info!(open = node.connected_clients(), "draining");
         drop(listener);
         tracker.close();
@@ -251,6 +259,9 @@ impl Server {
             tracing::warn!("drain timeout, closing remaining connections");
             hard_stop.cancel();
             tracker.wait().await;
+        }
+        if let Some(membership) = node.membership() {
+            membership.depart().await;
         }
         stop_background.cancel();
         if let Some(link) = node.link() {

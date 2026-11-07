@@ -219,3 +219,24 @@ fn ownership_gain_lists_the_new_owners() {
         vec![id(1), id(2), id(3)]
     );
 }
+
+#[test]
+fn a_drain_during_a_join_stays_leaving() {
+    let mut sim = Sim::new(6, cfg());
+    let ids = sim.cluster(3);
+    sim.run_ms(500);
+    let j = sim.add_node();
+    sim.start(j, &[ids[0]]);
+    // The join request leaves at the next tick. The drain comes before its reply.
+    sim.run_ms(10);
+    let now = sim.now();
+    sim.node_mut(j).swim.leave(now);
+    for _ in 0..200 {
+        sim.run_ms(10);
+        for &id in &ids {
+            assert!(sim.epoch(id).member(j).is_none(), "{j} is in an epoch");
+        }
+    }
+    assert_eq!(sim.node(j).swim.phase(), discus_membership::Phase::Leaving);
+    assert!(!sim.is_normal(j));
+}
