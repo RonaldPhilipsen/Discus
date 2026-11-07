@@ -15,7 +15,6 @@ use uhlc::NTP64;
 
 use crate::Clock;
 
-/// The number of mock clock slots.
 pub const MOCK_SLOTS: usize = 32;
 
 static SLOTS: [AtomicU64; MOCK_SLOTS] = [const { AtomicU64::new(0) }; MOCK_SLOTS];

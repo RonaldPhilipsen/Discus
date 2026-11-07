@@ -16,10 +16,8 @@ use crate::{Member, MemberState, NodeId};
 /// choice and owner choice are independent.
 pub const PLACEMENT_SEED: u64 = 0x4449_5343_5553_0002;
 
-/// The default replication factor.
 pub const DEFAULT_RF: usize = 3;
 
-/// 2^52 as `f64`.
 const TWO_POW_52: f64 = 4_503_599_627_370_496.0;
 
 /// The uniform value `u(k, n)` in `(0, 1)`.

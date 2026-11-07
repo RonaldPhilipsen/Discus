@@ -44,7 +44,6 @@ impl Default for Weight {
     }
 }
 
-/// One member of an epoch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Member {
     pub id: NodeId,

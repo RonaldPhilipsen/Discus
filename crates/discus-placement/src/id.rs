@@ -93,7 +93,6 @@ impl NodeId {
 }
 
 impl ClusterId {
-    /// A fresh random cluster identity.
     pub fn mint() -> ClusterId {
         ClusterId(random_u128())
     }
