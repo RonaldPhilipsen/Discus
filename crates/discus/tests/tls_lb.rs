@@ -1,4 +1,5 @@
 //! The `lb` TLS mode: PROXY protocol from a trusted load balancer over mTLS (spec §14.1).
+#![allow(clippy::unwrap_used)]
 mod security_support;
 
 use ppp::v2::{Builder, Command, IPv4, Protocol, Version};
