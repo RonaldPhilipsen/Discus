@@ -155,6 +155,172 @@ fn epoch_of(e: fb::Epoch<'_>) -> Result<Epoch, DecodeError> {
     .map_err(invalid)
 }
 
+fn cluster_of(id: &fb::Id128) -> ClusterId {
+    ClusterId::from_u128(u128::from_be_bytes(id.bytes().into()))
+}
+
+fn info_to<'a>(fbb: &mut FlatBufferBuilder<'a>, m: &MemberInfo) -> WIPOffset<fb::MemberInfo<'a>> {
+    let addr = fbb.create_string(&m.addr.to_string());
+    let hints = (!m.leader_hints.is_empty()).then(|| fbb.create_vector(&m.leader_hints));
+    fb::MemberInfo::create(
+        fbb,
+        &fb::MemberInfoArgs {
+            id: Some(&id128(m.id.to_be_bytes())),
+            addr: Some(addr),
+            state: state_to(m.state),
+            incarnation: m.incarnation,
+            weight: m.weight.get(),
+            epoch: Some(&epoch_id_to(m.epoch)),
+            capabilities: m.capabilities,
+            capacity_used: m.capacity.used,
+            capacity_max: m.capacity.max,
+            leader_hints: hints,
+        },
+    )
+}
+
+fn info_of(m: fb::MemberInfo<'_>) -> Result<MemberInfo, DecodeError> {
+    Ok(MemberInfo {
+        id: node_of(m.id().ok_or_else(|| invalid("member info without an id"))?),
+        addr: m
+            .addr()
+            .and_then(|a| a.parse().ok())
+            .ok_or_else(|| invalid("member info without a valid address"))?,
+        state: state_of(m.state())?,
+        incarnation: m.incarnation(),
+        weight: Weight::new(m.weight()).ok_or_else(|| invalid("member info with a bad weight"))?,
+        epoch: epoch_id_of(
+            m.epoch()
+                .ok_or_else(|| invalid("member info without an epoch"))?,
+        ),
+        capabilities: m.capabilities(),
+        capacity: Capacity {
+            used: m.capacity_used(),
+            max: m.capacity_max(),
+        },
+        leader_hints: m
+            .leader_hints()
+            .map(|h| Bytes::copy_from_slice(h.bytes()))
+            .unwrap_or_default(),
+    })
+}
+
+fn liveness_to(l: Liveness) -> fb::Liveness {
+    match l {
+        Liveness::Alive => fb::Liveness::ALIVE,
+        Liveness::Suspect => fb::Liveness::SUSPECT,
+        Liveness::Dead => fb::Liveness::DEAD,
+    }
+}
+
+fn liveness_of(l: fb::Liveness) -> Result<Liveness, DecodeError> {
+    Ok(match l {
+        fb::Liveness::ALIVE => Liveness::Alive,
+        fb::Liveness::SUSPECT => Liveness::Suspect,
+        fb::Liveness::DEAD => Liveness::Dead,
+        other => return Err(invalid(format!("unknown liveness {}", other.0))),
+    })
+}
+
+fn kind_to(k: GossipKind) -> fb::GossipKind {
+    match k {
+        GossipKind::Ping => fb::GossipKind::PING,
+        GossipKind::Ack => fb::GossipKind::ACK,
+        GossipKind::Nack => fb::GossipKind::NACK,
+        GossipKind::PingReq => fb::GossipKind::PING_REQ,
+        GossipKind::Sync => fb::GossipKind::SYNC,
+        GossipKind::SyncReply => fb::GossipKind::SYNC_REPLY,
+        GossipKind::Join => fb::GossipKind::JOIN,
+        GossipKind::JoinReply => fb::GossipKind::JOIN_REPLY,
+        GossipKind::Leave => fb::GossipKind::LEAVE,
+    }
+}
+
+fn kind_of(k: fb::GossipKind) -> Result<GossipKind, DecodeError> {
+    Ok(match k {
+        fb::GossipKind::PING => GossipKind::Ping,
+        fb::GossipKind::ACK => GossipKind::Ack,
+        fb::GossipKind::NACK => GossipKind::Nack,
+        fb::GossipKind::PING_REQ => GossipKind::PingReq,
+        fb::GossipKind::SYNC => GossipKind::Sync,
+        fb::GossipKind::SYNC_REPLY => GossipKind::SyncReply,
+        fb::GossipKind::JOIN => GossipKind::Join,
+        fb::GossipKind::JOIN_REPLY => GossipKind::JoinReply,
+        fb::GossipKind::LEAVE => GossipKind::Leave,
+        other => return Err(invalid(format!("unknown gossip kind {}", other.0))),
+    })
+}
+
+fn gossip_to(fbb: &mut FlatBufferBuilder<'_>, g: &Gossip) {
+    let from = info_to(fbb, &g.from);
+    let body = g.epoch_body.as_ref().map(|e| epoch_to(fbb, e));
+    let rumors: Vec<_> = g
+        .rumors
+        .iter()
+        .map(|r| {
+            let info = info_to(fbb, &r.info);
+            let accuser = r.accuser.map(|a| id128(a.to_be_bytes()));
+            fb::Rumor::create(
+                fbb,
+                &fb::RumorArgs {
+                    info: Some(info),
+                    liveness: liveness_to(r.liveness),
+                    accuser: accuser.as_ref(),
+                },
+            )
+        })
+        .collect();
+    let rumors = fbb.create_vector(&rumors);
+    let target_id = g.target.map(|(id, _)| id128(id.to_be_bytes()));
+    let target_addr = g.target.map(|(_, a)| fbb.create_string(&a.to_string()));
+    let t = fb::Gossip::create(
+        fbb,
+        &fb::GossipArgs {
+            kind: kind_to(g.kind),
+            from: Some(from),
+            cluster_id: Some(&id128(g.cluster_id.to_be_bytes())),
+            cluster_size: g.cluster_size,
+            epoch_body: body,
+            hlc: g.hlc,
+            target_id: target_id.as_ref(),
+            target_addr,
+            rumors: Some(rumors),
+            retry_after_ms: g.retry_after_ms,
+        },
+    );
+    fbb.finish_minimal(t);
+}
+
+fn gossip_of(g: fb::Gossip<'_>) -> Result<Gossip, DecodeError> {
+    let target = match (g.target_id(), g.target_addr()) {
+        (Some(id), Some(addr)) => Some((
+            node_of(id),
+            addr.parse()
+                .map_err(|_| invalid("gossip with a bad target address"))?,
+        )),
+        _ => None,
+    };
+    let mut rumors = Vec::new();
+    for r in g.rumors().into_iter().flatten() {
+        rumors.push(Rumor {
+            info: info_of(r.info().ok_or_else(|| invalid("rumor without a member"))?)?,
+            liveness: liveness_of(r.liveness())?,
+            accuser: r.accuser().map(node_of),
+        });
+    }
+    Ok(Gossip {
+        kind: kind_of(g.kind())?,
+        from: info_of(g.from().ok_or_else(|| invalid("gossip without a sender"))?)?,
+        cluster_id: g.cluster_id().map(cluster_of).unwrap_or(ClusterId::NIL),
+        cluster_size: g.cluster_size(),
+        epoch_body: g.epoch_body().map(epoch_of).transpose()?,
+        hlc: g.hlc(),
+        target,
+        rumors,
+        retry_after_ms: g.retry_after_ms(),
+    })
+}
+
 /// Encode the body of a message as its own FlatBuffer.
 fn encode_body(message: &Message) -> Vec<u8> {
     let mut fbb = FlatBufferBuilder::new();
@@ -230,6 +396,7 @@ fn encode_body(message: &Message) -> Vec<u8> {
             let t = fb::Ping::create(&mut fbb, &fb::PingArgs { nonce: *nonce });
             fbb.finish_minimal(t);
         }
+        Message::Gossip(g) => gossip_to(&mut fbb, g),
     }
     fbb.finished_data().to_vec()
 }
@@ -361,6 +528,10 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
             } else {
                 Message::Pong { nonce: p.nonce() }
             }
+        }
+        T::GOSSIP => {
+            let g = flatbuffers::root_with_opts::<fb::Gossip>(&opts, payload).map_err(invalid)?;
+            Message::Gossip(gossip_of(g)?)
         }
         other => {
             return Err(DecodeError::UnknownType {

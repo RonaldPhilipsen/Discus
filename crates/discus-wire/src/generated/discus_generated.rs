@@ -107,10 +107,10 @@ impl ::flatbuffers::SimpleToVerifyInSlice for MemberState {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_MESSAGE_TYPE: u16 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_MESSAGE_TYPE: u16 = 7;
+pub const ENUM_MAX_MESSAGE_TYPE: u16 = 8;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_MESSAGE_TYPE: [MessageType; 8] = [
+pub const ENUM_VALUES_MESSAGE_TYPE: [MessageType; 9] = [
   MessageType::NONE,
   MessageType::HELLO,
   MessageType::HANDSHAKE_FAILED,
@@ -119,9 +119,10 @@ pub const ENUM_VALUES_MESSAGE_TYPE: [MessageType; 8] = [
   MessageType::FORWARD_REPLY,
   MessageType::PING,
   MessageType::PONG,
+  MessageType::GOSSIP,
 ];
 
-/// Append-only. Later plans add STATS, SCAN, HANDOFF, HINT_REPLAY, RAFT_LEADER, RAFT_CONFIG.
+/// Append-only. GOSSIP carries every gossip body. Later plans add STATS, SCAN, HANDOFF, HINT_REPLAY, RAFT_LEADER, RAFT_CONFIG.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct MessageType(pub u16);
@@ -135,9 +136,10 @@ impl MessageType {
   pub const FORWARD_REPLY: Self = Self(5);
   pub const PING: Self = Self(6);
   pub const PONG: Self = Self(7);
+  pub const GOSSIP: Self = Self(8);
 
   pub const ENUM_MIN: u16 = 0;
-  pub const ENUM_MAX: u16 = 7;
+  pub const ENUM_MAX: u16 = 8;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::HELLO,
@@ -147,6 +149,7 @@ impl MessageType {
     Self::FORWARD_REPLY,
     Self::PING,
     Self::PONG,
+    Self::GOSSIP,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -159,6 +162,7 @@ impl MessageType {
       Self::FORWARD_REPLY => Some("FORWARD_REPLY"),
       Self::PING => Some("PING"),
       Self::PONG => Some("PONG"),
+      Self::GOSSIP => Some("GOSSIP"),
       _ => None,
     }
   }
@@ -507,6 +511,208 @@ impl<'a> ::flatbuffers::Verifiable for RespKind {
 }
 
 impl ::flatbuffers::SimpleToVerifyInSlice for RespKind {}
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MIN_LIVENESS: u8 = 0;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MAX_LIVENESS: u8 = 2;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+#[allow(non_camel_case_types)]
+pub const ENUM_VALUES_LIVENESS: [Liveness; 3] = [
+  Liveness::ALIVE,
+  Liveness::SUSPECT,
+  Liveness::DEAD,
+];
+
+/// What the sender believes about a member's liveness.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(transparent)]
+pub struct Liveness(pub u8);
+#[allow(non_upper_case_globals)]
+impl Liveness {
+  pub const ALIVE: Self = Self(0);
+  pub const SUSPECT: Self = Self(1);
+  pub const DEAD: Self = Self(2);
+
+  pub const ENUM_MIN: u8 = 0;
+  pub const ENUM_MAX: u8 = 2;
+  pub const ENUM_VALUES: &'static [Self] = &[
+    Self::ALIVE,
+    Self::SUSPECT,
+    Self::DEAD,
+  ];
+  /// Returns the variant's name or "" if unknown.
+  pub fn variant_name(self) -> Option<&'static str> {
+    match self {
+      Self::ALIVE => Some("ALIVE"),
+      Self::SUSPECT => Some("SUSPECT"),
+      Self::DEAD => Some("DEAD"),
+      _ => None,
+    }
+  }
+}
+impl ::core::fmt::Debug for Liveness {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+    if let Some(name) = self.variant_name() {
+      f.write_str(name)
+    } else {
+      f.write_fmt(format_args!("<UNKNOWN {:?}>", self.0))
+    }
+  }
+}
+impl<'a> ::flatbuffers::Follow<'a> for Liveness {
+  type Inner = Self;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    let b = unsafe { ::flatbuffers::read_scalar_at::<u8>(buf, loc) };
+    Self(b)
+  }
+}
+
+impl ::flatbuffers::Push for Liveness {
+    type Output = Liveness;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        unsafe { ::flatbuffers::emplace_scalar::<u8>(dst, self.0) };
+    }
+}
+
+impl ::flatbuffers::EndianScalar for Liveness {
+  type Scalar = u8;
+  #[inline]
+  fn to_little_endian(self) -> u8 {
+    self.0.to_le()
+  }
+  #[inline]
+  #[allow(clippy::wrong_self_convention)]
+  fn from_little_endian(v: u8) -> Self {
+    let b = u8::from_le(v);
+    Self(b)
+  }
+}
+
+impl<'a> ::flatbuffers::Verifiable for Liveness {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    u8::run_verifier(v, pos)
+  }
+}
+
+impl ::flatbuffers::SimpleToVerifyInSlice for Liveness {}
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MIN_GOSSIP_KIND: u8 = 0;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MAX_GOSSIP_KIND: u8 = 8;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+#[allow(non_camel_case_types)]
+pub const ENUM_VALUES_GOSSIP_KIND: [GossipKind; 9] = [
+  GossipKind::PING,
+  GossipKind::ACK,
+  GossipKind::NACK,
+  GossipKind::PING_REQ,
+  GossipKind::SYNC,
+  GossipKind::SYNC_REPLY,
+  GossipKind::JOIN,
+  GossipKind::JOIN_REPLY,
+  GossipKind::LEAVE,
+];
+
+/// Append-only.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(transparent)]
+pub struct GossipKind(pub u8);
+#[allow(non_upper_case_globals)]
+impl GossipKind {
+  pub const PING: Self = Self(0);
+  pub const ACK: Self = Self(1);
+  pub const NACK: Self = Self(2);
+  pub const PING_REQ: Self = Self(3);
+  pub const SYNC: Self = Self(4);
+  pub const SYNC_REPLY: Self = Self(5);
+  pub const JOIN: Self = Self(6);
+  pub const JOIN_REPLY: Self = Self(7);
+  pub const LEAVE: Self = Self(8);
+
+  pub const ENUM_MIN: u8 = 0;
+  pub const ENUM_MAX: u8 = 8;
+  pub const ENUM_VALUES: &'static [Self] = &[
+    Self::PING,
+    Self::ACK,
+    Self::NACK,
+    Self::PING_REQ,
+    Self::SYNC,
+    Self::SYNC_REPLY,
+    Self::JOIN,
+    Self::JOIN_REPLY,
+    Self::LEAVE,
+  ];
+  /// Returns the variant's name or "" if unknown.
+  pub fn variant_name(self) -> Option<&'static str> {
+    match self {
+      Self::PING => Some("PING"),
+      Self::ACK => Some("ACK"),
+      Self::NACK => Some("NACK"),
+      Self::PING_REQ => Some("PING_REQ"),
+      Self::SYNC => Some("SYNC"),
+      Self::SYNC_REPLY => Some("SYNC_REPLY"),
+      Self::JOIN => Some("JOIN"),
+      Self::JOIN_REPLY => Some("JOIN_REPLY"),
+      Self::LEAVE => Some("LEAVE"),
+      _ => None,
+    }
+  }
+}
+impl ::core::fmt::Debug for GossipKind {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+    if let Some(name) = self.variant_name() {
+      f.write_str(name)
+    } else {
+      f.write_fmt(format_args!("<UNKNOWN {:?}>", self.0))
+    }
+  }
+}
+impl<'a> ::flatbuffers::Follow<'a> for GossipKind {
+  type Inner = Self;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    let b = unsafe { ::flatbuffers::read_scalar_at::<u8>(buf, loc) };
+    Self(b)
+  }
+}
+
+impl ::flatbuffers::Push for GossipKind {
+    type Output = GossipKind;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        unsafe { ::flatbuffers::emplace_scalar::<u8>(dst, self.0) };
+    }
+}
+
+impl ::flatbuffers::EndianScalar for GossipKind {
+  type Scalar = u8;
+  #[inline]
+  fn to_little_endian(self) -> u8 {
+    self.0.to_le()
+  }
+  #[inline]
+  #[allow(clippy::wrong_self_convention)]
+  fn from_little_endian(v: u8) -> Self {
+    let b = u8::from_le(v);
+    Self(b)
+  }
+}
+
+impl<'a> ::flatbuffers::Verifiable for GossipKind {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    u8::run_verifier(v, pos)
+  }
+}
+
+impl ::flatbuffers::SimpleToVerifyInSlice for GossipKind {}
 /// A 128-bit identifier. NodeId and ClusterId use big-endian bytes.
 // struct Id128, aligned to 1
 #[repr(transparent)]
@@ -2224,6 +2430,647 @@ impl ::core::fmt::Debug for Ping<'_> {
   fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
     let mut ds = f.debug_struct("Ping");
       ds.field("nonce", &self.nonce());
+      ds.finish()
+  }
+}
+pub enum MemberInfoOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// The gossip payload of one member. Only the member itself raises its incarnation.
+pub struct MemberInfo<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for MemberInfo<'a> {
+  type Inner = MemberInfo<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> MemberInfo<'a> {
+  pub const VT_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_ADDR: ::flatbuffers::VOffsetT = 6;
+  pub const VT_STATE: ::flatbuffers::VOffsetT = 8;
+  pub const VT_INCARNATION: ::flatbuffers::VOffsetT = 10;
+  pub const VT_WEIGHT: ::flatbuffers::VOffsetT = 12;
+  pub const VT_EPOCH: ::flatbuffers::VOffsetT = 14;
+  pub const VT_CAPABILITIES: ::flatbuffers::VOffsetT = 16;
+  pub const VT_CAPACITY_USED: ::flatbuffers::VOffsetT = 18;
+  pub const VT_CAPACITY_MAX: ::flatbuffers::VOffsetT = 20;
+  pub const VT_LEADER_HINTS: ::flatbuffers::VOffsetT = 22;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    MemberInfo { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args MemberInfoArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<MemberInfo<'bldr>> {
+    let mut builder = MemberInfoBuilder::new(_fbb);
+    builder.add_capacity_max(args.capacity_max);
+    builder.add_capacity_used(args.capacity_used);
+    builder.add_capabilities(args.capabilities);
+    builder.add_weight(args.weight);
+    builder.add_incarnation(args.incarnation);
+    if let Some(x) = args.leader_hints { builder.add_leader_hints(x); }
+    if let Some(x) = args.epoch { builder.add_epoch(x); }
+    if let Some(x) = args.addr { builder.add_addr(x); }
+    if let Some(x) = args.id { builder.add_id(x); }
+    builder.add_state(args.state);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn id(&self) -> Option<&'a Id128> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Id128>(MemberInfo::VT_ID, None)}
+  }
+  #[inline]
+  pub fn addr(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(MemberInfo::VT_ADDR, None)}
+  }
+  #[inline]
+  pub fn state(&self) -> MemberState {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<MemberState>(MemberInfo::VT_STATE, Some(MemberState::JOINING)).unwrap()}
+  }
+  #[inline]
+  pub fn incarnation(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(MemberInfo::VT_INCARNATION, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn weight(&self) -> f64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<f64>(MemberInfo::VT_WEIGHT, Some(1.0)).unwrap()}
+  }
+  /// The epoch that the member holds.
+  #[inline]
+  pub fn epoch(&self) -> Option<&'a EpochId> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<EpochId>(MemberInfo::VT_EPOCH, None)}
+  }
+  /// The same capability bits as HELLO.
+  #[inline]
+  pub fn capabilities(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(MemberInfo::VT_CAPABILITIES, Some(0)).unwrap()}
+  }
+  /// Capacity hints: memory in use and the memory limit, in bytes.
+  #[inline]
+  pub fn capacity_used(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(MemberInfo::VT_CAPACITY_USED, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn capacity_max(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(MemberInfo::VT_CAPACITY_MAX, Some(0)).unwrap()}
+  }
+  /// Counter leader hints. Opaque to membership. The counter plan defines the content.
+  #[inline]
+  pub fn leader_hints(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(MemberInfo::VT_LEADER_HINTS, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for MemberInfo<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<Id128>("id", Self::VT_ID, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("addr", Self::VT_ADDR, false)?
+     .visit_field::<MemberState>("state", Self::VT_STATE, false)?
+     .visit_field::<u64>("incarnation", Self::VT_INCARNATION, false)?
+     .visit_field::<f64>("weight", Self::VT_WEIGHT, false)?
+     .visit_field::<EpochId>("epoch", Self::VT_EPOCH, false)?
+     .visit_field::<u64>("capabilities", Self::VT_CAPABILITIES, false)?
+     .visit_field::<u64>("capacity_used", Self::VT_CAPACITY_USED, false)?
+     .visit_field::<u64>("capacity_max", Self::VT_CAPACITY_MAX, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("leader_hints", Self::VT_LEADER_HINTS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct MemberInfoArgs<'a> {
+    pub id: Option<&'a Id128>,
+    pub addr: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub state: MemberState,
+    pub incarnation: u64,
+    pub weight: f64,
+    pub epoch: Option<&'a EpochId>,
+    pub capabilities: u64,
+    pub capacity_used: u64,
+    pub capacity_max: u64,
+    pub leader_hints: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+}
+impl<'a> Default for MemberInfoArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    MemberInfoArgs {
+      id: None,
+      addr: None,
+      state: MemberState::JOINING,
+      incarnation: 0,
+      weight: 1.0,
+      epoch: None,
+      capabilities: 0,
+      capacity_used: 0,
+      capacity_max: 0,
+      leader_hints: None,
+    }
+  }
+}
+
+pub struct MemberInfoBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> MemberInfoBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_id(&mut self, id: &Id128) {
+    self.fbb_.push_slot_always::<&Id128>(MemberInfo::VT_ID, id);
+  }
+  #[inline]
+  pub fn add_addr(&mut self, addr: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(MemberInfo::VT_ADDR, addr);
+  }
+  #[inline]
+  pub fn add_state(&mut self, state: MemberState) {
+    self.fbb_.push_slot::<MemberState>(MemberInfo::VT_STATE, state, MemberState::JOINING);
+  }
+  #[inline]
+  pub fn add_incarnation(&mut self, incarnation: u64) {
+    self.fbb_.push_slot::<u64>(MemberInfo::VT_INCARNATION, incarnation, 0);
+  }
+  #[inline]
+  pub fn add_weight(&mut self, weight: f64) {
+    self.fbb_.push_slot::<f64>(MemberInfo::VT_WEIGHT, weight, 1.0);
+  }
+  #[inline]
+  pub fn add_epoch(&mut self, epoch: &EpochId) {
+    self.fbb_.push_slot_always::<&EpochId>(MemberInfo::VT_EPOCH, epoch);
+  }
+  #[inline]
+  pub fn add_capabilities(&mut self, capabilities: u64) {
+    self.fbb_.push_slot::<u64>(MemberInfo::VT_CAPABILITIES, capabilities, 0);
+  }
+  #[inline]
+  pub fn add_capacity_used(&mut self, capacity_used: u64) {
+    self.fbb_.push_slot::<u64>(MemberInfo::VT_CAPACITY_USED, capacity_used, 0);
+  }
+  #[inline]
+  pub fn add_capacity_max(&mut self, capacity_max: u64) {
+    self.fbb_.push_slot::<u64>(MemberInfo::VT_CAPACITY_MAX, capacity_max, 0);
+  }
+  #[inline]
+  pub fn add_leader_hints(&mut self, leader_hints: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(MemberInfo::VT_LEADER_HINTS, leader_hints);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> MemberInfoBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    MemberInfoBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<MemberInfo<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for MemberInfo<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("MemberInfo");
+      ds.field("id", &self.id());
+      ds.field("addr", &self.addr());
+      ds.field("state", &self.state());
+      ds.field("incarnation", &self.incarnation());
+      ds.field("weight", &self.weight());
+      ds.field("epoch", &self.epoch());
+      ds.field("capabilities", &self.capabilities());
+      ds.field("capacity_used", &self.capacity_used());
+      ds.field("capacity_max", &self.capacity_max());
+      ds.field("leader_hints", &self.leader_hints());
+      ds.finish()
+  }
+}
+pub enum RumorOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// One member update with its liveness. A suspect rumor names the accuser.
+pub struct Rumor<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for Rumor<'a> {
+  type Inner = Rumor<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> Rumor<'a> {
+  pub const VT_INFO: ::flatbuffers::VOffsetT = 4;
+  pub const VT_LIVENESS: ::flatbuffers::VOffsetT = 6;
+  pub const VT_ACCUSER: ::flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    Rumor { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args RumorArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<Rumor<'bldr>> {
+    let mut builder = RumorBuilder::new(_fbb);
+    if let Some(x) = args.accuser { builder.add_accuser(x); }
+    if let Some(x) = args.info { builder.add_info(x); }
+    builder.add_liveness(args.liveness);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn info(&self) -> Option<MemberInfo<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<MemberInfo>>(Rumor::VT_INFO, None)}
+  }
+  #[inline]
+  pub fn liveness(&self) -> Liveness {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Liveness>(Rumor::VT_LIVENESS, Some(Liveness::ALIVE)).unwrap()}
+  }
+  #[inline]
+  pub fn accuser(&self) -> Option<&'a Id128> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Id128>(Rumor::VT_ACCUSER, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for Rumor<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<MemberInfo>>("info", Self::VT_INFO, false)?
+     .visit_field::<Liveness>("liveness", Self::VT_LIVENESS, false)?
+     .visit_field::<Id128>("accuser", Self::VT_ACCUSER, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct RumorArgs<'a> {
+    pub info: Option<::flatbuffers::WIPOffset<MemberInfo<'a>>>,
+    pub liveness: Liveness,
+    pub accuser: Option<&'a Id128>,
+}
+impl<'a> Default for RumorArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    RumorArgs {
+      info: None,
+      liveness: Liveness::ALIVE,
+      accuser: None,
+    }
+  }
+}
+
+pub struct RumorBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> RumorBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_info(&mut self, info: ::flatbuffers::WIPOffset<MemberInfo<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<MemberInfo>>(Rumor::VT_INFO, info);
+  }
+  #[inline]
+  pub fn add_liveness(&mut self, liveness: Liveness) {
+    self.fbb_.push_slot::<Liveness>(Rumor::VT_LIVENESS, liveness, Liveness::ALIVE);
+  }
+  #[inline]
+  pub fn add_accuser(&mut self, accuser: &Id128) {
+    self.fbb_.push_slot_always::<&Id128>(Rumor::VT_ACCUSER, accuser);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> RumorBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    RumorBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<Rumor<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for Rumor<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("Rumor");
+      ds.field("info", &self.info());
+      ds.field("liveness", &self.liveness());
+      ds.field("accuser", &self.accuser());
+      ds.finish()
+  }
+}
+pub enum GossipOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct Gossip<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for Gossip<'a> {
+  type Inner = Gossip<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> Gossip<'a> {
+  pub const VT_KIND: ::flatbuffers::VOffsetT = 4;
+  pub const VT_FROM: ::flatbuffers::VOffsetT = 6;
+  pub const VT_CLUSTER_ID: ::flatbuffers::VOffsetT = 8;
+  pub const VT_CLUSTER_SIZE: ::flatbuffers::VOffsetT = 10;
+  pub const VT_EPOCH_BODY: ::flatbuffers::VOffsetT = 12;
+  pub const VT_HLC: ::flatbuffers::VOffsetT = 14;
+  pub const VT_TARGET_ID: ::flatbuffers::VOffsetT = 16;
+  pub const VT_TARGET_ADDR: ::flatbuffers::VOffsetT = 18;
+  pub const VT_RUMORS: ::flatbuffers::VOffsetT = 20;
+  pub const VT_RETRY_AFTER_MS: ::flatbuffers::VOffsetT = 22;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    Gossip { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args GossipArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<Gossip<'bldr>> {
+    let mut builder = GossipBuilder::new(_fbb);
+    builder.add_hlc(args.hlc);
+    builder.add_retry_after_ms(args.retry_after_ms);
+    if let Some(x) = args.rumors { builder.add_rumors(x); }
+    if let Some(x) = args.target_addr { builder.add_target_addr(x); }
+    if let Some(x) = args.target_id { builder.add_target_id(x); }
+    if let Some(x) = args.epoch_body { builder.add_epoch_body(x); }
+    builder.add_cluster_size(args.cluster_size);
+    if let Some(x) = args.cluster_id { builder.add_cluster_id(x); }
+    if let Some(x) = args.from { builder.add_from(x); }
+    builder.add_kind(args.kind);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn kind(&self) -> GossipKind {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<GossipKind>(Gossip::VT_KIND, Some(GossipKind::PING)).unwrap()}
+  }
+  /// The sender's own payload.
+  #[inline]
+  pub fn from(&self) -> Option<MemberInfo<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<MemberInfo>>(Gossip::VT_FROM, None)}
+  }
+  /// The sender's cluster. All zero when the sender is not in a cluster yet.
+  #[inline]
+  pub fn cluster_id(&self) -> Option<&'a Id128> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Id128>(Gossip::VT_CLUSTER_ID, None)}
+  }
+  /// The NORMAL members in the sender's current epoch.
+  #[inline]
+  pub fn cluster_size(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(Gossip::VT_CLUSTER_SIZE, Some(0)).unwrap()}
+  }
+  /// The full sender epoch, when the receiver has an older one.
+  #[inline]
+  pub fn epoch_body(&self) -> Option<Epoch<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<Epoch>>(Gossip::VT_EPOCH_BODY, None)}
+  }
+  /// The sender's HLC (NTP64), or the cluster maximum in a join reply.
+  #[inline]
+  pub fn hlc(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(Gossip::VT_HLC, Some(0)).unwrap()}
+  }
+  /// The probe target of a PING_REQ.
+  #[inline]
+  pub fn target_id(&self) -> Option<&'a Id128> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Id128>(Gossip::VT_TARGET_ID, None)}
+  }
+  #[inline]
+  pub fn target_addr(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(Gossip::VT_TARGET_ADDR, None)}
+  }
+  #[inline]
+  pub fn rumors(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<Rumor<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<Rumor>>>>(Gossip::VT_RUMORS, None)}
+  }
+  /// A refused join waits this long before it tries again.
+  #[inline]
+  pub fn retry_after_ms(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(Gossip::VT_RETRY_AFTER_MS, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for Gossip<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<GossipKind>("kind", Self::VT_KIND, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<MemberInfo>>("from", Self::VT_FROM, false)?
+     .visit_field::<Id128>("cluster_id", Self::VT_CLUSTER_ID, false)?
+     .visit_field::<u32>("cluster_size", Self::VT_CLUSTER_SIZE, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<Epoch>>("epoch_body", Self::VT_EPOCH_BODY, false)?
+     .visit_field::<u64>("hlc", Self::VT_HLC, false)?
+     .visit_field::<Id128>("target_id", Self::VT_TARGET_ID, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("target_addr", Self::VT_TARGET_ADDR, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<Rumor>>>>("rumors", Self::VT_RUMORS, false)?
+     .visit_field::<u32>("retry_after_ms", Self::VT_RETRY_AFTER_MS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct GossipArgs<'a> {
+    pub kind: GossipKind,
+    pub from: Option<::flatbuffers::WIPOffset<MemberInfo<'a>>>,
+    pub cluster_id: Option<&'a Id128>,
+    pub cluster_size: u32,
+    pub epoch_body: Option<::flatbuffers::WIPOffset<Epoch<'a>>>,
+    pub hlc: u64,
+    pub target_id: Option<&'a Id128>,
+    pub target_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub rumors: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<Rumor<'a>>>>>,
+    pub retry_after_ms: u32,
+}
+impl<'a> Default for GossipArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    GossipArgs {
+      kind: GossipKind::PING,
+      from: None,
+      cluster_id: None,
+      cluster_size: 0,
+      epoch_body: None,
+      hlc: 0,
+      target_id: None,
+      target_addr: None,
+      rumors: None,
+      retry_after_ms: 0,
+    }
+  }
+}
+
+pub struct GossipBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> GossipBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_kind(&mut self, kind: GossipKind) {
+    self.fbb_.push_slot::<GossipKind>(Gossip::VT_KIND, kind, GossipKind::PING);
+  }
+  #[inline]
+  pub fn add_from(&mut self, from: ::flatbuffers::WIPOffset<MemberInfo<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<MemberInfo>>(Gossip::VT_FROM, from);
+  }
+  #[inline]
+  pub fn add_cluster_id(&mut self, cluster_id: &Id128) {
+    self.fbb_.push_slot_always::<&Id128>(Gossip::VT_CLUSTER_ID, cluster_id);
+  }
+  #[inline]
+  pub fn add_cluster_size(&mut self, cluster_size: u32) {
+    self.fbb_.push_slot::<u32>(Gossip::VT_CLUSTER_SIZE, cluster_size, 0);
+  }
+  #[inline]
+  pub fn add_epoch_body(&mut self, epoch_body: ::flatbuffers::WIPOffset<Epoch<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<Epoch>>(Gossip::VT_EPOCH_BODY, epoch_body);
+  }
+  #[inline]
+  pub fn add_hlc(&mut self, hlc: u64) {
+    self.fbb_.push_slot::<u64>(Gossip::VT_HLC, hlc, 0);
+  }
+  #[inline]
+  pub fn add_target_id(&mut self, target_id: &Id128) {
+    self.fbb_.push_slot_always::<&Id128>(Gossip::VT_TARGET_ID, target_id);
+  }
+  #[inline]
+  pub fn add_target_addr(&mut self, target_addr: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(Gossip::VT_TARGET_ADDR, target_addr);
+  }
+  #[inline]
+  pub fn add_rumors(&mut self, rumors: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<Rumor<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(Gossip::VT_RUMORS, rumors);
+  }
+  #[inline]
+  pub fn add_retry_after_ms(&mut self, retry_after_ms: u32) {
+    self.fbb_.push_slot::<u32>(Gossip::VT_RETRY_AFTER_MS, retry_after_ms, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> GossipBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    GossipBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<Gossip<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for Gossip<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("Gossip");
+      ds.field("kind", &self.kind());
+      ds.field("from", &self.from());
+      ds.field("cluster_id", &self.cluster_id());
+      ds.field("cluster_size", &self.cluster_size());
+      ds.field("epoch_body", &self.epoch_body());
+      ds.field("hlc", &self.hlc());
+      ds.field("target_id", &self.target_id());
+      ds.field("target_addr", &self.target_addr());
+      ds.field("rumors", &self.rumors());
+      ds.field("retry_after_ms", &self.retry_after_ms());
       ds.finish()
   }
 }

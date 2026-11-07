@@ -1,7 +1,9 @@
 //! Owned message types. The codec converts them to and from the generated FlatBuffers tables.
 
+use std::net::SocketAddr;
+
 use bytes::Bytes;
-use discus_placement::{ClusterId, Epoch, EpochId, NodeId, Version};
+use discus_placement::{ClusterId, Epoch, EpochId, MemberState, NodeId, Version, Weight};
 use discus_resp::Value;
 
 /// W3C Trace Context, copied unchanged across every hop. The telemetry plan fills it.
@@ -77,6 +79,7 @@ pub enum Message {
     ForwardReply(ForwardReply),
     Ping { nonce: u64 },
     Pong { nonce: u64 },
+    Gossip(Gossip),
 }
 
 impl Message {
@@ -91,6 +94,7 @@ impl Message {
             Message::ForwardReply(_) => T::FORWARD_REPLY.0,
             Message::Ping { .. } => T::PING.0,
             Message::Pong { .. } => T::PONG.0,
+            Message::Gossip(_) => T::GOSSIP.0,
         }
     }
 }
@@ -101,4 +105,96 @@ pub struct Frame {
     pub request_id: u64,
     pub trace: TraceContext,
     pub message: Message,
+}
+
+/// Capacity hints of a member, in bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Capacity {
+    pub used: u64,
+    pub max: u64,
+}
+
+/// The gossip payload of one member (spec section 6.1).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemberInfo {
+    pub id: NodeId,
+    pub addr: SocketAddr,
+    pub state: MemberState,
+    /// Only the member itself raises its incarnation.
+    pub incarnation: u64,
+    pub weight: Weight,
+    /// The epoch that the member holds.
+    pub epoch: EpochId,
+    /// The same capability bits as `HELLO`.
+    pub capabilities: u64,
+    pub capacity: Capacity,
+    /// Counter leader hints. Opaque to membership.
+    pub leader_hints: Bytes,
+}
+
+/// What the sender believes about a member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Liveness {
+    Alive,
+    Suspect,
+    Dead,
+}
+
+/// One member update. A suspect rumor names its accuser.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rumor {
+    pub info: MemberInfo,
+    pub liveness: Liveness,
+    pub accuser: Option<NodeId>,
+}
+
+/// The kind of a gossip body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GossipKind {
+    Ping,
+    Ack,
+    Nack,
+    PingReq,
+    Sync,
+    SyncReply,
+    Join,
+    JoinReply,
+    Leave,
+}
+
+/// One gossip message. Every message carries the sender's own payload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gossip {
+    pub kind: GossipKind,
+    pub from: MemberInfo,
+    /// `ClusterId::NIL` when the sender is not in a cluster yet.
+    pub cluster_id: ClusterId,
+    /// The `NORMAL` members in the sender's current epoch.
+    pub cluster_size: u32,
+    /// The full sender epoch, when the receiver has an older one.
+    pub epoch_body: Option<Epoch>,
+    /// The sender's HLC as a raw `NTP64`, or the cluster maximum in a join reply.
+    pub hlc: u64,
+    /// The probe target of a `PING_REQ`.
+    pub target: Option<(NodeId, SocketAddr)>,
+    pub rumors: Vec<Rumor>,
+    /// A refused join waits this long before it tries again.
+    pub retry_after_ms: u32,
+}
+
+impl Gossip {
+    /// A message of `kind` from `from` with every other field empty.
+    pub fn new(kind: GossipKind, from: MemberInfo) -> Gossip {
+        Gossip {
+            kind,
+            from,
+            cluster_id: ClusterId::NIL,
+            cluster_size: 0,
+            epoch_body: None,
+            hlc: 0,
+            target: None,
+            rumors: Vec::new(),
+            retry_after_ms: 0,
+        }
+    }
 }

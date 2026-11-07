@@ -30,8 +30,8 @@ mod resp;
 
 pub use codec::{decode_frame, encode_envelope, encode_frame, DecodeError};
 pub use message::{
-    Forward, ForwardMode, ForwardReply, Frame, HandshakeCode, HandshakeFailed, Hello, Message,
-    TraceContext,
+    Capacity, Forward, ForwardMode, ForwardReply, Frame, Gossip, GossipKind, HandshakeCode,
+    HandshakeFailed, Hello, Liveness, MemberInfo, Message, Rumor, TraceContext,
 };
 pub use resp::encode_command;
 
@@ -40,8 +40,10 @@ pub use resp::encode_command;
 pub mod caps {
     /// A forward carries the full sender epoch when the peer last reported an older one.
     pub const EPOCH_PUSH: u64 = 1;
+    /// The node serves SWIM gossip on the `discus-gossip` ALPN.
+    pub const GOSSIP: u64 = 2;
     /// Every bit this build knows.
-    pub const KNOWN: u64 = EPOCH_PUSH;
+    pub const KNOWN: u64 = EPOCH_PUSH | GOSSIP;
 }
 
 /// The frame limit before `HELLO` completes, and the smallest offer that `HELLO` accepts.
