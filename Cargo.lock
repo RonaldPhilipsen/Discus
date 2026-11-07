@@ -196,6 +196,7 @@ name = "discus-store"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "fastrand",
  "parking_lot",
  "tokio",
  "tokio-util",

@@ -8,11 +8,7 @@ async fn writes_beyond_maxmemory_evict_instead_of_failing() {
     for i in 0..400 {
         let _: () = c.set(format!("k{i}"), "x".repeat(1_000)).await.unwrap();
     }
-    let mut present = 0;
-    for i in 0..400 {
-        let e: i64 = c.exists(format!("k{i}")).await.unwrap();
-        present += e;
-    }
+    let present: i64 = redis::cmd("DBSIZE").query_async(&mut c).await.unwrap();
     assert!(present < 400 && present > 50, "present = {present}");
     let err = c
         .set::<_, _, ()>("huge", "x".repeat(300_000))

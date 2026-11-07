@@ -4,7 +4,7 @@ use discus_resp::{Command, Value};
 
 use super::error::CommandError;
 use super::table::CommandSpec;
-use super::util::parse_i64;
+use super::util::{parse_i64, upper};
 use crate::node::{ConnState, Node};
 
 pub const COMMANDS: &[CommandSpec] = &[
@@ -48,6 +48,36 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "PERSIST",
         arity: 2,
         handler: persist,
+        needs_auth: true,
+    },
+    CommandSpec {
+        name: "SCAN",
+        arity: -2,
+        handler: scan,
+        needs_auth: true,
+    },
+    CommandSpec {
+        name: "RANDOMKEY",
+        arity: 1,
+        handler: randomkey,
+        needs_auth: true,
+    },
+    CommandSpec {
+        name: "DBSIZE",
+        arity: 1,
+        handler: dbsize,
+        needs_auth: true,
+    },
+    CommandSpec {
+        name: "FLUSHDB",
+        arity: -1,
+        handler: flush,
+        needs_auth: true,
+    },
+    CommandSpec {
+        name: "FLUSHALL",
+        arity: -1,
+        handler: flush,
         needs_auth: true,
     },
 ];
@@ -130,4 +160,52 @@ fn persist(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         }
         _ => Ok(Value::Integer(0)),
     })
+}
+
+fn scan(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+    let cursor = std::str::from_utf8(&cmd[1])
+        .ok()
+        .and_then(|c| c.parse::<u64>().ok())
+        .ok_or_else(|| CommandError::Custom("ERR invalid cursor".into()))?;
+    let (mut pattern, mut count) = (None, 10usize);
+    let mut i = 2;
+    while i < cmd.len() {
+        match upper(&cmd[i]).as_str() {
+            "MATCH" if i + 1 < cmd.len() => pattern = Some(cmd[i + 1].clone()),
+            "COUNT" if i + 1 < cmd.len() => {
+                let n = parse_i64(&cmd[i + 1])?;
+                if n < 1 {
+                    return Err(CommandError::Syntax);
+                }
+                count = n as usize;
+            }
+            _ => return Err(CommandError::Syntax),
+        }
+        i += 2;
+    }
+    let (next, keys) = node.store.scan(cursor, count, pattern.as_deref());
+    Ok(Value::Array(vec![
+        Value::bulk(next.to_string().into_bytes()),
+        Value::Array(keys.into_iter().map(Value::Bulk).collect()),
+    ]))
+}
+
+fn randomkey(node: &Node, _: &mut ConnState, _: &Command) -> Reply {
+    Ok(node.store.random_key().map_or(Value::Null, Value::Bulk))
+}
+
+fn dbsize(node: &Node, _: &mut ConnState, _: &Command) -> Reply {
+    Ok(Value::Integer(node.store.len() as i64))
+}
+
+fn flush(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+    if cmd.len() > 2
+        || cmd
+            .get(1)
+            .is_some_and(|m| !matches!(upper(m).as_str(), "ASYNC" | "SYNC"))
+    {
+        return Err(CommandError::Syntax);
+    }
+    node.store.clear();
+    Ok(Value::ok())
 }
