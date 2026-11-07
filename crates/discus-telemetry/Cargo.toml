@@ -16,6 +16,10 @@ opentelemetry = { version = "0.33", default-features = false, features = ["trace
 opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "metrics"], optional = true }
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["grpc-tonic", "trace", "metrics", "tls-provider-agnostic"], optional = true }
 tracing-opentelemetry = { version = "0.34", default-features = false, optional = true }
+futures-executor = { version = "0.3", optional = true }
+# Only to check for an installed crypto provider under tls-openssl. No provider feature here.
+rustls = { version = "0.23", default-features = false, features = ["std"], optional = true }
+thiserror = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
@@ -29,6 +33,8 @@ otel = [
   "dep:opentelemetry_sdk",
   "dep:opentelemetry-otlp",
   "dep:tracing-opentelemetry",
+  "dep:futures-executor",
+  "dep:rustls",
 ]
 testing = ["opentelemetry_sdk?/testing"]
 tls-aws-lc = ["opentelemetry-otlp?/tls-aws-lc"]

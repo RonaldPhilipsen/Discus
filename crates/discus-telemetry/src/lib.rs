@@ -8,6 +8,9 @@ use std::sync::atomic::AtomicU64;
 pub mod attrs;
 pub mod context;
 pub mod metrics;
+pub mod pipeline;
+#[cfg(feature = "otel")]
+pub mod processor;
 #[cfg(all(feature = "otel", feature = "testing"))]
 pub mod testing;
 

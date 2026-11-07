@@ -8,7 +8,10 @@ use opentelemetry::KeyValue;
 use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData, ResourceMetrics};
 use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
 
+use opentelemetry_sdk::trace::InMemorySpanExporter;
+
 use crate::metrics::{Counters, Metrics};
+use crate::pipeline::{Telemetry, TelemetryConfig};
 
 /// One exported data point, flattened. A histogram reports its count as `value`.
 #[derive(Clone, Debug, PartialEq)]
@@ -131,4 +134,38 @@ fn flatten(rm: &ResourceMetrics) -> Vec<Point> {
         }
     }
     out
+}
+
+/// A full pipeline over the in-memory span and metric exporters.
+pub struct TraceHarness {
+    pub telemetry: Telemetry,
+    pub spans: InMemorySpanExporter,
+    pub metrics: InMemoryMetricExporter,
+}
+
+impl TraceHarness {
+    /// The default configuration with `ratio` as the sampling ratio.
+    pub fn new(ratio: f64) -> TraceHarness {
+        TraceHarness::with_config(&TelemetryConfig {
+            sampling_ratio: ratio,
+            ..TelemetryConfig::default()
+        })
+    }
+
+    pub fn with_config(cfg: &TelemetryConfig) -> TraceHarness {
+        let spans = InMemorySpanExporter::default();
+        let metrics = InMemoryMetricExporter::default();
+        let telemetry = Telemetry::with_exporters(cfg, spans.clone(), metrics.clone());
+        TraceHarness {
+            telemetry,
+            spans,
+            metrics,
+        }
+    }
+
+    /// Flush and flatten the last metric export.
+    pub fn points(&self) -> Vec<Point> {
+        self.telemetry.force_flush();
+        points(&self.metrics)
+    }
 }

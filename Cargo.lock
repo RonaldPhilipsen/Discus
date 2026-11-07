@@ -352,9 +352,12 @@ dependencies = [
 name = "discus-telemetry"
 version = "0.0.0"
 dependencies = [
+ "futures-executor",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "rustls",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-opentelemetry",
