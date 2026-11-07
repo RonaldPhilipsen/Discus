@@ -10,3 +10,7 @@ workspace = true
 [dependencies]
 fastrand = "2"
 getrandom = "0.3"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[dev-dependencies]
+proptest = "1"
