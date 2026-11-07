@@ -59,6 +59,7 @@ impl Parser {
     }
 
     /// Return the next complete command, or `None` when more bytes are needed.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<Command>, ParseError> {
         loop {
             match self.try_parse()? {
