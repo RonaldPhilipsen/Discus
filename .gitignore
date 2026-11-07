@@ -1,0 +1,4 @@
+/target/
+
+# Local design notes — not part of the repository
+/docs/superpowers/specs/2026-11-07-scalable-redis-compatible-cache-design.md
