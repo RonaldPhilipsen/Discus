@@ -24,7 +24,6 @@ use crate::hello;
 use crate::tls::TlsMaterial;
 use crate::{ALPN_RPC, CLOSE_HANDSHAKE_FAILED, CLOSE_SHUTDOWN, RESET_BAD_FRAME};
 
-/// Settings for one transport.
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
     pub listen: SocketAddr,
@@ -76,7 +75,6 @@ pub struct PeerInfo {
     pub epoch: EpochId,
 }
 
-/// One inbound request.
 #[derive(Debug)]
 pub struct Inbound {
     pub peer: PeerInfo,
