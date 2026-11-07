@@ -33,6 +33,11 @@ impl ManualClock {
     pub fn advance(&self, ms: u64) {
         self.0.fetch_add(ms, Ordering::SeqCst);
     }
+
+    /// Jump to `ms`. Unlike a real clock source, this can move backwards, to model an NTP step.
+    pub fn set(&self, ms: u64) {
+        self.0.store(ms, Ordering::SeqCst);
+    }
 }
 
 impl Clock for ManualClock {

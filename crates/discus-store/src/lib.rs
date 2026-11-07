@@ -3,7 +3,6 @@
 //! The key hash is xxh3 with [`HASH_SEED`]. It is part of the placement contract: a change to the
 //! hash or the seed is a breaking change.
 
-pub mod clock;
 pub mod entry;
 pub mod evict;
 pub mod glob;
@@ -13,7 +12,7 @@ pub mod ttl;
 pub mod value;
 pub mod zset;
 
-pub use clock::{Clock, ManualClock, SystemClock};
+pub use discus_placement::clock::{self, Clock, ManualClock, SystemClock};
 pub use entry::{estimate_size, Entry};
 pub use evict::Admit;
 pub use glob::glob_match;

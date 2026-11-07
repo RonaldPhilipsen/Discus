@@ -359,6 +359,7 @@ name = "discus-store"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "discus-placement",
  "fastrand",
  "parking_lot",
  "tokio",
