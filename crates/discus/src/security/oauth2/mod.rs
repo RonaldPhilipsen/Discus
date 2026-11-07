@@ -3,6 +3,8 @@
 //! `jsonwebtoken` verifies the signature and the registered claims. This module picks the
 //! issuer from `iss`, picks the key, checks `iat`, and maps scopes.
 
+#[cfg(feature = "oauth2-introspection")]
+pub mod introspect;
 pub mod issuer;
 pub mod jwks;
 
@@ -136,20 +138,20 @@ pub struct Claims {
 
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum OneOrMany {
+pub(crate) enum OneOrMany {
     One(String),
     Many(Vec<String>),
 }
 
 #[derive(Deserialize)]
-struct RawClaims {
-    sub: Option<String>,
-    jti: Option<String>,
-    exp: i64,
-    nbf: Option<i64>,
-    iat: Option<i64>,
-    scope: Option<String>,
-    scp: Option<OneOrMany>,
+pub(crate) struct RawClaims {
+    pub sub: Option<String>,
+    pub jti: Option<String>,
+    pub exp: i64,
+    pub nbf: Option<i64>,
+    pub iat: Option<i64>,
+    pub scope: Option<String>,
+    pub scp: Option<OneOrMany>,
 }
 
 #[derive(Deserialize)]
@@ -230,7 +232,7 @@ impl TrustedIssuer {
         Ok(keys.clone())
     }
 
-    fn scopes(&self, claims: &RawClaims) -> Scopes {
+    pub(crate) fn scopes(&self, claims: &RawClaims) -> Scopes {
         if !self.rules.subjects.is_empty() {
             let sub = claims.sub.as_deref().unwrap_or_default();
             return self
@@ -342,6 +344,13 @@ pub struct OAuth2 {
     validator: Validator,
     sources: Vec<Arc<issuer::Source>>,
     generation: Arc<AtomicU64>,
+    #[cfg(feature = "oauth2-introspection")]
+    introspector: Option<introspect::Introspector>,
+}
+
+/// A JWT has three dot-separated parts. Anything else is an opaque token.
+pub fn is_jwt(token: &[u8]) -> bool {
+    token.iter().filter(|&&b| b == b'.').count() == 2
 }
 
 impl OAuth2 {
@@ -353,6 +362,25 @@ impl OAuth2 {
     ) -> Result<OAuth2, String> {
         let generation = Arc::new(AtomicU64::new(0));
         let mut sources = Vec::new();
+        let introspecting: Vec<&IssuerFile> =
+            files.iter().filter(|f| f.client_id.is_some()).collect();
+        if introspecting.len() > 1 {
+            return Err(
+                "--auth-config: only one issuer can set client_id for introspection, so an \
+                 opaque token never goes to more than one identity provider"
+                    .into(),
+            );
+        }
+        #[cfg(not(feature = "oauth2-introspection"))]
+        if !introspecting.is_empty() {
+            return Err(
+                "--auth-config: client_id turns on RFC 7662 introspection, but this \
+                 binary was built without the \"oauth2-introspection\" feature"
+                    .into(),
+            );
+        }
+        #[cfg(feature = "oauth2-introspection")]
+        let mut introspector = None;
         for f in files {
             let ctx = |e: String| format!("--auth-config issuer {:?}: {e}", f.issuer);
             let mut rules = IssuerRules::new(&f.issuer, &f.audience);
@@ -385,9 +413,21 @@ impl OAuth2 {
             };
             let source =
                 issuer::Source::new(Arc::new(trusted), config, generation.clone()).map_err(ctx)?;
-            sources.push(Arc::new(source));
+            let source = Arc::new(source);
+            #[cfg(feature = "oauth2-introspection")]
+            if f.client_id.is_some() {
+                introspector =
+                    Some(introspect::Introspector::new(source.clone(), f, skew_secs).map_err(ctx)?);
+            }
+            sources.push(source);
         }
-        Ok(OAuth2::with_sources(sources, generation, skew_secs))
+        #[cfg_attr(not(feature = "oauth2-introspection"), allow(unused_mut))]
+        let mut out = OAuth2::with_sources(sources, generation, skew_secs);
+        #[cfg(feature = "oauth2-introspection")]
+        {
+            out.introspector = introspector;
+        }
+        Ok(out)
     }
 
     /// Build from loaders that are already set up.
@@ -401,6 +441,8 @@ impl OAuth2 {
             validator: Validator::new(issuers, skew_secs),
             sources,
             generation,
+            #[cfg(feature = "oauth2-introspection")]
+            introspector: None,
         }
     }
 
@@ -445,6 +487,13 @@ impl OAuth2 {
 
     /// Before a synchronous check: refresh the JWKS when the token names an unknown `kid`.
     pub async fn prefetch(&self, token: &[u8]) {
+        if !is_jwt(token) {
+            #[cfg(feature = "oauth2-introspection")]
+            if let Some(i) = &self.introspector {
+                i.prefetch(token).await;
+            }
+            return;
+        }
         let Some(trusted) = self.validator.issuer_of(token) else {
             return;
         };
@@ -468,8 +517,17 @@ impl OAuth2 {
         }
     }
 
+    /// Check a token. A JWT verifies locally. An opaque token needs a cached introspection
+    /// answer, which `prefetch` fills.
     pub fn check(&self, token: &[u8], now: i64) -> Result<Claims, Reject> {
-        self.validator.check(token, now)
+        if is_jwt(token) {
+            return self.validator.check(token, now);
+        }
+        #[cfg(feature = "oauth2-introspection")]
+        if let Some(i) = &self.introspector {
+            return i.check(token, now);
+        }
+        Err(Reject::Malformed)
     }
 }
 

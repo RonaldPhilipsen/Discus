@@ -61,6 +61,12 @@ pub struct IssuerFile {
     pub jwks_min_refetch_secs: u64,
     #[serde(default = "d3600")]
     pub jwks_max_stale_secs: u64,
+    /// RFC 7662 client ID. Setting it turns on introspection of opaque tokens for this issuer.
+    pub client_id: Option<String>,
+    /// A file that holds the introspection client secret.
+    pub client_secret_file: Option<PathBuf>,
+    /// Default: `introspection_endpoint` from discovery.
+    pub introspection_url: Option<String>,
     /// Scopes per `sub` pattern. When present, they replace the `scope` claim.
     #[serde(default)]
     pub subject: Vec<SubjectFile>,

@@ -69,6 +69,41 @@ async fn a_tls_mode_needs_a_certificate_and_a_key() {
     assert!(e.contains("--tls-cert"), "{e}");
 }
 
+#[cfg(all(feature = "oauth2", not(feature = "oauth2-introspection")))]
+#[tokio::test]
+async fn introspection_names_the_missing_feature() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("auth.toml");
+    std::fs::write(
+        &file,
+        "[[issuer]]\nissuer = \"https://idp.test\"\naudience = \"discus\"\nclient_id = \"d\"\n",
+    )
+    .unwrap();
+    let e = bind_error(&[
+        "--auth-policy",
+        "any:oauth2",
+        "--dev-insecure-oauth2",
+        "--auth-config",
+        file.to_str().unwrap(),
+    ])
+    .await;
+    assert!(e.contains("\"oauth2-introspection\" feature"), "{e}");
+}
+
+#[cfg(not(feature = "oauth2"))]
+#[tokio::test]
+async fn issuers_name_the_missing_feature() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("auth.toml");
+    std::fs::write(
+        &file,
+        "[[issuer]]\nissuer = \"https://idp.test\"\naudience = \"discus\"\n",
+    )
+    .unwrap();
+    let e = bind_error(&["--auth-config", file.to_str().unwrap()]).await;
+    assert!(e.contains("\"oauth2\" feature"), "{e}");
+}
+
 #[cfg(not(feature = "oauth2"))]
 #[tokio::test]
 async fn an_oauth2_policy_names_the_missing_feature() {

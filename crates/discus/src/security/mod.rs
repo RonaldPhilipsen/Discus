@@ -241,12 +241,16 @@ impl Security {
 
     /// The async part of `AUTH` and `HELLO ... AUTH`: refresh the JWKS on an unknown `kid`, so
     /// the synchronous handler finds the key.
-    pub async fn prefetch(&self, cmd: &discus_resp::Command) {
+    /// A source over its failed-attempt limit never reaches the identity provider.
+    pub async fn prefetch(&self, conn: &ConnState, cmd: &discus_resp::Command) {
         #[cfg(feature = "oauth2")]
         if let (Some(o), Some(token)) = (&self.oauth, token_arg(cmd)) {
+            if conn.auth.peer.is_some_and(|ip| self.limiter.blocked(ip)) {
+                return;
+            }
             o.prefetch(token).await;
         }
-        let _ = cmd;
+        let _ = (conn, cmd);
     }
 
     pub fn mode(&self) -> TlsMode {
@@ -373,7 +377,8 @@ impl Security {
                         exp: claims.exp,
                         nbf: claims.nbf,
                         scopes: claims.scopes,
-                        generation: Some(generation),
+                        // An introspected token has no JWKS to check against again.
+                        generation: oauth2::is_jwt(token).then_some(generation),
                     });
                     Ok(())
                 }

@@ -63,6 +63,15 @@ else
   failures=$((failures + 1))
 fi
 
+# Introspection is off by default, so `mise run test` does not run its tests.
+if cargo test -q -p discus --features oauth2-introspection --test introspection \
+  >/dev/null 2>&1; then
+  echo "ok      oauth2-introspection tests"
+else
+  echo "FAILED  oauth2-introspection tests"
+  failures=$((failures + 1))
+fi
+
 # Rejected combinations.
 reject "roots-system" "enable exactly one TLS backend feature"
 reject "tls-aws-lc,tls-ring,roots-system" "enable only one TLS backend feature"

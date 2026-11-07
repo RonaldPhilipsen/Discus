@@ -33,6 +33,8 @@ pub struct Source {
     generation: Arc<AtomicU64>,
     /// The `issuer` from discovery, for an issuer that learns its name from the document.
     pub discovered_issuer: Mutex<Option<String>>,
+    /// The `introspection_endpoint` from discovery.
+    pub introspection_endpoint: Mutex<Option<String>>,
 }
 
 /// The settings of a `Source`.
@@ -88,7 +90,17 @@ impl Source {
             last_kid_refresh: tokio::sync::Mutex::new(None),
             generation,
             discovered_issuer: Mutex::new(None),
+            introspection_endpoint: Mutex::new(None),
         })
+    }
+
+    /// The HTTP client of this issuer, with its trust roots.
+    pub fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
+    pub fn insecure(&self) -> bool {
+        self.insecure
     }
 
     async fn get(&self, url: &str) -> Result<bytes::Bytes, String> {
@@ -124,6 +136,11 @@ impl Source {
                 "discovery names issuer {issuer:?}, not {:?}",
                 self.trusted.rules.issuer
             ));
+        }
+        if let Some(url) = doc.get("introspection_endpoint").and_then(|v| v.as_str()) {
+            if let Ok(mut e) = self.introspection_endpoint.lock() {
+                *e = Some(url.to_string());
+            }
         }
         if let Some(fixed) = &self.fixed_jwks_url {
             return Ok(fixed.clone());
