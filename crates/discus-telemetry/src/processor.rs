@@ -33,7 +33,6 @@ enum Control {
     Shutdown(SyncSender<OTelSdkResult>),
 }
 
-/// See the module documentation.
 pub struct BoundedSpanProcessor {
     spans: SyncSender<SpanData>,
     control: SyncSender<Control>,

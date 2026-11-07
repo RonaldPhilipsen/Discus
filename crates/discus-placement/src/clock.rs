@@ -8,7 +8,6 @@ pub trait Clock: Send + Sync {
     fn now_ms(&self) -> u64;
 }
 
-/// The wall clock.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemClock;
 

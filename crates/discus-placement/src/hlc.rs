@@ -4,7 +4,7 @@
 //! epoch and 32 bits of fraction, whose low 4 bits are the logical counter) plus a 16-byte ID. The
 //! ID is the origin `NodeId`, so conflicts resolve by time and then by origin through the
 //! timestamp order of `uhlc`. That order compares the ID as its 16 little-endian bytes. This
-//! format is part of the wire contract of later plans.
+//! format is part of the wire contract.
 //!
 //! `uhlc` does not bound what it issues. [`Hlc`] adds that: it never hands out a timestamp
 //! [`MAX_DRIFT`] or more ahead of the wall clock, and it drops incoming timestamps more than

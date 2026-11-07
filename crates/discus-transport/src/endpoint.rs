@@ -42,7 +42,6 @@ impl Channel {
     }
 }
 
-/// Settings for one transport.
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
     pub listen: SocketAddr,
@@ -97,7 +96,6 @@ pub struct PeerInfo {
     pub channel: Channel,
 }
 
-/// One inbound request.
 #[derive(Debug)]
 pub struct Inbound {
     pub peer: PeerInfo,

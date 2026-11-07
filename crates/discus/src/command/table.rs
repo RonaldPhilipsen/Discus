@@ -19,7 +19,6 @@ pub struct CommandSpec {
     pub needs_auth: bool,
 }
 
-/// Every family of commands. Later tasks add their family here.
 fn families() -> Vec<&'static [CommandSpec]> {
     vec![
         super::connection::COMMANDS,
@@ -139,7 +138,7 @@ pub fn check(cmd: &Command) -> Result<&'static CommandSpec, CommandError> {
 }
 
 /// Check the authentication and the scopes of the connection for a command. Only the entry node
-/// calls it (spec §15.3).
+/// calls it (spec §14).
 pub fn authorize(
     node: &Node,
     conn: &mut ConnState,

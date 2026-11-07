@@ -6,7 +6,7 @@ use bytes::Bytes;
 use discus_placement::{ClusterId, Epoch, EpochId, MemberState, NodeId, Version, Weight};
 use discus_resp::Value;
 
-/// W3C Trace Context, copied unchanged across every hop. The telemetry plan fills it.
+/// W3C Trace Context, copied unchanged across every hop.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TraceContext {
     pub traceparent: Option<String>,

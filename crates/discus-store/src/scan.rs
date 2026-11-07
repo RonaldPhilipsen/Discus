@@ -81,7 +81,6 @@ impl Store {
         None
     }
 
-    /// Remove every entry.
     pub fn clear(&self) {
         for shard in &self.shards {
             let mut guard = shard.inner.write();

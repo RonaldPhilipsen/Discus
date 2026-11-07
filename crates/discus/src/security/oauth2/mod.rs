@@ -211,12 +211,10 @@ impl TrustedIssuer {
         }
     }
 
-    /// True once keys have loaded.
     pub fn loaded(&self) -> bool {
         self.keys.read().is_ok_and(|k| k.is_some())
     }
 
-    /// When the keys last loaded.
     pub fn loaded_at(&self) -> Option<Instant> {
         self.keys
             .read()

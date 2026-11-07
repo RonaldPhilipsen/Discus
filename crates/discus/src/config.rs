@@ -204,7 +204,7 @@ pub struct Config {
     /// Capability bits offered in HELLO. For tests of mixed builds.
     #[arg(long, hide = true, default_value_t = discus_wire::caps::KNOWN)]
     pub cluster_capabilities: u64,
-    /// Security flags (spec §15.3).
+    /// Security flags (spec §14).
     #[command(flatten)]
     pub security: crate::security::SecurityArgs,
     /// Telemetry flags (spec §15.4).

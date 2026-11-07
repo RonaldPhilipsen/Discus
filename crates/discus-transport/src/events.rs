@@ -28,7 +28,7 @@ pub enum PeerEventKind {
     ForwardTimeout { write: bool },
 }
 
-/// Counters for the transport. Plan 7 exports them as metrics.
+/// Counters for the transport. No metric exports them yet.
 #[derive(Debug, Default)]
 pub struct TransportStats {
     pub frames_rejected: AtomicU64,

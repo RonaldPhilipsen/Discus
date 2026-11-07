@@ -220,7 +220,6 @@ impl Node {
         result
     }
 
-    /// The current epoch ID.
     pub fn epoch_id(&self) -> EpochId {
         self.epochs.read().current().id()
     }
@@ -320,7 +319,6 @@ fn static_epoch(me: Member, config: &Config, cluster_id: ClusterId) -> Epoch {
         .unwrap_or_else(|_| Epoch::bootstrap(members[0].clone(), cluster_id))
 }
 
-/// Per-connection state.
 #[derive(Debug)]
 pub struct ConnState {
     pub protocol: Protocol,

@@ -100,7 +100,7 @@ async fn one_trace_id_covers_the_forward() {
     assert!(child_of!("store", remote_cmd));
     assert!(!child_of!("store", entry_cmd));
 
-    // The forward, epoch, and member metrics have real sources now.
+    // The forward, epoch, and member metrics report real values.
     let points = h.points();
     let sum = |name: &str, attr: Option<(&str, &str)>| -> f64 {
         points

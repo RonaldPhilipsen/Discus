@@ -95,7 +95,6 @@ impl TlsMaterial {
         })
     }
 
-    /// Build from PEM files.
     pub fn from_files(
         ca: &Path,
         cert: &Path,
@@ -180,7 +179,6 @@ pub(crate) struct PeerVerifier {
     provider: Arc<CryptoProvider>,
 }
 
-/// The URI SANs of a DER certificate.
 fn uri_sans(der: &[u8]) -> Vec<String> {
     let Ok((_, cert)) = x509_parser::parse_x509_certificate(der) else {
         return Vec::new();

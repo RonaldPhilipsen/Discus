@@ -19,7 +19,6 @@ pub struct AuthFile {
     pub issuer: Vec<IssuerFile>,
     /// The service account issuer of the cluster.
     pub kubernetes: Option<KubernetesFile>,
-    /// Admin port settings.
     #[serde(default)]
     pub admin: AdminFile,
 }

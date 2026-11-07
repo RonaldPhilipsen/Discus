@@ -11,8 +11,7 @@ use xxhash_rust::xxh3::xxh3_64_with_seed;
 use crate::entry::estimate_size;
 use crate::{Clock, Entry, Version};
 
-/// The seed of the key hash. A change to it or to the hash is a breaking change, because
-/// placement in later plans depends on it.
+/// The seed of the key hash that picks a shard. Placement does not use it.
 pub const HASH_SEED: u64 = 0x4449_5343_5553_0001;
 
 /// Reads refresh the access time at most this often per key, so they rarely need the write lock.
