@@ -8,7 +8,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 
-use crate::command::dispatch;
 use crate::node::{ConnState, Node};
 
 /// Flush when this many reply bytes are pending.
@@ -61,7 +60,7 @@ pub async fn serve(mut stream: TcpStream, node: Arc<Node>, hard_stop: Cancellati
         loop {
             match parser.next() {
                 Ok(Some(cmd)) => {
-                    let reply = dispatch(&node, &mut conn, &cmd);
+                    let reply = crate::telemetry::dispatch(&node, &mut conn, &cmd);
                     encode(&reply, conn.protocol, &mut out);
                     in_flight += 1;
                     if conn.closing {

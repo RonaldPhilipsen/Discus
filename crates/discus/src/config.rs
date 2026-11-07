@@ -44,6 +44,9 @@ pub struct Config {
     /// Shared token that clients must send with AUTH.
     #[arg(long)]
     pub shared_token: Option<String>,
+    /// Telemetry flags (spec §15.4).
+    #[command(flatten)]
+    pub telemetry: crate::telemetry::TelemetryArgs,
 }
 
 impl Config {

@@ -6,6 +6,7 @@ pub mod command;
 pub mod config;
 pub mod node;
 pub mod server;
+pub mod telemetry;
 
 pub use config::Config;
 pub use node::{ConnState, Node, Phase};

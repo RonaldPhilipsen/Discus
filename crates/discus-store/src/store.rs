@@ -34,6 +34,10 @@ pub(crate) struct Shard {
     pub(crate) inner: RwLock<ShardInner>,
     /// Where the next sweep or eviction sample starts within the shard's iteration order.
     pub(crate) cursor: AtomicUsize,
+    /// Reads that found a live entry, and reads that did not. Per shard, so reads on different
+    /// shards never touch the same counter.
+    hits: AtomicU64,
+    misses: AtomicU64,
 }
 
 pub struct Store {
@@ -53,6 +57,8 @@ impl Store {
             .map(|_| Shard {
                 inner: RwLock::new(ShardInner::default()),
                 cursor: AtomicUsize::new(0),
+                hits: AtomicU64::new(0),
+                misses: AtomicU64::new(0),
             })
             .collect();
         Store {
@@ -82,9 +88,13 @@ impl Store {
             let guard = shard.inner.read();
             match guard.map.get(key) {
                 Some(e) if !e.is_expired(now) => {
+                    shard.hits.fetch_add(1, Ordering::Relaxed);
                     (f(Some(e)), e.last_access_ms + ACCESS_RESOLUTION_MS < now)
                 }
-                _ => (f(None), false),
+                _ => {
+                    shard.misses.fetch_add(1, Ordering::Relaxed);
+                    (f(None), false)
+                }
             }
         };
         if stale {
@@ -148,6 +158,22 @@ impl Store {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Reads that found a live entry since start.
+    pub fn hits(&self) -> u64 {
+        self.shards
+            .iter()
+            .map(|s| s.hits.load(Ordering::Relaxed))
+            .sum()
+    }
+
+    /// Reads that found no live entry since start.
+    pub fn misses(&self) -> u64 {
+        self.shards
+            .iter()
+            .map(|s| s.misses.load(Ordering::Relaxed))
+            .sum()
     }
 
     pub fn used_memory(&self) -> u64 {

@@ -199,6 +199,14 @@ mod otel {
             self.tracer.clone()
         }
 
+        /// The `tracing` layer that turns spans into OpenTelemetry spans.
+        pub fn layer<S>(&self) -> tracing_opentelemetry::OpenTelemetryLayer<S, SdkTracer>
+        where
+            S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+        {
+            tracing_opentelemetry::layer().with_tracer(self.tracer())
+        }
+
         pub fn counters(&self) -> &Arc<Counters> {
             &self.counters
         }

@@ -62,6 +62,11 @@ mod imp {
         pub const fn noop() -> Metrics {
             Metrics
         }
+        /// Always false: this build has no `otel` feature.
+        #[inline]
+        pub fn is_enabled(&self) -> bool {
+            false
+        }
         #[inline]
         pub fn command(&self, cmd: CommandLabel, status: Status, elapsed: Duration) {}
         #[inline]
@@ -163,6 +168,11 @@ mod imp {
     impl Metrics {
         pub const fn noop() -> Metrics {
             Metrics { inner: None }
+        }
+
+        /// True when this handle records into instruments.
+        pub fn is_enabled(&self) -> bool {
+            self.inner.is_some()
         }
 
         /// Build every instrument on `meter`.
