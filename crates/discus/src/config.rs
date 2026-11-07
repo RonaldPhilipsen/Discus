@@ -29,6 +29,9 @@ pub struct Config {
     /// Maximum value size in bytes.
     #[arg(long, default_value_t = 67_108_864)]
     pub max_value_bytes: usize,
+    /// Maximum bytes buffered for one unfinished request on a connection.
+    #[arg(long, default_value_t = 134_217_728)]
+    pub max_request_bytes: usize,
     /// Maximum in-flight commands per connection.
     #[arg(long, default_value_t = 10_000)]
     pub max_pipeline: usize,

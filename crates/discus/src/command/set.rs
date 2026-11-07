@@ -72,13 +72,11 @@ fn sadd(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     }
     let grow = cmd[2..].iter().map(|m| m.len()).sum();
     mutate(node, &cmd[1], grow, |s: &mut Set| {
-        let mut added = 0;
+        let fresh: HashSet<&Bytes> = cmd[2..].iter().filter(|m| !s.contains(*m)).collect();
+        guard(node, s.len() + fresh.len())?;
+        let added = fresh.len() as i64;
         for m in &cmd[2..] {
-            if !s.contains(m) {
-                guard(node, s.len() + 1)?;
-                s.insert(m.clone());
-                added += 1;
-            }
+            s.insert(m.clone());
         }
         Ok(Value::Integer(added))
     })
@@ -166,6 +164,12 @@ fn spop(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 
 fn srandmember(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     let count = parse_count(cmd)?;
+    // A negative count repeats members, so cap it: the reply size follows the client's number.
+    if count
+        .is_some_and(|c| c < 0 && c.unsigned_abs() as usize > node.config.max_collection_members)
+    {
+        return Err(CommandError::Custom("ERR count is too large".into()));
+    }
     view(node, &cmd[1], |s: Option<&Set>| {
         let empty = Set::new();
         let s = s.unwrap_or(&empty);

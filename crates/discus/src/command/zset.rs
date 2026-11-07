@@ -157,12 +157,19 @@ fn zadd(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         pairs.push((parse_f64(&p[0])?, p[1].clone()));
     }
     mutate(node, &cmd[1], grow, |z: &mut ZSet| {
+        if !xx {
+            let fresh: std::collections::HashSet<&Bytes> = pairs
+                .iter()
+                .map(|(_, m)| m)
+                .filter(|m| z.score(m).is_none())
+                .collect();
+            guard(node, z.len() + fresh.len())?;
+        }
         let (mut added, mut changed) = (0, 0);
         for (score, member) in pairs {
             match z.score(&member) {
                 None if xx => {}
                 None => {
-                    guard(node, z.len() + 1)?;
                     z.insert(member, score);
                     added += 1;
                 }

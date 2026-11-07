@@ -62,9 +62,9 @@ async fn hash_errors_spop_and_collection_size_guard() {
     assert_eq!(left, 2);
     let some: Vec<String> = redis::cmd("SRANDMEMBER")
         .arg("s")
-        .arg(-5)
+        .arg(-3)
         .query_async(&mut c)
         .await
         .unwrap();
-    assert_eq!(some.len(), 5);
+    assert_eq!(some.len(), 3);
 }

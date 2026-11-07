@@ -294,6 +294,7 @@ fn mset(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 /// Add `delta` to the integer at `key`. A missing key counts as zero. The TTL is kept.
 fn add_integer(node: &Node, key: &Bytes, delta: i64) -> Reply {
     check_key(node, key)?;
+    admit(node, key.len() + 20)?;
     node.store.write(key, |slot| {
         let current = match slot.as_ref() {
             None => 0,
@@ -331,6 +332,7 @@ fn decrby(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 
 fn incrbyfloat(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     check_key(node, &cmd[1])?;
+    admit(node, cmd[1].len() + 32)?;
     let delta = parse_f64(&cmd[2])?;
     node.store.write(&cmd[1], |slot| {
         let current = match slot.as_ref() {

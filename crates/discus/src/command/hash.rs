@@ -95,15 +95,16 @@ fn hset(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         grow += pair[0].len() + pair[1].len();
     }
     mutate(node, &cmd[1], grow, |h: &mut Hash| {
-        let mut added = 0;
+        let fresh: std::collections::HashSet<&Bytes> = cmd[2..]
+            .chunks(2)
+            .map(|p| &p[0])
+            .filter(|f| !h.contains_key(*f))
+            .collect();
+        guard(node, h.len() + fresh.len())?;
         for pair in cmd[2..].chunks(2) {
-            if !h.contains_key(&pair[0]) {
-                guard(node, h.len() + 1)?;
-                added += 1;
-            }
             h.insert(pair[0].clone(), pair[1].clone());
         }
-        Ok(Value::Integer(added))
+        Ok(Value::Integer(fresh.len() as i64))
     })
 }
 

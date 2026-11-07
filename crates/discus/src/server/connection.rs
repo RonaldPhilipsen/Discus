@@ -20,6 +20,17 @@ const READ_CHUNK: usize = 64 * 1024;
 /// Backpressure: the loop reads only after it flushed every reply for the previous read, and it
 /// flushes at least every `max_pipeline` commands. A client that does not read its replies stalls
 /// the flush, which stalls the next read, so memory stays bounded.
+/// Write `out` to the client, giving up when the node force-closes connections. A client that
+/// never reads would otherwise hold the write open forever. Returns false to end the connection.
+async fn flush(stream: &mut TcpStream, out: &mut BytesMut, hard_stop: &CancellationToken) -> bool {
+    let sent = tokio::select! {
+        _ = hard_stop.cancelled() => false,
+        written = stream.write_all(out) => written.is_ok(),
+    };
+    out.clear();
+    sent
+}
+
 pub async fn serve(mut stream: TcpStream, node: Arc<Node>, hard_stop: CancellationToken) {
     let _guard = node.track_connection();
     let cfg = &node.config;
@@ -54,30 +65,34 @@ pub async fn serve(mut stream: TcpStream, node: Arc<Node>, hard_stop: Cancellati
                     encode(&reply, conn.protocol, &mut out);
                     in_flight += 1;
                     if conn.closing {
-                        let _ = stream.write_all(&out).await;
+                        flush(&mut stream, &mut out, &hard_stop).await;
                         return;
                     }
                     if in_flight >= cfg.max_pipeline.max(1) || out.len() >= FLUSH_BYTES {
-                        if stream.write_all(&out).await.is_err() {
+                        if !flush(&mut stream, &mut out, &hard_stop).await {
                             return;
                         }
-                        out.clear();
                         in_flight = 0;
                     }
                 }
-                Ok(None) => break,
+                Ok(None) => {
+                    if parser.buffered() > cfg.max_request_bytes {
+                        let e = Value::error("ERR Protocol error: request too large");
+                        encode(&e, conn.protocol, &mut out);
+                        flush(&mut stream, &mut out, &hard_stop).await;
+                        return;
+                    }
+                    break;
+                }
                 Err(e) => {
                     encode(&Value::error(&e.to_string()), conn.protocol, &mut out);
-                    let _ = stream.write_all(&out).await;
+                    flush(&mut stream, &mut out, &hard_stop).await;
                     return;
                 }
             }
         }
-        if !out.is_empty() {
-            if stream.write_all(&out).await.is_err() {
-                return;
-            }
-            out.clear();
+        if !out.is_empty() && !flush(&mut stream, &mut out, &hard_stop).await {
+            return;
         }
         in_flight = 0;
     }
