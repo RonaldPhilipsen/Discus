@@ -79,8 +79,8 @@ pub struct Faults {
     pub stall_forwards: std::sync::atomic::AtomicBool,
 }
 
-/// Keeps one epoch in the history until it is dropped (spec section 5.1). Handoff (plan 4)
-/// holds one for the old epoch of each ownership change.
+/// Keeps one epoch in the history until it is dropped (spec section 5.1). Handoff holds one for
+/// the old epoch of each ownership change.
 pub struct EpochPin {
     epochs: std::sync::Weak<RwLock<EpochHistory>>,
     id: EpochId,
@@ -190,9 +190,10 @@ impl Node {
         self.membership().is_none_or(|m| m.reached_normal())
     }
 
-    /// The store needs no warm-up yet. Plan 4 adds a condition here.
+    /// The store holds its handoff: the node reached `NORMAL` with no incoming handoff left.
+    /// A node without a transport needs no handoff.
     pub fn store_ready(&self) -> bool {
-        true
+        self.replicator().is_none_or(|r| r.store_ready())
     }
 
     /// The counter tier is settled (spec section 15.2). Plan 5 replaces this. Until then the tier
@@ -210,6 +211,9 @@ impl Node {
         tracing::info!(epoch = %id, cluster = %epochs.cluster_id(), "took a new cluster history");
         crate::telemetry::record_epoch(discus_telemetry::global(), epochs.current());
         drop(epochs);
+        if let Some(r) = self.replicator() {
+            r.reset_handoffs();
+        }
         self.epoch_tx.send_replace(id);
     }
 
@@ -259,6 +263,17 @@ impl Node {
         tracing::info!(epoch = %id, "adopted a newer epoch");
         let new = epochs.current().clone();
         crate::telemetry::record_epoch(discus_telemetry::global(), &new);
+        // The handoff registers under the lock, so no reader sees the new epoch without it.
+        if let Some(r) = self.replicator() {
+            let weak = Arc::downgrade(&self.epochs);
+            r.register(&old, &new, || {
+                epochs.pin(old.id()).ok()?;
+                Some(EpochPin {
+                    epochs: weak.clone(),
+                    id: old.id(),
+                })
+            });
+        }
         drop(epochs);
         if let Some(r) = self.replicator() {
             r.on_epoch(&old, &new);

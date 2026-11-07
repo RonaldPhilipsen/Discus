@@ -14,18 +14,31 @@ use crate::Node;
 
 /// The nodes to ask before `key` is served here, in order. Empty when the local entry (or
 /// tombstone) is there, or when this node is the primary of a read.
+///
+/// While a handoff toward this node is incomplete, the previous owners come first, for reads
+/// and writes. A write then applies to the handed-off value, so an `INCR` on a moved key does
+/// not restart from zero (spec section 5.2).
 pub fn sources(node: &Node, key: &[u8], write: bool) -> Vec<NodeId> {
-    if node.replicator().is_none() || node.store.version(key).is_some() {
+    let Some(replicator) = node.replicator() else {
+        return Vec::new();
+    };
+    if node.store.version(key).is_some() {
         return Vec::new();
     }
+    let epoch = node.epochs().current().clone();
+    let mut out = replicator.fallback_sources(key, &epoch);
     if write {
-        return Vec::new();
+        return out;
     }
-    let owners = node.owners(key);
-    if owners.first() == Some(&node.id) || !owners.contains(&node.id) {
-        return Vec::new();
+    let owners = epoch.owners(key, node.config.replication_factor);
+    if owners.first() != Some(&node.id) && owners.contains(&node.id) {
+        for o in owners {
+            if o != node.id && !out.contains(&o) {
+                out.push(o);
+            }
+        }
     }
-    owners.into_iter().filter(|o| *o != node.id).collect()
+    out
 }
 
 /// Ask `sources` in order for `key` and apply the first answer that has it. Each request has

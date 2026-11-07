@@ -260,7 +260,14 @@ impl Server {
         drop(listener);
         tracker.close();
         let timeout = Duration::from_secs(node.config.shutdown_timeout_secs);
-        if tokio::time::timeout(timeout, tracker.wait()).await.is_err() {
+        // The node stays a handoff source and flushes its queues within the same deadline.
+        let drained = async {
+            tracker.wait().await;
+            if let Some(replicator) = node.replicator() {
+                replicator.idle().await;
+            }
+        };
+        if tokio::time::timeout(timeout, drained).await.is_err() {
             tracing::warn!("drain timeout, closing remaining connections");
             hard_stop.cancel();
             tracker.wait().await;

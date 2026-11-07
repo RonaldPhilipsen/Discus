@@ -11,12 +11,13 @@
 //! succeeds and the epoch lists the peer as `NORMAL`, or when a lagging queue drains.
 
 pub mod digest;
+mod handoff;
 mod hints;
 mod queue;
 pub mod repair;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -49,6 +50,9 @@ pub struct Settings {
     pub rf: usize,
     pub tombstone_ttl: Duration,
     pub hints: HintLimits,
+    pub handoff: bool,
+    pub handoff_rate: u64,
+    pub handoff_timeout: Duration,
 }
 
 impl Settings {
@@ -66,6 +70,9 @@ impl Settings {
                 global_bytes: c.max_memory / 100 * c.hint_memory_percent,
                 max_age: Duration::from_millis(c.tombstone_ttl_ms),
             },
+            handoff: c.handoff,
+            handoff_rate: c.handoff_rate_bytes,
+            handoff_timeout: Duration::from_millis(c.handoff_timeout_ms),
         }
     }
 }
@@ -84,6 +91,12 @@ pub struct Replicator {
     contacts: Mutex<HashMap<NodeId, Instant>>,
     started: Instant,
     stop: CancellationToken,
+    /// Lock order: the epoch lock comes first. Code that holds this lock never reads the
+    /// epochs and never drops an `EpochPin`, because a pin takes the epoch lock on drop.
+    handoff: Mutex<handoff::State>,
+    scan_wake: tokio::sync::Notify,
+    scans: AtomicU64,
+    ready: AtomicBool,
 }
 
 impl Replicator {
@@ -101,6 +114,10 @@ impl Replicator {
             contacts: Mutex::new(HashMap::new()),
             started: Instant::now(),
             stop: CancellationToken::new(),
+            handoff: Mutex::new(handoff::State::default()),
+            scan_wake: tokio::sync::Notify::new(),
+            scans: AtomicU64::new(0),
+            ready: AtomicBool::new(false),
         });
         // Under memory pressure the store frees the oldest hints after its normal entries
         // (spec section 11).
@@ -114,6 +131,9 @@ impl Replicator {
     /// Run the gauge reporter and the rejoin listener until `stop`. Sender tasks start with
     /// their first key.
     pub fn spawn(self: &Arc<Self>, stop: CancellationToken) {
+        let me = self.clone();
+        let s = stop.clone();
+        tokio::spawn(async move { me.scan_loop(s).await });
         let me = self.clone();
         let s = stop.clone();
         tokio::spawn(async move {
@@ -164,6 +184,175 @@ impl Replicator {
         let evicted = self.hints.lock().expire(Instant::now());
         self.count_evicted(&evicted);
         self.sync_charge();
+        if let Some(node) = self.node.upgrade() {
+            let current = node.epochs().current().clone();
+            self.prune_handoffs(&current);
+        }
+    }
+
+    /// Register the handoffs of an adoption from `old` to `new`. `Node::adopt_epoch` calls
+    /// this under the epoch lock, and `pin` pins `old` without taking the lock again.
+    pub fn register(
+        &self,
+        old: &Arc<Epoch>,
+        new: &Arc<Epoch>,
+        mut pin: impl FnMut() -> Option<crate::node::EpochPin>,
+    ) {
+        if !self.settings.handoff {
+            return;
+        }
+        let (outgoing, incoming) = handoff::changes(old, new, self.id, self.settings.rf);
+        let mut st = self.handoff.lock();
+        if let Some(gained) = outgoing {
+            if let Some(pin) = pin() {
+                st.pending.push(handoff::Outgoing {
+                    old: old.clone(),
+                    gained,
+                    _pin: pin,
+                });
+                self.scan_wake.notify_one();
+            }
+        }
+        if let Some(sources) = incoming {
+            if let Some(pin) = pin() {
+                st.expect(handoff::Incoming {
+                    old: old.clone(),
+                    new: new.id(),
+                    sources,
+                    started: Instant::now(),
+                    _pin: pin,
+                });
+            }
+        }
+    }
+
+    /// Forget every handoff, after the history was replaced.
+    pub fn reset_handoffs(&self) {
+        let dropped = std::mem::take(&mut *self.handoff.lock());
+        drop(dropped);
+    }
+
+    fn prune_handoffs(&self, current: &Epoch) {
+        let finished = self
+            .handoff
+            .lock()
+            .prune(current, self.settings.handoff_timeout);
+        drop(finished);
+    }
+
+    /// An incoming handoff is incomplete, so previous-epoch fallback is on.
+    pub fn handoff_pending(&self) -> bool {
+        !self.handoff.lock().incoming.is_empty()
+    }
+
+    /// A handoff scan runs or waits.
+    pub fn scanning(&self) -> bool {
+        let st = self.handoff.lock();
+        st.scanning || !st.pending.is_empty()
+    }
+
+    /// Handoff scans finished since start.
+    pub fn scans(&self) -> u64 {
+        self.scans.load(Ordering::Relaxed)
+    }
+
+    /// The node reached `NORMAL` once with no incoming handoff left (spec section 15.2). It
+    /// latches, so a later join of another node never makes this one unready.
+    pub fn store_ready(&self) -> bool {
+        if self.ready.load(Ordering::Acquire) {
+            return true;
+        }
+        let Some(node) = self.node.upgrade() else {
+            return false;
+        };
+        if node.reached_normal() && !self.handoff_pending() {
+            self.ready.store(true, Ordering::Release);
+            return true;
+        }
+        false
+    }
+
+    /// The previous owners of `key` to ask on a miss while a handoff toward this node is
+    /// incomplete: the old owners that are not current owners, that the current epoch still
+    /// lists, and that have not finished their part.
+    pub fn fallback_sources(&self, key: &[u8], current: &Epoch) -> Vec<NodeId> {
+        let owners = current.owners(key, self.settings.rf);
+        let st = self.handoff.lock();
+        let mut out = Vec::new();
+        for inc in &st.incoming {
+            for o in inc.old.owners(key, self.settings.rf) {
+                if !owners.contains(&o)
+                    && inc.sources.contains(&o)
+                    && current.member(o).is_some()
+                    && !out.contains(&o)
+                {
+                    out.push(o);
+                }
+            }
+        }
+        out
+    }
+
+    async fn scan_loop(self: Arc<Self>, stop: CancellationToken) {
+        loop {
+            tokio::select! {
+                _ = stop.cancelled() => return,
+                _ = self.scan_wake.notified() => {}
+            }
+            let changes = {
+                let mut st = self.handoff.lock();
+                if st.pending.is_empty() {
+                    continue;
+                }
+                st.scanning = true;
+                std::mem::take(&mut st.pending)
+            };
+            let Some(node) = self.node.upgrade() else {
+                return;
+            };
+            let to = node.epochs().current().clone();
+            let limits = handoff::Limits {
+                rate_bytes: self.settings.handoff_rate,
+                rf: self.settings.rf,
+            };
+            handoff::scan(&node, &changes, to, limits).await;
+            self.scans.fetch_add(1, Ordering::Relaxed);
+            drop(changes);
+            let more = {
+                let mut st = self.handoff.lock();
+                st.scanning = false;
+                !st.pending.is_empty()
+            };
+            if more {
+                self.scan_wake.notify_one();
+            }
+        }
+    }
+
+    /// Wait until the node is out of placement, its scans are done, and its queues are empty.
+    /// A draining node calls this within its shutdown deadline (spec section 15.3).
+    pub async fn idle(&self) {
+        loop {
+            let Some(node) = self.node.upgrade() else {
+                return;
+            };
+            let placed = node.membership().is_some()
+                && node
+                    .epochs()
+                    .current()
+                    .member(self.id)
+                    .is_some_and(|m| m.state == MemberState::Normal);
+            let queued = self
+                .peers
+                .lock()
+                .values()
+                .any(|q| !q.is_empty() && !q.is_down());
+            if !placed && !self.scanning() && !queued {
+                return;
+            }
+            drop(node);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     /// Keep the store charge equal to the hint bytes.
@@ -283,6 +472,7 @@ impl Replicator {
             hints.retain(|target, k| new.owners(k, rf).contains(&target));
         }
         self.sync_charge();
+        self.prune_handoffs(new);
         if !digest::removed(old, new).is_empty() && new.member(self.id).is_some() {
             if let Some(node) = self.node.upgrade() {
                 tokio::spawn(digest::reconcile(node, old.clone(), new.clone()));
@@ -525,6 +715,23 @@ impl Replicator {
                 }
                 let applied = self.apply_entries(&node, b.entries);
                 ack(&node, applied, Vec::new())
+            }
+            Message::Handoff(b) => {
+                let want: Vec<Bytes> = b
+                    .offers
+                    .into_iter()
+                    .filter(|(k, v)| self.store.version(k).is_none_or(|local| local < *v))
+                    .map(|(k, _)| k)
+                    .collect();
+                let applied = self.apply_entries(&node, b.entries);
+                if let Some((_, to)) = b.done {
+                    let finished = self.handoff.lock().done(from, to);
+                    if !finished.is_empty() {
+                        tracing::info!(source = %from, "an incoming handoff completed");
+                    }
+                    drop(finished);
+                }
+                ack(&node, applied, want)
             }
             Message::Fetch { keys } => {
                 let mut out = Batch::new(node.epoch_id());

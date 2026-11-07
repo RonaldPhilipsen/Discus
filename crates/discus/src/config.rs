@@ -219,6 +219,16 @@ pub struct Config {
     /// Time for a peer to acknowledge a replication batch, in milliseconds.
     #[arg(long, default_value_t = 1_000)]
     pub replication_timeout_ms: u64,
+    /// Bytes per second that one handoff scan sends at most.
+    #[arg(long, default_value_t = 33_554_432)]
+    pub handoff_rate_bytes: u64,
+    /// Time after which a node gives up on an incoming handoff, in milliseconds. Its
+    /// previous-epoch fallback ends then too.
+    #[arg(long, default_value_t = 300_000)]
+    pub handoff_timeout_ms: u64,
+    /// Hand entries to nodes that gain ownership. Off only for comparisons in tests.
+    #[arg(long, hide = true, default_value_t = true, action = clap::ArgAction::Set)]
+    pub handoff: bool,
     /// Hints held for one unreachable peer, at most.
     #[arg(long, default_value_t = 262_144)]
     pub hint_max_entries: usize,

@@ -45,9 +45,10 @@ async fn leaving_turns_readiness_off() {
         })
         .await
     );
-    // The open connection keeps working. Without handoff (plan 4) the new owner of `k` can
-    // miss it, so the value is not checked.
-    let _: Option<String> = client.get("k").await.unwrap();
+    // The open connection keeps working, and the handoff or the previous-epoch fallback keeps
+    // the value readable.
+    let v: Option<String> = client.get("k").await.unwrap();
+    assert_eq!(v.as_deref(), Some("v"));
     let pong: String = redis::cmd("PING").query_async(&mut client).await.unwrap();
     assert_eq!(pong, "PONG");
 }

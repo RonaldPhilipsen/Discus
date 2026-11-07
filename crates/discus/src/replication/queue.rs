@@ -152,6 +152,10 @@ impl PeerQueue {
         self.state.lock().keys.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// The key is queued or in flight.
     pub fn holds(&self, key: &[u8]) -> bool {
         let s = self.state.lock();
