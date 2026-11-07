@@ -159,10 +159,37 @@ async fn peers_without_certificates_are_refused() {
         "/nonexistent/key.pem",
         "--weight",
         "2",
+        "--membership",
+        "static",
     ]))
     .unwrap();
     let err = discus::Server::bind(config).await.err().unwrap();
     assert!(err.to_string().contains("--weight"), "{err}");
+}
+
+#[test]
+fn a_bare_address_is_a_seed() {
+    let config = Config::parse_from(["discus", "--peer", "127.0.0.1:7379"]).unwrap();
+    assert_eq!(config.peers[0].id, None);
+    assert_eq!(config.peers[0].addr, "127.0.0.1:7379".parse().unwrap());
+}
+
+#[test]
+fn static_peers_need_their_ids() {
+    let mut argv = cluster_args(&["--membership", "static", "--peer", "127.0.0.1:2"]);
+    argv.extend(
+        [
+            "--cluster-ca",
+            "a",
+            "--cluster-cert",
+            "b",
+            "--cluster-key",
+            "c",
+        ]
+        .map(String::from),
+    );
+    let err = Config::parse_from(argv).unwrap().validate().unwrap_err();
+    assert!(err.contains("<node-id>@<address>"), "{err}");
 }
 
 #[test]

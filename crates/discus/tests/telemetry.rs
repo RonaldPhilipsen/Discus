@@ -97,7 +97,7 @@ fn the_resource_carries_the_node_id_that_the_node_uses() {
 #[test]
 fn resolve_identity_still_refuses_peers_without_a_node_id() {
     let peer = format!("{}@127.0.0.1:7380", discus_placement::NodeId::random());
-    let mut config = args(&["--peer", &peer]);
+    let mut config = args(&["--membership", "static", "--peer", &peer]);
     assert!(config.resolve_identity().is_err());
 }
 

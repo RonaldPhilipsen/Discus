@@ -109,6 +109,8 @@ async fn setup() -> Setup {
         "127.0.0.1:0".into(),
         "--cluster-san".into(),
         TEST_SAN.into(),
+        "--membership".into(),
+        "static".into(),
         "--node-id".into(),
         node_id.to_string(),
         "--cluster-id".into(),

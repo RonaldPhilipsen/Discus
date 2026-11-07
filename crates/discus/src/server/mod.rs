@@ -9,13 +9,57 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+use discus_membership::{LeaseProvider, NoneLease};
+use discus_placement::{Clock, NTP64};
 use discus_transport::{TlsMaterial, Transport, TransportConfig};
 
 use crate::admin::serve_admin;
 use crate::cluster::service::NodeService;
 use crate::cluster::ClusterLink;
+use crate::config::LeaseKind;
+use crate::membership::{discovery, Membership};
 use crate::security::Security;
 use crate::{Config, Node, Phase};
+
+/// Parts that tests supply instead of the defaults.
+#[derive(Default)]
+pub struct BindOptions {
+    /// The QUIC socket, already bound, so a test knows every address first.
+    pub cluster_socket: Option<std::net::UdpSocket>,
+    /// The cluster lease instead of the one `--lease-provider` names.
+    pub lease: Option<Arc<dyn LeaseProvider>>,
+    /// The HLC clock and the wall clock, for example two halves of one mock clock slot.
+    pub hlc_clock: Option<fn() -> NTP64>,
+    pub wall: Option<Arc<dyn Clock>>,
+}
+
+/// The lease that `--lease-provider` names.
+fn lease_provider(config: &Config) -> Result<Arc<dyn LeaseProvider>, String> {
+    match config.lease_provider {
+        LeaseKind::None => {
+            tracing::warn!(
+                "--lease-provider none cannot stop two nodes from forming two clusters. \
+                 Use it for single-node development only"
+            );
+            Ok(Arc::new(NoneLease))
+        }
+        #[cfg(feature = "k8s")]
+        LeaseKind::K8s => {
+            const NAMESPACE_FILE: &str = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
+            let namespace = config.lease_namespace.clone().unwrap_or_else(|| {
+                std::fs::read_to_string(NAMESPACE_FILE)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|_| "default".into())
+            });
+            let duration = Duration::from_millis(config.lease_duration_ms);
+            discus_membership::lease::K8sLease::in_cluster(&namespace, &config.lease_name, duration)
+                .map(|l| Arc::new(l) as Arc<dyn LeaseProvider>)
+                .map_err(|e| format!("--lease-provider k8s: {e}"))
+        }
+        #[cfg(not(feature = "k8s"))]
+        LeaseKind::K8s => Err("--lease-provider k8s needs the k8s build feature".into()),
+    }
+}
 
 mod connection;
 mod order;
@@ -31,7 +75,7 @@ impl Server {
     /// Bind the client and admin listeners, and the QUIC port when the node has peers or
     /// certificates.
     pub async fn bind(config: Config) -> io::Result<Server> {
-        Server::bind_inner(config, None).await
+        Server::bind_with(config, BindOptions::default()).await
     }
 
     /// Like `bind`, with the QUIC port already bound. Tests use it to learn every address
@@ -40,10 +84,15 @@ impl Server {
         config: Config,
         socket: std::net::UdpSocket,
     ) -> io::Result<Server> {
-        Server::bind_inner(config, Some(socket)).await
+        let opts = BindOptions {
+            cluster_socket: Some(socket),
+            ..BindOptions::default()
+        };
+        Server::bind_with(config, opts).await
     }
 
-    async fn bind_inner(config: Config, socket: Option<std::net::UdpSocket>) -> io::Result<Server> {
+    pub async fn bind_with(config: Config, opts: BindOptions) -> io::Result<Server> {
+        let socket = opts.cluster_socket;
         let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidInput, msg);
         config.validate().map_err(invalid)?;
         let tls = if config.cluster_enabled() {
@@ -68,7 +117,15 @@ impl Server {
             Arc::new(Security::from_config(&config).map_err(|e| invalid(e.to_string()))?);
         let listener = TcpListener::bind(config.listen).await?;
         let admin = TcpListener::bind(config.admin_listen).await?;
-        let node = Arc::new(Node::new(config, security));
+        let lease = match (config.gossip_enabled(), opts.lease) {
+            (true, Some(lease)) => Some(lease),
+            (true, None) => Some(lease_provider(&config).map_err(invalid)?),
+            (false, _) => None,
+        };
+        let node = Arc::new(match (opts.wall, opts.hlc_clock) {
+            (Some(wall), Some(hlc_clock)) => Node::with_clocks(config, security, wall, hlc_clock),
+            _ => Node::new(config, security),
+        });
         if let Some(tls) = tls {
             let cfg = &node.config;
             let mut tc = TransportConfig::new(cfg.cluster_listen, tls, node.id, node.cluster_id());
@@ -82,6 +139,11 @@ impl Server {
                 Some(socket) => Transport::bind_socket(tc, socket, service)?,
                 None => Transport::bind(tc, service).await?,
             };
+            if let Some(lease) = lease {
+                let advertise = discovery::advertise(&node.config);
+                let membership = Membership::new(&node, transport.clone(), lease, advertise);
+                node.set_membership(membership);
+            }
             node.set_link(ClusterLink::new(transport, &node.config));
         }
         Ok(Server {
@@ -144,6 +206,9 @@ impl Server {
             "bootstrapped"
         );
         tracing::info!(addr = ?listener.local_addr().ok(), "serving");
+        if let Some(membership) = node.membership() {
+            membership.spawn(stop_background.clone());
+        }
         if let Some(link) = node.link() {
             tracing::info!(cluster = %link.transport.local_addr(), "node-to-node transport");
             // The transport events feed the peer error and QUIC failure metrics.

@@ -1,8 +1,10 @@
 //! The admin port: liveness, startup, and readiness probes.
 //!
 //! - `/healthz` is liveness. It answers 200 while the process runs.
-//! - `/startupz` answers 200 once the node serves, and stays 200 while it drains.
-//! - `/readyz` answers 200 only while the node serves, so a drain stops new connections.
+//! - `/startupz` answers 200 once the node has been `NORMAL`, the store is ready, and the counter
+//!   tier is settled (spec §15.2). It stays 200 while the node drains.
+//! - `/readyz` answers 200 only while the node serves and is `NORMAL` in its epoch, so a drain
+//!   (`LEAVING`) and a rejoin stop new connections.
 //! - Both wait until every trusted OAuth 2.0 issuer has its keys (spec §14.3).
 //! - Routes under `/admin/` need admin credentials (`security::admin`).
 
@@ -34,12 +36,16 @@ async fn healthz(State(node): State<Arc<Node>>) -> (StatusCode, &'static str) {
 }
 
 async fn startupz(State(node): State<Arc<Node>>) -> (StatusCode, &'static str) {
-    let ok = matches!(node.phase(), Phase::Serving | Phase::Leaving) && node.security.ready();
+    let ok = matches!(node.phase(), Phase::Serving | Phase::Leaving)
+        && node.security.ready()
+        && node.reached_normal()
+        && node.store_ready()
+        && node.counters_settled();
     body(&node, ok)
 }
 
 async fn readyz(State(node): State<Arc<Node>>) -> (StatusCode, &'static str) {
-    let ok = node.phase() == Phase::Serving && node.security.ready();
+    let ok = node.phase() == Phase::Serving && node.security.ready() && node.is_normal();
     body(&node, ok)
 }
 

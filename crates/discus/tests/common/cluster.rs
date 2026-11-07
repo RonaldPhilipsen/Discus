@@ -1,4 +1,4 @@
-//! In-process static clusters over real QUIC on localhost with a test CA.
+//! In-process static clusters (`--membership static`) over real QUIC on localhost with a test CA.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -100,6 +100,8 @@ pub async fn start_cluster_with(n: usize, extra: impl Fn(usize) -> Vec<String>) 
             "127.0.0.1:0",
             "--cluster-san",
             TEST_SAN,
+            "--membership",
+            "static",
         ]
         .iter()
         .map(|s| s.to_string())

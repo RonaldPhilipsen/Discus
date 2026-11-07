@@ -5,11 +5,12 @@ pub mod build;
 pub mod cluster;
 pub mod command;
 pub mod config;
+pub mod membership;
 pub mod node;
 pub mod security;
 pub mod server;
 pub mod telemetry;
 
-pub use config::{Config, Peer};
-pub use node::{ConnState, Node, Phase};
+pub use config::{Config, LeaseKind, MembershipMode, Peer};
+pub use node::{ConnState, EpochPin, Node, Phase};
 pub use server::Server;

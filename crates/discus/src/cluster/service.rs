@@ -4,7 +4,7 @@ use std::sync::{Arc, Weak};
 
 use discus_placement::EpochId;
 use discus_resp::{Limits, Parser, Value};
-use discus_transport::{Inbound, Service};
+use discus_transport::{Channel, Inbound, Service};
 use discus_wire::{Forward, ForwardMode, ForwardReply, Message, TraceContext};
 use futures::future::BoxFuture;
 
@@ -37,6 +37,18 @@ impl Service for NodeService {
             };
             match inbound.message {
                 Message::Ping { nonce } => Message::Pong { nonce },
+                Message::Gossip(g) => match node.membership().cloned() {
+                    Some(m) => Message::Gossip(m.handle(inbound.peer.addr, g).await),
+                    None => Message::Unsupported {
+                        message_type: Message::Gossip(g).type_code(),
+                    },
+                },
+                // The gossip HELLO admits other clusters and joiners, so it never carries data.
+                Message::Forward(_) if inbound.peer.channel == Channel::Gossip => {
+                    Message::Unsupported {
+                        message_type: discus_wire::fb::MessageType::FORWARD.0,
+                    }
+                }
                 Message::Forward(f) => {
                     let span =
                         telemetry::forwarded_span(discus_telemetry::global(), &inbound.trace);

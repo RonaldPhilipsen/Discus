@@ -80,7 +80,19 @@ fn the_higher_cluster_id_breaks_a_tie() {
 
 #[test]
 fn two_clusters_merge_into_the_larger() {
+    merge(false);
+}
+
+#[test]
+fn the_none_lease_does_not_decide_a_merge() {
+    merge(true);
+}
+
+fn merge(none_lease: bool) {
     let mut sim = Sim::new(8, cfg(8));
+    if none_lease {
+        sim.with_none_lease();
+    }
     let big = sim.cluster(3);
     let small = sim.cluster(2);
     sim.run_ms(1_000);

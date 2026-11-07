@@ -141,6 +141,12 @@ impl Hlc {
         NTP64(self.last.load(Ordering::Acquire))
     }
 
+    /// The larger of [`Hlc::last`] and the wall clock: the time a peer can safely take as a
+    /// floor from this node.
+    pub fn current(&self) -> NTP64 {
+        self.last().max((self.clock)())
+    }
+
     /// Issue a new version for a local write. It is greater than every version issued or
     /// observed before. A clock at its drift bound refuses.
     pub fn tick(&self) -> Result<Version, HlcError> {

@@ -274,6 +274,23 @@ fn info(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
                     .map_or("none".to_string(), |l| l.transport.local_addr().to_string())
             ),
             format!("discus_peers:{}", node.config.peers.len()),
+            format!(
+                "discus_membership:{}",
+                match (node.membership(), node.link()) {
+                    (Some(_), _) => "gossip",
+                    (None, Some(_)) => "static",
+                    (None, None) => "standalone",
+                }
+            ),
+            format!(
+                "discus_member_state:{}",
+                node.membership()
+                    .map_or("NORMAL", |m| m.local().state.name())
+            ),
+            format!(
+                "discus_incarnation:{}",
+                node.membership().map_or(0, |m| m.local().incarnation)
+            ),
         ],
     );
     Ok(Value::Bulk(Bytes::from(out)))

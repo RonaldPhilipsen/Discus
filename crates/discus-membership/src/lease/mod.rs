@@ -54,6 +54,12 @@ pub trait LeaseProvider: Send + Sync {
     ) -> BoxFuture<'a, Result<LeaseState, LeaseError>>;
 
     fn name(&self) -> &'static str;
+
+    /// False when the answer says nothing about other nodes, as with `none`. Only an
+    /// authoritative lease decides a merge (spec section 6.3).
+    fn authoritative(&self) -> bool {
+        true
+    }
 }
 
 /// The provider `none`: every node holds the lease. It cannot stop a split bootstrap, so it is
@@ -71,5 +77,9 @@ impl LeaseProvider for NoneLease {
 
     fn name(&self) -> &'static str {
         "none"
+    }
+
+    fn authoritative(&self) -> bool {
+        false
     }
 }

@@ -683,6 +683,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "clap",
+ "discus-membership",
  "discus-placement",
  "discus-resp",
  "discus-store",

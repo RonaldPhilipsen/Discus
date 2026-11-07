@@ -4,14 +4,53 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use discus_placement::{ClusterId, NodeId};
 
-/// A static peer: `<node-id>@<quic-addr>`.
+/// A peer: `<addr>` or `<node-id>@<addr>`. With gossip it is a discovery seed, and the ID is only
+/// an expectation. With static membership the ID is required.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Peer {
-    pub id: NodeId,
+    pub id: Option<NodeId>,
     pub addr: SocketAddr,
+}
+
+/// How the node learns the member list (spec section 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MembershipMode {
+    /// SWIM gossip with the lease bootstrap. `--peer` entries are discovery seeds.
+    Gossip,
+    /// The fixed member list of `--peer`, with no gossip and no failure detection.
+    Static,
+}
+
+/// The cluster lease provider (spec section 6.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LeaseKind {
+    /// The Kubernetes `Lease`. Needs the `k8s` build feature.
+    K8s,
+    /// No lease: a node forms a cluster alone after the bootstrap deadline. Development only.
+    None,
+}
+
+impl LeaseKind {
+    /// `k8s` when the binary has the `k8s` feature, else `none`.
+    pub const fn default_kind() -> LeaseKind {
+        if cfg!(feature = "k8s") {
+            LeaseKind::K8s
+        } else {
+            LeaseKind::None
+        }
+    }
+}
+
+impl std::fmt::Display for LeaseKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            LeaseKind::K8s => "k8s",
+            LeaseKind::None => "none",
+        })
+    }
 }
 
 /// Configuration for one Discus node.
@@ -61,18 +100,73 @@ pub struct Config {
     #[arg(long)]
     pub shared_token: Option<String>,
 
-    /// This node's ID, 32 hex digits. Random by default. Required with --peer.
+    /// This node's ID, 32 hex digits. Random by default. Required with static membership.
     #[arg(long)]
     pub node_id: Option<NodeId>,
-    /// The cluster ID, 32 hex digits. Minted by default. Required with --peer.
+    /// The cluster ID, 32 hex digits. Required with static membership. With gossip it is the ID
+    /// that this node mints if it forms a cluster.
     #[arg(long)]
     pub cluster_id: Option<ClusterId>,
+    /// How the node learns the member list.
+    #[arg(long, value_enum, default_value_t = MembershipMode::Gossip)]
+    pub membership: MembershipMode,
     /// Node-to-node (QUIC, UDP) listen address.
     #[arg(long, default_value = "0.0.0.0:7379")]
     pub cluster_listen: SocketAddr,
-    /// A static peer as `<node-id>@<address>`. Repeat for each other member.
+    /// A peer as `<address>` or `<node-id>@<address>`. A discovery seed with gossip, a member
+    /// with static membership. Repeatable.
     #[arg(long = "peer", value_parser = parse_peer)]
     pub peers: Vec<Peer>,
+    /// A headless Service name to resolve for discovery seeds, as `<host>` or `<host>:<port>`.
+    /// The port defaults to the `--cluster-listen` port.
+    #[arg(long)]
+    pub discovery_dns: Option<String>,
+    /// The node-to-node address that other members use. Default: `--cluster-listen` when its IP
+    /// is specified, else the local address toward the first seed.
+    #[arg(long)]
+    pub cluster_advertise: Option<SocketAddr>,
+    /// The cluster lease provider.
+    #[arg(long, value_enum, default_value_t = LeaseKind::default_kind())]
+    pub lease_provider: LeaseKind,
+    /// The name of the cluster lease.
+    #[arg(long, default_value = "discus-cluster")]
+    pub lease_name: String,
+    /// The namespace of the cluster lease. Default: the service account namespace.
+    #[arg(long)]
+    pub lease_namespace: Option<String>,
+    /// The lease duration, in milliseconds.
+    #[arg(long, default_value_t = 15_000)]
+    pub lease_duration_ms: u64,
+    /// The lease renewal interval, in milliseconds.
+    #[arg(long, default_value_t = 5_000)]
+    pub lease_renew_ms: u64,
+    /// Time to look for a NORMAL peer before the node tries the lease, in milliseconds.
+    #[arg(long, default_value_t = 10_000)]
+    pub bootstrap_deadline_ms: u64,
+    /// The gossip protocol period: one probe per period, in milliseconds.
+    #[arg(long, default_value_t = 1_000)]
+    pub gossip_interval_ms: u64,
+    /// Time to wait for a direct probe ack, in milliseconds.
+    #[arg(long, default_value_t = 500)]
+    pub gossip_probe_timeout_ms: u64,
+    /// Members asked to probe a target that missed a direct probe.
+    #[arg(long, default_value_t = 3)]
+    pub gossip_indirect_probes: usize,
+    /// The detector score that makes a member suspect.
+    #[arg(long, default_value_t = 8.0)]
+    pub phi_suspect: f64,
+    /// The detector score that makes a suspect member dead at once.
+    #[arg(long, default_value_t = 16.0)]
+    pub phi_dead: f64,
+    /// Detector evidence of one data-path failure. One failed probe adds `--phi-suspect`.
+    #[arg(long, default_value_t = 10.0)]
+    pub data_path_weight: f64,
+    /// The suspicion timeout once enough nodes confirm a suspicion, in milliseconds.
+    #[arg(long, default_value_t = 3_000)]
+    pub suspicion_min_ms: u64,
+    /// The suspicion timeout without confirmations, in milliseconds.
+    #[arg(long, default_value_t = 10_000)]
+    pub suspicion_max_ms: u64,
     /// PEM file with the CA that issues node certificates.
     #[arg(long)]
     pub cluster_ca: Option<PathBuf>,
@@ -140,11 +234,50 @@ impl Config {
         !self.peers.is_empty() || self.cert_flags().iter().all(|(_, set)| *set)
     }
 
+    /// True when the node runs SWIM gossip: the transport runs in gossip mode.
+    pub fn gossip_enabled(&self) -> bool {
+        self.cluster_enabled() && self.membership == MembershipMode::Gossip
+    }
+
+    /// The SWIM settings from the flags.
+    pub fn swim(&self) -> discus_membership::SwimConfig {
+        discus_membership::SwimConfig {
+            period_ms: self.gossip_interval_ms,
+            probe_timeout_ms: self.gossip_probe_timeout_ms,
+            indirect_probes: self.gossip_indirect_probes,
+            phi_suspect: self.phi_suspect,
+            phi_dead: self.phi_dead,
+            data_path_weight: self.data_path_weight,
+            missed_ping_weight: self.phi_suspect,
+            suspicion_min_ms: self.suspicion_min_ms,
+            suspicion_max_ms: self.suspicion_max_ms,
+            bootstrap_deadline_ms: self.bootstrap_deadline_ms,
+            replication_factor: self.replication_factor,
+            ..discus_membership::SwimConfig::default()
+        }
+    }
+
     /// Check the flags that depend on each other. The message names the flags to fix.
     pub fn validate(&self) -> Result<(), String> {
         let certs = self.cert_flags();
         let set = certs.iter().filter(|(_, s)| *s).count();
-        if !self.peers.is_empty() {
+        if self.gossip_enabled() {
+            self.swim().validate()?;
+            if self.lease_provider == LeaseKind::K8s && !cfg!(feature = "k8s") {
+                return Err("--lease-provider k8s needs the k8s build feature. \
+                    Use --lease-provider none outside Kubernetes"
+                    .into());
+            }
+        }
+        if !self.peers.is_empty() && self.membership == MembershipMode::Gossip {
+            let missing: Vec<&str> = certs.iter().filter(|(_, s)| !*s).map(|(f, _)| *f).collect();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "--peer needs {}. Node-to-node traffic always uses mTLS",
+                    missing.join(", ")
+                ));
+            }
+        } else if !self.peers.is_empty() {
             let mut missing: Vec<&str> = Vec::new();
             if self.node_id.is_none() {
                 missing.push("--node-id");
@@ -166,11 +299,17 @@ impl Config {
                 );
             }
             for (i, p) in self.peers.iter().enumerate() {
-                if Some(p.id) == self.node_id {
-                    return Err(format!("--peer {} is this node's own ID", p.id));
+                let Some(id) = p.id else {
+                    return Err(format!(
+                        "--peer {} needs a node ID as <node-id>@<address> with --membership static",
+                        p.addr
+                    ));
+                };
+                if Some(id) == self.node_id {
+                    return Err(format!("--peer {id} is this node's own ID"));
                 }
-                if self.peers[..i].iter().any(|q| q.id == p.id) {
-                    return Err(format!("--peer {} is listed twice", p.id));
+                if self.peers[..i].iter().any(|q| q.id == Some(id)) {
+                    return Err(format!("--peer {id} is listed twice"));
                 }
             }
         } else if set != 0 && set != certs.len() {
@@ -200,15 +339,17 @@ impl Config {
 }
 
 fn parse_peer(s: &str) -> Result<Peer, String> {
-    let (id, addr) = s
-        .split_once('@')
-        .ok_or_else(|| "a peer is <node-id>@<address>".to_string())?;
+    let (id, addr) = match s.split_once('@') {
+        Some((id, addr)) => (Some(id), addr),
+        None => (None, s),
+    };
     let id = id
-        .parse::<NodeId>()
+        .map(|id| id.parse::<NodeId>())
+        .transpose()
         .map_err(|_| "a peer node ID is 32 hex digits".to_string())?;
     let addr = addr
         .parse::<SocketAddr>()
-        .map_err(|_| "a peer address is <ip>:<port>".to_string())?;
+        .map_err(|_| "a peer is <ip>:<port> or <node-id>@<ip>:<port>".to_string())?;
     Ok(Peer { id, addr })
 }
 

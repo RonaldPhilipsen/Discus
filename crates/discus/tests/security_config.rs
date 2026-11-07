@@ -136,3 +136,22 @@ async fn an_oauth2_policy_names_the_missing_feature() {
     let e = bind_error(&["--auth-policy", "any:oauth2", "--dev-insecure-oauth2"]).await;
     assert!(e.contains("\"oauth2\" feature"), "{e}");
 }
+
+#[cfg(not(feature = "k8s"))]
+#[tokio::test]
+async fn the_k8s_lease_names_the_missing_feature() {
+    let mut config = discus::Config::parse_from([
+        "discus",
+        "--cluster-ca",
+        "ca.pem",
+        "--cluster-cert",
+        "cert.pem",
+        "--cluster-key",
+        "key.pem",
+        "--lease-provider",
+        "k8s",
+    ])
+    .unwrap();
+    let err = config.resolve_identity().unwrap_err();
+    assert!(err.contains("k8s build feature"), "{err}");
+}

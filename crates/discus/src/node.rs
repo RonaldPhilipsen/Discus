@@ -16,6 +16,7 @@ use parking_lot::{RwLock, RwLockReadGuard};
 
 use crate::cluster::ClusterLink;
 use crate::command::CommandError;
+use crate::membership::Membership;
 use crate::security::{ConnAuth, Security};
 use crate::Config;
 
@@ -50,7 +51,7 @@ pub struct Node {
     pub id: NodeId,
     /// The clock that stamps every write.
     pub hlc: Hlc,
-    epochs: RwLock<EpochHistory>,
+    epochs: Arc<RwLock<EpochHistory>>,
     pub started_at: Instant,
     pub store: Arc<Store>,
     pub security: Arc<Security>,
@@ -58,6 +59,34 @@ pub struct Node {
     connected: AtomicUsize,
     phase: AtomicU8,
     link: OnceLock<ClusterLink>,
+    membership: OnceLock<Arc<Membership>>,
+}
+
+/// Keeps one epoch in the history until it is dropped (spec section 5.1). Handoff (plan 4)
+/// holds one for the old epoch of each ownership change.
+pub struct EpochPin {
+    epochs: std::sync::Weak<RwLock<EpochHistory>>,
+    id: EpochId,
+}
+
+impl EpochPin {
+    pub fn id(&self) -> EpochId {
+        self.id
+    }
+}
+
+impl Drop for EpochPin {
+    fn drop(&mut self) {
+        if let Some(epochs) = self.epochs.upgrade() {
+            epochs.write().unpin(self.id);
+        }
+    }
+}
+
+impl std::fmt::Debug for EpochPin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "EpochPin({})", self.id)
+    }
 }
 
 impl Node {
@@ -89,13 +118,19 @@ impl Node {
             state: MemberState::Normal,
             weight: Weight::new(config.weight).unwrap_or_default(),
         };
-        let epochs = EpochHistory::new(static_epoch(me, &config, cluster_id));
+        // A gossip node starts outside any cluster and joins or forms one (spec section 6.2).
+        let first = if config.gossip_enabled() {
+            discus_membership::provisional_epoch(id)
+        } else {
+            static_epoch(me, &config, cluster_id)
+        };
+        let epochs = EpochHistory::new(first);
         crate::telemetry::record_epoch(discus_telemetry::global(), epochs.current());
         Node {
             config,
             id,
             hlc: Hlc::new(id, hlc_clock),
-            epochs: RwLock::new(epochs),
+            epochs: Arc::new(RwLock::new(epochs)),
             started_at: Instant::now(),
             store: Arc::new(store),
             security,
@@ -103,7 +138,57 @@ impl Node {
             connected: AtomicUsize::new(0),
             phase: AtomicU8::new(Phase::Starting as u8),
             link: OnceLock::new(),
+            membership: OnceLock::new(),
         }
+    }
+
+    pub fn membership(&self) -> Option<&Arc<Membership>> {
+        self.membership.get()
+    }
+
+    /// Attach the gossip membership. Only the first call has an effect.
+    pub fn set_membership(&self, membership: Arc<Membership>) {
+        let _ = self.membership.set(membership);
+    }
+
+    /// True when the node is `NORMAL` in its current epoch. Without gossip, always.
+    pub fn is_normal(&self) -> bool {
+        self.membership().is_none_or(|m| m.is_normal())
+    }
+
+    /// The node was `NORMAL` at least once. The startup probe latches on it.
+    pub fn reached_normal(&self) -> bool {
+        self.membership().is_none_or(|m| m.reached_normal())
+    }
+
+    /// The store needs no warm-up yet. Plan 4 adds a condition here.
+    pub fn store_ready(&self) -> bool {
+        true
+    }
+
+    /// The counter tier is settled (spec section 15.2). Plan 5 replaces this. Until then the tier
+    /// does not exist, so it is always settled.
+    pub fn counters_settled(&self) -> bool {
+        true
+    }
+
+    /// Replace the history with `epoch`: after a join, or after a lost merge (spec section 6.3).
+    /// Pins of the old history are dropped with it.
+    pub fn reset_cluster(&self, epoch: Epoch) {
+        let id = epoch.id();
+        let mut epochs = self.epochs.write();
+        *epochs = EpochHistory::new(epoch);
+        tracing::info!(epoch = %id, cluster = %epochs.cluster_id(), "took a new cluster history");
+        crate::telemetry::record_epoch(discus_telemetry::global(), epochs.current());
+    }
+
+    /// Keep epoch `id` in the history until the pin is dropped.
+    pub fn pin_epoch(&self, id: EpochId) -> Result<EpochPin, EpochError> {
+        self.epochs.write().pin(id)?;
+        Ok(EpochPin {
+            epochs: Arc::downgrade(&self.epochs),
+            id,
+        })
     }
 
     /// The node-to-node link, when the transport runs.
@@ -212,7 +297,8 @@ fn static_epoch(me: Member, config: &Config, cluster_id: ClusterId) -> Epoch {
     let my_id = me.id;
     let mut members = vec![me];
     members.extend(config.peers.iter().map(|p| Member {
-        id: p.id,
+        // Config::validate requires the ID with static membership.
+        id: p.id.unwrap_or(NodeId::NIL),
         addr: p.addr,
         state: MemberState::Normal,
         weight: Weight::default(),
