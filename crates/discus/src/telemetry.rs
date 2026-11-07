@@ -243,9 +243,6 @@ fn instrumented(metrics: &Metrics, node: &Node, conn: &mut ConnState, cmd: &Comm
     }
     let status = if failed { Status::Error } else { Status::Ok };
     metrics.command(label, status, start.elapsed());
-    if is_auth(label, cmd) {
-        metrics.auth(!failed);
-    }
 
     /// The metric label: the table name, never the name the client sent.
     fn label(cmd: &Command) -> CommandLabel {
@@ -260,15 +257,6 @@ fn instrumented(metrics: &Metrics, node: &Node, conn: &mut ConnState, cmd: &Comm
             CommandLabel::UNSUPPORTED
         } else {
             CommandLabel::UNKNOWN
-        }
-    }
-
-    /// `AUTH`, or `HELLO` with an `AUTH` option.
-    fn is_auth(label: CommandLabel, cmd: &Command) -> bool {
-        match label.as_str() {
-            "AUTH" => true,
-            "HELLO" => cmd.iter().skip(2).any(|a| a.eq_ignore_ascii_case(b"AUTH")),
-            _ => false,
         }
     }
 

@@ -108,7 +108,7 @@ and 100.
 | `discus.memory.used` | gauge (bytes) | none | Memory that the store uses. |
 | `discus.memory.limit` | gauge (bytes) | none | The memory budget, `--max-memory`. |
 | `discus.keys` | gauge | none | Stored keys. |
-| `discus.auth.attempts` | counter | `status` | `AUTH` results, `success` or `failure`. |
+| `discus.auth.attempts` | counter | `status` | Results of `AUTH` and `HELLO ... AUTH`, `success` or `failure`. |
 | `discus.telemetry.spans.dropped` | counter | none | Spans dropped because the queue was full. |
 | `discus.telemetry.spans.export_failures` | counter | none | Failed span exports. |
 | `discus.telemetry.metrics.export_failures` | counter | none | Failed metric exports. |

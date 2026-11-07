@@ -436,8 +436,19 @@ impl Security {
     }
 
     /// Handle the credentials of `AUTH` or `HELLO ... AUTH`. `user` is only a hint, except that
-    /// `OAUTH2` selects OAuth 2.0.
+    /// `OAUTH2` selects OAuth 2.0. The auth attempt metric counts every result (spec §15.4).
     pub fn authenticate(
+        &self,
+        conn: &mut ConnState,
+        user: Option<&[u8]>,
+        token: &[u8],
+    ) -> Result<(), CommandError> {
+        let result = self.check_credentials(conn, user, token);
+        discus_telemetry::global().auth(result.is_ok());
+        result
+    }
+
+    fn check_credentials(
         &self,
         conn: &mut ConnState,
         user: Option<&[u8]>,

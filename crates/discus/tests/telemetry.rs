@@ -162,7 +162,7 @@ mod otel {
     }
 
     #[test]
-    fn metrics_record_commands_auth_and_only_bounded_attributes() {
+    fn metrics_record_commands_and_only_bounded_attributes() {
         let _serial = serial();
         let h = TraceHarness::new(0.0);
         let m = h.telemetry.metrics();
@@ -179,14 +179,6 @@ mod otel {
             discus::telemetry::dispatch_with(&m, &node, &mut conn, &cmd(c));
         }
         let points = h.points();
-        assert_eq!(
-            sum(&points, "discus.auth.attempts", ("status", "failure")),
-            2.0
-        );
-        assert_eq!(
-            sum(&points, "discus.auth.attempts", ("status", "success")),
-            1.0
-        );
         assert_eq!(sum(&points, "discus.commands", ("command", "GET")), 1.0);
         assert_eq!(sum(&points, "discus.commands", ("command", "unknown")), 1.0);
         assert_eq!(
