@@ -1,6 +1,7 @@
 //! Routing: plan each command as local or forwarded, and run it (spec section 7).
 
 pub mod forward;
+pub mod multi;
 pub mod route;
 pub mod service;
 
@@ -168,7 +169,28 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop) -> Dispatch {
     }
     match job.route {
         Route::Single { write } => single(node, job, hop, write),
-        _ => Dispatch::Ready(local(node, &job.cmd)),
+        Route::MultiRead { sum } => {
+            let merge = if sum {
+                multi::Merge::Sum
+            } else {
+                multi::Merge::InOrder
+            };
+            multi::multi(node, job.cmd, hop, job.rr, merge, false)
+        }
+        Route::MultiWrite { pairs } => {
+            let merge = if pairs {
+                multi::Merge::AllOk
+            } else {
+                multi::Merge::Sum
+            };
+            multi::multi(node, job.cmd, hop, job.rr, merge, true)
+        }
+        // Only the entry node fans out. A forwarded copy runs locally.
+        Route::Fanout if hop.hops == 0 => multi::dbsize(node, job.cmd),
+        Route::Broadcast if hop.hops == 0 => multi::flush(node, job.cmd),
+        Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => {
+            Dispatch::Ready(local(node, &job.cmd))
+        }
     }
 }
 

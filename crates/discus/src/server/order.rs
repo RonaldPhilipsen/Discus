@@ -97,7 +97,9 @@ impl KeyOrder {
             Keys::Some(list) => {
                 for key in list {
                     if let Some(prev) = self.last.insert(key.clone(), gate.clone()) {
-                        if !prev.is_done() && !deps.iter().any(|d| Arc::ptr_eq(d, &prev)) {
+                        // A key named twice in one command must not wait for itself.
+                        let own = Arc::ptr_eq(&prev, &gate);
+                        if !own && !prev.is_done() && !deps.iter().any(|d| Arc::ptr_eq(d, &prev)) {
                             deps.push(prev);
                         }
                     }
@@ -155,6 +157,13 @@ mod tests {
         drop(d1);
         assert!(w2b.is_ready());
         w2b.wait().await;
+    }
+
+    #[tokio::test]
+    async fn a_key_named_twice_does_not_wait_for_itself() {
+        let mut order = KeyOrder::new();
+        let (w, _d) = order.admit(&keys(&["a", "b", "a"]));
+        assert!(w.is_ready());
     }
 
     #[tokio::test]

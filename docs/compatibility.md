@@ -33,6 +33,19 @@ need topology awareness.
 
 Any other unknown command returns `-ERR unknown command '<name>'`.
 
+## Commands in a cluster
+
+In a cluster, any node accepts any command and forwards it to the owner of the key. Some commands
+behave differently from Redis:
+
+- `MSET` and `DEL` with several keys are not atomic. If one part fails, the command returns
+  `-TRYAGAIN` and the other parts stay applied. A retry of the whole command is safe.
+- `SCAN` and `RANDOMKEY` see only the keys of the node that the client is connected to.
+- `DBSIZE` adds the counts of every member that answers.
+- `FLUSHDB` and `FLUSHALL` clear every member that answers.
+
+See [Running a static cluster](cluster.md) for the details.
+
 ## Limits and defaults
 
 | Limit | Default | Flag |
