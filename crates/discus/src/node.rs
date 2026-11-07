@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use discus_placement::{
-    Clock, ClusterId, Epoch, EpochHistory, Hlc, Member, MemberState, NodeId, Version, Weight,
+    hlc, Clock, ClusterId, Epoch, EpochHistory, Hlc, Member, MemberState, NodeId, Version, Weight,
+    NTP64,
 };
 use discus_resp::Protocol;
 use discus_store::{Store, StoreConfig, SystemClock, HASH_SEED};
@@ -52,18 +53,19 @@ pub struct Node {
 
 impl Node {
     pub fn new(config: Config) -> Node {
-        Node::with_clock(config, Arc::new(SystemClock))
+        Node::with_clocks(config, Arc::new(SystemClock), hlc::system_clock)
     }
 
-    /// A node on the given wall clock. The store and the HLC share it.
-    pub fn with_clock(config: Config, clock: Arc<dyn Clock>) -> Node {
+    /// A node on the given clocks: `wall` for TTL and eviction, `hlc_clock` for the HLC. Tests
+    /// pass both halves of one mock clock slot, so the two agree.
+    pub fn with_clocks(config: Config, wall: Arc<dyn Clock>, hlc_clock: fn() -> NTP64) -> Node {
         let store = Store::new(
             StoreConfig {
                 shards: config.shards,
                 max_memory: config.max_memory,
                 seed: HASH_SEED,
             },
-            clock.clone(),
+            wall,
         );
         let id = NodeId::random();
         // This plan has one node, so it always bootstraps: it mints the cluster ID, forms epoch
@@ -79,7 +81,7 @@ impl Node {
         Node {
             config,
             id,
-            hlc: Hlc::new(id, clock),
+            hlc: Hlc::new(id, hlc_clock),
             epochs: RwLock::new(epochs),
             started_at: Instant::now(),
             store: Arc::new(store),

@@ -9,11 +9,14 @@ pub mod hlc;
 pub mod hrw;
 pub mod id;
 pub mod member;
+#[cfg(feature = "mock-clock")]
+pub mod mock;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use epoch::{Epoch, EpochError, EpochId};
 pub use history::{Adopt, EpochHistory, MIN_HISTORY};
-pub use hlc::{Hlc, HlcError, Timestamp, Version, MAX_DRIFT_MS};
+pub use hlc::{Hlc, HlcError, Version, MAX_DRIFT};
 pub use hrw::{owners, DEFAULT_RF, PLACEMENT_SEED};
 pub use id::{ClusterId, NodeId, ParseIdError};
 pub use member::{Member, MemberState, Weight};
+pub use uhlc::NTP64;

@@ -5,15 +5,22 @@ use std::sync::Arc;
 use bytes::Bytes;
 use discus::command::dispatch;
 use discus::{Config, ConnState, Node};
+use discus_placement::mock::MockClock;
 use discus_resp::Value;
-use discus_store::{ManualClock, Version};
+use discus_store::{Version, NTP64};
 
 const START: u64 = 1_700_000_000_000;
 
-fn node() -> (Node, Arc<ManualClock>) {
-    let clock = Arc::new(ManualClock::new(START));
+/// A node on mock clock slot `SLOT`. Each test uses its own slot.
+fn node<const SLOT: usize>() -> Node {
+    let clock = MockClock::<SLOT>;
+    clock.set(START);
     let config = Config::parse_from(["discus"]).unwrap();
-    (Node::with_clock(config, clock.clone()), clock)
+    Node::with_clocks(config, Arc::new(clock), clock.hlc_clock())
+}
+
+fn ms(n: u64) -> NTP64 {
+    NTP64::from(std::time::Duration::from_millis(n))
 }
 
 fn run(node: &Node, args: &[&str]) -> Value {
@@ -37,18 +44,18 @@ fn is_tryagain(v: &Value) -> bool {
 
 #[test]
 fn set_stamps_the_entry_with_the_node_origin() {
-    let (node, _clock) = node();
+    let node = node::<0>();
     run(&node, &["SET", "k", "v"]);
     let first = version(&node, "k");
-    assert_eq!(first.origin, node.id);
-    assert_eq!(first.ts.wall_ms(), START);
+    assert_eq!(first.origin(), node.id);
+    assert!(first.time() <= ms(START) && first.time() > ms(START - 1));
     run(&node, &["SET", "k", "w"]);
     assert!(version(&node, "k") > first);
 }
 
 #[test]
 fn collection_and_ttl_writes_stamp_the_entry() {
-    let (node, _clock) = node();
+    let node = node::<1>();
     let cases: &[(&str, &[&str])] = &[
         ("h", &["HSET", "h", "f", "1"]),
         ("s", &["SADD", "s", "m"]),
@@ -59,7 +66,7 @@ fn collection_and_ttl_writes_stamp_the_entry() {
     for (key, cmd) in cases {
         run(&node, cmd);
         let first = version(&node, key);
-        assert_eq!(first.origin, node.id, "{key}");
+        assert_eq!(first.origin(), node.id, "{key}");
         run(&node, cmd);
         assert!(version(&node, key) > first, "{key}");
     }
@@ -75,7 +82,8 @@ fn collection_and_ttl_writes_stamp_the_entry() {
 
 #[test]
 fn a_pinned_clock_refuses_writes_but_serves_reads() {
-    let (node, clock) = node();
+    let node = node::<2>();
+    let clock = MockClock::<2>;
     run(&node, &["SET", "k", "v"]);
     clock.set(START - 2_000);
     assert!(is_tryagain(&run(&node, &["SET", "k", "w"])));

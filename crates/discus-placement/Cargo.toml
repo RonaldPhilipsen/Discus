@@ -10,7 +10,13 @@ workspace = true
 [dependencies]
 fastrand = "2"
 getrandom = "0.3"
+uhlc = { version = "0.9", default-features = false }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
+# Process-wide mock clocks for the HLC, for tests only. Never enable this in a release build.
+[features]
+mock-clock = []
+
 [dev-dependencies]
+discus-placement = { path = ".", features = ["mock-clock"] }
 proptest = "1"

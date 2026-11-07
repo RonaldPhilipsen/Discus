@@ -25,7 +25,7 @@ impl Entry {
             value,
             expires_at_ms,
             last_access_ms: 0,
-            version: Version::ZERO,
+            version: Version::zero(),
         }
     }
 

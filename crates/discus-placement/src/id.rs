@@ -81,9 +81,14 @@ id_type!(
 );
 
 impl NodeId {
-    /// A fresh random identity.
+    /// A fresh random identity. It is never [`NodeId::NIL`].
     pub fn random() -> NodeId {
-        NodeId(random_u128())
+        loop {
+            let id = random_u128();
+            if id != 0 {
+                return NodeId(id);
+            }
+        }
     }
 }
 

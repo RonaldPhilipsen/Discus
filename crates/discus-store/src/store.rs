@@ -147,7 +147,7 @@ impl Store {
     ///
     /// This is for internal deletes that take no HLC stamp. A client `DEL` uses [`Store::write`].
     pub fn remove(&self, key: &[u8]) -> bool {
-        self.write(key, Version::ZERO, |slot| slot.take().is_some())
+        self.write(key, Version::zero(), |slot| slot.take().is_some())
     }
 
     /// Number of stored entries, including expired entries that nobody reaped yet.
