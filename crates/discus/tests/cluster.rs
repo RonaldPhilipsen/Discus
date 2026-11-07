@@ -230,6 +230,7 @@ async fn a_loop_is_detected() {
         hops: 1,
         path: vec![me, b.id],
         mode: ForwardMode::Route,
+        track: false,
     };
     let reply = t
         .request(

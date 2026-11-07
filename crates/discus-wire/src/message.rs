@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use bytes::Bytes;
 use discus_placement::{ClusterId, Epoch, EpochId, MemberState, NodeId, Version, Weight};
 use discus_resp::Value;
+use discus_store::Entry;
 
 /// W3C Trace Context, copied unchanged across every hop.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -59,6 +60,8 @@ pub struct Forward {
     /// The nodes that forwarded this command, in order.
     pub path: Vec<NodeId>,
     pub mode: ForwardMode,
+    /// The sender keeps the key in a write set: report `observed` and `settled`.
+    pub track: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,18 +71,76 @@ pub struct ForwardReply {
     pub applied: Option<Version>,
     /// The epoch of the receiver after it acted.
     pub epoch: EpochId,
+    /// A tracked read: the version that the read saw.
+    pub observed: Option<Version>,
+    /// A tracked read: no replication queue, batch in flight, or hint holds the key.
+    pub settled: bool,
+}
+
+/// The body of `REPLICATE`, `HINT_REPLAY`, `HANDOFF`, and `ENTRIES`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Batch {
+    /// The epoch of the sender.
+    pub epoch: EpochId,
+    /// Full entries with their keys. The access time does not travel.
+    pub entries: Vec<(Bytes, Entry)>,
+    /// `HANDOFF`: keys that another source sends in full, with the version this source holds.
+    pub offers: Vec<(Bytes, Version)>,
+    /// `HINT_REPLAY`: refill buckets whose hints were lost.
+    pub discard: Vec<u8>,
+    /// `HANDOFF`: the source finished its scan over this epoch range.
+    pub done: Option<(EpochId, EpochId)>,
+}
+
+impl Batch {
+    pub fn new(epoch: EpochId) -> Batch {
+        Batch {
+            epoch,
+            entries: Vec::new(),
+            offers: Vec::new(),
+            discard: Vec::new(),
+            done: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchAck {
+    pub applied: u32,
+    /// `HANDOFF`: offered keys that the receiver wants in full.
+    pub want: Vec<Bytes>,
+    pub epoch: EpochId,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     Hello(Hello),
     HandshakeFailed(HandshakeFailed),
-    Unsupported { message_type: u16 },
+    Unsupported {
+        message_type: u16,
+    },
     Forward(Forward),
     ForwardReply(ForwardReply),
-    Ping { nonce: u64 },
-    Pong { nonce: u64 },
+    Ping {
+        nonce: u64,
+    },
+    Pong {
+        nonce: u64,
+    },
     Gossip(Gossip),
+    Replicate(Batch),
+    HintReplay(Batch),
+    Handoff(Batch),
+    BatchAck(BatchAck),
+    Fetch {
+        keys: Vec<Bytes>,
+    },
+    Entries(Batch),
+    Digest {
+        from: EpochId,
+        to: EpochId,
+        sums: Vec<u64>,
+    },
 }
 
 impl Message {
@@ -95,6 +156,13 @@ impl Message {
             Message::Ping { .. } => T::PING.0,
             Message::Pong { .. } => T::PONG.0,
             Message::Gossip(_) => T::GOSSIP.0,
+            Message::Replicate(_) => T::REPLICATE.0,
+            Message::HintReplay(_) => T::HINT_REPLAY.0,
+            Message::Handoff(_) => T::HANDOFF.0,
+            Message::BatchAck(_) => T::BATCH_ACK.0,
+            Message::Fetch { .. } => T::FETCH.0,
+            Message::Entries(_) => T::ENTRIES.0,
+            Message::Digest { .. } => T::DIGEST.0,
         }
     }
 }

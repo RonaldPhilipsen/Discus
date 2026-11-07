@@ -4,7 +4,8 @@
 
 namespace discus.wire;
 
-/// Append-only. GOSSIP carries every gossip body. Later plans add STATS, SCAN, HANDOFF, HINT_REPLAY, RAFT_LEADER, RAFT_CONFIG.
+/// Append-only. GOSSIP carries every gossip body. REPLICATE to DIGEST carry the bulk traffic
+/// of replication and handoff. Later plans add RAFT_LEADER and RAFT_CONFIG.
 enum MessageType: ushort {
   NONE = 0,
   HELLO = 1,
@@ -15,6 +16,13 @@ enum MessageType: ushort {
   PING = 6,
   PONG = 7,
   GOSSIP = 8,
+  REPLICATE = 9,
+  HINT_REPLAY = 10,
+  HANDOFF = 11,
+  BATCH_ACK = 12,
+  FETCH = 13,
+  ENTRIES = 14,
+  DIGEST = 15,
 }
 
 table Envelope {

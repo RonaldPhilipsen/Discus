@@ -4,6 +4,7 @@ use bytes::Bytes;
 use discus_placement::{
     ClusterId, Epoch, EpochId, Member, MemberState, NodeId, Version, Weight, NTP64,
 };
+use discus_store::{Entry, Value};
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
 
 use crate::fb;
@@ -321,6 +322,204 @@ fn gossip_of(g: fb::Gossip<'_>) -> Result<Gossip, DecodeError> {
     })
 }
 
+fn blobs<'a, 'b>(
+    fbb: &mut FlatBufferBuilder<'a>,
+    items: impl Iterator<Item = &'b [u8]>,
+) -> WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<fb::Blob<'a>>>> {
+    let items: Vec<_> = items
+        .map(|b| {
+            let data = fbb.create_vector(b);
+            fb::Blob::create(fbb, &fb::BlobArgs { data: Some(data) })
+        })
+        .collect();
+    fbb.create_vector(&items)
+}
+
+fn blobs_of(
+    v: Option<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<fb::Blob<'_>>>>,
+) -> Vec<Bytes> {
+    v.into_iter()
+        .flatten()
+        .map(|b| {
+            b.data()
+                .map(|d| Bytes::copy_from_slice(d.bytes()))
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+fn stored_to<'a>(
+    fbb: &mut FlatBufferBuilder<'a>,
+    key: &[u8],
+    e: &Entry,
+) -> WIPOffset<fb::StoredEntry<'a>> {
+    let key = fbb.create_vector(key);
+    let (kind, bytes, items, scores) = match &e.value {
+        Value::Str(b) => (
+            fb::ValueKind::STRING,
+            Some(fbb.create_vector(b)),
+            None,
+            None,
+        ),
+        Value::Hash(h) => {
+            let flat = h.iter().flat_map(|(k, v)| [&k[..], &v[..]]);
+            (fb::ValueKind::HASH, None, Some(blobs(fbb, flat)), None)
+        }
+        Value::Set(s) => {
+            let items = blobs(fbb, s.iter().map(|m| &m[..]));
+            (fb::ValueKind::SET, None, Some(items), None)
+        }
+        Value::ZSet(z) => {
+            let all = z.range(0, -1, false);
+            let scores: Vec<f64> = all.iter().map(|(_, s)| *s).collect();
+            let items = blobs(fbb, all.into_iter().map(|(m, _)| &m[..]));
+            let scores = fbb.create_vector(&scores);
+            (fb::ValueKind::ZSET, None, Some(items), Some(scores))
+        }
+    };
+    let version = version_to(e.version);
+    fb::StoredEntry::create(
+        fbb,
+        &fb::StoredEntryArgs {
+            key: Some(key),
+            kind,
+            bytes,
+            items,
+            scores,
+            expires_at_ms: e.expires_at_ms.unwrap_or(0),
+            version: Some(&version),
+            tombstone: e.tombstone,
+        },
+    )
+}
+
+fn stored_of(s: fb::StoredEntry<'_>) -> Result<(Bytes, Entry), DecodeError> {
+    let key = s
+        .key()
+        .map(|k| Bytes::copy_from_slice(k.bytes()))
+        .ok_or_else(|| invalid("entry without a key"))?;
+    let items = blobs_of(s.items());
+    let value = match s.kind() {
+        fb::ValueKind::STRING => Value::Str(
+            s.bytes()
+                .map(|b| Bytes::copy_from_slice(b.bytes()))
+                .unwrap_or_default(),
+        ),
+        fb::ValueKind::HASH => {
+            if !items.len().is_multiple_of(2) {
+                return Err(invalid("a hash entry with an odd item count"));
+            }
+            let mut h = std::collections::HashMap::with_capacity(items.len() / 2);
+            let mut it = items.into_iter();
+            while let (Some(k), Some(v)) = (it.next(), it.next()) {
+                h.insert(k, v);
+            }
+            Value::Hash(h)
+        }
+        fb::ValueKind::SET => Value::Set(items.into_iter().collect()),
+        fb::ValueKind::ZSET => {
+            let scores: Vec<f64> = s.scores().map(|v| v.iter().collect()).unwrap_or_default();
+            if scores.len() != items.len() {
+                return Err(invalid("a sorted set entry with mismatched scores"));
+            }
+            let mut z = discus_store::ZSet::new();
+            for (m, score) in items.into_iter().zip(scores) {
+                z.insert(m, score);
+            }
+            Value::ZSet(z)
+        }
+        other => return Err(invalid(format!("unknown value kind {}", other.0))),
+    };
+    let version = version_of(
+        s.version()
+            .ok_or_else(|| invalid("entry without a version"))?,
+    );
+    let expires = s.expires_at_ms();
+    Ok((
+        key,
+        Entry {
+            value,
+            expires_at_ms: (expires != 0).then_some(expires),
+            last_access_ms: 0,
+            version,
+            tombstone: s.tombstone(),
+        },
+    ))
+}
+
+fn batch_to(fbb: &mut FlatBufferBuilder<'_>, b: &Batch) {
+    let entries: Vec<_> = b
+        .entries
+        .iter()
+        .map(|(k, e)| stored_to(fbb, k, e))
+        .collect();
+    let entries = fbb.create_vector(&entries);
+    let offers: Vec<_> = b
+        .offers
+        .iter()
+        .map(|(k, v)| {
+            let key = fbb.create_vector(k);
+            let version = version_to(*v);
+            fb::KeyVersion::create(
+                fbb,
+                &fb::KeyVersionArgs {
+                    key: Some(key),
+                    version: Some(&version),
+                },
+            )
+        })
+        .collect();
+    let offers = fbb.create_vector(&offers);
+    let discard = fbb.create_vector(&b.discard);
+    let done_from = b.done.map(|(f, _)| epoch_id_to(f));
+    let done_to = b.done.map(|(_, t)| epoch_id_to(t));
+    let t = fb::EntryBatch::create(
+        fbb,
+        &fb::EntryBatchArgs {
+            epoch: Some(&epoch_id_to(b.epoch)),
+            entries: Some(entries),
+            offers: Some(offers),
+            discard_buckets: Some(discard),
+            done_from: done_from.as_ref(),
+            done_to: done_to.as_ref(),
+        },
+    );
+    fbb.finish_minimal(t);
+}
+
+fn batch_of(b: fb::EntryBatch<'_>) -> Result<Batch, DecodeError> {
+    let mut entries = Vec::new();
+    for e in b.entries().into_iter().flatten() {
+        entries.push(stored_of(e)?);
+    }
+    let mut offers = Vec::new();
+    for o in b.offers().into_iter().flatten() {
+        let key = o
+            .key()
+            .map(|k| Bytes::copy_from_slice(k.bytes()))
+            .ok_or_else(|| invalid("offer without a key"))?;
+        let version = version_of(
+            o.version()
+                .ok_or_else(|| invalid("offer without a version"))?,
+        );
+        offers.push((key, version));
+    }
+    let done = match (b.done_from(), b.done_to()) {
+        (Some(f), Some(t)) => Some((epoch_id_of(f), epoch_id_of(t))),
+        _ => None,
+    };
+    Ok(Batch {
+        epoch: epoch_id_of(b.epoch().ok_or_else(|| invalid("batch without an epoch"))?),
+        entries,
+        offers,
+        discard: b
+            .discard_buckets()
+            .map(|d| d.bytes().to_vec())
+            .unwrap_or_default(),
+        done,
+    })
+}
+
 /// Encode the body of a message as its own FlatBuffer.
 fn encode_body(message: &Message) -> Vec<u8> {
     let mut fbb = FlatBufferBuilder::new();
@@ -375,6 +574,7 @@ fn encode_body(message: &Message) -> Vec<u8> {
                         ForwardMode::Route => fb::ForwardMode::ROUTE,
                         ForwardMode::Local => fb::ForwardMode::LOCAL,
                     },
+                    track: f.track,
                 },
             );
             fbb.finish_minimal(t);
@@ -382,12 +582,15 @@ fn encode_body(message: &Message) -> Vec<u8> {
         Message::ForwardReply(r) => {
             let value = to_wire(&mut fbb, &r.value);
             let applied = r.applied.map(version_to);
+            let observed = r.observed.map(version_to);
             let t = fb::ForwardReply::create(
                 &mut fbb,
                 &fb::ForwardReplyArgs {
                     value: Some(value),
                     applied: applied.as_ref(),
                     epoch: Some(&epoch_id_to(r.epoch)),
+                    observed: observed.as_ref(),
+                    settled: r.settled,
                 },
             );
             fbb.finish_minimal(t);
@@ -397,6 +600,39 @@ fn encode_body(message: &Message) -> Vec<u8> {
             fbb.finish_minimal(t);
         }
         Message::Gossip(g) => gossip_to(&mut fbb, g),
+        Message::Replicate(b)
+        | Message::HintReplay(b)
+        | Message::Handoff(b)
+        | Message::Entries(b) => batch_to(&mut fbb, b),
+        Message::BatchAck(a) => {
+            let want = blobs(&mut fbb, a.want.iter().map(|k| &k[..]));
+            let t = fb::BatchAck::create(
+                &mut fbb,
+                &fb::BatchAckArgs {
+                    applied: a.applied,
+                    want: Some(want),
+                    epoch: Some(&epoch_id_to(a.epoch)),
+                },
+            );
+            fbb.finish_minimal(t);
+        }
+        Message::Fetch { keys } => {
+            let keys = blobs(&mut fbb, keys.iter().map(|k| &k[..]));
+            let t = fb::Fetch::create(&mut fbb, &fb::FetchArgs { keys: Some(keys) });
+            fbb.finish_minimal(t);
+        }
+        Message::Digest { from, to, sums } => {
+            let sums = fbb.create_vector(sums);
+            let t = fb::Digest::create(
+                &mut fbb,
+                &fb::DigestArgs {
+                    from: Some(&epoch_id_to(*from)),
+                    to: Some(&epoch_id_to(*to)),
+                    sums: Some(sums),
+                },
+            );
+            fbb.finish_minimal(t);
+        }
     }
     fbb.finished_data().to_vec()
 }
@@ -510,6 +746,7 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
                     fb::ForwardMode::LOCAL => ForwardMode::Local,
                     other => return Err(invalid(format!("unknown forward mode {}", other.0))),
                 },
+                track: f.track(),
             })
         }
         T::FORWARD_REPLY => {
@@ -519,6 +756,8 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
                 value: from_wire(r.value().ok_or_else(|| invalid("reply without a value"))?)?,
                 applied: r.applied().map(version_of),
                 epoch: epoch_id_of(r.epoch().ok_or_else(|| invalid("reply without an epoch"))?),
+                observed: r.observed().map(version_of),
+                settled: r.settled(),
             })
         }
         T::PING | T::PONG => {
@@ -532,6 +771,39 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
         T::GOSSIP => {
             let g = flatbuffers::root_with_opts::<fb::Gossip>(&opts, payload).map_err(invalid)?;
             Message::Gossip(gossip_of(g)?)
+        }
+        T::REPLICATE | T::HINT_REPLAY | T::HANDOFF | T::ENTRIES => {
+            let b =
+                flatbuffers::root_with_opts::<fb::EntryBatch>(&opts, payload).map_err(invalid)?;
+            let b = batch_of(b)?;
+            match env.type_() {
+                T::REPLICATE => Message::Replicate(b),
+                T::HINT_REPLAY => Message::HintReplay(b),
+                T::HANDOFF => Message::Handoff(b),
+                _ => Message::Entries(b),
+            }
+        }
+        T::BATCH_ACK => {
+            let a = flatbuffers::root_with_opts::<fb::BatchAck>(&opts, payload).map_err(invalid)?;
+            Message::BatchAck(BatchAck {
+                applied: a.applied(),
+                want: blobs_of(a.want()),
+                epoch: epoch_id_of(a.epoch().ok_or_else(|| invalid("ack without an epoch"))?),
+            })
+        }
+        T::FETCH => {
+            let f = flatbuffers::root_with_opts::<fb::Fetch>(&opts, payload).map_err(invalid)?;
+            Message::Fetch {
+                keys: blobs_of(f.keys()),
+            }
+        }
+        T::DIGEST => {
+            let d = flatbuffers::root_with_opts::<fb::Digest>(&opts, payload).map_err(invalid)?;
+            Message::Digest {
+                from: epoch_id_of(d.from().ok_or_else(|| invalid("digest without an epoch"))?),
+                to: epoch_id_of(d.to().ok_or_else(|| invalid("digest without an epoch"))?),
+                sums: d.sums().map(|s| s.iter().collect()).unwrap_or_default(),
+            }
         }
         other => {
             return Err(DecodeError::UnknownType {

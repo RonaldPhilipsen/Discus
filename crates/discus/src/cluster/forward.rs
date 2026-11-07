@@ -67,6 +67,7 @@ async fn send_in_span(
         hops: hop.hops.saturating_add(1),
         path,
         mode,
+        track: false,
     };
     let timeout = if write {
         link.write_timeout

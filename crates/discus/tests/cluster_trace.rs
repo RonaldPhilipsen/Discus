@@ -38,6 +38,8 @@ impl Service for Capture {
                 value: Value::ok(),
                 applied: None,
                 epoch,
+                observed: None,
+                settled: false,
             })
         })
     }
@@ -171,6 +173,7 @@ async fn forward_get(s: &Setup, key: &str, trace: TraceContext) -> Value {
         hops: 1,
         path: vec![sender_id],
         mode: ForwardMode::Route,
+        track: false,
     };
     let reply = s
         .sender

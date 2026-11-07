@@ -107,10 +107,10 @@ impl ::flatbuffers::SimpleToVerifyInSlice for MemberState {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_MESSAGE_TYPE: u16 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_MESSAGE_TYPE: u16 = 8;
+pub const ENUM_MAX_MESSAGE_TYPE: u16 = 15;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_MESSAGE_TYPE: [MessageType; 9] = [
+pub const ENUM_VALUES_MESSAGE_TYPE: [MessageType; 16] = [
   MessageType::NONE,
   MessageType::HELLO,
   MessageType::HANDSHAKE_FAILED,
@@ -120,9 +120,17 @@ pub const ENUM_VALUES_MESSAGE_TYPE: [MessageType; 9] = [
   MessageType::PING,
   MessageType::PONG,
   MessageType::GOSSIP,
+  MessageType::REPLICATE,
+  MessageType::HINT_REPLAY,
+  MessageType::HANDOFF,
+  MessageType::BATCH_ACK,
+  MessageType::FETCH,
+  MessageType::ENTRIES,
+  MessageType::DIGEST,
 ];
 
-/// Append-only. GOSSIP carries every gossip body. Later plans add STATS, SCAN, HANDOFF, HINT_REPLAY, RAFT_LEADER, RAFT_CONFIG.
+/// Append-only. GOSSIP carries every gossip body. REPLICATE to DIGEST carry the bulk traffic
+/// of replication and handoff. Later plans add RAFT_LEADER and RAFT_CONFIG.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct MessageType(pub u16);
@@ -137,9 +145,16 @@ impl MessageType {
   pub const PING: Self = Self(6);
   pub const PONG: Self = Self(7);
   pub const GOSSIP: Self = Self(8);
+  pub const REPLICATE: Self = Self(9);
+  pub const HINT_REPLAY: Self = Self(10);
+  pub const HANDOFF: Self = Self(11);
+  pub const BATCH_ACK: Self = Self(12);
+  pub const FETCH: Self = Self(13);
+  pub const ENTRIES: Self = Self(14);
+  pub const DIGEST: Self = Self(15);
 
   pub const ENUM_MIN: u16 = 0;
-  pub const ENUM_MAX: u16 = 8;
+  pub const ENUM_MAX: u16 = 15;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::HELLO,
@@ -150,6 +165,13 @@ impl MessageType {
     Self::PING,
     Self::PONG,
     Self::GOSSIP,
+    Self::REPLICATE,
+    Self::HINT_REPLAY,
+    Self::HANDOFF,
+    Self::BATCH_ACK,
+    Self::FETCH,
+    Self::ENTRIES,
+    Self::DIGEST,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -163,6 +185,13 @@ impl MessageType {
       Self::PING => Some("PING"),
       Self::PONG => Some("PONG"),
       Self::GOSSIP => Some("GOSSIP"),
+      Self::REPLICATE => Some("REPLICATE"),
+      Self::HINT_REPLAY => Some("HINT_REPLAY"),
+      Self::HANDOFF => Some("HANDOFF"),
+      Self::BATCH_ACK => Some("BATCH_ACK"),
+      Self::FETCH => Some("FETCH"),
+      Self::ENTRIES => Some("ENTRIES"),
+      Self::DIGEST => Some("DIGEST"),
       _ => None,
     }
   }
@@ -713,6 +742,99 @@ impl<'a> ::flatbuffers::Verifiable for GossipKind {
 }
 
 impl ::flatbuffers::SimpleToVerifyInSlice for GossipKind {}
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MIN_VALUE_KIND: u8 = 0;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MAX_VALUE_KIND: u8 = 3;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+#[allow(non_camel_case_types)]
+pub const ENUM_VALUES_VALUE_KIND: [ValueKind; 4] = [
+  ValueKind::STRING,
+  ValueKind::HASH,
+  ValueKind::SET,
+  ValueKind::ZSET,
+];
+
+/// Append-only.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(transparent)]
+pub struct ValueKind(pub u8);
+#[allow(non_upper_case_globals)]
+impl ValueKind {
+  pub const STRING: Self = Self(0);
+  pub const HASH: Self = Self(1);
+  pub const SET: Self = Self(2);
+  pub const ZSET: Self = Self(3);
+
+  pub const ENUM_MIN: u8 = 0;
+  pub const ENUM_MAX: u8 = 3;
+  pub const ENUM_VALUES: &'static [Self] = &[
+    Self::STRING,
+    Self::HASH,
+    Self::SET,
+    Self::ZSET,
+  ];
+  /// Returns the variant's name or "" if unknown.
+  pub fn variant_name(self) -> Option<&'static str> {
+    match self {
+      Self::STRING => Some("STRING"),
+      Self::HASH => Some("HASH"),
+      Self::SET => Some("SET"),
+      Self::ZSET => Some("ZSET"),
+      _ => None,
+    }
+  }
+}
+impl ::core::fmt::Debug for ValueKind {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+    if let Some(name) = self.variant_name() {
+      f.write_str(name)
+    } else {
+      f.write_fmt(format_args!("<UNKNOWN {:?}>", self.0))
+    }
+  }
+}
+impl<'a> ::flatbuffers::Follow<'a> for ValueKind {
+  type Inner = Self;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    let b = unsafe { ::flatbuffers::read_scalar_at::<u8>(buf, loc) };
+    Self(b)
+  }
+}
+
+impl ::flatbuffers::Push for ValueKind {
+    type Output = ValueKind;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        unsafe { ::flatbuffers::emplace_scalar::<u8>(dst, self.0) };
+    }
+}
+
+impl ::flatbuffers::EndianScalar for ValueKind {
+  type Scalar = u8;
+  #[inline]
+  fn to_little_endian(self) -> u8 {
+    self.0.to_le()
+  }
+  #[inline]
+  #[allow(clippy::wrong_self_convention)]
+  fn from_little_endian(v: u8) -> Self {
+    let b = u8::from_le(v);
+    Self(b)
+  }
+}
+
+impl<'a> ::flatbuffers::Verifiable for ValueKind {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    u8::run_verifier(v, pos)
+  }
+}
+
+impl ::flatbuffers::SimpleToVerifyInSlice for ValueKind {}
 /// A 128-bit identifier. NodeId and ClusterId use big-endian bytes.
 // struct Id128, aligned to 1
 #[repr(transparent)]
@@ -1860,6 +1982,7 @@ impl<'a> Forward<'a> {
   pub const VT_HOPS: ::flatbuffers::VOffsetT = 10;
   pub const VT_PATH: ::flatbuffers::VOffsetT = 12;
   pub const VT_MODE: ::flatbuffers::VOffsetT = 14;
+  pub const VT_TRACK: ::flatbuffers::VOffsetT = 16;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -1875,6 +1998,7 @@ impl<'a> Forward<'a> {
     if let Some(x) = args.epoch_body { builder.add_epoch_body(x); }
     if let Some(x) = args.epoch { builder.add_epoch(x); }
     if let Some(x) = args.command { builder.add_command(x); }
+    builder.add_track(args.track);
     builder.add_mode(args.mode);
     builder.add_hops(args.hops);
     builder.finish()
@@ -1927,6 +2051,14 @@ impl<'a> Forward<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<ForwardMode>(Forward::VT_MODE, Some(ForwardMode::ROUTE)).unwrap()}
   }
+  /// The sender keeps the key in a write set. The reply reports `observed` and `settled`.
+  #[inline]
+  pub fn track(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(Forward::VT_TRACK, Some(false)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for Forward<'_> {
@@ -1941,6 +2073,7 @@ impl ::flatbuffers::Verifiable for Forward<'_> {
      .visit_field::<u8>("hops", Self::VT_HOPS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Id128>>>("path", Self::VT_PATH, false)?
      .visit_field::<ForwardMode>("mode", Self::VT_MODE, false)?
+     .visit_field::<bool>("track", Self::VT_TRACK, false)?
      .finish();
     Ok(())
   }
@@ -1952,6 +2085,7 @@ pub struct ForwardArgs<'a> {
     pub hops: u8,
     pub path: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Id128>>>,
     pub mode: ForwardMode,
+    pub track: bool,
 }
 impl<'a> Default for ForwardArgs<'a> {
   #[inline]
@@ -1963,6 +2097,7 @@ impl<'a> Default for ForwardArgs<'a> {
       hops: 0,
       path: None,
       mode: ForwardMode::ROUTE,
+      track: false,
     }
   }
 }
@@ -1997,6 +2132,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ForwardBuilder<'a, 'b, A> {
     self.fbb_.push_slot::<ForwardMode>(Forward::VT_MODE, mode, ForwardMode::ROUTE);
   }
   #[inline]
+  pub fn add_track(&mut self, track: bool) {
+    self.fbb_.push_slot::<bool>(Forward::VT_TRACK, track, false);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ForwardBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ForwardBuilder {
@@ -2020,6 +2159,7 @@ impl ::core::fmt::Debug for Forward<'_> {
       ds.field("hops", &self.hops());
       ds.field("path", &self.path());
       ds.field("mode", &self.mode());
+      ds.field("track", &self.track());
       ds.finish()
   }
 }
@@ -2224,6 +2364,8 @@ impl<'a> ForwardReply<'a> {
   pub const VT_VALUE: ::flatbuffers::VOffsetT = 4;
   pub const VT_APPLIED: ::flatbuffers::VOffsetT = 6;
   pub const VT_EPOCH: ::flatbuffers::VOffsetT = 8;
+  pub const VT_OBSERVED: ::flatbuffers::VOffsetT = 10;
+  pub const VT_SETTLED: ::flatbuffers::VOffsetT = 12;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -2235,9 +2377,11 @@ impl<'a> ForwardReply<'a> {
     args: &'args ForwardReplyArgs<'args>
   ) -> ::flatbuffers::WIPOffset<ForwardReply<'bldr>> {
     let mut builder = ForwardReplyBuilder::new(_fbb);
+    if let Some(x) = args.observed { builder.add_observed(x); }
     if let Some(x) = args.epoch { builder.add_epoch(x); }
     if let Some(x) = args.applied { builder.add_applied(x); }
     if let Some(x) = args.value { builder.add_value(x); }
+    builder.add_settled(args.settled);
     builder.finish()
   }
 
@@ -2265,6 +2409,22 @@ impl<'a> ForwardReply<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<EpochId>(ForwardReply::VT_EPOCH, None)}
   }
+  /// A tracked read: the version that the read saw.
+  #[inline]
+  pub fn observed(&self) -> Option<&'a Version> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Version>(ForwardReply::VT_OBSERVED, None)}
+  }
+  /// A tracked read: no replication queue, batch in flight, or hint holds the key.
+  #[inline]
+  pub fn settled(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(ForwardReply::VT_SETTLED, Some(false)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ForwardReply<'_> {
@@ -2276,6 +2436,8 @@ impl ::flatbuffers::Verifiable for ForwardReply<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<RespValue>>("value", Self::VT_VALUE, false)?
      .visit_field::<Version>("applied", Self::VT_APPLIED, false)?
      .visit_field::<EpochId>("epoch", Self::VT_EPOCH, false)?
+     .visit_field::<Version>("observed", Self::VT_OBSERVED, false)?
+     .visit_field::<bool>("settled", Self::VT_SETTLED, false)?
      .finish();
     Ok(())
   }
@@ -2284,6 +2446,8 @@ pub struct ForwardReplyArgs<'a> {
     pub value: Option<::flatbuffers::WIPOffset<RespValue<'a>>>,
     pub applied: Option<&'a Version>,
     pub epoch: Option<&'a EpochId>,
+    pub observed: Option<&'a Version>,
+    pub settled: bool,
 }
 impl<'a> Default for ForwardReplyArgs<'a> {
   #[inline]
@@ -2292,6 +2456,8 @@ impl<'a> Default for ForwardReplyArgs<'a> {
       value: None,
       applied: None,
       epoch: None,
+      observed: None,
+      settled: false,
     }
   }
 }
@@ -2314,6 +2480,14 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ForwardReplyBuilder<'a, 'b, A
     self.fbb_.push_slot_always::<&EpochId>(ForwardReply::VT_EPOCH, epoch);
   }
   #[inline]
+  pub fn add_observed(&mut self, observed: &Version) {
+    self.fbb_.push_slot_always::<&Version>(ForwardReply::VT_OBSERVED, observed);
+  }
+  #[inline]
+  pub fn add_settled(&mut self, settled: bool) {
+    self.fbb_.push_slot::<bool>(ForwardReply::VT_SETTLED, settled, false);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ForwardReplyBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ForwardReplyBuilder {
@@ -2334,6 +2508,8 @@ impl ::core::fmt::Debug for ForwardReply<'_> {
       ds.field("value", &self.value());
       ds.field("applied", &self.applied());
       ds.field("epoch", &self.epoch());
+      ds.field("observed", &self.observed());
+      ds.field("settled", &self.settled());
       ds.finish()
   }
 }
@@ -3071,6 +3247,982 @@ impl ::core::fmt::Debug for Gossip<'_> {
       ds.field("target_addr", &self.target_addr());
       ds.field("rumors", &self.rumors());
       ds.field("retry_after_ms", &self.retry_after_ms());
+      ds.finish()
+  }
+}
+pub enum BlobOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct Blob<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for Blob<'a> {
+  type Inner = Blob<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> Blob<'a> {
+  pub const VT_DATA: ::flatbuffers::VOffsetT = 4;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    Blob { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args BlobArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<Blob<'bldr>> {
+    let mut builder = BlobBuilder::new(_fbb);
+    if let Some(x) = args.data { builder.add_data(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn data(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(Blob::VT_DATA, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for Blob<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("data", Self::VT_DATA, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct BlobArgs<'a> {
+    pub data: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+}
+impl<'a> Default for BlobArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    BlobArgs {
+      data: None,
+    }
+  }
+}
+
+pub struct BlobBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BlobBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_data(&mut self, data: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(Blob::VT_DATA, data);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> BlobBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    BlobBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<Blob<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for Blob<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("Blob");
+      ds.field("data", &self.data());
+      ds.finish()
+  }
+}
+pub enum StoredEntryOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// One full entry with its key. A collection travels as one value.
+pub struct StoredEntry<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for StoredEntry<'a> {
+  type Inner = StoredEntry<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> StoredEntry<'a> {
+  pub const VT_KEY: ::flatbuffers::VOffsetT = 4;
+  pub const VT_KIND: ::flatbuffers::VOffsetT = 6;
+  pub const VT_BYTES: ::flatbuffers::VOffsetT = 8;
+  pub const VT_ITEMS: ::flatbuffers::VOffsetT = 10;
+  pub const VT_SCORES: ::flatbuffers::VOffsetT = 12;
+  pub const VT_EXPIRES_AT_MS: ::flatbuffers::VOffsetT = 14;
+  pub const VT_VERSION: ::flatbuffers::VOffsetT = 16;
+  pub const VT_TOMBSTONE: ::flatbuffers::VOffsetT = 18;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    StoredEntry { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args StoredEntryArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<StoredEntry<'bldr>> {
+    let mut builder = StoredEntryBuilder::new(_fbb);
+    builder.add_expires_at_ms(args.expires_at_ms);
+    if let Some(x) = args.version { builder.add_version(x); }
+    if let Some(x) = args.scores { builder.add_scores(x); }
+    if let Some(x) = args.items { builder.add_items(x); }
+    if let Some(x) = args.bytes { builder.add_bytes(x); }
+    if let Some(x) = args.key { builder.add_key(x); }
+    builder.add_tombstone(args.tombstone);
+    builder.add_kind(args.kind);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn key(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(StoredEntry::VT_KEY, None)}
+  }
+  #[inline]
+  pub fn kind(&self) -> ValueKind {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<ValueKind>(StoredEntry::VT_KIND, Some(ValueKind::STRING)).unwrap()}
+  }
+  /// STRING: the value.
+  #[inline]
+  pub fn bytes(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(StoredEntry::VT_BYTES, None)}
+  }
+  /// HASH: field and value pairs, flattened. SET and ZSET: the members.
+  #[inline]
+  pub fn items(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<Blob<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<Blob>>>>(StoredEntry::VT_ITEMS, None)}
+  }
+  /// ZSET: the score of each member in `items`, in the same order.
+  #[inline]
+  pub fn scores(&self) -> Option<::flatbuffers::Vector<'a, f64>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, f64>>>(StoredEntry::VT_SCORES, None)}
+  }
+  /// The absolute deadline in Unix milliseconds. Zero means no expiry.
+  #[inline]
+  pub fn expires_at_ms(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(StoredEntry::VT_EXPIRES_AT_MS, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn version(&self) -> Option<&'a Version> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Version>(StoredEntry::VT_VERSION, None)}
+  }
+  #[inline]
+  pub fn tombstone(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(StoredEntry::VT_TOMBSTONE, Some(false)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for StoredEntry<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("key", Self::VT_KEY, false)?
+     .visit_field::<ValueKind>("kind", Self::VT_KIND, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("bytes", Self::VT_BYTES, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<Blob>>>>("items", Self::VT_ITEMS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, f64>>>("scores", Self::VT_SCORES, false)?
+     .visit_field::<u64>("expires_at_ms", Self::VT_EXPIRES_AT_MS, false)?
+     .visit_field::<Version>("version", Self::VT_VERSION, false)?
+     .visit_field::<bool>("tombstone", Self::VT_TOMBSTONE, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct StoredEntryArgs<'a> {
+    pub key: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+    pub kind: ValueKind,
+    pub bytes: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+    pub items: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<Blob<'a>>>>>,
+    pub scores: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, f64>>>,
+    pub expires_at_ms: u64,
+    pub version: Option<&'a Version>,
+    pub tombstone: bool,
+}
+impl<'a> Default for StoredEntryArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    StoredEntryArgs {
+      key: None,
+      kind: ValueKind::STRING,
+      bytes: None,
+      items: None,
+      scores: None,
+      expires_at_ms: 0,
+      version: None,
+      tombstone: false,
+    }
+  }
+}
+
+pub struct StoredEntryBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> StoredEntryBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_key(&mut self, key: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(StoredEntry::VT_KEY, key);
+  }
+  #[inline]
+  pub fn add_kind(&mut self, kind: ValueKind) {
+    self.fbb_.push_slot::<ValueKind>(StoredEntry::VT_KIND, kind, ValueKind::STRING);
+  }
+  #[inline]
+  pub fn add_bytes(&mut self, bytes: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(StoredEntry::VT_BYTES, bytes);
+  }
+  #[inline]
+  pub fn add_items(&mut self, items: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<Blob<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(StoredEntry::VT_ITEMS, items);
+  }
+  #[inline]
+  pub fn add_scores(&mut self, scores: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , f64>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(StoredEntry::VT_SCORES, scores);
+  }
+  #[inline]
+  pub fn add_expires_at_ms(&mut self, expires_at_ms: u64) {
+    self.fbb_.push_slot::<u64>(StoredEntry::VT_EXPIRES_AT_MS, expires_at_ms, 0);
+  }
+  #[inline]
+  pub fn add_version(&mut self, version: &Version) {
+    self.fbb_.push_slot_always::<&Version>(StoredEntry::VT_VERSION, version);
+  }
+  #[inline]
+  pub fn add_tombstone(&mut self, tombstone: bool) {
+    self.fbb_.push_slot::<bool>(StoredEntry::VT_TOMBSTONE, tombstone, false);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> StoredEntryBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    StoredEntryBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<StoredEntry<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for StoredEntry<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("StoredEntry");
+      ds.field("key", &self.key());
+      ds.field("kind", &self.kind());
+      ds.field("bytes", &self.bytes());
+      ds.field("items", &self.items());
+      ds.field("scores", &self.scores());
+      ds.field("expires_at_ms", &self.expires_at_ms());
+      ds.field("version", &self.version());
+      ds.field("tombstone", &self.tombstone());
+      ds.finish()
+  }
+}
+pub enum KeyVersionOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// A key and the version that a handoff source holds for it.
+pub struct KeyVersion<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for KeyVersion<'a> {
+  type Inner = KeyVersion<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> KeyVersion<'a> {
+  pub const VT_KEY: ::flatbuffers::VOffsetT = 4;
+  pub const VT_VERSION: ::flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    KeyVersion { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args KeyVersionArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<KeyVersion<'bldr>> {
+    let mut builder = KeyVersionBuilder::new(_fbb);
+    if let Some(x) = args.version { builder.add_version(x); }
+    if let Some(x) = args.key { builder.add_key(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn key(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(KeyVersion::VT_KEY, None)}
+  }
+  #[inline]
+  pub fn version(&self) -> Option<&'a Version> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Version>(KeyVersion::VT_VERSION, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for KeyVersion<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("key", Self::VT_KEY, false)?
+     .visit_field::<Version>("version", Self::VT_VERSION, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct KeyVersionArgs<'a> {
+    pub key: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+    pub version: Option<&'a Version>,
+}
+impl<'a> Default for KeyVersionArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    KeyVersionArgs {
+      key: None,
+      version: None,
+    }
+  }
+}
+
+pub struct KeyVersionBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> KeyVersionBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_key(&mut self, key: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(KeyVersion::VT_KEY, key);
+  }
+  #[inline]
+  pub fn add_version(&mut self, version: &Version) {
+    self.fbb_.push_slot_always::<&Version>(KeyVersion::VT_VERSION, version);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> KeyVersionBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    KeyVersionBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<KeyVersion<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for KeyVersion<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("KeyVersion");
+      ds.field("key", &self.key());
+      ds.field("version", &self.version());
+      ds.finish()
+  }
+}
+pub enum EntryBatchOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// The body of REPLICATE, HINT_REPLAY, HANDOFF, and ENTRIES.
+pub struct EntryBatch<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for EntryBatch<'a> {
+  type Inner = EntryBatch<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> EntryBatch<'a> {
+  pub const VT_EPOCH: ::flatbuffers::VOffsetT = 4;
+  pub const VT_ENTRIES: ::flatbuffers::VOffsetT = 6;
+  pub const VT_OFFERS: ::flatbuffers::VOffsetT = 8;
+  pub const VT_DISCARD_BUCKETS: ::flatbuffers::VOffsetT = 10;
+  pub const VT_DONE_FROM: ::flatbuffers::VOffsetT = 12;
+  pub const VT_DONE_TO: ::flatbuffers::VOffsetT = 14;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    EntryBatch { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args EntryBatchArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<EntryBatch<'bldr>> {
+    let mut builder = EntryBatchBuilder::new(_fbb);
+    if let Some(x) = args.done_to { builder.add_done_to(x); }
+    if let Some(x) = args.done_from { builder.add_done_from(x); }
+    if let Some(x) = args.discard_buckets { builder.add_discard_buckets(x); }
+    if let Some(x) = args.offers { builder.add_offers(x); }
+    if let Some(x) = args.entries { builder.add_entries(x); }
+    if let Some(x) = args.epoch { builder.add_epoch(x); }
+    builder.finish()
+  }
+
+
+  /// The epoch of the sender.
+  #[inline]
+  pub fn epoch(&self) -> Option<&'a EpochId> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<EpochId>(EntryBatch::VT_EPOCH, None)}
+  }
+  #[inline]
+  pub fn entries(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<StoredEntry<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<StoredEntry>>>>(EntryBatch::VT_ENTRIES, None)}
+  }
+  /// HANDOFF: keys that another source sends in full. The receiver asks for the ones it lacks.
+  #[inline]
+  pub fn offers(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<KeyVersion<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<KeyVersion>>>>(EntryBatch::VT_OFFERS, None)}
+  }
+  /// HINT_REPLAY: refill buckets whose hints were lost. The receiver drops their keys first.
+  #[inline]
+  pub fn discard_buckets(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(EntryBatch::VT_DISCARD_BUCKETS, None)}
+  }
+  /// HANDOFF: the source finished its scan over this epoch range.
+  #[inline]
+  pub fn done_from(&self) -> Option<&'a EpochId> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<EpochId>(EntryBatch::VT_DONE_FROM, None)}
+  }
+  #[inline]
+  pub fn done_to(&self) -> Option<&'a EpochId> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<EpochId>(EntryBatch::VT_DONE_TO, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for EntryBatch<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<EpochId>("epoch", Self::VT_EPOCH, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<StoredEntry>>>>("entries", Self::VT_ENTRIES, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<KeyVersion>>>>("offers", Self::VT_OFFERS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("discard_buckets", Self::VT_DISCARD_BUCKETS, false)?
+     .visit_field::<EpochId>("done_from", Self::VT_DONE_FROM, false)?
+     .visit_field::<EpochId>("done_to", Self::VT_DONE_TO, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct EntryBatchArgs<'a> {
+    pub epoch: Option<&'a EpochId>,
+    pub entries: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<StoredEntry<'a>>>>>,
+    pub offers: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<KeyVersion<'a>>>>>,
+    pub discard_buckets: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+    pub done_from: Option<&'a EpochId>,
+    pub done_to: Option<&'a EpochId>,
+}
+impl<'a> Default for EntryBatchArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    EntryBatchArgs {
+      epoch: None,
+      entries: None,
+      offers: None,
+      discard_buckets: None,
+      done_from: None,
+      done_to: None,
+    }
+  }
+}
+
+pub struct EntryBatchBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> EntryBatchBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_epoch(&mut self, epoch: &EpochId) {
+    self.fbb_.push_slot_always::<&EpochId>(EntryBatch::VT_EPOCH, epoch);
+  }
+  #[inline]
+  pub fn add_entries(&mut self, entries: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<StoredEntry<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(EntryBatch::VT_ENTRIES, entries);
+  }
+  #[inline]
+  pub fn add_offers(&mut self, offers: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<KeyVersion<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(EntryBatch::VT_OFFERS, offers);
+  }
+  #[inline]
+  pub fn add_discard_buckets(&mut self, discard_buckets: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(EntryBatch::VT_DISCARD_BUCKETS, discard_buckets);
+  }
+  #[inline]
+  pub fn add_done_from(&mut self, done_from: &EpochId) {
+    self.fbb_.push_slot_always::<&EpochId>(EntryBatch::VT_DONE_FROM, done_from);
+  }
+  #[inline]
+  pub fn add_done_to(&mut self, done_to: &EpochId) {
+    self.fbb_.push_slot_always::<&EpochId>(EntryBatch::VT_DONE_TO, done_to);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> EntryBatchBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    EntryBatchBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<EntryBatch<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for EntryBatch<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("EntryBatch");
+      ds.field("epoch", &self.epoch());
+      ds.field("entries", &self.entries());
+      ds.field("offers", &self.offers());
+      ds.field("discard_buckets", &self.discard_buckets());
+      ds.field("done_from", &self.done_from());
+      ds.field("done_to", &self.done_to());
+      ds.finish()
+  }
+}
+pub enum BatchAckOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct BatchAck<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for BatchAck<'a> {
+  type Inner = BatchAck<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> BatchAck<'a> {
+  pub const VT_APPLIED: ::flatbuffers::VOffsetT = 4;
+  pub const VT_WANT: ::flatbuffers::VOffsetT = 6;
+  pub const VT_EPOCH: ::flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    BatchAck { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args BatchAckArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<BatchAck<'bldr>> {
+    let mut builder = BatchAckBuilder::new(_fbb);
+    if let Some(x) = args.epoch { builder.add_epoch(x); }
+    if let Some(x) = args.want { builder.add_want(x); }
+    builder.add_applied(args.applied);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn applied(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(BatchAck::VT_APPLIED, Some(0)).unwrap()}
+  }
+  /// HANDOFF: offered keys that the receiver wants in full.
+  #[inline]
+  pub fn want(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<Blob<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<Blob>>>>(BatchAck::VT_WANT, None)}
+  }
+  #[inline]
+  pub fn epoch(&self) -> Option<&'a EpochId> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<EpochId>(BatchAck::VT_EPOCH, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for BatchAck<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u32>("applied", Self::VT_APPLIED, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<Blob>>>>("want", Self::VT_WANT, false)?
+     .visit_field::<EpochId>("epoch", Self::VT_EPOCH, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct BatchAckArgs<'a> {
+    pub applied: u32,
+    pub want: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<Blob<'a>>>>>,
+    pub epoch: Option<&'a EpochId>,
+}
+impl<'a> Default for BatchAckArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    BatchAckArgs {
+      applied: 0,
+      want: None,
+      epoch: None,
+    }
+  }
+}
+
+pub struct BatchAckBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BatchAckBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_applied(&mut self, applied: u32) {
+    self.fbb_.push_slot::<u32>(BatchAck::VT_APPLIED, applied, 0);
+  }
+  #[inline]
+  pub fn add_want(&mut self, want: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<Blob<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BatchAck::VT_WANT, want);
+  }
+  #[inline]
+  pub fn add_epoch(&mut self, epoch: &EpochId) {
+    self.fbb_.push_slot_always::<&EpochId>(BatchAck::VT_EPOCH, epoch);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> BatchAckBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    BatchAckBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<BatchAck<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for BatchAck<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("BatchAck");
+      ds.field("applied", &self.applied());
+      ds.field("want", &self.want());
+      ds.field("epoch", &self.epoch());
+      ds.finish()
+  }
+}
+pub enum FetchOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Read repair and previous-epoch fallback. The reply is ENTRIES.
+pub struct Fetch<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for Fetch<'a> {
+  type Inner = Fetch<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> Fetch<'a> {
+  pub const VT_KEYS: ::flatbuffers::VOffsetT = 4;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    Fetch { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args FetchArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<Fetch<'bldr>> {
+    let mut builder = FetchBuilder::new(_fbb);
+    if let Some(x) = args.keys { builder.add_keys(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn keys(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<Blob<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<Blob>>>>(Fetch::VT_KEYS, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for Fetch<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<Blob>>>>("keys", Self::VT_KEYS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct FetchArgs<'a> {
+    pub keys: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<Blob<'a>>>>>,
+}
+impl<'a> Default for FetchArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    FetchArgs {
+      keys: None,
+    }
+  }
+}
+
+pub struct FetchBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> FetchBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_keys(&mut self, keys: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<Blob<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(Fetch::VT_KEYS, keys);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> FetchBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    FetchBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<Fetch<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for Fetch<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("Fetch");
+      ds.field("keys", &self.keys());
+      ds.finish()
+  }
+}
+pub enum DigestOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// Promotion reconciliation: 256 bucket sums over the keys that moved from a removed primary
+/// to the sender between the two epochs. The reply is ENTRIES with the differing buckets.
+pub struct Digest<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for Digest<'a> {
+  type Inner = Digest<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> Digest<'a> {
+  pub const VT_FROM: ::flatbuffers::VOffsetT = 4;
+  pub const VT_TO: ::flatbuffers::VOffsetT = 6;
+  pub const VT_SUMS: ::flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    Digest { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args DigestArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<Digest<'bldr>> {
+    let mut builder = DigestBuilder::new(_fbb);
+    if let Some(x) = args.sums { builder.add_sums(x); }
+    if let Some(x) = args.to { builder.add_to(x); }
+    if let Some(x) = args.from { builder.add_from(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn from(&self) -> Option<&'a EpochId> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<EpochId>(Digest::VT_FROM, None)}
+  }
+  #[inline]
+  pub fn to(&self) -> Option<&'a EpochId> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<EpochId>(Digest::VT_TO, None)}
+  }
+  #[inline]
+  pub fn sums(&self) -> Option<::flatbuffers::Vector<'a, u64>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u64>>>(Digest::VT_SUMS, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for Digest<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<EpochId>("from", Self::VT_FROM, false)?
+     .visit_field::<EpochId>("to", Self::VT_TO, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u64>>>("sums", Self::VT_SUMS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct DigestArgs<'a> {
+    pub from: Option<&'a EpochId>,
+    pub to: Option<&'a EpochId>,
+    pub sums: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u64>>>,
+}
+impl<'a> Default for DigestArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    DigestArgs {
+      from: None,
+      to: None,
+      sums: None,
+    }
+  }
+}
+
+pub struct DigestBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> DigestBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_from(&mut self, from: &EpochId) {
+    self.fbb_.push_slot_always::<&EpochId>(Digest::VT_FROM, from);
+  }
+  #[inline]
+  pub fn add_to(&mut self, to: &EpochId) {
+    self.fbb_.push_slot_always::<&EpochId>(Digest::VT_TO, to);
+  }
+  #[inline]
+  pub fn add_sums(&mut self, sums: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u64>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(Digest::VT_SUMS, sums);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> DigestBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    DigestBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<Digest<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for Digest<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("Digest");
+      ds.field("from", &self.from());
+      ds.field("to", &self.to());
+      ds.field("sums", &self.sums());
       ds.finish()
   }
 }

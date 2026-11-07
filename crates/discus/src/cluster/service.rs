@@ -59,6 +59,8 @@ impl Service for NodeService {
                         value: reply.value,
                         applied: reply.applied,
                         epoch: node.epoch_id(),
+                        observed: None,
+                        settled: false,
                     })
                 }
                 other => Message::Unsupported {

@@ -102,6 +102,7 @@ fn every_message_round_trips() {
         hops: 1,
         path: vec![id(1), id(2)],
         mode: ForwardMode::Route,
+        track: false,
     }));
     round_trip(Message::Forward(Forward {
         command: Bytes::from_static(b"*1\r\n$6\r\nDBSIZE\r\n"),
@@ -110,16 +111,21 @@ fn every_message_round_trips() {
         hops: 1,
         path: vec![],
         mode: ForwardMode::Local,
+        track: false,
     }));
     round_trip(Message::ForwardReply(ForwardReply {
         value: all_kinds(),
         applied: Some(Version::new(NTP64(123_456), id(99))),
         epoch: epoch_id(4, 2),
+        observed: None,
+        settled: false,
     }));
     round_trip(Message::ForwardReply(ForwardReply {
         value: Value::Null,
         applied: None,
         epoch: epoch_id(1, 1),
+        observed: None,
+        settled: false,
     }));
     round_trip(Message::Ping { nonce: 11 });
     round_trip(Message::Pong { nonce: 12 });
@@ -133,6 +139,8 @@ fn version_struct_is_the_uhlc_layout() {
         value: Value::ok(),
         applied: Some(Version::new(NTP64(5), origin)),
         epoch: epoch_id(1, 1),
+        observed: None,
+        settled: false,
     });
     let frame = Frame {
         request_id: 1,
@@ -191,6 +199,8 @@ fn deep_nesting_fails_the_depth_limit() {
             value: nested(depth),
             applied: None,
             epoch: epoch_id(1, 1),
+            observed: None,
+            settled: false,
         }),
     };
     assert!(matches!(
@@ -215,6 +225,7 @@ fn a_frame_over_the_size_limit_fails() {
             hops: 1,
             path: vec![],
             mode: ForwardMode::Route,
+            track: false,
         }),
     };
     let small = Limits { max_frame: 1000 };

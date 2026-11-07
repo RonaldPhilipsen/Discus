@@ -11,5 +11,6 @@ workspace = true
 bytes = "1"
 discus-placement = { path = "../discus-placement" }
 discus-resp = { path = "../discus-resp" }
+discus-store = { path = "../discus-store" }
 flatbuffers = "=25.12.19"
 thiserror = "2"

@@ -50,6 +50,8 @@ table Forward {
   /// The nodes that forwarded this command, in order.
   path: [Id128] (id: 4);
   mode: ForwardMode (id: 5);
+  /// The sender keeps the key in a write set. The reply reports `observed` and `settled`.
+  track: bool (id: 6);
 }
 
 enum RespKind: ubyte {
@@ -80,6 +82,10 @@ table ForwardReply {
   applied: Version (id: 1);
   /// The epoch of the receiver after it acted.
   epoch: EpochId (id: 2);
+  /// A tracked read: the version that the read saw.
+  observed: Version (id: 3);
+  /// A tracked read: no replication queue, batch in flight, or hint holds the key.
+  settled: bool (id: 4);
 }
 
 table Ping {
