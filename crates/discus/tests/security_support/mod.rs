@@ -192,7 +192,6 @@ pub async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, wire: &[u8])
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-/// A running node.
 pub struct Node {
     pub addr: SocketAddr,
     pub admin: SocketAddr,

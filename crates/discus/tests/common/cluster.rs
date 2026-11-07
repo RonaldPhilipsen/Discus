@@ -51,7 +51,6 @@ pub struct Cluster {
 }
 
 impl Cluster {
-    /// The node with this ID.
     pub fn by_id(&self, id: NodeId) -> &ClusterNode {
         self.nodes.iter().find(|n| n.id == id).unwrap()
     }

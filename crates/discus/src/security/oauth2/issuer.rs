@@ -37,7 +37,6 @@ pub struct Source {
     pub introspection_endpoint: Mutex<Option<String>>,
 }
 
-/// The settings of a `Source`.
 pub struct SourceConfig {
     pub discovery_url: String,
     pub fixed_jwks_url: Option<String>,
