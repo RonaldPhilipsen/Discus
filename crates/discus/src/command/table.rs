@@ -20,7 +20,11 @@ pub struct CommandSpec {
 
 /// Every family of commands. Later tasks add their family here.
 fn families() -> Vec<&'static [CommandSpec]> {
-    vec![super::connection::COMMANDS, super::string::COMMANDS]
+    vec![
+        super::connection::COMMANDS,
+        super::string::COMMANDS,
+        super::keys::COMMANDS,
+    ]
 }
 
 fn registry() -> &'static HashMap<&'static str, &'static CommandSpec> {

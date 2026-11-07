@@ -32,6 +32,8 @@ pub(crate) struct ShardInner {
 
 pub(crate) struct Shard {
     pub(crate) inner: RwLock<ShardInner>,
+    /// Where the next sweep or eviction sample starts within the shard's iteration order.
+    pub(crate) cursor: AtomicUsize,
 }
 
 pub struct Store {
@@ -48,6 +50,7 @@ impl Store {
         let shards = (0..count)
             .map(|_| Shard {
                 inner: RwLock::new(ShardInner::default()),
+                cursor: AtomicUsize::new(0),
             })
             .collect();
         Store {
@@ -153,5 +156,9 @@ impl Store {
         } else {
             self.used.fetch_sub(before - after, Ordering::Relaxed);
         }
+    }
+
+    pub(crate) fn drop_len(&self, n: usize) {
+        self.len.fetch_sub(n, Ordering::Relaxed);
     }
 }

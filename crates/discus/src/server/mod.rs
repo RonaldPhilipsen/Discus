@@ -37,6 +37,12 @@ impl Server {
 
     /// Accept connections until the token is cancelled.
     pub async fn run(self, shutdown: CancellationToken) -> io::Result<()> {
+        discus_store::spawn_sweeper(
+            self.node.store.clone(),
+            std::time::Duration::from_millis(100),
+            20,
+            shutdown.clone(),
+        );
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => return Ok(()),

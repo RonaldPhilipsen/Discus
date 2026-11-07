@@ -2,6 +2,7 @@
 
 pub mod connection;
 pub mod error;
+pub mod keys;
 pub mod string;
 pub mod table;
 pub mod util;
