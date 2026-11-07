@@ -22,7 +22,25 @@ use crate::events::{PeerEvent, PeerEventKind, TransportStats, EVENT_CAPACITY};
 use crate::frame::{read_frame, write_frame};
 use crate::hello;
 use crate::tls::TlsMaterial;
-use crate::{ALPN_RPC, CLOSE_HANDSHAKE_FAILED, CLOSE_SHUTDOWN, RESET_BAD_FRAME};
+use crate::{ALPN_GOSSIP, ALPN_RPC, CLOSE_HANDSHAKE_FAILED, CLOSE_SHUTDOWN, RESET_BAD_FRAME};
+
+/// The ALPN of a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Channel {
+    /// `discus-rpc`: forwarded commands. `HELLO` requires the same cluster.
+    Rpc,
+    /// `discus-gossip`: membership. `HELLO` accepts another cluster.
+    Gossip,
+}
+
+impl Channel {
+    fn alpn(self) -> &'static [u8] {
+        match self {
+            Channel::Rpc => ALPN_RPC,
+            Channel::Gossip => ALPN_GOSSIP,
+        }
+    }
+}
 
 /// Settings for one transport.
 #[derive(Debug, Clone)]
@@ -74,6 +92,9 @@ pub struct PeerInfo {
     pub max_frame: usize,
     /// The epoch that the peer reported in `HELLO`.
     pub epoch: EpochId,
+    /// The cluster that the peer reported in `HELLO`. On the gossip channel it can differ.
+    pub cluster_id: ClusterId,
+    pub channel: Channel,
 }
 
 /// One inbound request.
@@ -107,6 +128,21 @@ pub enum TransportError {
     PeerUnsupported(u16),
 }
 
+/// Why a gossip request failed. Gossip failures are not data-path evidence, so they never reach
+/// the event channel.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GossipError {
+    /// No connection: the address does not answer, or the TLS handshake failed.
+    #[error("unreachable: {0}")]
+    Unreachable(String),
+    /// The connection and `HELLO` succeeded, but no reply came in time.
+    #[error("node {} did not answer", .0.node_id)]
+    Silent(Box<PeerInfo>),
+    /// `HELLO` failed, another node answered at the address, or the reply was not usable.
+    #[error("refused: {0}")]
+    Refused(String),
+}
+
 struct Conn {
     conn: quinn::Connection,
     info: PeerInfo,
@@ -117,13 +153,16 @@ type Slot = Arc<tokio::sync::Mutex<Option<Conn>>>;
 struct Inner {
     endpoint: quinn::Endpoint,
     client: quinn::ClientConfig,
+    gossip_client: quinn::ClientConfig,
     node_id: NodeId,
-    cluster_id: ClusterId,
+    cluster_id: parking_lot::RwLock<ClusterId>,
     capabilities: u64,
     max_frame: usize,
     handshake_timeout: Duration,
     service: Arc<dyn Service>,
     pool: Mutex<HashMap<NodeId, Slot>>,
+    /// Gossip connections by address, because a seed has no known node ID.
+    gossip_pool: Mutex<HashMap<SocketAddr, Slot>>,
     events: broadcast::Sender<PeerEvent>,
     stats: TransportStats,
     next_request: AtomicU64,
@@ -164,13 +203,18 @@ impl Transport {
     ) -> io::Result<Transport> {
         let transport = quinn_transport(&config)?;
         let server_tls =
-            QuicServerConfig::try_from(config.tls.server_config(&[ALPN_RPC])).map_err(other)?;
+            QuicServerConfig::try_from(config.tls.server_config(&[ALPN_RPC, ALPN_GOSSIP]))
+                .map_err(other)?;
         let mut server = quinn::ServerConfig::with_crypto(Arc::new(server_tls));
         server.transport_config(transport.clone());
-        let client_tls =
-            QuicClientConfig::try_from(config.tls.client_config(ALPN_RPC)).map_err(other)?;
-        let mut client = quinn::ClientConfig::new(Arc::new(client_tls));
-        client.transport_config(transport);
+        let client_for = |alpn: &[u8]| -> io::Result<quinn::ClientConfig> {
+            let tls = QuicClientConfig::try_from(config.tls.client_config(alpn)).map_err(other)?;
+            let mut client = quinn::ClientConfig::new(Arc::new(tls));
+            client.transport_config(transport.clone());
+            Ok(client)
+        };
+        let client = client_for(ALPN_RPC)?;
+        let gossip_client = client_for(ALPN_GOSSIP)?;
         let runtime = quinn::default_runtime().ok_or_else(|| other("no async runtime"))?;
         let endpoint = quinn::Endpoint::new(
             quinn::EndpointConfig::default(),
@@ -182,13 +226,15 @@ impl Transport {
         let inner = Arc::new(Inner {
             endpoint,
             client,
+            gossip_client,
             node_id: config.node_id,
-            cluster_id: config.cluster_id,
+            cluster_id: parking_lot::RwLock::new(config.cluster_id),
             capabilities: config.capabilities,
             max_frame: config.max_frame,
             handshake_timeout: config.handshake_timeout,
             service,
             pool: Mutex::new(HashMap::new()),
+            gossip_pool: Mutex::new(HashMap::new()),
             events,
             stats: TransportStats::default(),
             next_request: AtomicU64::new(1),
@@ -207,6 +253,98 @@ impl Transport {
 
     pub fn node_id(&self) -> NodeId {
         self.0.node_id
+    }
+
+    /// The cluster that `HELLO` offers and that the RPC channel requires.
+    pub fn cluster_id(&self) -> ClusterId {
+        *self.0.cluster_id.read()
+    }
+
+    /// Change the cluster, after a join or a lost merge. Pooled RPC connections belong to the old
+    /// cluster, so they are dropped.
+    pub fn set_cluster_id(&self, cluster_id: ClusterId) {
+        *self.0.cluster_id.write() = cluster_id;
+        self.0.pool.lock().clear();
+    }
+
+    /// Send one gossip message to `addr` on the gossip channel and wait for the reply. `expected`
+    /// is the node that the caller believes is at `addr`.
+    pub async fn gossip(
+        &self,
+        addr: SocketAddr,
+        expected: Option<NodeId>,
+        message: Message,
+        timeout: Duration,
+    ) -> Result<(PeerInfo, Message), GossipError> {
+        let (conn, info) = self.gossip_connection(addr).await?;
+        if let Some(want) = expected {
+            if info.node_id != want {
+                return Err(GossipError::Refused(format!(
+                    "expected node {want}, found {}",
+                    info.node_id
+                )));
+            }
+        }
+        let frame = Frame {
+            request_id: self.0.next_request.fetch_add(1, Ordering::Relaxed),
+            trace: TraceContext::default(),
+            message,
+        };
+        let bytes = match tokio::time::timeout(timeout, exchange(&conn, &info, &frame)).await {
+            Err(_) => return Err(GossipError::Silent(Box::new(info))),
+            Ok(Err((_, reason))) => {
+                if conn.close_reason().is_some() {
+                    forget(&self.0.gossip_pool, addr, &conn);
+                    return Err(GossipError::Unreachable(reason));
+                }
+                return Err(GossipError::Refused(reason));
+            }
+            Ok(Ok(bytes)) => bytes,
+        };
+        let limits = Limits {
+            max_frame: info.max_frame,
+        };
+        match decode_frame(&bytes, &limits) {
+            Ok(Frame {
+                message: Message::Unsupported { message_type },
+                ..
+            }) => Err(GossipError::Refused(format!(
+                "the peer does not support message type {message_type}"
+            ))),
+            Ok(reply) => Ok((info, reply.message)),
+            Err(e) => {
+                TransportStats::bump(&self.0.stats.frames_rejected);
+                Err(GossipError::Refused(e.to_string()))
+            }
+        }
+    }
+
+    async fn gossip_connection(
+        &self,
+        addr: SocketAddr,
+    ) -> Result<(quinn::Connection, PeerInfo), GossipError> {
+        if self.0.closed.is_cancelled() {
+            return Err(GossipError::Unreachable("the transport is closed".into()));
+        }
+        let slot = self.0.gossip_pool.lock().entry(addr).or_default().clone();
+        let mut guard = slot.lock().await;
+        if let Some(c) = guard.as_ref() {
+            if c.conn.close_reason().is_none() {
+                return Ok((c.conn.clone(), c.info));
+            }
+        }
+        *guard = None;
+        let dial = self.dial(None, addr, Channel::Gossip);
+        match tokio::time::timeout(self.0.handshake_timeout, dial).await {
+            Err(_) => Err(GossipError::Unreachable("the handshake timed out".into())),
+            Ok(Err(TransportError::Handshake { reason, .. })) => Err(GossipError::Refused(reason)),
+            Ok(Err(e)) => Err(GossipError::Unreachable(e.to_string())),
+            Ok(Ok(conn)) => {
+                let out = (conn.conn.clone(), conn.info);
+                *guard = Some(conn);
+                Ok(out)
+            }
+        }
     }
 
     /// Subscribe to data-path evidence.
@@ -250,22 +388,7 @@ impl Transport {
         };
         let sent_type = frame.message.type_code();
         TransportStats::bump(&self.0.stats.requests_out);
-        let exchange = async {
-            let (mut send, mut recv) = conn.open_bi().await.map_err(|e| (true, e.to_string()))?;
-            write_frame(&mut send, &encode_frame(&frame))
-                .await
-                .map_err(|e| (true, e.to_string()))?;
-            let _ = send.finish();
-            match read_frame(&mut recv, info.max_frame).await {
-                Ok(Some(bytes)) => Ok(bytes),
-                Ok(None) => Err((
-                    false,
-                    "the peer ended the stream without a reply".to_string(),
-                )),
-                Err(e) => Err((conn.close_reason().is_some(), e.to_string())),
-            }
-        };
-        let bytes = match tokio::time::timeout(timeout, exchange).await {
+        let bytes = match tokio::time::timeout(timeout, exchange(&conn, &info, &frame)).await {
             Err(_) => {
                 self.emit(Some(node), addr, PeerEventKind::ForwardTimeout { write });
                 return Err(TransportError::Timeout);
@@ -306,15 +429,7 @@ impl Transport {
     }
 
     fn forget(&self, node: NodeId, conn: &quinn::Connection) {
-        let slot = self.slot(node);
-        if let Ok(mut guard) = slot.try_lock() {
-            if guard
-                .as_ref()
-                .is_some_and(|c| c.conn.stable_id() == conn.stable_id())
-            {
-                *guard = None;
-            }
-        };
+        forget(&self.0.pool, node, conn);
     }
 
     async fn connection(
@@ -333,7 +448,8 @@ impl Transport {
             }
         }
         *guard = None;
-        let result = tokio::time::timeout(self.0.handshake_timeout, self.dial(node, addr)).await;
+        let dial = self.dial(Some(node), addr, Channel::Rpc);
+        let result = tokio::time::timeout(self.0.handshake_timeout, dial).await;
         let result = match result {
             Ok(r) => r,
             Err(_) => Err(TransportError::Connect("the handshake timed out".into())),
@@ -357,12 +473,21 @@ impl Transport {
         }
     }
 
-    async fn dial(&self, node: NodeId, addr: SocketAddr) -> Result<Conn, TransportError> {
+    async fn dial(
+        &self,
+        node: Option<NodeId>,
+        addr: SocketAddr,
+        channel: Channel,
+    ) -> Result<Conn, TransportError> {
         let connect = |e: &dyn std::fmt::Display| TransportError::Connect(e.to_string());
+        let client = match channel {
+            Channel::Rpc => self.0.client.clone(),
+            Channel::Gossip => self.0.gossip_client.clone(),
+        };
         let conn = self
             .0
             .endpoint
-            .connect_with(self.0.client.clone(), addr, "discus")
+            .connect_with(client, addr, "discus")
             .map_err(|e| connect(&e))?
             .await
             .map_err(|e| connect(&e))?;
@@ -397,11 +522,12 @@ impl Transport {
         match reply.message {
             Message::Hello(theirs) => {
                 match hello::check(
-                    self.0.cluster_id,
+                    *self.0.cluster_id.read(),
                     self.0.capabilities,
                     self.0.max_frame,
                     &theirs,
-                    Some(node),
+                    node,
+                    channel,
                 ) {
                     Ok(agreed) => Ok(Conn {
                         info: PeerInfo {
@@ -410,6 +536,8 @@ impl Transport {
                             capabilities: agreed.capabilities,
                             max_frame: agreed.max_frame,
                             epoch: theirs.epoch,
+                            cluster_id: theirs.cluster_id,
+                            channel,
                         },
                         conn,
                     }),
@@ -425,6 +553,47 @@ impl Transport {
     }
 }
 
+/// Write one request frame on a new stream and read the reply frame. The flag of an error says
+/// whether the connection is lost.
+async fn exchange(
+    conn: &quinn::Connection,
+    info: &PeerInfo,
+    frame: &Frame,
+) -> Result<bytes::Bytes, (bool, String)> {
+    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| (true, e.to_string()))?;
+    write_frame(&mut send, &encode_frame(frame))
+        .await
+        .map_err(|e| (true, e.to_string()))?;
+    let _ = send.finish();
+    match read_frame(&mut recv, info.max_frame).await {
+        Ok(Some(bytes)) => Ok(bytes),
+        Ok(None) => Err((
+            false,
+            "the peer ended the stream without a reply".to_string(),
+        )),
+        Err(e) => Err((conn.close_reason().is_some(), e.to_string())),
+    }
+}
+
+/// Drop the pooled connection under `key` if it is still `conn`.
+fn forget<K: std::hash::Hash + Eq>(
+    pool: &Mutex<HashMap<K, Slot>>,
+    key: K,
+    conn: &quinn::Connection,
+) {
+    let Some(slot) = pool.lock().get(&key).cloned() else {
+        return;
+    };
+    if let Ok(mut guard) = slot.try_lock() {
+        if guard
+            .as_ref()
+            .is_some_and(|c| c.conn.stable_id() == conn.stable_id())
+        {
+            *guard = None;
+        }
+    };
+}
+
 fn emit(inner: &Inner, peer: Option<NodeId>, addr: SocketAddr, kind: PeerEventKind) {
     tracing::debug!(?peer, %addr, ?kind, "peer event");
     let _ = inner.events.send(PeerEvent { peer, addr, kind });
@@ -433,7 +602,7 @@ fn emit(inner: &Inner, peer: Option<NodeId>, addr: SocketAddr, kind: PeerEventKi
 fn local_hello(inner: &Inner) -> Hello {
     Hello {
         node_id: inner.node_id,
-        cluster_id: inner.cluster_id,
+        cluster_id: *inner.cluster_id.read(),
         capabilities: inner.capabilities,
         epoch: inner.service.epoch(),
         max_frame: u32::try_from(inner.max_frame).unwrap_or(u32::MAX),
@@ -471,7 +640,17 @@ async fn serve_connection(inner: Arc<Inner>, incoming: quinn::Incoming) {
     let addr = incoming.remote_address();
     let handshake = async {
         let conn = incoming.await.map_err(|e| e.to_string())?;
-        let info = accept_hello(&inner, &conn).await?;
+        let gossip = conn
+            .handshake_data()
+            .and_then(|d| d.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
+            .and_then(|d| d.protocol)
+            .is_some_and(|p| p == Channel::Gossip.alpn());
+        let channel = if gossip {
+            Channel::Gossip
+        } else {
+            Channel::Rpc
+        };
+        let info = accept_hello(&inner, &conn, channel).await?;
         Ok::<_, String>((conn, info))
     };
     let (conn, info) = match tokio::time::timeout(inner.handshake_timeout, handshake).await {
@@ -507,7 +686,11 @@ async fn serve_connection(inner: Arc<Inner>, incoming: quinn::Incoming) {
 }
 
 /// Read the dialer `HELLO` on the first stream and answer it.
-async fn accept_hello(inner: &Arc<Inner>, conn: &quinn::Connection) -> Result<PeerInfo, String> {
+async fn accept_hello(
+    inner: &Arc<Inner>,
+    conn: &quinn::Connection,
+    channel: Channel,
+) -> Result<PeerInfo, String> {
     let (mut send, mut recv) = conn.accept_bi().await.map_err(|e| e.to_string())?;
     let bytes = read_frame(&mut recv, HELLO_FRAME_LIMIT)
         .await
@@ -521,11 +704,12 @@ async fn accept_hello(inner: &Arc<Inner>, conn: &quinn::Connection) -> Result<Pe
             message: Message::Hello(theirs),
             ..
         }) => hello::check(
-            inner.cluster_id,
+            *inner.cluster_id.read(),
             inner.capabilities,
             inner.max_frame,
             &theirs,
             None,
+            channel,
         )
         .map(|agreed| (theirs, agreed)),
         Ok(_) | Err(DecodeError::UnknownType { .. }) => Err((
@@ -551,6 +735,8 @@ async fn accept_hello(inner: &Arc<Inner>, conn: &quinn::Connection) -> Result<Pe
                 capabilities: agreed.capabilities,
                 max_frame: agreed.max_frame,
                 epoch: theirs.epoch,
+                cluster_id: theirs.cluster_id,
+                channel,
             })
         }
         Err((code, reason)) => {

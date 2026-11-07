@@ -3,6 +3,8 @@
 use discus_placement::{ClusterId, NodeId};
 use discus_wire::{caps, HandshakeCode, Hello, HELLO_FRAME_LIMIT};
 
+use crate::endpoint::Channel;
+
 /// What both sides agreed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Agreed {
@@ -11,15 +13,17 @@ pub(crate) struct Agreed {
 }
 
 /// Check the peer `HELLO` against the local identity. `expected` is the node that the dialer
-/// meant to reach.
+/// meant to reach. The gossip channel accepts another cluster: membership needs it to admit a
+/// joiner and to find a second cluster (spec section 6.3).
 pub(crate) fn check(
     cluster_id: ClusterId,
     capabilities: u64,
     max_frame: usize,
     theirs: &Hello,
     expected: Option<NodeId>,
+    channel: Channel,
 ) -> Result<Agreed, (HandshakeCode, String)> {
-    if theirs.cluster_id != cluster_id {
+    if channel == Channel::Rpc && theirs.cluster_id != cluster_id {
         return Err((
             HandshakeCode::ClusterMismatch,
             format!("cluster {} is not {}", theirs.cluster_id, cluster_id),
