@@ -20,6 +20,7 @@ const READ_CHUNK: usize = 64 * 1024;
 /// flushes at least every `max_pipeline` commands. A client that does not read its replies stalls
 /// the flush, which stalls the next read, so memory stays bounded.
 pub async fn serve(mut stream: TcpStream, node: Arc<Node>) {
+    let _guard = node.track_connection();
     let cfg = &node.config;
     // The parser limit is looser than the value limit so a moderately oversize value gets a clean
     // `value too large` error. A hugely oversize one still closes the connection.

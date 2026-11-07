@@ -1,6 +1,6 @@
 //! State shared by every connection on a node.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use std::sync::Arc;
@@ -17,6 +17,7 @@ pub struct Node {
     pub started_at: Instant,
     pub store: Arc<Store>,
     next_conn_id: AtomicU64,
+    connected: AtomicUsize,
 }
 
 impl Node {
@@ -34,7 +35,23 @@ impl Node {
             started_at: Instant::now(),
             store: Arc::new(store),
             next_conn_id: AtomicU64::new(1),
+            connected: AtomicUsize::new(0),
         }
+    }
+
+    /// Count a new client. The returned guard decrements the count when dropped.
+    pub fn track_connection(self: &Arc<Self>) -> ConnectionGuard {
+        self.connected.fetch_add(1, Ordering::Relaxed);
+        ConnectionGuard(self.clone())
+    }
+
+    pub fn connected_clients(&self) -> usize {
+        self.connected.load(Ordering::Relaxed)
+    }
+
+    /// Connections accepted since start.
+    pub fn total_connections(&self) -> u64 {
+        self.next_conn_id.load(Ordering::Relaxed) - 1
     }
 
     pub fn next_conn_id(&self) -> u64 {
@@ -62,5 +79,14 @@ impl ConnState {
             id,
             closing: false,
         }
+    }
+}
+
+/// Keeps the connected-clients count accurate for the life of one connection.
+pub struct ConnectionGuard(Arc<Node>);
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.0.connected.fetch_sub(1, Ordering::Relaxed);
     }
 }

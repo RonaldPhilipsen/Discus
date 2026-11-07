@@ -12,4 +12,4 @@ pub mod util;
 pub mod zset;
 
 pub use error::CommandError;
-pub use table::{dispatch, lookup, CommandSpec, Handler};
+pub use table::{dispatch, lookup, names, CommandSpec, Handler};

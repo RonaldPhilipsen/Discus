@@ -39,3 +39,13 @@ pub async fn connect(args: &[&str]) -> redis::aio::MultiplexedConnection {
     let client = redis::Client::open(format!("redis://{addr}")).unwrap();
     client.get_multiplexed_async_connection().await.unwrap()
 }
+
+/// Send raw bytes on a fresh connection and return the first reply read.
+pub async fn roundtrip(addr: SocketAddr, wire: &[u8]) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    s.write_all(wire).await.unwrap();
+    let mut buf = vec![0u8; 8192];
+    let n = s.read(&mut buf).await.unwrap();
+    String::from_utf8_lossy(&buf[..n]).into_owned()
+}

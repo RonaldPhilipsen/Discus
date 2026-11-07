@@ -43,6 +43,13 @@ fn registry() -> &'static HashMap<&'static str, &'static CommandSpec> {
     })
 }
 
+/// The names of every supported command, sorted.
+pub fn names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = registry().keys().copied().collect();
+    names.sort_unstable();
+    names
+}
+
 /// Look up a command by name, ignoring case.
 pub fn lookup(name: &[u8]) -> Option<&'static CommandSpec> {
     let upper = String::from_utf8_lossy(name).to_ascii_uppercase();
