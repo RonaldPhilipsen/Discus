@@ -3,6 +3,7 @@
 //! - `/healthz` is liveness. It answers 200 while the process runs.
 //! - `/startupz` answers 200 once the node serves, and stays 200 while it drains.
 //! - `/readyz` answers 200 only while the node serves, so a drain stops new connections.
+//! - Both wait until every trusted OAuth 2.0 issuer has its keys (spec §14.3).
 
 use std::io;
 use std::sync::Arc;
@@ -30,12 +31,12 @@ async fn healthz(State(node): State<Arc<Node>>) -> (StatusCode, &'static str) {
 }
 
 async fn startupz(State(node): State<Arc<Node>>) -> (StatusCode, &'static str) {
-    let ok = matches!(node.phase(), Phase::Serving | Phase::Leaving);
+    let ok = matches!(node.phase(), Phase::Serving | Phase::Leaving) && node.security.ready();
     body(&node, ok)
 }
 
 async fn readyz(State(node): State<Arc<Node>>) -> (StatusCode, &'static str) {
-    let ok = node.phase() == Phase::Serving;
+    let ok = node.phase() == Phase::Serving && node.security.ready();
     body(&node, ok)
 }
 

@@ -72,6 +72,7 @@ impl Server {
             20,
             stop_background.clone(),
         );
+        node.security.start(stop_background.clone());
         let admin_task = tokio::spawn(serve_admin(node.clone(), admin, stop_background.clone()));
         let tracker = TaskTracker::new();
         let hard_stop = CancellationToken::new();

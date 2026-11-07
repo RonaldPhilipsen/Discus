@@ -65,6 +65,8 @@ pub struct Security {
     shared_token: Option<String>,
     max_conn_failures: u32,
     limiter: FailureLimiter,
+    #[cfg(feature = "oauth2")]
+    oauth: Option<oauth2::OAuth2>,
 }
 
 impl Security {
@@ -110,9 +112,10 @@ impl Security {
             }
             _ => {}
         }
-        if policy.uses(Factor::Oauth2) {
-            Self::check_oauth2(args, tls_on)?;
-        }
+        #[cfg(feature = "oauth2")]
+        let oauth = Self::oauth2(args, &policy, &file, tls_on)?;
+        #[cfg(not(feature = "oauth2"))]
+        Self::no_oauth2(&policy, &file)?;
         let lb = args.tls_mode == TlsMode::Lb;
         if lb && (args.lb_trusted_source.is_empty() || args.tls_client_ca.is_none()) {
             return fail(
@@ -152,23 +155,98 @@ impl Security {
                 args.auth_max_failures_per_source.max(1),
                 Duration::from_secs(args.auth_failure_window_secs),
             ),
+            #[cfg(feature = "oauth2")]
+            oauth,
         })
     }
 
     #[cfg(not(feature = "oauth2"))]
-    fn check_oauth2(_: &SecurityArgs, _: bool) -> Result<(), SecurityError> {
-        fail("the policy uses oauth2, but this binary was built without the \"oauth2\" feature")
+    fn no_oauth2(policy: &Policy, file: &AuthFile) -> Result<(), SecurityError> {
+        let missing = |what: &str| {
+            fail(format!(
+                "{what} needs OAuth 2.0, but this binary was built without the \"oauth2\" feature"
+            ))
+        };
+        if policy.uses(Factor::Oauth2) {
+            return missing("the policy oauth2 factor");
+        }
+        if !file.issuer.is_empty() {
+            return missing("the [[issuer]] section of --auth-config");
+        }
+        Ok(())
     }
 
     #[cfg(feature = "oauth2")]
-    fn check_oauth2(args: &SecurityArgs, tls_on: bool) -> Result<(), SecurityError> {
+    fn oauth2(
+        args: &SecurityArgs,
+        policy: &Policy,
+        file: &AuthFile,
+        tls_on: bool,
+    ) -> Result<Option<oauth2::OAuth2>, SecurityError> {
+        if !policy.uses(Factor::Oauth2) {
+            if !file.issuer.is_empty() {
+                return fail(format!(
+                    "--auth-config lists trusted issuers, but the policy {policy} does not use \
+                     oauth2"
+                ));
+            }
+            return Ok(None);
+        }
         if !tls_on && !args.dev_insecure_oauth2 {
             return fail(
                 "the policy uses oauth2, which needs TLS: set --tls-mode, or set \
                  --dev-insecure-oauth2 for development",
             );
         }
-        fail("the policy uses oauth2, but --auth-config lists no trusted issuer")
+        let oauth = oauth2::OAuth2::from_file(
+            &file.issuer,
+            args.auth_clock_skew_secs,
+            args.dev_insecure_oauth2,
+        )?;
+        if oauth.is_empty() {
+            return fail("the policy uses oauth2, but --auth-config lists no trusted issuer");
+        }
+        Ok(Some(oauth))
+    }
+
+    /// True when every trusted issuer has its keys. The probes stay unready until then.
+    pub fn ready(&self) -> bool {
+        #[cfg(feature = "oauth2")]
+        if let Some(o) = &self.oauth {
+            return o.ready();
+        }
+        true
+    }
+
+    /// Start the background tasks: one JWKS loader per trusted issuer.
+    pub fn start(&self, stop: tokio_util::sync::CancellationToken) {
+        #[cfg(feature = "oauth2")]
+        if let Some(o) = &self.oauth {
+            o.start(stop);
+        }
+        #[cfg(not(feature = "oauth2"))]
+        drop(stop);
+    }
+
+    /// True for a command that `prefetch` must see before it runs.
+    pub fn wants_prefetch(&self, cmd: &discus_resp::Command) -> bool {
+        #[cfg(feature = "oauth2")]
+        if self.oauth.is_some() {
+            let name = &cmd[0];
+            return name.eq_ignore_ascii_case(b"AUTH") || name.eq_ignore_ascii_case(b"HELLO");
+        }
+        let _ = cmd;
+        false
+    }
+
+    /// The async part of `AUTH` and `HELLO ... AUTH`: refresh the JWKS on an unknown `kid`, so
+    /// the synchronous handler finds the key.
+    pub async fn prefetch(&self, cmd: &discus_resp::Command) {
+        #[cfg(feature = "oauth2")]
+        if let (Some(o), Some(token)) = (&self.oauth, token_arg(cmd)) {
+            o.prefetch(token).await;
+        }
+        let _ = cmd;
     }
 
     pub fn mode(&self) -> TlsMode {
@@ -279,7 +357,61 @@ impl Security {
                 }
             }
         }
+        #[cfg(feature = "oauth2")]
+        if let Some(o) = &self.oauth {
+            let generation = o.generation();
+            return match o.check(token, oauth2::unix_now()) {
+                Ok(claims) => {
+                    tracing::debug!(
+                        conn = conn.id,
+                        sub = claims.sub.as_deref().unwrap_or_default(),
+                        jti = claims.jti.as_deref().unwrap_or_default(),
+                        "token accepted"
+                    );
+                    conn.auth.token = Some(TokenGrant {
+                        raw: bytes::Bytes::copy_from_slice(token),
+                        exp: claims.exp,
+                        nbf: claims.nbf,
+                        scopes: claims.scopes,
+                        generation: Some(generation),
+                    });
+                    Ok(())
+                }
+                Err(reject) => Err(self.failed(conn, &reject.to_string())),
+            };
+        }
         Err(self.failed(conn, "the token does not match"))
+    }
+
+    /// Drop the token grant of a connection when it expired, or when it fails a full check
+    /// after a JWKS refresh.
+    #[cfg(feature = "oauth2")]
+    fn recheck_token(&self, conn: &mut ConnState) {
+        let (Some(o), Some(t)) = (&self.oauth, &conn.auth.token) else {
+            return;
+        };
+        let now = oauth2::unix_now();
+        let skew = o.skew();
+        let current = o.generation();
+        if t.generation.is_some_and(|g| g != current) {
+            match o.check(&t.raw.clone(), now) {
+                Ok(c) => {
+                    if let Some(t) = conn.auth.token.as_mut() {
+                        t.exp = c.exp;
+                        t.nbf = c.nbf;
+                        t.scopes = c.scopes;
+                        t.generation = Some(current);
+                    }
+                }
+                Err(reject) => {
+                    tracing::debug!(conn = conn.id, reason = %reject, "token no longer valid");
+                    conn.auth.token = None;
+                }
+            }
+        } else if now > t.exp + skew || t.nbf.is_some_and(|n| now + skew < n) {
+            tracing::debug!(conn = conn.id, "token expired");
+            conn.auth.token = None;
+        }
     }
 
     /// Count a failed attempt and return the generic error. The reason goes to the debug log.
@@ -304,6 +436,8 @@ impl Security {
         if self.policy == Policy::None {
             return Ok(());
         }
+        #[cfg(feature = "oauth2")]
+        self.recheck_token(conn);
         let scopes = conn.auth.scopes(&self.policy).ok_or(CommandError::NoAuth)?;
         let allowed = match access(name) {
             Access::Connection => true,
@@ -316,6 +450,21 @@ impl Security {
             Err(CommandError::NoPerm(name.to_ascii_lowercase()))
         }
     }
+}
+
+/// The token of `AUTH [user] <token>` or `HELLO ... AUTH <user> <token>`.
+#[cfg(feature = "oauth2")]
+fn token_arg(cmd: &discus_resp::Command) -> Option<&[u8]> {
+    let name = &cmd[0];
+    if name.eq_ignore_ascii_case(b"AUTH") {
+        return match cmd.len() {
+            2 | 3 => Some(&cmd[cmd.len() - 1]),
+            _ => None,
+        };
+    }
+    (1..cmd.len())
+        .find(|&i| cmd[i].eq_ignore_ascii_case(b"AUTH") && i + 2 < cmd.len())
+        .map(|i| &cmd[i + 2][..])
 }
 
 #[cfg(test)]

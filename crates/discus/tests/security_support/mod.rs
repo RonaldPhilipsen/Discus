@@ -239,3 +239,34 @@ pub async fn try_start(args: &[&str]) -> Result<Node, String> {
 pub async fn start(args: &[&str]) -> Node {
     try_start(args).await.unwrap()
 }
+
+#[cfg(feature = "oauth2")]
+pub mod idp;
+
+/// Write `content` to a new file in the CA directory and return its path.
+pub fn write_file(ca: &TestCa, name: &str, content: &str) -> String {
+    let path = ca.path(name);
+    std::fs::write(&path, content).unwrap();
+    path.to_str().unwrap().to_string()
+}
+
+/// The status code of a plain HTTP GET on the admin port.
+pub async fn admin_status(node: &Node, path: &str) -> u16 {
+    reqwest::get(format!("http://{}{path}", node.admin))
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+/// Poll `/readyz` until it answers 200, for at most `secs` seconds.
+pub async fn wait_ready(node: &Node, secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    while std::time::Instant::now() < deadline {
+        if admin_status(node, "/readyz").await == 200 {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}

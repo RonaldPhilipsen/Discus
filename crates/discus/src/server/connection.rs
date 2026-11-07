@@ -90,6 +90,9 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         loop {
             match parser.next() {
                 Ok(Some(cmd)) => {
+                    if node.security.wants_prefetch(&cmd) {
+                        node.security.prefetch(&cmd).await;
+                    }
                     let reply = dispatch(&node, &mut conn, &cmd);
                     encode(&reply, conn.protocol, &mut out);
                     in_flight += 1;
