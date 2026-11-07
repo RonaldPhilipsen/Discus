@@ -11,6 +11,7 @@ bytes = "1"
 discus-placement = { path = "../discus-placement" }
 discus-resp = { path = "../discus-resp" }
 discus-store = { path = "../discus-store" }
+discus-transport = { path = "../discus-transport", default-features = false }
 fastrand = "2"
 parking_lot = "0.12"
 subtle = "2"
@@ -27,16 +28,17 @@ discus-placement = { path = "../discus-placement", features = ["mock-clock"] }
 redis = { version = "0.27", features = ["tokio-comp"] }
 reqwest = { version = "0.12", default-features = false }
 
-# Build features, spec §15.5. The subsystems behind them arrive in later plans, so every feature
-# is a marker for now. Exactly one TLS backend and one trust root feature must be on.
+# Build features, spec §15.5. Most subsystems arrive in later plans, so those features are markers
+# for now. The TLS backend selects the QUIC cryptography provider in discus-transport. Exactly one
+# TLS backend and one trust root feature must be on.
 [features]
 default = ["otel", "oauth2", "k8s", "tls-aws-lc", "roots-system"]
 otel = []
 oauth2 = []
 oauth2-introspection = ["oauth2"]
 k8s = []
-tls-aws-lc = []
-tls-ring = []
-tls-openssl = []
+tls-aws-lc = ["discus-transport/tls-aws-lc"]
+tls-ring = ["discus-transport/tls-ring"]
+tls-openssl = ["discus-transport/tls-openssl"]
 roots-system = []
 roots-webpki = []
