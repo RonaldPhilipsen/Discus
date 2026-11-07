@@ -24,6 +24,9 @@ fn families() -> Vec<&'static [CommandSpec]> {
         super::connection::COMMANDS,
         super::string::COMMANDS,
         super::keys::COMMANDS,
+        super::hash::COMMANDS,
+        super::set::COMMANDS,
+        super::zset::COMMANDS,
     ]
 }
 
