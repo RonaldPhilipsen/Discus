@@ -118,39 +118,47 @@ impl Drop for TelemetryGuard {
 /// and install the global metrics handle. Call it once, inside the Tokio runtime.
 pub fn init(config: &Config) -> Result<TelemetryGuard, String> {
     use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::Layer;
 
     let args = &config.telemetry;
     args.validate(cfg!(feature = "otel"))?;
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let fmt = tracing_subscriber::fmt::layer().json().with_filter(filter);
+    let (logs, slot) =
+        discus_telemetry::logging::json_layer(std::io::stdout, filter, args.log_rate_limit);
 
     #[cfg(feature = "otel")]
     if args.otel {
+        use tracing_subscriber::Layer;
         let telemetry = discus_telemetry::pipeline::Telemetry::otlp(&pipeline_config(args))
             .map_err(|e| e.to_string())?;
         // Only Discus spans become OpenTelemetry spans. The exporter's own crates (tonic, h2)
         // stay out, so an export never creates spans to export.
         let targets =
             tracing_subscriber::filter::Targets::new().with_target("discus", tracing::Level::INFO);
-        tracing_subscriber::registry()
-            .with(fmt)
-            .with(telemetry.layer().with_filter(targets))
-            .try_init()
-            .map_err(|e| e.to_string())?;
+        let subscriber = tracing_subscriber::registry()
+            .with(logs)
+            .with(telemetry.layer().with_filter(targets));
+        install(tracing::Dispatch::new(subscriber), &slot)?;
         discus_telemetry::install_global(telemetry.metrics());
         return Ok(TelemetryGuard {
             telemetry: Some(telemetry),
         });
     }
 
-    tracing_subscriber::registry()
-        .with(fmt)
-        .try_init()
-        .map_err(|e| e.to_string())?;
+    install(
+        tracing::Dispatch::new(tracing_subscriber::registry().with(logs)),
+        &slot,
+    )?;
     Ok(TelemetryGuard::default())
+}
+
+/// Make `dispatch` the global subscriber, and give the log formatter its handle for trace IDs.
+fn install(
+    dispatch: tracing::Dispatch,
+    slot: &discus_telemetry::logging::DispatchSlot,
+) -> Result<(), String> {
+    let _ = slot.set(dispatch.downgrade());
+    tracing::dispatcher::set_global_default(dispatch).map_err(|e| e.to_string())
 }
 
 #[cfg(feature = "otel")]

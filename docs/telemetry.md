@@ -176,3 +176,24 @@ The standard `OTEL_RESOURCE_ATTRIBUTES` variable adds more attributes.
 
 The node writes one JSON object per line to stdout. `RUST_LOG` sets the level, and the default is
 `info`. OTLP log export is not part of this release.
+
+Each line has these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `timestamp` | The time in UTC, in RFC 3339 form. |
+| `level` | `ERROR`, `WARN`, `INFO`, `DEBUG`, or `TRACE`. |
+| `target` | The module that wrote the line. |
+| `fields` | The message and the values of the line. |
+| `trace_id` | The 32-digit trace ID. Only when the line comes from inside a span. |
+| `span_id` | The 16-digit span ID. Only when the line comes from inside a span. |
+
+With `--otel`, the trace ID in a log line is the same as the trace ID in the exported trace. Use it
+to find the trace of a log line.
+
+### Rate limit
+
+Each place in the code that writes log lines can write at most `--log-rate-limit` lines per second.
+The default is 100. The node drops the lines over the limit and counts them in
+`discus.logs.suppressed`. A noisy place in the code does not stop other places from logging. Set
+`--log-rate-limit 0` to turn the limit off.

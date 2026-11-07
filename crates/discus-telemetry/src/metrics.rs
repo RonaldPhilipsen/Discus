@@ -275,7 +275,7 @@ mod imp {
             observers.push(Box::new(atomic_counter(
                 "discus.logs.suppressed",
                 "Log lines dropped by the rate limit",
-                Box::new(|| crate::LOGS_SUPPRESSED.load(Ordering::Relaxed)),
+                Box::new(crate::logging::suppressed),
             )));
 
             let latency = |name: &'static str, desc: &'static str| {
