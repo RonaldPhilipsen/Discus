@@ -9,6 +9,7 @@ use subtle::ConstantTimeEq;
 use super::error::CommandError;
 use super::table::{names, CommandSpec};
 use super::util::{glob_match, parse_i64, upper};
+use crate::build;
 use crate::node::{ConnState, Node};
 
 /// The Redis version that Discus reports. Clients gate features on it.
@@ -277,10 +278,12 @@ fn info(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     );
     section(
         "discus",
-        &[format!(
-            "discus_build:{}",
-            option_env!("DISCUS_BUILD").unwrap_or("dev")
-        )],
+        &[
+            format!("discus_build:{}", build::BUILD_ID),
+            format!("discus_features:{}", build::FEATURES.join(",")),
+            format!("discus_tls_backend:{}", build::TLS_BACKEND),
+            format!("discus_trust_roots:{}", build::TRUST_ROOTS),
+        ],
     );
     Ok(Value::Bulk(Bytes::from(out)))
 }

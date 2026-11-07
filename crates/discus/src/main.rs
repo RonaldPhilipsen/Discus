@@ -10,6 +10,13 @@ async fn main() -> std::io::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
+    tracing::info!(
+        build = discus::build::BUILD_ID,
+        features = discus::build::FEATURES.join(","),
+        tls_backend = discus::build::TLS_BACKEND,
+        trust_roots = discus::build::TRUST_ROOTS,
+        "starting"
+    );
     let config = Config::parse();
     let server = Server::bind(config).await?;
     tracing::info!(client = %server.local_addr(), admin = %server.admin_addr(), "bound");

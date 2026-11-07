@@ -51,6 +51,34 @@ When the memory budget is full, a write evicts the least recently used entries f
 random sample. A single value larger than the whole budget returns
 `-OOM value larger than maxmemory` and evicts nothing.
 
+## Build features
+
+Cargo features select optional subsystems and the TLS backend at compile time. The subsystems
+arrive in later releases, so today each feature changes only what `INFO` reports. The `discus`
+section of `INFO` and the first log line show the build identifier, the enabled features, the TLS
+backend, and the trust root source.
+
+| Feature | Default | Adds |
+| --- | --- | --- |
+| `otel` | on | OpenTelemetry metrics and traces |
+| `oauth2` | on | OAuth 2.0 token validation |
+| `oauth2-introspection` | off | RFC 7662 introspection, turns on `oauth2` |
+| `k8s` | on | The Kubernetes `Lease` provider and service account tokens |
+| `tls-aws-lc` | on | The `aws-lc-rs` TLS backend |
+| `tls-ring` | off | The `ring` TLS backend |
+| `tls-openssl` | off | The system OpenSSL as the TLS backend |
+| `roots-system` | on | Trust roots from the system store |
+| `roots-webpki` | off | Compiled-in Mozilla trust roots |
+
+You must enable exactly one TLS backend and one trust root feature, or the build fails. For
+example, this command builds a binary with no optional subsystems:
+
+```bash
+cargo build -p discus --no-default-features --features tls-aws-lc,roots-system
+```
+
+Run `mise run build-matrix` to check every supported combination.
+
 ## Documented deviations
 
 - `SET ... NX` or `XX` with `GET` returns the old value, as in Redis 7.
