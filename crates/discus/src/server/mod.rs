@@ -6,21 +6,26 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-use crate::Config;
+use std::sync::Arc;
+
+use crate::{Config, Node};
 
 mod connection;
 
 /// A bound client listener.
 pub struct Server {
     listener: TcpListener,
-    config: Config,
+    node: Arc<Node>,
 }
 
 impl Server {
     /// Bind the client listener.
     pub async fn bind(config: Config) -> io::Result<Server> {
         let listener = TcpListener::bind(config.listen).await?;
-        Ok(Server { listener, config })
+        Ok(Server {
+            listener,
+            node: Arc::new(Node::new(config)),
+        })
     }
 
     /// The address that the listener is bound to.
@@ -32,13 +37,12 @@ impl Server {
 
     /// Accept connections until the token is cancelled.
     pub async fn run(self, shutdown: CancellationToken) -> io::Result<()> {
-        let _ = &self.config;
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => return Ok(()),
                 accepted = self.listener.accept() => {
                     let (stream, _) = accepted?;
-                    tokio::spawn(connection::serve(stream));
+                    tokio::spawn(connection::serve(stream, self.node.clone()));
                 }
             }
         }

@@ -131,6 +131,7 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "clap",
+ "discus-resp",
  "thiserror",
  "tokio",
  "tokio-util",

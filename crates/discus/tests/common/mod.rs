@@ -1,0 +1,34 @@
+#![allow(dead_code)]
+
+use std::net::SocketAddr;
+
+use tokio_util::sync::CancellationToken;
+
+/// Start a node on free ports and return its client address.
+pub async fn start_node(args: &[&str]) -> SocketAddr {
+    start_node_raw(args).await.0
+}
+
+/// Start a node and return its client address, its task, and its shutdown token.
+pub async fn start_node_raw(
+    args: &[&str],
+) -> (
+    SocketAddr,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+    CancellationToken,
+) {
+    let mut argv = vec![
+        "discus",
+        "--listen",
+        "127.0.0.1:0",
+        "--admin-listen",
+        "127.0.0.1:0",
+    ];
+    argv.extend_from_slice(args);
+    let config = discus::Config::parse_from(argv).expect("valid test arguments");
+    let server = discus::Server::bind(config).await.expect("bind");
+    let addr = server.local_addr();
+    let shutdown = CancellationToken::new();
+    let handle = tokio::spawn(server.run(shutdown.clone()));
+    (addr, handle, shutdown)
+}

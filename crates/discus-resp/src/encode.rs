@@ -33,7 +33,11 @@ pub fn encode(value: &Value, protocol: Protocol, out: &mut BytesMut) {
             }
         }
         Value::Map(pairs) => {
-            let (prefix, n) = if resp3 { (b'%', pairs.len()) } else { (b'*', pairs.len() * 2) };
+            let (prefix, n) = if resp3 {
+                (b'%', pairs.len())
+            } else {
+                (b'*', pairs.len() * 2)
+            };
             line(out, prefix, n.to_string().as_bytes());
             for (k, v) in pairs {
                 encode(k, protocol, out);

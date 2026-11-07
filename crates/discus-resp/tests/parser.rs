@@ -1,7 +1,10 @@
 use discus_resp::{Limits, ParseError, Parser};
 
 fn cmd(parts: &[&str]) -> Vec<bytes::Bytes> {
-    parts.iter().map(|p| bytes::Bytes::copy_from_slice(p.as_bytes())).collect()
+    parts
+        .iter()
+        .map(|p| bytes::Bytes::copy_from_slice(p.as_bytes()))
+        .collect()
 }
 
 #[test]
@@ -27,10 +30,19 @@ fn parses_across_arbitrary_chunk_boundaries() {
 
 #[test]
 fn rejects_oversize_bulk_before_allocating() {
-    let mut p = Parser::new(Limits { max_bulk_bytes: 8, max_array_len: 16 });
+    let mut p = Parser::new(Limits {
+        max_bulk_bytes: 8,
+        max_array_len: 16,
+    });
     p.feed(b"*2\r\n$3\r\nSET\r\n$999999999\r\n");
     let err = p.next().unwrap_err();
-    assert!(matches!(err, ParseError::BulkTooLarge { len: 999999999, limit: 8 }));
+    assert!(matches!(
+        err,
+        ParseError::BulkTooLarge {
+            len: 999999999,
+            limit: 8
+        }
+    ));
 }
 
 #[test]
@@ -45,7 +57,13 @@ fn rejects_negative_lengths_and_nested_arrays() {
 
 #[test]
 fn rejects_oversize_array() {
-    let mut p = Parser::new(Limits { max_bulk_bytes: 64, max_array_len: 4 });
+    let mut p = Parser::new(Limits {
+        max_bulk_bytes: 64,
+        max_array_len: 4,
+    });
     p.feed(b"*5\r\n");
-    assert!(matches!(p.next().unwrap_err(), ParseError::ArrayTooLarge { len: 5, limit: 4 }));
+    assert!(matches!(
+        p.next().unwrap_err(),
+        ParseError::ArrayTooLarge { len: 5, limit: 4 }
+    ));
 }

@@ -14,7 +14,10 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits { max_bulk_bytes: 67_108_864, max_array_len: 1_048_576 }
+        Limits {
+            max_bulk_bytes: 67_108_864,
+            max_array_len: 1_048_576,
+        }
     }
 }
 
@@ -40,7 +43,10 @@ pub struct Parser {
 
 impl Parser {
     pub fn new(limits: Limits) -> Parser {
-        Parser { buf: BytesMut::new(), limits }
+        Parser {
+            buf: BytesMut::new(),
+            limits,
+        }
     }
 
     pub fn feed(&mut self, data: &[u8]) {
@@ -62,7 +68,9 @@ impl Parser {
                 }
                 Attempt::Done { consumed, ranges } => {
                     let frame = self.buf.split_to(consumed).freeze();
-                    return Ok(Some(ranges.into_iter().map(|(s, e)| frame.slice(s..e)).collect()));
+                    return Ok(Some(
+                        ranges.into_iter().map(|(s, e)| frame.slice(s..e)).collect(),
+                    ));
                 }
             }
         }
@@ -84,7 +92,10 @@ impl Parser {
         }
         let n = n as usize;
         if n > self.limits.max_array_len {
-            return Err(ParseError::ArrayTooLarge { len: n, limit: self.limits.max_array_len });
+            return Err(ParseError::ArrayTooLarge {
+                len: n,
+                limit: self.limits.max_array_len,
+            });
         }
         if n == 0 {
             return Ok(Attempt::Empty(pos));
@@ -106,26 +117,37 @@ impl Parser {
             }
             let len = len as usize;
             if len > self.limits.max_bulk_bytes {
-                return Err(ParseError::BulkTooLarge { len, limit: self.limits.max_bulk_bytes });
+                return Err(ParseError::BulkTooLarge {
+                    len,
+                    limit: self.limits.max_bulk_bytes,
+                });
             }
             let end = next + len;
             if buf.len() < end + 2 {
                 return Ok(Attempt::Incomplete);
             }
             if &buf[end..end + 2] != b"\r\n" {
-                return Err(ParseError::Protocol("bulk string is not CRLF terminated".to_string()));
+                return Err(ParseError::Protocol(
+                    "bulk string is not CRLF terminated".to_string(),
+                ));
             }
             ranges.push((next, end));
             pos = end + 2;
         }
-        Ok(Attempt::Done { consumed: pos, ranges })
+        Ok(Attempt::Done {
+            consumed: pos,
+            ranges,
+        })
     }
 }
 
 enum Attempt {
     Incomplete,
     Empty(usize),
-    Done { consumed: usize, ranges: Vec<(usize, usize)> },
+    Done {
+        consumed: usize,
+        ranges: Vec<(usize, usize)>,
+    },
 }
 
 /// Read one CRLF-terminated line that starts at `from`. Returns the line and the next position.
