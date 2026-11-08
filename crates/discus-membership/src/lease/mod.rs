@@ -33,16 +33,9 @@ pub enum LeaseState {
     HeldByOther(LeaseHolder),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("lease: {0}")]
 pub struct LeaseError(pub String);
-
-impl std::fmt::Display for LeaseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "lease: {}", self.0)
-    }
-}
-
-impl std::error::Error for LeaseError {}
 
 /// A lease provider. Every NORMAL member calls `acquire_or_renew` at the renewal interval, so a
 /// live cluster always holds the lease. A seeking node calls it once its bootstrap deadline has

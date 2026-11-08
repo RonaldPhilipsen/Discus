@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use discus_placement::{Epoch, MemberState, NodeId};
+use discus_placement::{Epoch, NodeId};
 use discus_store::{refill_bucket, Entry, Store};
 use discus_wire::{Batch, Message};
 use xxhash_rust::xxh3::Xxh3;
@@ -27,11 +27,8 @@ pub type Sums = Vec<u64>;
 
 /// The members that were `NORMAL` in `old` and are not `NORMAL` in `new`.
 pub fn removed(old: &Epoch, new: &Epoch) -> BTreeSet<NodeId> {
-    let normal =
-        |e: &Epoch, id: NodeId| e.member(id).is_some_and(|m| m.state == MemberState::Normal);
-    old.members()
-        .iter()
-        .filter(|m| m.state == MemberState::Normal && !normal(new, m.id))
+    old.normal()
+        .filter(|m| !new.is_normal(m.id))
         .map(|m| m.id)
         .collect()
 }

@@ -36,6 +36,31 @@ pub enum TlsError {
     Config(String),
 }
 
+/// Every certificate in PEM text. Text without one is an error.
+pub fn pem_certs(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, TlsError> {
+    let certs = CertificateDer::pem_slice_iter(pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| TlsError::Pem(e.to_string()))?;
+    if certs.is_empty() {
+        return Err(TlsError::NoCertificate);
+    }
+    Ok(certs)
+}
+
+/// The first private key in PEM text.
+pub fn pem_key(pem: &[u8]) -> Result<PrivateKeyDer<'static>, TlsError> {
+    PrivateKeyDer::from_pem_slice(pem).map_err(|e| TlsError::Pem(e.to_string()))
+}
+
+/// A root store with every certificate in PEM text.
+pub fn pem_roots(pem: &[u8]) -> Result<RootCertStore, TlsError> {
+    let mut roots = RootCertStore::empty();
+    for cert in pem_certs(pem)? {
+        roots.add(cert).map_err(|e| TlsError::Ca(e.to_string()))?;
+    }
+    Ok(roots)
+}
+
 /// The CA, the node certificate and key, and the SAN that every peer must carry.
 pub struct TlsMaterial {
     roots: Arc<RootCertStore>,
@@ -72,25 +97,14 @@ impl TlsMaterial {
         key: &[u8],
         san: &str,
     ) -> Result<TlsMaterial, TlsError> {
-        let mut roots = RootCertStore::empty();
-        for cert in CertificateDer::pem_slice_iter(ca) {
-            let cert = cert.map_err(|e| TlsError::Pem(e.to_string()))?;
-            roots.add(cert).map_err(|e| TlsError::Ca(e.to_string()))?;
-        }
-        if roots.is_empty() {
-            return Err(TlsError::Ca("no certificate in the CA file".into()));
-        }
-        let chain = CertificateDer::pem_slice_iter(cert_chain)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| TlsError::Pem(e.to_string()))?;
-        if chain.is_empty() {
-            return Err(TlsError::NoCertificate);
-        }
-        let key = PrivateKeyDer::from_pem_slice(key).map_err(|e| TlsError::Pem(e.to_string()))?;
+        let roots = pem_roots(ca).map_err(|e| match e {
+            TlsError::NoCertificate => TlsError::Ca("no certificate in the CA file".into()),
+            e => e,
+        })?;
         Ok(TlsMaterial {
             roots: Arc::new(roots),
-            chain,
-            key,
+            chain: pem_certs(cert_chain)?,
+            key: pem_key(key)?,
             san: san.to_owned(),
         })
     }

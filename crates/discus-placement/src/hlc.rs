@@ -74,26 +74,15 @@ impl From<Timestamp> for Version {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum HlcError {
     /// The clock is at its drift bound and cannot issue a timestamp now.
+    #[error("the clock is at its drift bound")]
     Pinned,
     /// An incoming timestamp is too far ahead of the local wall clock. It was dropped.
+    #[error("timestamp is {ahead_ms} ms ahead of the wall clock")]
     TooFarAhead { ahead_ms: u64 },
 }
-
-impl fmt::Display for HlcError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            HlcError::Pinned => f.write_str("the clock is at its drift bound"),
-            HlcError::TooFarAhead { ahead_ms } => {
-                write!(f, "timestamp is {ahead_ms} ms ahead of the wall clock")
-            }
-        }
-    }
-}
-
-impl std::error::Error for HlcError {}
 
 /// Milliseconds from `now` to `later`, rounded to the nearest millisecond.
 fn ahead_ms(later: NTP64, now: NTP64) -> u64 {

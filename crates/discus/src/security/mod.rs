@@ -392,7 +392,7 @@ impl Security {
     ) -> io::Result<(ClientStream, ConnAuth)> {
         let mut auth = ConnAuth::new(Some(peer.ip()));
         let Some(config) = &self.server_tls else {
-            return Ok((ClientStream::Plain(tcp), auth));
+            return Ok((ClientStream::Left(tcp), auth));
         };
         let forwarded = if self.mode == TlsMode::Lb {
             if !self.lb_sources.iter().any(|n| n.contains(&peer.ip())) {
@@ -418,7 +418,7 @@ impl Security {
                 tracing::debug!(%identity, "forwarded client identity");
                 auth.cert = Some(CertGrant { identity, scopes });
             }
-            return Ok((ClientStream::Tls(Box::new(tls)), auth));
+            return Ok((ClientStream::Right(Box::new(tls)), auth));
         }
         auth.tls = true;
         if let Some(leaf) = tls.get_ref().1.peer_certificates().and_then(|c| c.first()) {
@@ -427,7 +427,7 @@ impl Security {
             tracing::debug!(%identity, "client certificate verified");
             auth.cert = Some(CertGrant { identity, scopes });
         }
-        Ok((ClientStream::Tls(Box::new(tls)), auth))
+        Ok((ClientStream::Right(Box::new(tls)), auth))
     }
 
     /// True when the connection meets the policy.

@@ -20,19 +20,11 @@ pub struct Record {
     pub hlc: Option<(u64, Millis)>,
 }
 
-fn rank(l: Liveness) -> u8 {
-    match l {
-        Liveness::Alive => 0,
-        Liveness::Suspect => 1,
-        Liveness::Dead => 2,
-    }
-}
-
 /// SWIM precedence: a higher incarnation wins. At the same incarnation, `Dead` beats `Suspect`,
 /// and `Suspect` beats `Alive`. Only the member itself raises its incarnation, so an `Alive` with
 /// a higher incarnation refutes a suspicion or a death.
 pub fn supersedes(new: (u64, Liveness), old: (u64, Liveness)) -> bool {
-    new.0 > old.0 || (new.0 == old.0 && rank(new.1) > rank(old.1))
+    new > old
 }
 
 /// The broadcast queue: one entry per member, sent with the fewest-sent entries first.

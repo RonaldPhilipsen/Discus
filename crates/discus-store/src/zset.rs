@@ -2,7 +2,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
-use std::ops::Bound;
+use std::ops::{Bound, RangeBounds};
 
 use bytes::Bytes;
 
@@ -30,22 +30,6 @@ impl Ord for Score {
 pub struct ZSet {
     scores: HashMap<Bytes, f64>,
     order: BTreeSet<(Score, Bytes)>,
-}
-
-fn above(bound: Bound<f64>, score: f64) -> bool {
-    match bound {
-        Bound::Unbounded => true,
-        Bound::Included(m) => score >= m,
-        Bound::Excluded(m) => score > m,
-    }
-}
-
-fn below(bound: Bound<f64>, score: f64) -> bool {
-    match bound {
-        Bound::Unbounded => true,
-        Bound::Included(m) => score <= m,
-        Bound::Excluded(m) => score < m,
-    }
 }
 
 impl ZSet {
@@ -136,8 +120,8 @@ impl ZSet {
         self.order
             .range((from, Bound::Unbounded))
             .map(|(s, m)| (m, s.0))
-            .filter(move |(_, s)| above(min, *s))
-            .take_while(move |(_, s)| below(max, *s))
+            .filter(move |(_, s)| (min, Bound::Unbounded).contains(s))
+            .take_while(move |(_, s)| (Bound::Unbounded, max).contains(s))
     }
 
     /// Approximate bytes that the members cost.

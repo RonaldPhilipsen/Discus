@@ -22,7 +22,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use discus_placement::{Epoch, MemberState, NodeId, Version};
+use discus_placement::{Epoch, NodeId, Version};
 use discus_store::{refill_bucket, Entry, Store};
 use discus_transport::{Lane, TransportError};
 use discus_wire::{caps, Batch, BatchAck, Message, TraceContext};
@@ -376,12 +376,7 @@ impl Replicator {
             let Some(node) = self.node.upgrade() else {
                 return;
             };
-            let placed = node.membership().is_some()
-                && node
-                    .epochs()
-                    .current()
-                    .member(self.id)
-                    .is_some_and(|m| m.state == MemberState::Normal);
+            let placed = node.membership().is_some() && node.epochs().current().is_normal(self.id);
             let queued = self
                 .peers
                 .lock()
@@ -642,12 +637,7 @@ impl Replicator {
     /// 9). The first batch names the refill buckets of lost hints. Only a peer that the epoch
     /// lists as `NORMAL` gets a replay. Returns false when a batch failed.
     async fn replay(&self, node: &Arc<Node>, peer: NodeId) -> bool {
-        let normal = node
-            .epochs()
-            .current()
-            .member(peer)
-            .is_some_and(|m| m.state == MemberState::Normal);
-        if !normal {
+        if !node.epochs().current().is_normal(peer) {
             return false;
         }
         let mut first = true;

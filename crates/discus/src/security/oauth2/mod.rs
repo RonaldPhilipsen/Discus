@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::{Algorithm, Validation};
@@ -32,9 +32,7 @@ const MAX_TOKEN_BYTES: usize = 16 * 1024;
 
 /// Seconds since the Unix epoch.
 pub fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64)
+    (discus_store::Clock::now_ms(&discus_store::SystemClock) / 1000) as i64
 }
 
 /// Parse an algorithm allowlist. Symmetric algorithms and `none` are refused, because a

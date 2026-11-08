@@ -367,48 +367,33 @@ pub fn outbound(inbound: &discus_wire::TraceContext) -> discus_wire::TraceContex
     to_wire(&discus_telemetry::context::outbound(&from_wire(inbound)))
 }
 
-/// The `forward` child span of the current span. It opens only under a command span, so a
-/// node without export opens no span.
-pub fn forward_span() -> tracing::Span {
-    if tracing::Span::current().is_none() {
-        return tracing::Span::none();
-    }
-    tracing::info_span!("forward")
+/// Child spans of the current span. Each opens only under a command span, so a node without
+/// export opens no span.
+macro_rules! child_spans {
+    ($($(#[$doc:meta])* $fn:ident => $name:literal;)+) => {
+        $(
+            $(#[$doc])*
+            pub fn $fn() -> tracing::Span {
+                if tracing::Span::current().is_none() {
+                    return tracing::Span::none();
+                }
+                tracing::info_span!($name)
+            }
+        )+
+    };
 }
 
-/// The `store` child span of the current span. It opens only under a command span.
-pub fn store_span() -> tracing::Span {
-    if tracing::Span::current().is_none() {
-        return tracing::Span::none();
-    }
-    tracing::info_span!("store")
-}
-
-/// The `raft` child span of the current span: a counter command on its Raft leader. It opens
-/// only under a command span.
-pub fn raft_span() -> tracing::Span {
-    if tracing::Span::current().is_none() {
-        return tracing::Span::none();
-    }
-    tracing::info_span!("raft")
-}
-
-/// The `counter.sync` child span of the current span: a leader-follower write that waits for its
-/// follower. It opens only under a command span.
-pub fn counter_sync_span() -> tracing::Span {
-    if tracing::Span::current().is_none() {
-        return tracing::Span::none();
-    }
-    tracing::info_span!("counter.sync")
-}
-
-/// The `route` child span of the current span. A node that receives a forward routes in it. It
-/// opens only under a command span.
-pub fn route_span() -> tracing::Span {
-    if tracing::Span::current().is_none() {
-        return tracing::Span::none();
-    }
-    tracing::info_span!("route")
+child_spans! {
+    /// The `forward` span: one forward to another node.
+    forward_span => "forward";
+    /// The `store` span: the command runs on this node.
+    store_span => "store";
+    /// The `raft` span: a counter command on its Raft leader.
+    raft_span => "raft";
+    /// The `counter.sync` span: a leader-follower write that waits for its follower.
+    counter_sync_span => "counter.sync";
+    /// The `route` span. A node that receives a forward routes in it.
+    route_span => "route";
 }
 
 /// Record one forward: the command, the outcome, and the hop count of the forward.

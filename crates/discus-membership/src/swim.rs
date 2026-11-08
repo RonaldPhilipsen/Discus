@@ -243,7 +243,7 @@ impl Swim {
     pub fn is_normal(&self, host: &dyn Host) -> bool {
         self.phase == Phase::Member
             && self.me.state == MemberState::Normal
-            && host.epoch().member(self.me.id).map(|m| m.state) == Some(MemberState::Normal)
+            && host.epoch().is_normal(self.me.id)
     }
 
     /// Counter leader hints spread with a new incarnation.
@@ -569,7 +569,7 @@ impl Swim {
                 });
             }
             let me = self.me.id;
-            let normal = |e: &Epoch| e.member(me).map(|m| m.state) == Some(MemberState::Normal);
+            let normal = |e: &Epoch| e.is_normal(me);
             // The rejoin rule needs the node to have been placed. A joiner that adopts an epoch
             // made before its own change keeps its pending delta instead.
             if self.phase == Phase::Member && normal(&old) && !normal(&current) {
@@ -776,7 +776,7 @@ impl Swim {
                 .filter(|(_, r)| r.liveness != Liveness::Dead)
                 .map(|(id, _)| *id)
                 .collect();
-            if let Some(&target) = pick(&mut self.rng, &alive) {
+            if let Some(&target) = self.rng.choice(&alive) {
                 out.extend(self.sync_to(target, host));
             }
         }
@@ -851,7 +851,7 @@ impl Swim {
                 .filter(|s| !live.contains(s))
                 .map(|s| (None, s)),
         );
-        let &(expected, to) = pick(&mut self.rng, &targets)?;
+        let &(expected, to) = self.rng.choice(&targets)?;
         let msg = self.message(GossipKind::Sync, expected, host);
         let token = self.token(Pending::Sync);
         Some(Action {
@@ -1280,11 +1280,7 @@ pub fn suspicion_timeout(cfg: &SwimConfig, others: usize) -> Millis {
 }
 
 pub fn normal_count(epoch: &Epoch) -> usize {
-    epoch
-        .members()
-        .iter()
-        .filter(|m| m.state == MemberState::Normal)
-        .count()
+    epoch.normal().count()
 }
 
 /// The epoch of a node that is not in a cluster: generation 0, `ClusterId::NIL`, no members. Its
@@ -1302,25 +1298,11 @@ pub fn provisional_epoch(id: NodeId) -> Epoch {
 /// member gains, because the keys of the departed member move to them. With `rf` or fewer, every
 /// member already owned every key.
 pub fn gained_owners(old: &Epoch, new: &Epoch, rf: usize) -> Vec<NodeId> {
-    let normal = |e: &Epoch| -> BTreeSet<NodeId> {
-        e.members()
-            .iter()
-            .filter(|m| m.state == MemberState::Normal)
-            .map(|m| m.id)
-            .collect()
-    };
+    let normal = |e: &Epoch| -> BTreeSet<NodeId> { e.normal().map(|m| m.id).collect() };
     let (o, n) = (normal(old), normal(new));
     let mut gained: BTreeSet<NodeId> = n.difference(&o).copied().collect();
     if o.difference(&n).next().is_some() && o.len() > rf {
         gained.extend(n.intersection(&o).copied());
     }
     gained.into_iter().collect()
-}
-
-fn pick<'a, T>(rng: &mut fastrand::Rng, items: &'a [T]) -> Option<&'a T> {
-    if items.is_empty() {
-        None
-    } else {
-        items.get(rng.usize(..items.len()))
-    }
 }
