@@ -278,16 +278,12 @@ impl CounterState {
                     .count();
                 Ok(Value::Integer(removed as i64))
             }
-            "EXPIRE" => {
-                let ms = span(&cmd[2], 1000, "expire")?;
-                Ok(self.set_deadline(now, &cmd[1], now as i128 + ms))
+            "EXPIRE" | "PEXPIRE" | "EXPIREAT" | "PEXPIREAT" => {
+                let unit = if name.starts_with('P') { 1 } else { 1000 };
+                let base = if name.ends_with("AT") { 0 } else { now as i128 };
+                let ms = span(&cmd[2], unit, &name.to_lowercase())?;
+                Ok(self.set_deadline(now, &cmd[1], base + ms))
             }
-            "PEXPIRE" => {
-                let ms = span(&cmd[2], 1, "pexpire")?;
-                Ok(self.set_deadline(now, &cmd[1], now as i128 + ms))
-            }
-            "EXPIREAT" => Ok(self.set_deadline(now, &cmd[1], span(&cmd[2], 1000, "expireat")?)),
-            "PEXPIREAT" => Ok(self.set_deadline(now, &cmd[1], span(&cmd[2], 1, "pexpireat")?)),
             "PERSIST" => Ok(Value::Integer(match self.live(&cmd[1], now) {
                 Some(e) if e.expires_at_ms.is_some() => {
                     e.expires_at_ms = None;
