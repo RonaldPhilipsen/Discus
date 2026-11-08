@@ -84,9 +84,13 @@ const DISTRUST: Duration = Duration::from_millis(500);
 /// The shortest time between two `RAFT_LEADER` rounds of one group.
 pub const ASK_EVERY: Duration = Duration::from_millis(200);
 
-/// Order two hints: the newer regime, then the higher Raft term.
+/// Order two hints: the newer regime, then the higher Raft term, then a named leader over the
+/// nil one. A term has at most one leader, so a hint that names it beats a hint of the same term
+/// that lost its leader. Else the nil hint blocks the leader of its term until the next election.
+/// It appears when an answer to `RAFT_LEADER` names a new leader before its gossip claim arrives.
 pub fn newer(a: &GroupHint, b: &GroupHint) -> bool {
-    (a.regime, a.term) > (b.regime, b.term)
+    let rank = |h: &GroupHint| (h.regime, h.term, h.leader != NodeId::NIL);
+    rank(a) > rank(b)
 }
 
 pub struct Group {
@@ -655,5 +659,72 @@ fn stop(role: &Role) {
     }
     if let Role::Leader(l) = role {
         l.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use discus_placement::{ClusterId, Epoch, EpochId, Member, MemberState, Weight};
+
+    fn view(ids: &[NodeId]) -> View {
+        let members = ids
+            .iter()
+            .map(|id| Member {
+                id: *id,
+                addr: std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+                state: MemberState::Normal,
+                weight: Weight::default(),
+            })
+            .collect();
+        let id = EpochId {
+            generation: 1,
+            origin: ids[0],
+        };
+        View {
+            epoch: Arc::new(Epoch::new(id, ClusterId::NIL, members).unwrap()),
+            me: ids[0],
+            me_normal: true,
+            leaving: false,
+        }
+    }
+
+    fn raft_hint(leader: NodeId, term: u64, voters: &[NodeId]) -> GroupHint {
+        GroupHint {
+            group: 0,
+            mode: CounterMode::Raft,
+            regime: Regime {
+                generation: 2,
+                origin: NodeId::from_u128(1),
+            },
+            leader,
+            term,
+            follower: None,
+            voters: voters.to_vec(),
+            learners: Vec::new(),
+        }
+    }
+
+    /// An answer to `RAFT_LEADER` names the new leader before its gossip does. The next merge
+    /// sees no claim and drops the leader. Once the claim arrives, it names the leader again.
+    #[test]
+    fn a_leader_hint_replaces_a_leaderless_one_of_its_term() {
+        let ids: Vec<NodeId> = (1..=4).map(NodeId::from_u128).collect();
+        let v = view(&ids);
+        let group = Group::new(0, None);
+        let elected = raft_hint(ids[1], 2, &ids[1..]);
+        group.learn(Some(elected.clone()), &[ids[2]]);
+        assert_eq!(group.leader(&v), Some(ids[1]));
+        group.observe(&v, &[], true);
+        assert_eq!(group.leader(&v), None);
+
+        group.observe(&v, std::slice::from_ref(&elected), true);
+        assert_eq!(group.leader(&v), Some(ids[1]), "the gossip claim");
+
+        group.observe(&v, &[], true);
+        group.learn(Some(elected), &[ids[2]]);
+        assert_eq!(group.leader(&v), Some(ids[1]), "the answer");
     }
 }
