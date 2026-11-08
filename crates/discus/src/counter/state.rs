@@ -13,6 +13,7 @@ use bytes::Bytes;
 use discus_resp::{Command, Value};
 
 use crate::command::float::{incr_by_float, parse_float_delta, FloatDelta};
+use crate::command::keys::{span, ttl_value};
 use crate::command::string::{deadline, set_options, Expiry};
 use crate::command::util::{parse_i64, upper};
 use crate::command::CommandError;
@@ -206,6 +207,7 @@ impl CounterState {
             self.peek(key, now)
                 .map_or(Value::Null, |e| Value::Bulk(e.value.clone()))
         };
+        let expires = |key: &[u8]| self.peek(key, now).map(|e| e.expires_at_ms);
         Ok(match name.as_str() {
             "GET" => bulk(&cmd[1]),
             "MGET" => Value::Array(cmd[1..].iter().map(|k| bulk(k)).collect()),
@@ -221,10 +223,8 @@ impl CounterState {
             } else {
                 "none"
             }),
-            "TTL" => remaining(self.peek(&cmd[1], now), now, |ms| {
-                ((ms + 500) / 1000) as i64
-            }),
-            "PTTL" => remaining(self.peek(&cmd[1], now), now, |ms| ms as i64),
+            "TTL" => ttl_value(expires(&cmd[1]), now, |ms| ((ms + 500) / 1000) as i64),
+            "PTTL" => ttl_value(expires(&cmd[1]), now, |ms| ms as i64),
             other => return Err(CommandError::UnknownCommand(other.to_lowercase())),
         })
     }
@@ -448,26 +448,6 @@ impl CounterState {
         }
         Value::Integer(1)
     }
-}
-
-fn remaining(entry: Option<&CounterEntry>, now: u64, to_unit: impl Fn(u64) -> i64) -> Value {
-    Value::Integer(match entry {
-        None => -2,
-        Some(e) => match e.expires_at_ms {
-            None => -1,
-            Some(t) => to_unit(t.saturating_sub(now)),
-        },
-    })
-}
-
-fn span(arg: &[u8], unit_ms: i128, who: &str) -> Result<i128, CommandError> {
-    let ms = parse_i64(arg)? as i128 * unit_ms;
-    if ms.abs() > (i64::MAX / 2) as i128 {
-        return Err(CommandError::Custom(format!(
-            "ERR invalid expire time in '{who}' command"
-        )));
-    }
-    Ok(ms)
 }
 
 /// The deadline of `INCR key [EX s | PX ms | EXAT s | PXAT ms]`, from the arguments after the
