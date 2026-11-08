@@ -118,6 +118,23 @@ async fn read_load(mut c: redis::aio::MultiplexedConnection, t: Arc<Tally>, stop
     }
 }
 
+/// The values of `keys` through `c`, in pipelines of 500.
+async fn gets(c: &mut redis::aio::MultiplexedConnection, keys: &[&String]) -> Vec<Option<String>> {
+    let mut out = Vec::with_capacity(keys.len());
+    for chunk in keys.chunks(500) {
+        let mut pipe = redis::pipe();
+        for key in chunk {
+            pipe.get(*key);
+        }
+        out.extend(
+            pipe.query_async::<Vec<Option<String>>>(&mut *c)
+                .await
+                .unwrap(),
+        );
+    }
+    out
+}
+
 /// A refusal applied nothing. Any other error may have applied.
 async fn counter_load(
     mut c: redis::aio::MultiplexedConnection,
@@ -186,10 +203,10 @@ async fn growth_from_one_to_five_and_back_under_load() {
 
     // Every node serves every key that the load wrote, whichever node owns it.
     let written = tally.written.lock().unwrap().clone();
+    let sample: Vec<&String> = written.iter().step_by(7).collect();
     for node in &nodes {
-        let mut c = node.redis().await;
-        for key in written.iter().step_by(7) {
-            let v: Option<String> = c.get(key).await.unwrap();
+        let got = gets(&mut node.redis().await, &sample).await;
+        for (key, v) in sample.iter().zip(got) {
             assert_eq!(
                 v.as_deref(),
                 Some(key.as_str()),
@@ -241,13 +258,10 @@ async fn growth_from_one_to_five_and_back_under_load() {
 
     // Writes are acknowledged at W = 1 and copied asynchronously, so a write that lands on a node
     // as it leaves can become a miss (spec section 15.3). Anything beyond a few is a handoff bug.
-    let mut lost = Vec::new();
-    for (i, key) in written.iter().enumerate() {
-        let v: Option<String> = setup.get(key).await.unwrap();
-        if v.as_deref() != Some(key.as_str()) {
-            lost.push(i);
-        }
-    }
+    let got = gets(&mut setup, &written.iter().collect::<Vec<_>>()).await;
+    let lost: Vec<usize> = (0..written.len())
+        .filter(|i| got[*i].as_deref() != Some(written[*i].as_str()))
+        .collect();
     assert!(
         lost.len() <= written.len() / 1000,
         "lost {} of {} entries while the cluster shrank, at write positions {lost:?}",
