@@ -11,7 +11,7 @@ use common::counters::{
     key_in, leader_of, raft_cluster, role, start, status, targeted, voters_of, Leases, GROUPS,
     RAFT, SLOW_DEATH,
 };
-use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
+use common::gossip::{partition, refs, wait_agreed, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
 use serial_test::serial;
 
@@ -87,10 +87,8 @@ async fn a_minority_returns_tryagain() {
     let mut c = nodes[0].redis().await;
     let _: i64 = incr_once(&mut c, "cnt:min").await;
     let leader = leader_of(&refs, g).unwrap();
-    for n in nodes.iter().filter(|n| n.id != leader.id) {
-        n.node.faults.blocked.lock().insert(leader.id);
-        leader.node.faults.blocked.lock().insert(n.id);
-    }
+    let rest: Vec<&GossipNode> = nodes.iter().filter(|n| n.id != leader.id).collect();
+    partition(leader, &rest);
     let mut lc = leader.redis().await;
     let err = redis::cmd("INCR")
         .arg("cnt:min")
@@ -98,8 +96,7 @@ async fn a_minority_returns_tryagain() {
         .await
         .unwrap_err();
     assert!(err.to_string().to_uppercase().contains("TRYAGAIN"), "{err}");
-    let other = nodes.iter().find(|n| n.id != leader.id).unwrap();
-    let mut oc = other.redis().await;
+    let mut oc = rest[0].redis().await;
     let n = incr_or_show(&mut oc, "cnt:min", Duration::from_secs(15), &refs).await;
     assert!(n >= 2, "{n}");
 }

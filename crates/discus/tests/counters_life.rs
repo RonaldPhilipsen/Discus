@@ -11,7 +11,7 @@ use common::counters::{
     all_hold, flags, group_of, incr_until, join_to, leader_of, raft_cluster, status, targeted,
     Leases, GROUPS,
 };
-use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
+use common::gossip::{heal, partition, refs, wait_agreed, wait_until, GossipNode, Net};
 use common::status as http_status;
 use redis::AsyncCommands;
 use serial_test::serial;
@@ -135,10 +135,7 @@ async fn a_rejoined_node_discards_its_counters() {
         })
         .collect();
     let x = &nodes[3];
-    for n in &nodes[..3] {
-        n.node.faults.blocked.lock().insert(x.id);
-        x.node.faults.blocked.lock().insert(n.id);
-    }
+    partition(x, &refs(&nodes[..3]));
     let x_alone = || x.node.epochs().current().members().len() == 1;
     let rest_alone = || {
         nodes[..3]
@@ -149,10 +146,7 @@ async fn a_rejoined_node_discards_its_counters() {
         wait_until(Duration::from_secs(20), || x_alone() && rest_alone()).await,
         "the partition did not split the epochs"
     );
-    for n in &nodes[..3] {
-        n.node.faults.blocked.lock().remove(&x.id);
-        x.node.faults.blocked.lock().remove(&n.id);
-    }
+    heal(x, &refs(&nodes[..3]));
     let refs = refs(&nodes);
     wait_agreed(&refs, Duration::from_secs(30)).await;
     let losers: Vec<usize> = (0..nodes.len())
@@ -182,10 +176,7 @@ async fn a_false_dead_heals_to_one_value() {
         1
     );
     let x = &nodes[2];
-    for n in &nodes[..2] {
-        n.node.faults.blocked.lock().insert(x.id);
-        x.node.faults.blocked.lock().insert(n.id);
-    }
+    partition(x, &refs[..2]);
     assert!(
         wait_until(Duration::from_secs(20), || x
             .node
@@ -203,10 +194,7 @@ async fn a_false_dead_heals_to_one_value() {
     for _ in 0..3 {
         on_rest = incr_until(&mut c, "cnt:fd", Duration::from_secs(10)).await;
     }
-    for n in &nodes[..2] {
-        n.node.faults.blocked.lock().remove(&x.id);
-        x.node.faults.blocked.lock().remove(&n.id);
-    }
+    heal(x, &refs[..2]);
     wait_agreed(&refs, Duration::from_secs(30)).await;
     let mut values = Vec::new();
     for n in &nodes {

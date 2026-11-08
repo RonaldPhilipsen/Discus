@@ -272,6 +272,22 @@ pub fn refs(nodes: &[GossipNode]) -> Vec<&GossipNode> {
     nodes.iter().collect()
 }
 
+/// Drop every message between `a` and each of `others`, in both directions.
+pub fn partition(a: &GossipNode, others: &[&GossipNode]) {
+    for n in others {
+        n.node.faults.blocked.lock().insert(a.id);
+        a.node.faults.blocked.lock().insert(n.id);
+    }
+}
+
+/// Undo [`partition`].
+pub fn heal(a: &GossipNode, others: &[&GossipNode]) {
+    for n in others {
+        n.node.faults.blocked.lock().remove(&a.id);
+        a.node.faults.blocked.lock().remove(&n.id);
+    }
+}
+
 /// Wait until `nodes` are [`agreed`], or fail the test.
 pub async fn wait_agreed(nodes: &[&GossipNode], timeout: Duration) {
     assert!(
