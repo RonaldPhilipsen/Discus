@@ -98,6 +98,19 @@ impl PeerQueue {
         out
     }
 
+    /// Put back keys taken for a batch that had no room for them. They go first in line, in
+    /// their order. A key written again since `take` already has its place.
+    pub fn untake(&self, keys: impl DoubleEndedIterator<Item = Bytes>) {
+        let mut s = self.state.lock();
+        for k in keys.rev() {
+            s.inflight.remove(&k);
+            if !s.keys.contains(&k) {
+                s.keys.push(k.clone(), ());
+            }
+            s.keys.demote(&k);
+        }
+    }
+
     /// The batch in flight was acknowledged.
     pub fn acked(&self) {
         self.state.lock().inflight.clear();

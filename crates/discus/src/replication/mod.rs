@@ -601,16 +601,7 @@ impl Replicator {
                 continue;
             }
             let mut batch = Batch::new(node.epoch_id());
-            let mut bytes = 0;
-            for k in keys {
-                if let Some(e) = self.store.entry(&k) {
-                    bytes += discus_store::estimate_size(&k, &e);
-                    batch.entries.push((k, e));
-                }
-                if bytes > BATCH_BYTES {
-                    break;
-                }
-            }
+            batch.entries = fill(&self.store, &q, keys);
             let started = Instant::now();
             match self.send(&node, q.peer, Message::Replicate(batch)).await {
                 Ok(_) => {
@@ -850,6 +841,25 @@ impl Replicator {
     }
 }
 
+/// The current entries of `keys` for one replication batch, up to about [`BATCH_BYTES`]. The
+/// keys past the limit go back to `q`, so acknowledging the batch does not drop them.
+fn fill(store: &Store, q: &PeerQueue, keys: Vec<Bytes>) -> Vec<(Bytes, Entry)> {
+    let mut entries = Vec::new();
+    let mut bytes = 0;
+    let mut keys = keys.into_iter();
+    for k in keys.by_ref() {
+        if let Some(e) = store.entry(&k) {
+            bytes += discus_store::estimate_size(&k, &e);
+            entries.push((k, e));
+        }
+        if bytes > BATCH_BYTES {
+            break;
+        }
+    }
+    q.untake(keys);
+    entries
+}
+
 fn ack(node: &Node, applied: u32, want: Vec<Bytes>) -> Message {
     Message::BatchAck(BatchAck {
         applied,
@@ -857,4 +867,37 @@ fn ack(node: &Node, applied: u32, want: Vec<Bytes>) -> Message {
         epoch: node.epoch_id(),
         idle: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use discus_store::{ManualClock, StoreConfig, Value};
+
+    #[test]
+    fn keys_past_the_batch_size_stay_queued() {
+        let store = Store::new(StoreConfig::default(), Arc::new(ManualClock::new(1)));
+        let q = PeerQueue::new(NodeId::from_u128(1), 1024);
+        let big = Bytes::from(vec![b'x'; 100 << 10]);
+        let keys: Vec<Bytes> = (0..64).map(|i| Bytes::from(format!("k{i}"))).collect();
+        for k in &keys {
+            store.write(k, Version::zero(), |slot| {
+                *slot = Some(Entry::new(Value::Str(big.clone()), None));
+            });
+            q.push(k);
+        }
+        let entries = fill(&store, &q, q.take(keys.len()));
+        assert!(entries.len() < keys.len());
+        q.acked();
+        let mut sent: Vec<Bytes> = entries.into_iter().map(|(k, _)| k).collect();
+        while !q.is_empty() {
+            sent.extend(
+                fill(&store, &q, q.take(keys.len()))
+                    .into_iter()
+                    .map(|(k, _)| k),
+            );
+            q.acked();
+        }
+        assert_eq!(sent, keys);
+    }
 }
