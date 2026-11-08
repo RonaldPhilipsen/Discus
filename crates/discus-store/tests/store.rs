@@ -86,3 +86,52 @@ fn reads_count_hits_and_misses() {
     s.read(b"k", |_| ());
     assert_eq!((s.hits(), s.misses()), (2, 2));
 }
+
+/// Deletes, rewrites, and inserts that grow the map between steps must not hide a key that is
+/// present for the whole walk (the `SCAN` guarantee, which handoff relies on too).
+#[test]
+fn a_walk_sees_every_key_that_stays_despite_deletes_and_growth() {
+    let clock = Arc::new(ManualClock::new(0));
+    let s = Store::new(
+        StoreConfig {
+            shards: 2,
+            ..StoreConfig::default()
+        },
+        clock,
+    );
+    let put = |k: &str| {
+        s.write(k.as_bytes(), Version::zero(), |slot| {
+            *slot = Some(Entry::new(Value::Str("v".into()), None));
+        })
+    };
+    let stays: Vec<String> = (0..500).map(|i| format!("stay{i}")).collect();
+    let goes: Vec<String> = (0..500).map(|i| format!("go{i}")).collect();
+    for k in stays.iter().chain(&goes) {
+        put(k);
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut cursor = 0;
+    let mut round = 0;
+    loop {
+        let (next, keys) = s.scan(cursor, 40, None);
+        seen.extend(keys.iter().map(|k| String::from_utf8(k.to_vec()).unwrap()));
+        if next == 0 {
+            break;
+        }
+        cursor = next;
+        for k in goes.iter().skip(round * 5).take(5) {
+            s.write(k.as_bytes(), Version::zero(), |slot| slot.take());
+        }
+        for i in 0..10 {
+            put(&format!("new{round}:{i}"));
+        }
+        put(&stays[round % stays.len()]);
+        round += 1;
+    }
+    let missed: Vec<&String> = stays.iter().filter(|k| !seen.contains(*k)).collect();
+    assert!(
+        missed.is_empty(),
+        "missed {} keys: {missed:?}",
+        missed.len()
+    );
+}
