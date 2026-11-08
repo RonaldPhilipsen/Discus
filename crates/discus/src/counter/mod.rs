@@ -146,7 +146,7 @@ pub type CounterLeases = Arc<dyn Fn(u16) -> Arc<dyn LeaseProvider> + Send + Sync
 const HINTS_FRESH: Duration = Duration::from_millis(50);
 
 /// The state of one group on this node, for tests and `GET /admin/counters`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GroupStatus {
     pub group: u16,
     pub role: &'static str,
@@ -165,8 +165,6 @@ pub struct GroupStatus {
     pub replica: Option<u64>,
     /// The first role this node had in the current regime.
     pub first_role: Option<&'static str>,
-    /// The best hint that this node knows.
-    pub known: Option<GroupHint>,
 }
 
 pub struct Counters {
@@ -326,62 +324,49 @@ impl Counters {
     }
 
     pub fn status(&self) -> Vec<GroupStatus> {
-        let view = self.view();
-        self.groups
-            .iter()
-            .map(|g| {
-                let leader = view.as_ref().and_then(|v| g.leader(v));
-                let inner = g.inner();
-                let (regime, follower, synced, lease_until, since) = match &inner.role {
-                    Role::Idle => (None, None, false, None, None),
-                    Role::Follower(f) => (Some(f.regime), None, f.synced(), None, Some(f.since)),
-                    Role::Leader(l) => (
-                        Some(l.regime),
-                        l.follower(),
-                        true,
-                        l.lease_until(),
-                        Some(l.since),
-                    ),
-                    Role::Raft(r) => (
-                        Some(r.regime()),
-                        None,
-                        r.is_voter(),
-                        None,
-                        Some(r.replica.started),
-                    ),
-                };
-                let (voters, learners, installed) = match &inner.role {
-                    Role::Raft(r) => (
-                        r.replica.voter_nodes(),
-                        r.replica.learner_nodes(),
-                        r.replica.sm.lock().installed,
-                    ),
-                    _ => (Vec::new(), Vec::new(), 0),
-                };
-                GroupStatus {
-                    group: g.g,
-                    role: inner.role.name(),
-                    regime,
-                    leader,
-                    follower,
-                    synced,
-                    lease_until,
-                    since,
-                    voters,
-                    learners,
-                    installed,
-                    replica: match &inner.role {
-                        Role::Raft(r) => Some(r.replica.replica),
-                        _ => None,
-                    },
-                    first_role: inner
-                        .first_role
-                        .filter(|(r, _)| Some(*r) == regime)
-                        .map(|(_, name)| name),
-                    known: inner.known.clone(),
-                }
-            })
+        (0..self.settings.groups)
+            .map(|g| self.status_of(g))
             .collect()
+    }
+
+    pub fn status_of(&self, g: u16) -> GroupStatus {
+        let group = self.group(g);
+        let leader = self.view().and_then(|v| group.leader(&v));
+        let inner = group.inner();
+        let regime = inner.role.regime();
+        let mut s = GroupStatus {
+            group: group.g,
+            role: inner.role.name(),
+            regime,
+            leader,
+            first_role: inner
+                .first_role
+                .filter(|(r, _)| Some(*r) == regime)
+                .map(|(_, name)| name),
+            ..GroupStatus::default()
+        };
+        match &inner.role {
+            Role::Idle => {}
+            Role::Follower(f) => {
+                s.synced = f.synced();
+                s.since = Some(f.since);
+            }
+            Role::Leader(l) => {
+                s.follower = l.follower();
+                s.synced = true;
+                s.lease_until = l.lease_until();
+                s.since = Some(l.since);
+            }
+            Role::Raft(r) => {
+                s.synced = r.is_voter();
+                s.since = Some(r.replica.started);
+                s.voters = r.replica.voter_nodes();
+                s.learners = r.replica.learner_nodes();
+                s.installed = r.replica.sm.lock().installed;
+                s.replica = Some(r.replica.replica);
+            }
+        }
+        s
     }
 
     /// Reconfigure every Raft group in which this node is a voter, or only `group`, to this node
@@ -402,14 +387,9 @@ impl Counters {
         done
     }
 
-    /// The counter state that this node holds for group `g`, as leader or follower.
+    /// The counter state that this node holds for group `g`, in any role.
     pub fn held_state(&self, g: u16) -> Option<state::CounterState> {
-        match self.group(g).role() {
-            Role::Idle => None,
-            Role::Follower(f) => Some(f.state()),
-            Role::Leader(l) => Some(l.state()),
-            Role::Raft(r) => Some(r.replica.state()),
-        }
+        self.group(g).role().state()
     }
 
     pub fn node(&self) -> Option<Arc<Node>> {
