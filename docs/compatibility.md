@@ -33,6 +33,37 @@ need topology awareness.
 
 Any other unknown command returns `-ERR unknown command '<name>'`.
 
+## Counter keys
+
+Keys with the prefix `--counter-prefix` (default `cnt:`) are counter keys. Every command on them is
+linearizable, also on one node. Counter keys accept the string and expiry commands:
+
+| Family | Commands |
+| --- | --- |
+| Strings | `GET`, `SET` (every option), `GETDEL`, `GETEX`, `MGET`, `MSET`, `INCR`, `DECR`, `INCRBY`, `DECRBY`, `INCRBYFLOAT`, `APPEND`, `STRLEN` |
+| Keys and expiry | `DEL`, `EXISTS`, `TYPE`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `TTL`, `PTTL`, `PERSIST` |
+
+Any other command on a counter key returns `-ERR counter keys accept only string and expiry
+commands`.
+
+`INCR`, `DECR`, `INCRBY`, and `DECRBY` on a counter key accept one expiry option at the end:
+
+```text
+INCR key [EX seconds | PX milliseconds | EXAT unix-seconds | PXAT unix-milliseconds]
+INCRBY key increment [EX seconds | PX milliseconds | EXAT unix-seconds | PXAT unix-milliseconds]
+```
+
+If the key has no deadline, the option sets one, as `EXPIRE NX` does. So the first increment
+starts a fixed window, and later increments keep it. This makes a rate limit one atomic
+command. On a normal key, these commands keep the Redis arity and reject the option.
+
+The leader of the group stamps each command with its clock. The deadline of a counter key follows
+that stamp on every copy, so the copies agree on expiry.
+
+A command that mixes counter keys and other keys returns
+`-ERR counter keys and other keys cannot be mixed in one command`. A multi-key command on counter
+keys of one group is atomic.
+
 ## Commands in a cluster
 
 In a cluster, any node accepts any command and forwards it to the owner of the key. Some commands
@@ -40,11 +71,13 @@ behave differently from Redis:
 
 - `MSET` and `DEL` with several keys are not atomic. If one part fails, the command returns
   `-TRYAGAIN` and the other parts stay applied. A retry of the whole command is safe.
-- `SCAN` and `RANDOMKEY` see only the keys of the node that the client is connected to.
+- `SCAN` and `RANDOMKEY` see only the keys of the node that the client is connected to. They never
+  list counter keys.
 - `DBSIZE` adds the counts of every member that answers and divides the sum by the replication
-  factor. The result is an estimate.
+  factor. The result is an estimate. It does not count counter keys.
 - `FLUSHDB` and `FLUSHALL` clear every member that answers. This is best-effort. A write that is on
-  its way during the flush can survive it.
+  its way during the flush can survive it. If a counter group has no leader or no quorum, the
+  command returns `-TRYAGAIN FLUSHALL cleared the cache and <n> of <G> counter groups`.
 
 See [Running a cluster](cluster.md) for the details.
 
@@ -67,6 +100,7 @@ See [security.md](security.md) for TLS, the authentication policy, scopes, and t
 | In-flight commands per connection | 10000 | `--max-pipeline` |
 | Members in one collection | 1048576 | `--max-collection-members` |
 | Memory budget | 1 GiB | `--max-memory` |
+| Counter state | 5% of the memory budget | `--counter-memory-percent` |
 | Store shards | 256 | `--shards` |
 
 A request over a size limit returns an error. A client that sends more commands than the pipeline
@@ -74,7 +108,9 @@ limit without reading its replies stops being read until the replies drain.
 
 When the memory budget is full, a write evicts the least recently used entries from a small
 random sample. A single value larger than the whole budget returns
-`-OOM value larger than maxmemory` and evicts nothing.
+`-OOM value larger than maxmemory` and evicts nothing. Counter state is never evicted. When it
+fills its share, a counter write that can grow it returns
+`-OOM command not allowed when the counter reserve is full`.
 
 ## Build features
 
@@ -139,6 +175,19 @@ In a cluster, replication adds these deviations:
 - A delete leaves a tombstone for one hour. Tombstones take memory, up to 5% of `--max-memory`.
 - `MSET` and multi-key `DEL` hold their failed parts like single writes. If a part still fails,
   the command returns `-TRYAGAIN` with the other parts applied.
+
+Counter keys add these deviations:
+
+- A counter command that cannot reach a leader within `--counter-timeout-ms` (default 1 s) returns
+  `-TRYAGAIN the counter group has no leader, try again later`. Nothing was applied.
+- A counter command whose outcome is in doubt returns
+  `-TRYAGAIN the counter command did not finish, it may have applied`. A retry of an `INCR` can
+  then count twice.
+- Below three nodes, a counter failover can lose the increments that the follower missed. With one
+  node, a node loss loses every counter.
+- During a partition that makes both sides declare the other side `DEAD`, both sides can serve
+  counters. On heal, the counters of the losing side are lost.
+- A full cold restart loses every counter.
 
 ## Baseline
 

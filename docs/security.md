@@ -392,7 +392,10 @@ The admin port (`--admin-listen`) has two kinds of routes:
   credentials. They show only the phase of the node.
 - Every route under `/admin/` needs admin credentials. `GET /admin/security` shows the TLS mode,
   the policy, readiness, and the key status of each issuer. `POST /admin/drain` starts a drain
-  (see `docs/cluster.md`).
+  (see `docs/cluster.md`). `GET /admin/counters` shows the role of the node in each counter
+  group. `POST /admin/raft/force-reconfigure` is `RAFT_FORCE_RECONFIGURE`. It makes the node the
+  only voter of each Raft group in which it is a voter, and it can lose counter writes. Only the
+  admin port has it.
 
 An admin request passes in one of two ways:
 

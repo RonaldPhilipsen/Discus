@@ -79,6 +79,8 @@ Each command gets a span named `command`. It has these child spans:
   the arguments, the authentication, and the scopes.
 - `store` covers the work on the store.
 - `forward` covers one forward to another node.
+- `raft` covers a counter command on its Raft leader: the quorum read or the log write.
+- `counter.sync` covers a leader-follower write that waits for its follower.
 
 The `command` span carries `db.system=redis` and `db.operation.name`, for example `GET`. A span
 never carries a key or a value. A command that returns an error sets the span status to error.
@@ -137,9 +139,15 @@ and 100.
 | `discus.hints.evicted` | counter | `peer` | Hints lost to a bound before a replay. |
 | `discus.gossip.rtt` | histogram (ms) | `peer` | The round-trip time of gossip requests. |
 | `discus.tombstones` | gauge | none | Stored tombstones (delete markers). |
+| `discus.counter.roles` | gauge | `state` | Counter groups by the role of this node: `leader`, `follower`, `voter`, `learner`, or `idle`. |
+| `discus.counter.memory` | gauge (bytes) | none | Counter state that this node holds. |
+| `discus.counter.mode.switches` | counter | `state` | Mode switches of a counter group by the new mode, `raft` or `leader_follower`. |
+| `discus.counter.failovers` | counter | none | Leader-follower groups that this node took over from another leader. |
+| `discus.raft.single_voter_groups` | gauge | none | Raft groups that this node leads and that have one voter. If it stays above zero, raise an alert. The next loss then loses the counters of the group. |
 
 The `peer` attribute is the node ID of the peer in hex. A transport event without a known peer is
-not counted.
+not counted. The `state` attribute holds a member state, a counter role, or a counter mode. A
+metric never carries a counter group number.
 
 ## Resource attributes
 

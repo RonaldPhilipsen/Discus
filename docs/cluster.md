@@ -121,7 +121,7 @@ roleRef:
 | Path | Answers 200 when |
 | --- | --- |
 | `/healthz` | The process runs. |
-| `/startupz` | The node was `NORMAL` at least once, the store is ready, and the counter tier is settled. The store is ready once the node received its handoff (see [Handoff](#handoff)). Counters do not exist yet, so the last condition always holds. |
+| `/startupz` | The node was `NORMAL` at least once, the store is ready, and the counter tier is settled. The store is ready once the node received its handoff (see [Handoff](#handoff)). The counter tier is settled once the node holds what each counter group needs from it (see [Strong counters](#strong-counters)). |
 | `/readyz` | The node is `NORMAL` in its current epoch and does not drain. |
 
 A join does not make the serving nodes unready.
@@ -134,9 +134,10 @@ route under `/admin/`.
 1. The node turns unready and marks itself `LEAVING`. The next epoch keeps it out of placement,
    so its keys move to other members.
 2. The node stops accepting connections. It keeps serving the open connections, sends the
-   entries of its keys to their new owners, and empties its replication queues. It stops waiting
-   when all three are done or `--shutdown-timeout-secs` (default 30 s) ends. Keys that did not
-   move in time refill as misses.
+   entries of its keys to their new owners, and empties its replication queues. A leader-follower
+   leader stops at once, and its follower takes over. The Raft leaders move the voter slots of the
+   node to other members. The node waits for all of this, at most `--shutdown-timeout-secs`
+   (default 30 s). Keys that did not move in time refill as misses.
 3. The node tells three members that it is gone, leaves gossip, and stops. The other members
    remove it from the epoch at once, without the suspicion timeout.
 
@@ -288,7 +289,20 @@ Follow these rules:
 | `--write-set-memory-percent` | 1 | The share of `--max-memory` for all write sets. |
 | `--write-set-ttl-ms` | 5000 | Time that a written key stays in the write set. |
 | `--hold-budget-ms` | 3000 | Time that a write to a failed primary waits for a new primary. |
-| `--counter-prefix` | `cnt:` | Keys with this prefix are counter keys. They never enter a write set. |
+| `--counter-prefix` | `cnt:` | Keys with this prefix are counter keys. The counter groups serve them. |
+| `--counter-groups` | 8 | The number of counter groups. A change is an offline procedure. |
+| `--counter-memory-percent` | 5 | The share of `--max-memory` for counter state. |
+| `--counter-timeout-ms` | 1000 | Time that a counter command waits for a leader, a quorum, or a commit. |
+| `--counter-lease-duration-ms` | 5000 | The duration of a counter group lease. |
+| `--counter-lease-renew-ms` | 1000 | The renewal interval of a counter group lease. |
+| `--counter-lease-margin-ms` | 1000 | A leader stops this long before its lease ends. |
+| `--counter-follower-timeout-ms` | 50 | Time that a leader-follower write waits for the follower. |
+| `--counter-dwell-ms` | 30000 | Time with three `NORMAL` members before a group switches to Raft. |
+| `--raft-heartbeat-ms` | 100 | The Raft heartbeat interval. |
+| `--raft-election-timeout-ms` | 1000 | The shortest Raft election timeout. The longest is twice this value. |
+| `--raft-snapshot-entries` | 10000 | Log entries between two Raft snapshots. |
+| `--raft-catchup-entries` | 100 | A learner this close to the log end of the leader becomes a voter. |
+| `--raft-voter-timeout-ms` | 10000 | The leader removes a voter that does not answer for this long. |
 
 A node with `--peer` and without the three certificate flags does not start. The error names the
 missing flags. With `static`, `--weight` must be 1, because every member has weight 1.
@@ -418,7 +432,7 @@ on a best-effort basis through its write set:
   A write that does not fit is not recorded. The write set never takes memory from the cache.
 - The write set ends with the connection. A new connection, also to the same node, can read a
   stale value.
-- Keys with the `--counter-prefix` (default `cnt:`) never enter a write set.
+- Counter keys never enter a write set. Every read of a counter key goes to its group leader.
 
 ## Hinted handoff
 
@@ -499,10 +513,133 @@ start a handoff, so a new owner does not start empty.
 `/startupz` passes only after the node received its handoff. A rolling restart therefore waits for
 each new pod to fill before it replaces the next one.
 
+## Strong counters
+
+Keys with the prefix `--counter-prefix` (default `cnt:`) are counter keys. Every command on a
+counter key is linearizable. Each command acts at one moment between its request and its reply,
+and every client sees the same order. Counter keys never take the asynchronous replication path.
+The prefix decides the path before the value is read. So a plain `SET` of a counter key cannot
+overwrite a counter with a stale value.
+
+### Groups and leaders
+
+The counter keys split into `--counter-groups` groups (default 8) by a hash of the key. Each group
+has one leader, and the leader runs every command of the group, also the reads. The node that a
+client is connected to forwards the command to the leader. Nodes learn the leader from the leader
+hints in gossip, from the group lease, and from the `RAFT_LEADER` question to the other members.
+
+A group runs in one of two modes:
+
+- Leader-follower mode with fewer than three `NORMAL` members.
+- Raft mode with three or more `NORMAL` members. A Raft group of two voters cannot survive the
+  loss of one, so a small cluster uses leader-follower mode.
+
+The target voters of a group are the top three `NORMAL` members by HRW (rendezvous hashing) with
+the group as the key.
+
+### Leader-follower mode
+
+The Kubernetes `Lease` `discus-counter-<g>` names the leader of group `g`. Its duration is
+`--counter-lease-duration-ms` (default 5 s), and the leader renews it every
+`--counter-lease-renew-ms` (default 1 s).
+
+- The leader serves only while its lease is valid by its own clock, minus
+  `--counter-lease-margin-ms` (default 1 s). Otherwise it returns `-TRYAGAIN`. Two leaders never
+  serve one group at the same time.
+- The leader sends each write to its follower and waits up to `--counter-follower-timeout-ms`
+  (default 50 ms) for the acknowledgement. After a timeout, it replies anyway and sends a fresh
+  snapshot to the follower later. A new follower starts with a snapshot.
+- Leadership is sticky. When the leader goes silent for one lease duration, the follower tries to
+  take the lease first. The other members wait one more lease duration.
+- A failover takes about one lease duration. It loses the writes that a lagging follower missed.
+  With one node, a node loss loses the counters. In this mode the counters depend on the API
+  server.
+
+With `--lease-provider none` and with static membership, no lease fences the leader. The epoch
+names the leader: the previous leader, else the previous follower, else the top member by HRW.
+This mode cannot fence a leader and is for development only.
+
+### Raft mode
+
+The leader writes each command to a replicated log. It replies once two of three voters hold the
+entry. A read asks a quorum first (ReadIndex), so a read never sees an old value. The log, the
+snapshots, and the votes live in memory.
+
+- A restarted pod has a new node ID, so it enters a group only as a learner. A node that discards
+  its counters also enters as a new learner.
+- The leader moves the voters toward the targets one change at a time. It adds a learner, waits
+  until it is within `--raft-catchup-entries` (default 100) entries of the log end, promotes it,
+  and then removes a voter that is not a target. A node starts at most one change every 200 ms.
+- The leader removes a voter that the epoch marks `DEAD`, or that does not answer for
+  `--raft-voter-timeout-ms` (default 10 s).
+- A minority side of a partition returns `-TRYAGAIN`.
+- A snapshot follows every `--raft-snapshot-entries` (default 10000) entries. A learner that is
+  far behind receives the snapshot.
+
+### Mode switches
+
+- Up: after three `NORMAL` members for `--counter-dwell-ms` (default 30 s), the lease holder of
+  each group creates a Raft group with itself as the only voter and its state as the start. It
+  lets the lease expire. The other members join as learners.
+- Down: below three members, a group switches at once. The Raft leader takes the lease. If the
+  leader is gone, a surviving voter takes it. Other members wait one lease duration first. If the
+  quorum was already lost, the last committed writes can be lost.
+
+### Quorum loss
+
+- When two of three voters are `DEAD`, the surviving voter makes itself the only voter of a new
+  Raft group with its state.
+- When every voter is `DEAD`, the top target creates the group again, empty. Its counters are
+  lost.
+- `POST /admin/raft/force-reconfigure` acts at once, before the failure detector declares the
+  voters `DEAD`. On every group in which the node is a voter, the node becomes the only voter
+  with its state. Add `?group=<g>` for one group. The reply lists the groups that changed. The
+  route needs admin credentials, like `/admin/drain`.
+
+`GET /admin/counters` shows the role of the node in each group, the leader, the voters, and the
+learners.
+
+A false `DEAD` during a partition lets both sides rebuild a group. On heal, the losing side
+discards its counters, and the writes that it accepted are lost.
+
+### Startup and drain
+
+`/startupz` looks at every group. A group is settled for the node in four cases:
+
+- The node is a voter of a Raft group that targets it.
+- The node is the synced follower.
+- The node is the leader.
+- The group does not need the node.
+
+A later change of the targets does not make a serving node unready.
+
+A drain hands the counter roles over. See [Drain](#drain).
+
+### Change the number of groups
+
+A change of `--counter-groups` moves keys to other groups, so it is an offline procedure.
+Linearizability does not hold across it, and Discus does not automate it:
+
+1. Stop the clients that write counter keys.
+2. Read every counter key with `GET` and `PTTL`, and save the values.
+3. Restart every node with the new `--counter-groups`. A full cold restart clears the counters.
+4. Write the saved values back with `SET` and `PX`.
+5. Start the clients again.
+
+### Growth from one node to three
+
+- One node holds the cluster lease and every group lease. The effective replication factor is 1.
+- A second node gains every key. It receives a handoff of the whole store and a snapshot of every
+  group as follower. The effective replication factor is 2.
+- A third node gains about a third of the owner slots. After the dwell time, every group switches
+  to Raft with three voters, and the replication factor is 3.
+
+Shrinking runs the same steps in reverse.
+
 ## Rejoin after a partition
 
-A node that the winning epoch does not list joins again. The node measures the time since it last
-heard from the winning members:
+A node that the winning epoch does not list joins again. It discards its counters. The node
+measures the time since it last heard from the winning members:
 
 - Shorter than the tombstone TTL: it keeps its store. It clears only the parts of the store that
   dropped tombstones early.
@@ -511,8 +648,8 @@ heard from the winning members:
 
 ## Memory
 
-`--max-memory` is one budget for entries, tombstones, hints, and write sets. At the limit, the
-node evicts in this order:
+`--max-memory` is one budget for entries, tombstones, hints, write sets, and counter state. At the
+limit, the node evicts in this order:
 
 1. Normal entries, by sampled LRU.
 2. The oldest hints.
@@ -523,6 +660,12 @@ Tombstones also have their own share, `--tombstone-reserve-percent` (default 5).
 tombstones go first. Write sets are never evicted for memory. Each key that enters a write set must
 fit its bounds.
 
+Counter state is never evicted. It has its own share, `--counter-memory-percent` (default 5). Each
+counter key costs its key, its value, and 64 bytes on every node that holds the group. When the
+counter bytes of the leader reach the share, a write that can grow the state returns
+`-OOM command not allowed when the counter reserve is full`. `DEL`, `GETDEL`, `PERSIST`, the expiry
+commands, and `FLUSHALL` still work.
+
 ## Multi-key and keyspace commands
 
 | Command | Behavior in a cluster |
@@ -530,9 +673,14 @@ fit its bounds.
 | `MGET` | Groups the keys by owner, asks each owner once, and returns the values in the order of the request. |
 | `EXISTS` | Groups the keys by owner and adds the counts. |
 | `MSET`, `DEL` | Group the keys by owner. This is not atomic. If one part fails, the command returns `-TRYAGAIN` and the other parts stay applied. A retry of the whole command is safe. |
-| `SCAN`, `RANDOMKEY` | Look at the keys of the node that the client is connected to only. |
-| `DBSIZE` | Adds the key counts of every member that answers and divides the sum by the replication factor. The result is an estimate. |
-| `FLUSHDB`, `FLUSHALL` | Clear every member that answers and return `OK`. Each member also drops its replication queues, its hints, and its handoffs. A write that is on its way during the flush can survive it. |
+| `SCAN`, `RANDOMKEY` | Look at the keys of the node that the client is connected to only. Counter keys are not listed. |
+| `DBSIZE` | Adds the key counts of every member that answers and divides the sum by the replication factor. The result is an estimate. Counter keys do not count. |
+| `FLUSHDB`, `FLUSHALL` | Clear every member that answers. Each member also drops its replication queues, its hints, and its handoffs. A write that is on its way during the flush can survive it. Then each counter group clears its counters. If a group has no leader or no quorum, the reply is `-TRYAGAIN FLUSHALL cleared the cache and <n> of <G> counter groups`. A retry is safe. |
+
+Multi-key commands on counter keys split by group. The keys of one group run as one command on
+its leader, so they are atomic. Keys of several groups fan out like normal keys. A command that
+mixes counter keys and other keys returns
+`-ERR counter keys and other keys cannot be mixed in one command`.
 
 ## Limits of this release
 

@@ -48,6 +48,19 @@ ok() {
   fi
 }
 
+# absent NAME TEXT ARGS...: the reply must not contain the text.
+absent() {
+  local name=$1 text=$2 out
+  shift 2
+  out=$(cli "$@")
+  if grep -q -F -- "$text" <<<"$out"; then
+    echo "FAIL $name: $text in: $out"
+    fail=1
+  else
+    echo "ok   $name"
+  fi
+}
+
 # unsupported NAME ARGS...: the reply must be the Discus error.
 unsupported() {
   local name=$1 out
@@ -135,6 +148,21 @@ ok ZRANGEBYSCORE 'a' ZRANGEBYSCORE "$p:z" -inf +inf
 ok ZINCRBY '^2$' ZINCRBY "$p:z" 1 a
 ok ZCOUNT '^2$' ZCOUNT "$p:z" 0 5
 ok ZREM '^1$' ZREM "$p:z" a
+
+# Counter keys
+c="cnt:$p"
+ok "INCR counter" '^1$' INCR "$c:n"
+ok "INCRBY counter" '^5$' INCRBY "$c:n" 4
+ok "INCR EX counter" '^1$' INCR "$c:w" EX 100
+ok "TTL counter" '^(100|99)$' TTL "$c:w"
+ok "INCR EX keeps the window" '^2$' INCR "$c:w" EX 5
+ok "TTL window kept" '^(100|99)$' TTL "$c:w"
+ok "GET counter" '^5$' GET "$c:n"
+ok "TYPE counter" '^string$' TYPE "$c:n"
+absent "SCAN skips counters" "$c" SCAN 0 MATCH "$c:*" COUNT 1000
+ok "HSET counter" 'only string and expiry' HSET "$c:h" f v
+ok "MGET mixed" 'cannot be mixed' MGET "$c:n" "$p:s"
+ok "DEL counter" '^2$' DEL "$c:n" "$c:w"
 
 # Keys
 ok SCAN "$p" SCAN 0 MATCH "$p:*" COUNT 1000
