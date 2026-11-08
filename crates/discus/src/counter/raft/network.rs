@@ -88,14 +88,26 @@ fn unreachable<E: std::error::Error>(why: impl std::fmt::Display) -> RPCError<u6
 }
 
 impl NetClient {
-    async fn call(&self, message: Message, option: &RPCOption) -> Result<RaftReply, String> {
-        match self.link.send(self.to, message, option.hard_ttl()).await? {
-            Message::RaftReply(r) => Ok(r),
-            other => Err(format!(
-                "expected RAFT_REPLY, got message type {}",
-                other.type_code()
-            )),
-        }
+    /// One RPC: send `message`, read the reply with `of`, and count the contact.
+    #[allow(clippy::result_large_err)] // the error type of `RaftNetwork`
+    async fn rpc<R, E: std::error::Error>(
+        &self,
+        message: Message,
+        option: &RPCOption,
+        of: fn(RaftReply) -> Option<R>,
+    ) -> Result<R, RPCError<u64, Peer, E>> {
+        let reply = match self.link.send(self.to, message, option.hard_ttl()).await {
+            Ok(Message::RaftReply(r)) => of(r).ok_or_else(|| unreachable("refused"))?,
+            Ok(other) => {
+                return Err(unreachable(format!(
+                    "expected RAFT_REPLY, got message type {}",
+                    other.type_code()
+                )))
+            }
+            Err(e) => return Err(unreachable(e)),
+        };
+        self.contacts.saw(self.header.target);
+        Ok(reply)
     }
 }
 
@@ -106,10 +118,7 @@ impl RaftNetwork<TypeConfig> for NetClient {
         option: RPCOption,
     ) -> Result<AppendEntriesResponse<u64>, RPCError<u64, Peer, RaftError<u64>>> {
         let message = Message::RaftAppend(convert::append_to(self.header, &rpc));
-        let reply = self.call(message, &option).await.map_err(unreachable)?;
-        let reply = convert::append_reply_of(reply).ok_or_else(|| unreachable("refused"))?;
-        self.contacts.saw(self.header.target);
-        Ok(reply)
+        self.rpc(message, &option, convert::append_reply_of).await
     }
 
     async fn install_snapshot(
@@ -120,11 +129,8 @@ impl RaftNetwork<TypeConfig> for NetClient {
         InstallSnapshotResponse<u64>,
         RPCError<u64, Peer, RaftError<u64, InstallSnapshotError>>,
     > {
-        let message = Message::RaftSnapshot(convert::snapshot_to(self.header, &rpc));
-        let reply = self.call(message, &option).await.map_err(unreachable)?;
-        let reply = convert::snapshot_reply_of(reply).ok_or_else(|| unreachable("refused"))?;
-        self.contacts.saw(self.header.target);
-        Ok(reply)
+        let message = Message::RaftSnapshot(convert::snapshot_to(self.header, rpc));
+        self.rpc(message, &option, convert::snapshot_reply_of).await
     }
 
     async fn vote(
@@ -133,9 +139,6 @@ impl RaftNetwork<TypeConfig> for NetClient {
         option: RPCOption,
     ) -> Result<VoteResponse<u64>, RPCError<u64, Peer, RaftError<u64>>> {
         let message = Message::RaftVote(convert::vote_req_to(self.header, &rpc));
-        let reply = self.call(message, &option).await.map_err(unreachable)?;
-        let reply = convert::vote_reply_of(reply).ok_or_else(|| unreachable("refused"))?;
-        self.contacts.saw(self.header.target);
-        Ok(reply)
+        self.rpc(message, &option, convert::vote_reply_of).await
     }
 }
