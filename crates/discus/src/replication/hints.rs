@@ -5,7 +5,7 @@
 //! maximum age, and memory pressure. An evicted hint is lost, so its refill bucket is marked for
 //! the target, and the first replay batch tells the target to discard those buckets.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -13,8 +13,9 @@ use discus_placement::{NodeId, Version};
 use discus_store::{estimate_size, refill_bucket, Entry};
 use lru::LruCache;
 
-/// The bookkeeping cost of one hint on top of its entry.
-const HINT_OVERHEAD: u64 = 64;
+/// The bookkeeping cost of one hint on top of its entry: its LRU node and its place in the
+/// replay order.
+const HINT_OVERHEAD: u64 = 128;
 
 #[derive(Debug, Clone, Copy)]
 pub struct HintLimits {
@@ -33,6 +34,9 @@ pub struct Hint {
 
 struct Target {
     hints: LruCache<Bytes, Hint>,
+    /// The hints by version. A replay batch takes the oldest versions from here, so a replay of
+    /// N hints costs O(N log N) in all, not a sort of every hint per batch.
+    order: BTreeSet<(Version, Bytes)>,
     bytes: u64,
     /// The refill buckets of lost hints, each with the mark of its latest loss.
     lost: BTreeMap<u8, u64>,
@@ -41,6 +45,26 @@ struct Target {
 }
 
 impl Target {
+    /// Store a hint and return the hint it replaced.
+    fn put(&mut self, key: Bytes, hint: Hint) -> Option<Hint> {
+        let old = self.pop(&key);
+        self.order.insert((hint.entry.version, key.clone()));
+        self.hints.push(key, hint);
+        old
+    }
+
+    fn pop(&mut self, key: &[u8]) -> Option<Hint> {
+        let (k, h) = self.hints.pop_entry(key)?;
+        self.order.remove(&(h.entry.version, k));
+        Some(h)
+    }
+
+    fn pop_lru(&mut self) -> Option<(Bytes, Hint)> {
+        let (k, h) = self.hints.pop_lru()?;
+        self.order.remove(&(h.entry.version, k.clone()));
+        Some((k, h))
+    }
+
     fn mark_lost(&mut self, key: &[u8]) {
         self.marks += 1;
         self.lost.insert(refill_bucket(key), self.marks);
@@ -58,6 +82,7 @@ impl Target {
     fn new() -> Target {
         Target {
             hints: LruCache::unbounded(),
+            order: BTreeSet::new(),
             bytes: 0,
             lost: BTreeMap::new(),
             marks: 0,
@@ -105,23 +130,22 @@ impl HintStore {
     ) -> Vec<(NodeId, u64)> {
         let size = estimate_size(&key, &entry) + HINT_OVERHEAD;
         let t = self.targets.entry(target).or_insert_with(Target::new);
-        if let Some(old) = t.hints.pop(&key) {
-            t.bytes -= old.size;
-            self.bytes -= old.size;
-        }
-        t.hints.push(
+        if let Some(old) = t.put(
             key,
             Hint {
                 entry,
                 at: now,
                 size,
             },
-        );
+        ) {
+            t.bytes -= old.size;
+            self.bytes -= old.size;
+        }
         t.bytes += size;
         self.bytes += size;
         let mut evicted = 0;
         while t.hints.len() > self.limits.max_entries || t.bytes > self.limits.max_bytes {
-            let Some((k, h)) = t.hints.pop_lru() else {
+            let Some((k, h)) = t.pop_lru() else {
                 break;
             };
             t.bytes -= h.size;
@@ -151,7 +175,7 @@ impl HintStore {
             .min()?
             .1;
         let t = self.targets.get_mut(&target)?;
-        let (k, h) = t.hints.pop_lru()?;
+        let (k, h) = t.pop_lru()?;
         t.bytes -= h.size;
         self.bytes -= h.size;
         t.mark_lost(&k);
@@ -167,7 +191,7 @@ impl HintStore {
                 .peek_lru()
                 .is_some_and(|(_, h)| now.duration_since(h.at) >= self.limits.max_age)
             {
-                let Some((k, h)) = t.hints.pop_lru() else {
+                let Some((k, h)) = t.pop_lru() else {
                     break;
                 };
                 t.bytes -= h.size;
@@ -198,11 +222,10 @@ impl HintStore {
         let Some(t) = self.targets.get(&target) else {
             return Vec::new();
         };
-        let mut all: Vec<(&Bytes, &Hint)> = t.hints.iter().collect();
-        all.sort_by_key(|(_, h)| h.entry.version);
-        all.into_iter()
+        t.order
+            .iter()
             .take(max)
-            .map(|(k, h)| (k.clone(), h.entry.clone()))
+            .filter_map(|(_, k)| t.hints.peek(k).map(|h| (k.clone(), h.entry.clone())))
             .collect()
     }
 
@@ -213,7 +236,7 @@ impl HintStore {
         };
         for (k, v) in sent {
             if t.hints.peek(k).is_some_and(|h| h.entry.version == *v) {
-                if let Some(h) = t.hints.pop(k) {
+                if let Some(h) = t.pop(k) {
                     t.bytes -= h.size;
                     self.bytes -= h.size;
                 }
@@ -263,7 +286,7 @@ impl HintStore {
                 .cloned()
                 .collect();
             for k in drop {
-                if let Some(h) = t.hints.pop(&k) {
+                if let Some(h) = t.pop(&k) {
                     t.bytes -= h.size;
                     self.bytes -= h.size;
                 }
@@ -437,6 +460,32 @@ mod tests {
         let again = h.lost(T);
         h.clear_lost(T, &again);
         assert!(h.lost(T).buckets.is_empty());
+    }
+
+    /// Every hint is in the replay order once, with its current version, through replacement,
+    /// eviction, confirmation, and retain. A replay batch reads that order and sorts nothing.
+    #[test]
+    fn the_replay_order_follows_every_change() {
+        let mut h = HintStore::new(limits(4));
+        let now = Instant::now();
+        for (i, key) in ["a", "b", "c", "d"].iter().enumerate() {
+            h.record(T, k(key), entry(10 - i as u64), now);
+        }
+        h.record(T, k("b"), entry(20), now);
+        h.record(T, k("e"), entry(1), now);
+        h.confirm(T, &[(k("c"), entry(8).version)]);
+        h.retain(|_, key| key.as_ref() != b"d");
+        for t in h.targets.values() {
+            assert_eq!(t.order.len(), t.hints.len());
+            for (v, key) in &t.order {
+                assert_eq!(t.hints.peek(key).map(|x| x.entry.version), Some(*v));
+            }
+        }
+        let keys: Vec<Bytes> = h.batch(T, 10).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, vec![k("e"), k("b")]);
+        h.expire(now + Duration::from_secs(61));
+        assert!(h.batch(T, 10).is_empty());
+        assert!(h.targets.values().all(|t| t.order.is_empty()));
     }
 
     #[test]
