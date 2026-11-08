@@ -6,3 +6,4 @@ include "envelope.fbs";
 include "rpc.fbs";
 include "gossip.fbs";
 include "replication.fbs";
+include "counter.fbs";

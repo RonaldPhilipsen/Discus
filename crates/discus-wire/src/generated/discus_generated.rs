@@ -107,10 +107,10 @@ impl ::flatbuffers::SimpleToVerifyInSlice for MemberState {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_MESSAGE_TYPE: u16 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_MESSAGE_TYPE: u16 = 15;
+pub const ENUM_MAX_MESSAGE_TYPE: u16 = 23;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_MESSAGE_TYPE: [MessageType; 16] = [
+pub const ENUM_VALUES_MESSAGE_TYPE: [MessageType; 24] = [
   MessageType::NONE,
   MessageType::HELLO,
   MessageType::HANDSHAKE_FAILED,
@@ -127,10 +127,18 @@ pub const ENUM_VALUES_MESSAGE_TYPE: [MessageType; 16] = [
   MessageType::FETCH,
   MessageType::ENTRIES,
   MessageType::DIGEST,
+  MessageType::RAFT_LEADER,
+  MessageType::RAFT_CONFIG,
+  MessageType::RAFT_VOTE,
+  MessageType::RAFT_APPEND,
+  MessageType::RAFT_SNAPSHOT,
+  MessageType::RAFT_REPLY,
+  MessageType::COUNTER_SYNC,
+  MessageType::COUNTER_ACK,
 ];
 
 /// Append-only. GOSSIP carries every gossip body. REPLICATE to DIGEST carry the bulk traffic
-/// of replication and handoff. Later plans add RAFT_LEADER and RAFT_CONFIG.
+/// of replication and handoff. RAFT_LEADER to COUNTER_ACK carry the counter tier.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct MessageType(pub u16);
@@ -152,9 +160,17 @@ impl MessageType {
   pub const FETCH: Self = Self(13);
   pub const ENTRIES: Self = Self(14);
   pub const DIGEST: Self = Self(15);
+  pub const RAFT_LEADER: Self = Self(16);
+  pub const RAFT_CONFIG: Self = Self(17);
+  pub const RAFT_VOTE: Self = Self(18);
+  pub const RAFT_APPEND: Self = Self(19);
+  pub const RAFT_SNAPSHOT: Self = Self(20);
+  pub const RAFT_REPLY: Self = Self(21);
+  pub const COUNTER_SYNC: Self = Self(22);
+  pub const COUNTER_ACK: Self = Self(23);
 
   pub const ENUM_MIN: u16 = 0;
-  pub const ENUM_MAX: u16 = 15;
+  pub const ENUM_MAX: u16 = 23;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::NONE,
     Self::HELLO,
@@ -172,6 +188,14 @@ impl MessageType {
     Self::FETCH,
     Self::ENTRIES,
     Self::DIGEST,
+    Self::RAFT_LEADER,
+    Self::RAFT_CONFIG,
+    Self::RAFT_VOTE,
+    Self::RAFT_APPEND,
+    Self::RAFT_SNAPSHOT,
+    Self::RAFT_REPLY,
+    Self::COUNTER_SYNC,
+    Self::COUNTER_ACK,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -192,6 +216,14 @@ impl MessageType {
       Self::FETCH => Some("FETCH"),
       Self::ENTRIES => Some("ENTRIES"),
       Self::DIGEST => Some("DIGEST"),
+      Self::RAFT_LEADER => Some("RAFT_LEADER"),
+      Self::RAFT_CONFIG => Some("RAFT_CONFIG"),
+      Self::RAFT_VOTE => Some("RAFT_VOTE"),
+      Self::RAFT_APPEND => Some("RAFT_APPEND"),
+      Self::RAFT_SNAPSHOT => Some("RAFT_SNAPSHOT"),
+      Self::RAFT_REPLY => Some("RAFT_REPLY"),
+      Self::COUNTER_SYNC => Some("COUNTER_SYNC"),
+      Self::COUNTER_ACK => Some("COUNTER_ACK"),
       _ => None,
     }
   }
@@ -835,6 +867,277 @@ impl<'a> ::flatbuffers::Verifiable for ValueKind {
 }
 
 impl ::flatbuffers::SimpleToVerifyInSlice for ValueKind {}
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MIN_COUNTER_MODE: u8 = 0;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MAX_COUNTER_MODE: u8 = 1;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+#[allow(non_camel_case_types)]
+pub const ENUM_VALUES_COUNTER_MODE: [CounterMode; 2] = [
+  CounterMode::LEADER_FOLLOWER,
+  CounterMode::RAFT,
+];
+
+/// Append-only.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(transparent)]
+pub struct CounterMode(pub u8);
+#[allow(non_upper_case_globals)]
+impl CounterMode {
+  pub const LEADER_FOLLOWER: Self = Self(0);
+  pub const RAFT: Self = Self(1);
+
+  pub const ENUM_MIN: u8 = 0;
+  pub const ENUM_MAX: u8 = 1;
+  pub const ENUM_VALUES: &'static [Self] = &[
+    Self::LEADER_FOLLOWER,
+    Self::RAFT,
+  ];
+  /// Returns the variant's name or "" if unknown.
+  pub fn variant_name(self) -> Option<&'static str> {
+    match self {
+      Self::LEADER_FOLLOWER => Some("LEADER_FOLLOWER"),
+      Self::RAFT => Some("RAFT"),
+      _ => None,
+    }
+  }
+}
+impl ::core::fmt::Debug for CounterMode {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+    if let Some(name) = self.variant_name() {
+      f.write_str(name)
+    } else {
+      f.write_fmt(format_args!("<UNKNOWN {:?}>", self.0))
+    }
+  }
+}
+impl<'a> ::flatbuffers::Follow<'a> for CounterMode {
+  type Inner = Self;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    let b = unsafe { ::flatbuffers::read_scalar_at::<u8>(buf, loc) };
+    Self(b)
+  }
+}
+
+impl ::flatbuffers::Push for CounterMode {
+    type Output = CounterMode;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        unsafe { ::flatbuffers::emplace_scalar::<u8>(dst, self.0) };
+    }
+}
+
+impl ::flatbuffers::EndianScalar for CounterMode {
+  type Scalar = u8;
+  #[inline]
+  fn to_little_endian(self) -> u8 {
+    self.0.to_le()
+  }
+  #[inline]
+  #[allow(clippy::wrong_self_convention)]
+  fn from_little_endian(v: u8) -> Self {
+    let b = u8::from_le(v);
+    Self(b)
+  }
+}
+
+impl<'a> ::flatbuffers::Verifiable for CounterMode {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    u8::run_verifier(v, pos)
+  }
+}
+
+impl ::flatbuffers::SimpleToVerifyInSlice for CounterMode {}
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MIN_RAFT_ENTRY_KIND: u8 = 0;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MAX_RAFT_ENTRY_KIND: u8 = 2;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+#[allow(non_camel_case_types)]
+pub const ENUM_VALUES_RAFT_ENTRY_KIND: [RaftEntryKind; 3] = [
+  RaftEntryKind::BLANK,
+  RaftEntryKind::COMMAND,
+  RaftEntryKind::MEMBERSHIP,
+];
+
+/// Append-only.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(transparent)]
+pub struct RaftEntryKind(pub u8);
+#[allow(non_upper_case_globals)]
+impl RaftEntryKind {
+  pub const BLANK: Self = Self(0);
+  pub const COMMAND: Self = Self(1);
+  pub const MEMBERSHIP: Self = Self(2);
+
+  pub const ENUM_MIN: u8 = 0;
+  pub const ENUM_MAX: u8 = 2;
+  pub const ENUM_VALUES: &'static [Self] = &[
+    Self::BLANK,
+    Self::COMMAND,
+    Self::MEMBERSHIP,
+  ];
+  /// Returns the variant's name or "" if unknown.
+  pub fn variant_name(self) -> Option<&'static str> {
+    match self {
+      Self::BLANK => Some("BLANK"),
+      Self::COMMAND => Some("COMMAND"),
+      Self::MEMBERSHIP => Some("MEMBERSHIP"),
+      _ => None,
+    }
+  }
+}
+impl ::core::fmt::Debug for RaftEntryKind {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+    if let Some(name) = self.variant_name() {
+      f.write_str(name)
+    } else {
+      f.write_fmt(format_args!("<UNKNOWN {:?}>", self.0))
+    }
+  }
+}
+impl<'a> ::flatbuffers::Follow<'a> for RaftEntryKind {
+  type Inner = Self;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    let b = unsafe { ::flatbuffers::read_scalar_at::<u8>(buf, loc) };
+    Self(b)
+  }
+}
+
+impl ::flatbuffers::Push for RaftEntryKind {
+    type Output = RaftEntryKind;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        unsafe { ::flatbuffers::emplace_scalar::<u8>(dst, self.0) };
+    }
+}
+
+impl ::flatbuffers::EndianScalar for RaftEntryKind {
+  type Scalar = u8;
+  #[inline]
+  fn to_little_endian(self) -> u8 {
+    self.0.to_le()
+  }
+  #[inline]
+  #[allow(clippy::wrong_self_convention)]
+  fn from_little_endian(v: u8) -> Self {
+    let b = u8::from_le(v);
+    Self(b)
+  }
+}
+
+impl<'a> ::flatbuffers::Verifiable for RaftEntryKind {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    u8::run_verifier(v, pos)
+  }
+}
+
+impl ::flatbuffers::SimpleToVerifyInSlice for RaftEntryKind {}
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MIN_RAFT_OUTCOME: u8 = 0;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MAX_RAFT_OUTCOME: u8 = 4;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+#[allow(non_camel_case_types)]
+pub const ENUM_VALUES_RAFT_OUTCOME: [RaftOutcome; 5] = [
+  RaftOutcome::OK,
+  RaftOutcome::CONFLICT,
+  RaftOutcome::HIGHER_VOTE,
+  RaftOutcome::PARTIAL,
+  RaftOutcome::REFUSED,
+];
+
+/// Append-only. REFUSED: the receiver has no replica for the regime and the target.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(transparent)]
+pub struct RaftOutcome(pub u8);
+#[allow(non_upper_case_globals)]
+impl RaftOutcome {
+  pub const OK: Self = Self(0);
+  pub const CONFLICT: Self = Self(1);
+  pub const HIGHER_VOTE: Self = Self(2);
+  pub const PARTIAL: Self = Self(3);
+  pub const REFUSED: Self = Self(4);
+
+  pub const ENUM_MIN: u8 = 0;
+  pub const ENUM_MAX: u8 = 4;
+  pub const ENUM_VALUES: &'static [Self] = &[
+    Self::OK,
+    Self::CONFLICT,
+    Self::HIGHER_VOTE,
+    Self::PARTIAL,
+    Self::REFUSED,
+  ];
+  /// Returns the variant's name or "" if unknown.
+  pub fn variant_name(self) -> Option<&'static str> {
+    match self {
+      Self::OK => Some("OK"),
+      Self::CONFLICT => Some("CONFLICT"),
+      Self::HIGHER_VOTE => Some("HIGHER_VOTE"),
+      Self::PARTIAL => Some("PARTIAL"),
+      Self::REFUSED => Some("REFUSED"),
+      _ => None,
+    }
+  }
+}
+impl ::core::fmt::Debug for RaftOutcome {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+    if let Some(name) = self.variant_name() {
+      f.write_str(name)
+    } else {
+      f.write_fmt(format_args!("<UNKNOWN {:?}>", self.0))
+    }
+  }
+}
+impl<'a> ::flatbuffers::Follow<'a> for RaftOutcome {
+  type Inner = Self;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    let b = unsafe { ::flatbuffers::read_scalar_at::<u8>(buf, loc) };
+    Self(b)
+  }
+}
+
+impl ::flatbuffers::Push for RaftOutcome {
+    type Output = RaftOutcome;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        unsafe { ::flatbuffers::emplace_scalar::<u8>(dst, self.0) };
+    }
+}
+
+impl ::flatbuffers::EndianScalar for RaftOutcome {
+  type Scalar = u8;
+  #[inline]
+  fn to_little_endian(self) -> u8 {
+    self.0.to_le()
+  }
+  #[inline]
+  #[allow(clippy::wrong_self_convention)]
+  fn from_little_endian(v: u8) -> Self {
+    let b = u8::from_le(v);
+    Self(b)
+  }
+}
+
+impl<'a> ::flatbuffers::Verifiable for RaftOutcome {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    u8::run_verifier(v, pos)
+  }
+}
+
+impl ::flatbuffers::SimpleToVerifyInSlice for RaftOutcome {}
 /// A 128-bit identifier. NodeId and ClusterId use big-endian bytes.
 // struct Id128, aligned to 1
 #[repr(transparent)]
@@ -1136,6 +1439,437 @@ impl<'a> EpochId {
   #[allow(clippy::identity_op)]
   pub fn set_origin(&mut self, x: &Id128) {
     self.0[8..8 + 16].copy_from_slice(&x.0)
+  }
+
+}
+
+/// One leadership of a group: a leader-follower lease term or a Raft instance. Ordered by
+/// generation, then origin.
+// struct Regime, aligned to 8
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq)]
+pub struct Regime(pub [u8; 24]);
+impl Default for Regime { 
+  fn default() -> Self { 
+    Self([0; 24])
+  }
+}
+impl ::core::fmt::Debug for Regime {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+    f.debug_struct("Regime")
+      .field("generation", &self.generation())
+      .field("origin", &self.origin())
+      .finish()
+  }
+}
+
+impl ::flatbuffers::SimpleToVerifyInSlice for Regime {}
+impl<'a> ::flatbuffers::Follow<'a> for Regime {
+  type Inner = &'a Regime;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { <&'a Regime>::follow(buf, loc) }
+  }
+}
+impl<'a> ::flatbuffers::Follow<'a> for &'a Regime {
+  type Inner = &'a Regime;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { ::flatbuffers::follow_cast_ref::<Regime>(buf, loc) }
+  }
+}
+impl<'b> ::flatbuffers::Push for Regime {
+    type Output = Regime;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        let src = unsafe { ::core::slice::from_raw_parts(self as *const Regime as *const u8, <Self as ::flatbuffers::Push>::size()) };
+        dst.copy_from_slice(src);
+    }
+    #[inline]
+    fn alignment() -> ::flatbuffers::PushAlignment {
+        ::flatbuffers::PushAlignment::new(8)
+    }
+}
+
+impl<'a> ::flatbuffers::Verifiable for Regime {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.in_buffer::<Self>(pos)
+  }
+}
+
+impl<'a> Regime {
+  #[allow(clippy::too_many_arguments)]
+  pub fn new(
+    generation: u64,
+    origin: &Id128,
+  ) -> Self {
+    let mut s = Self([0; 24]);
+    s.set_generation(generation);
+    s.set_origin(origin);
+    s
+  }
+
+  pub fn generation(&self) -> u64 {
+    let mut mem = ::core::mem::MaybeUninit::<<u64 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[0..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_generation(&mut self, x: u64) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[0..].as_mut_ptr(),
+        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn origin(&self) -> &Id128 {
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid struct in this slot
+    unsafe { &*(self.0[8..].as_ptr() as *const Id128) }
+  }
+
+  #[allow(clippy::identity_op)]
+  pub fn set_origin(&mut self, x: &Id128) {
+    self.0[8..8 + 16].copy_from_slice(&x.0)
+  }
+
+}
+
+/// A Raft log position. `leader` is the replica ID of the leader that wrote the entry.
+// struct RaftLogId, aligned to 8
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq)]
+pub struct RaftLogId(pub [u8; 24]);
+impl Default for RaftLogId { 
+  fn default() -> Self { 
+    Self([0; 24])
+  }
+}
+impl ::core::fmt::Debug for RaftLogId {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+    f.debug_struct("RaftLogId")
+      .field("term", &self.term())
+      .field("leader", &self.leader())
+      .field("index", &self.index())
+      .finish()
+  }
+}
+
+impl ::flatbuffers::SimpleToVerifyInSlice for RaftLogId {}
+impl<'a> ::flatbuffers::Follow<'a> for RaftLogId {
+  type Inner = &'a RaftLogId;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { <&'a RaftLogId>::follow(buf, loc) }
+  }
+}
+impl<'a> ::flatbuffers::Follow<'a> for &'a RaftLogId {
+  type Inner = &'a RaftLogId;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { ::flatbuffers::follow_cast_ref::<RaftLogId>(buf, loc) }
+  }
+}
+impl<'b> ::flatbuffers::Push for RaftLogId {
+    type Output = RaftLogId;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        let src = unsafe { ::core::slice::from_raw_parts(self as *const RaftLogId as *const u8, <Self as ::flatbuffers::Push>::size()) };
+        dst.copy_from_slice(src);
+    }
+    #[inline]
+    fn alignment() -> ::flatbuffers::PushAlignment {
+        ::flatbuffers::PushAlignment::new(8)
+    }
+}
+
+impl<'a> ::flatbuffers::Verifiable for RaftLogId {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.in_buffer::<Self>(pos)
+  }
+}
+
+impl<'a> RaftLogId {
+  #[allow(clippy::too_many_arguments)]
+  pub fn new(
+    term: u64,
+    leader: u64,
+    index: u64,
+  ) -> Self {
+    let mut s = Self([0; 24]);
+    s.set_term(term);
+    s.set_leader(leader);
+    s.set_index(index);
+    s
+  }
+
+  pub fn term(&self) -> u64 {
+    let mut mem = ::core::mem::MaybeUninit::<<u64 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[0..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_term(&mut self, x: u64) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[0..].as_mut_ptr(),
+        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn leader(&self) -> u64 {
+    let mut mem = ::core::mem::MaybeUninit::<<u64 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[8..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_leader(&mut self, x: u64) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[8..].as_mut_ptr(),
+        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn index(&self) -> u64 {
+    let mut mem = ::core::mem::MaybeUninit::<<u64 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[16..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_index(&mut self, x: u64) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[16..].as_mut_ptr(),
+        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+}
+
+// struct RaftVote, aligned to 8
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq)]
+pub struct RaftVote(pub [u8; 24]);
+impl Default for RaftVote { 
+  fn default() -> Self { 
+    Self([0; 24])
+  }
+}
+impl ::core::fmt::Debug for RaftVote {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+    f.debug_struct("RaftVote")
+      .field("term", &self.term())
+      .field("leader", &self.leader())
+      .field("committed", &self.committed())
+      .finish()
+  }
+}
+
+impl ::flatbuffers::SimpleToVerifyInSlice for RaftVote {}
+impl<'a> ::flatbuffers::Follow<'a> for RaftVote {
+  type Inner = &'a RaftVote;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { <&'a RaftVote>::follow(buf, loc) }
+  }
+}
+impl<'a> ::flatbuffers::Follow<'a> for &'a RaftVote {
+  type Inner = &'a RaftVote;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { ::flatbuffers::follow_cast_ref::<RaftVote>(buf, loc) }
+  }
+}
+impl<'b> ::flatbuffers::Push for RaftVote {
+    type Output = RaftVote;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        let src = unsafe { ::core::slice::from_raw_parts(self as *const RaftVote as *const u8, <Self as ::flatbuffers::Push>::size()) };
+        dst.copy_from_slice(src);
+    }
+    #[inline]
+    fn alignment() -> ::flatbuffers::PushAlignment {
+        ::flatbuffers::PushAlignment::new(8)
+    }
+}
+
+impl<'a> ::flatbuffers::Verifiable for RaftVote {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.in_buffer::<Self>(pos)
+  }
+}
+
+impl<'a> RaftVote {
+  #[allow(clippy::too_many_arguments)]
+  pub fn new(
+    term: u64,
+    leader: u64,
+    committed: bool,
+  ) -> Self {
+    let mut s = Self([0; 24]);
+    s.set_term(term);
+    s.set_leader(leader);
+    s.set_committed(committed);
+    s
+  }
+
+  pub fn term(&self) -> u64 {
+    let mut mem = ::core::mem::MaybeUninit::<<u64 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[0..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_term(&mut self, x: u64) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[0..].as_mut_ptr(),
+        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn leader(&self) -> u64 {
+    let mut mem = ::core::mem::MaybeUninit::<<u64 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[8..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_leader(&mut self, x: u64) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[8..].as_mut_ptr(),
+        ::core::mem::size_of::<<u64 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn committed(&self) -> bool {
+    let mut mem = ::core::mem::MaybeUninit::<<bool as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[16..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<bool as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_committed(&mut self, x: bool) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[16..].as_mut_ptr(),
+        ::core::mem::size_of::<<bool as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
   }
 
 }
@@ -4242,6 +4976,2453 @@ impl ::core::fmt::Debug for Digest<'_> {
       ds.field("from", &self.from());
       ds.field("to", &self.to());
       ds.field("sums", &self.sums());
+      ds.finish()
+  }
+}
+pub enum GroupHintOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// What one node knows about the leader of one group.
+pub struct GroupHint<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for GroupHint<'a> {
+  type Inner = GroupHint<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> GroupHint<'a> {
+  pub const VT_GROUP: ::flatbuffers::VOffsetT = 4;
+  pub const VT_MODE: ::flatbuffers::VOffsetT = 6;
+  pub const VT_REGIME: ::flatbuffers::VOffsetT = 8;
+  pub const VT_LEADER: ::flatbuffers::VOffsetT = 10;
+  pub const VT_TERM: ::flatbuffers::VOffsetT = 12;
+  pub const VT_FOLLOWER: ::flatbuffers::VOffsetT = 14;
+  pub const VT_VOTERS: ::flatbuffers::VOffsetT = 16;
+  pub const VT_LEARNERS: ::flatbuffers::VOffsetT = 18;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    GroupHint { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args GroupHintArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<GroupHint<'bldr>> {
+    let mut builder = GroupHintBuilder::new(_fbb);
+    builder.add_term(args.term);
+    if let Some(x) = args.learners { builder.add_learners(x); }
+    if let Some(x) = args.voters { builder.add_voters(x); }
+    if let Some(x) = args.follower { builder.add_follower(x); }
+    if let Some(x) = args.leader { builder.add_leader(x); }
+    if let Some(x) = args.regime { builder.add_regime(x); }
+    builder.add_group(args.group);
+    builder.add_mode(args.mode);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn group(&self) -> u16 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u16>(GroupHint::VT_GROUP, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn mode(&self) -> CounterMode {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<CounterMode>(GroupHint::VT_MODE, Some(CounterMode::LEADER_FOLLOWER)).unwrap()}
+  }
+  #[inline]
+  pub fn regime(&self) -> Option<&'a Regime> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Regime>(GroupHint::VT_REGIME, None)}
+  }
+  #[inline]
+  pub fn leader(&self) -> Option<&'a Id128> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Id128>(GroupHint::VT_LEADER, None)}
+  }
+  /// The Raft term. Zero in leader-follower mode.
+  #[inline]
+  pub fn term(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(GroupHint::VT_TERM, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn follower(&self) -> Option<&'a Id128> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Id128>(GroupHint::VT_FOLLOWER, None)}
+  }
+  #[inline]
+  pub fn voters(&self) -> Option<::flatbuffers::Vector<'a, Id128>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Id128>>>(GroupHint::VT_VOTERS, None)}
+  }
+  #[inline]
+  pub fn learners(&self) -> Option<::flatbuffers::Vector<'a, Id128>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Id128>>>(GroupHint::VT_LEARNERS, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for GroupHint<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u16>("group", Self::VT_GROUP, false)?
+     .visit_field::<CounterMode>("mode", Self::VT_MODE, false)?
+     .visit_field::<Regime>("regime", Self::VT_REGIME, false)?
+     .visit_field::<Id128>("leader", Self::VT_LEADER, false)?
+     .visit_field::<u64>("term", Self::VT_TERM, false)?
+     .visit_field::<Id128>("follower", Self::VT_FOLLOWER, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Id128>>>("voters", Self::VT_VOTERS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Id128>>>("learners", Self::VT_LEARNERS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct GroupHintArgs<'a> {
+    pub group: u16,
+    pub mode: CounterMode,
+    pub regime: Option<&'a Regime>,
+    pub leader: Option<&'a Id128>,
+    pub term: u64,
+    pub follower: Option<&'a Id128>,
+    pub voters: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Id128>>>,
+    pub learners: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Id128>>>,
+}
+impl<'a> Default for GroupHintArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    GroupHintArgs {
+      group: 0,
+      mode: CounterMode::LEADER_FOLLOWER,
+      regime: None,
+      leader: None,
+      term: 0,
+      follower: None,
+      voters: None,
+      learners: None,
+    }
+  }
+}
+
+pub struct GroupHintBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> GroupHintBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_group(&mut self, group: u16) {
+    self.fbb_.push_slot::<u16>(GroupHint::VT_GROUP, group, 0);
+  }
+  #[inline]
+  pub fn add_mode(&mut self, mode: CounterMode) {
+    self.fbb_.push_slot::<CounterMode>(GroupHint::VT_MODE, mode, CounterMode::LEADER_FOLLOWER);
+  }
+  #[inline]
+  pub fn add_regime(&mut self, regime: &Regime) {
+    self.fbb_.push_slot_always::<&Regime>(GroupHint::VT_REGIME, regime);
+  }
+  #[inline]
+  pub fn add_leader(&mut self, leader: &Id128) {
+    self.fbb_.push_slot_always::<&Id128>(GroupHint::VT_LEADER, leader);
+  }
+  #[inline]
+  pub fn add_term(&mut self, term: u64) {
+    self.fbb_.push_slot::<u64>(GroupHint::VT_TERM, term, 0);
+  }
+  #[inline]
+  pub fn add_follower(&mut self, follower: &Id128) {
+    self.fbb_.push_slot_always::<&Id128>(GroupHint::VT_FOLLOWER, follower);
+  }
+  #[inline]
+  pub fn add_voters(&mut self, voters: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , Id128>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(GroupHint::VT_VOTERS, voters);
+  }
+  #[inline]
+  pub fn add_learners(&mut self, learners: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , Id128>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(GroupHint::VT_LEARNERS, learners);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> GroupHintBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    GroupHintBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<GroupHint<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for GroupHint<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("GroupHint");
+      ds.field("group", &self.group());
+      ds.field("mode", &self.mode());
+      ds.field("regime", &self.regime());
+      ds.field("leader", &self.leader());
+      ds.field("term", &self.term());
+      ds.field("follower", &self.follower());
+      ds.field("voters", &self.voters());
+      ds.field("learners", &self.learners());
+      ds.finish()
+  }
+}
+pub enum LeaderHintsOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// The gossip leader hints of a member, and the body of RAFT_LEADER. A request lists nothing.
+pub struct LeaderHints<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for LeaderHints<'a> {
+  type Inner = LeaderHints<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> LeaderHints<'a> {
+  pub const VT_GROUPS: ::flatbuffers::VOffsetT = 4;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    LeaderHints { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args LeaderHintsArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<LeaderHints<'bldr>> {
+    let mut builder = LeaderHintsBuilder::new(_fbb);
+    if let Some(x) = args.groups { builder.add_groups(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn groups(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<GroupHint<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<GroupHint>>>>(LeaderHints::VT_GROUPS, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for LeaderHints<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<GroupHint>>>>("groups", Self::VT_GROUPS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct LeaderHintsArgs<'a> {
+    pub groups: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<GroupHint<'a>>>>>,
+}
+impl<'a> Default for LeaderHintsArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    LeaderHintsArgs {
+      groups: None,
+    }
+  }
+}
+
+pub struct LeaderHintsBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> LeaderHintsBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_groups(&mut self, groups: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<GroupHint<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(LeaderHints::VT_GROUPS, groups);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> LeaderHintsBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    LeaderHintsBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<LeaderHints<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for LeaderHints<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("LeaderHints");
+      ds.field("groups", &self.groups());
+      ds.finish()
+  }
+}
+pub enum RaftConfigOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// RAFT_CONFIG: the leader of `regime` asks a target to prepare a learner replica. The reply
+/// carries the replica ID, or zero when the target refuses the regime.
+pub struct RaftConfig<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for RaftConfig<'a> {
+  type Inner = RaftConfig<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> RaftConfig<'a> {
+  pub const VT_GROUP: ::flatbuffers::VOffsetT = 4;
+  pub const VT_REGIME: ::flatbuffers::VOffsetT = 6;
+  pub const VT_REPLICA: ::flatbuffers::VOffsetT = 8;
+  pub const VT_LEADER: ::flatbuffers::VOffsetT = 10;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    RaftConfig { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args RaftConfigArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<RaftConfig<'bldr>> {
+    let mut builder = RaftConfigBuilder::new(_fbb);
+    builder.add_replica(args.replica);
+    if let Some(x) = args.leader { builder.add_leader(x); }
+    if let Some(x) = args.regime { builder.add_regime(x); }
+    builder.add_group(args.group);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn group(&self) -> u16 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u16>(RaftConfig::VT_GROUP, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn regime(&self) -> Option<&'a Regime> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Regime>(RaftConfig::VT_REGIME, None)}
+  }
+  #[inline]
+  pub fn replica(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(RaftConfig::VT_REPLICA, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn leader(&self) -> Option<&'a Id128> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Id128>(RaftConfig::VT_LEADER, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for RaftConfig<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u16>("group", Self::VT_GROUP, false)?
+     .visit_field::<Regime>("regime", Self::VT_REGIME, false)?
+     .visit_field::<u64>("replica", Self::VT_REPLICA, false)?
+     .visit_field::<Id128>("leader", Self::VT_LEADER, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct RaftConfigArgs<'a> {
+    pub group: u16,
+    pub regime: Option<&'a Regime>,
+    pub replica: u64,
+    pub leader: Option<&'a Id128>,
+}
+impl<'a> Default for RaftConfigArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    RaftConfigArgs {
+      group: 0,
+      regime: None,
+      replica: 0,
+      leader: None,
+    }
+  }
+}
+
+pub struct RaftConfigBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> RaftConfigBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_group(&mut self, group: u16) {
+    self.fbb_.push_slot::<u16>(RaftConfig::VT_GROUP, group, 0);
+  }
+  #[inline]
+  pub fn add_regime(&mut self, regime: &Regime) {
+    self.fbb_.push_slot_always::<&Regime>(RaftConfig::VT_REGIME, regime);
+  }
+  #[inline]
+  pub fn add_replica(&mut self, replica: u64) {
+    self.fbb_.push_slot::<u64>(RaftConfig::VT_REPLICA, replica, 0);
+  }
+  #[inline]
+  pub fn add_leader(&mut self, leader: &Id128) {
+    self.fbb_.push_slot_always::<&Id128>(RaftConfig::VT_LEADER, leader);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> RaftConfigBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    RaftConfigBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<RaftConfig<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for RaftConfig<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("RaftConfig");
+      ds.field("group", &self.group());
+      ds.field("regime", &self.regime());
+      ds.field("replica", &self.replica());
+      ds.field("leader", &self.leader());
+      ds.finish()
+  }
+}
+pub enum RaftNodeIdsOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct RaftNodeIds<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for RaftNodeIds<'a> {
+  type Inner = RaftNodeIds<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> RaftNodeIds<'a> {
+  pub const VT_IDS: ::flatbuffers::VOffsetT = 4;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    RaftNodeIds { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args RaftNodeIdsArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<RaftNodeIds<'bldr>> {
+    let mut builder = RaftNodeIdsBuilder::new(_fbb);
+    if let Some(x) = args.ids { builder.add_ids(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn ids(&self) -> Option<::flatbuffers::Vector<'a, u64>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u64>>>(RaftNodeIds::VT_IDS, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for RaftNodeIds<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u64>>>("ids", Self::VT_IDS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct RaftNodeIdsArgs<'a> {
+    pub ids: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u64>>>,
+}
+impl<'a> Default for RaftNodeIdsArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    RaftNodeIdsArgs {
+      ids: None,
+    }
+  }
+}
+
+pub struct RaftNodeIdsBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> RaftNodeIdsBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_ids(&mut self, ids: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u64>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(RaftNodeIds::VT_IDS, ids);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> RaftNodeIdsBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    RaftNodeIdsBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<RaftNodeIds<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for RaftNodeIds<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("RaftNodeIds");
+      ds.field("ids", &self.ids());
+      ds.finish()
+  }
+}
+pub enum RaftPeerOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct RaftPeer<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for RaftPeer<'a> {
+  type Inner = RaftPeer<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> RaftPeer<'a> {
+  pub const VT_REPLICA: ::flatbuffers::VOffsetT = 4;
+  pub const VT_NODE: ::flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    RaftPeer { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args RaftPeerArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<RaftPeer<'bldr>> {
+    let mut builder = RaftPeerBuilder::new(_fbb);
+    builder.add_replica(args.replica);
+    if let Some(x) = args.node { builder.add_node(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn replica(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(RaftPeer::VT_REPLICA, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn node(&self) -> Option<&'a Id128> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Id128>(RaftPeer::VT_NODE, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for RaftPeer<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("replica", Self::VT_REPLICA, false)?
+     .visit_field::<Id128>("node", Self::VT_NODE, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct RaftPeerArgs<'a> {
+    pub replica: u64,
+    pub node: Option<&'a Id128>,
+}
+impl<'a> Default for RaftPeerArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    RaftPeerArgs {
+      replica: 0,
+      node: None,
+    }
+  }
+}
+
+pub struct RaftPeerBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> RaftPeerBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_replica(&mut self, replica: u64) {
+    self.fbb_.push_slot::<u64>(RaftPeer::VT_REPLICA, replica, 0);
+  }
+  #[inline]
+  pub fn add_node(&mut self, node: &Id128) {
+    self.fbb_.push_slot_always::<&Id128>(RaftPeer::VT_NODE, node);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> RaftPeerBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    RaftPeerBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<RaftPeer<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for RaftPeer<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("RaftPeer");
+      ds.field("replica", &self.replica());
+      ds.field("node", &self.node());
+      ds.finish()
+  }
+}
+pub enum RaftMembershipOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// A Raft membership: one voter set, or two during a joint change, and every node by replica ID.
+pub struct RaftMembership<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for RaftMembership<'a> {
+  type Inner = RaftMembership<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> RaftMembership<'a> {
+  pub const VT_CONFIGS: ::flatbuffers::VOffsetT = 4;
+  pub const VT_NODES: ::flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    RaftMembership { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args RaftMembershipArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<RaftMembership<'bldr>> {
+    let mut builder = RaftMembershipBuilder::new(_fbb);
+    if let Some(x) = args.nodes { builder.add_nodes(x); }
+    if let Some(x) = args.configs { builder.add_configs(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn configs(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RaftNodeIds<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RaftNodeIds>>>>(RaftMembership::VT_CONFIGS, None)}
+  }
+  #[inline]
+  pub fn nodes(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RaftPeer<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RaftPeer>>>>(RaftMembership::VT_NODES, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for RaftMembership<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<RaftNodeIds>>>>("configs", Self::VT_CONFIGS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<RaftPeer>>>>("nodes", Self::VT_NODES, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct RaftMembershipArgs<'a> {
+    pub configs: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RaftNodeIds<'a>>>>>,
+    pub nodes: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RaftPeer<'a>>>>>,
+}
+impl<'a> Default for RaftMembershipArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    RaftMembershipArgs {
+      configs: None,
+      nodes: None,
+    }
+  }
+}
+
+pub struct RaftMembershipBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> RaftMembershipBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_configs(&mut self, configs: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<RaftNodeIds<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(RaftMembership::VT_CONFIGS, configs);
+  }
+  #[inline]
+  pub fn add_nodes(&mut self, nodes: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<RaftPeer<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(RaftMembership::VT_NODES, nodes);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> RaftMembershipBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    RaftMembershipBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<RaftMembership<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for RaftMembership<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("RaftMembership");
+      ds.field("configs", &self.configs());
+      ds.field("nodes", &self.nodes());
+      ds.finish()
+  }
+}
+pub enum RaftEntryOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct RaftEntry<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for RaftEntry<'a> {
+  type Inner = RaftEntry<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> RaftEntry<'a> {
+  pub const VT_LOG_ID: ::flatbuffers::VOffsetT = 4;
+  pub const VT_KIND: ::flatbuffers::VOffsetT = 6;
+  pub const VT_STAMP_MS: ::flatbuffers::VOffsetT = 8;
+  pub const VT_COMMAND: ::flatbuffers::VOffsetT = 10;
+  pub const VT_MEMBERSHIP: ::flatbuffers::VOffsetT = 12;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    RaftEntry { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args RaftEntryArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<RaftEntry<'bldr>> {
+    let mut builder = RaftEntryBuilder::new(_fbb);
+    builder.add_stamp_ms(args.stamp_ms);
+    if let Some(x) = args.membership { builder.add_membership(x); }
+    if let Some(x) = args.command { builder.add_command(x); }
+    if let Some(x) = args.log_id { builder.add_log_id(x); }
+    builder.add_kind(args.kind);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn log_id(&self) -> Option<&'a RaftLogId> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<RaftLogId>(RaftEntry::VT_LOG_ID, None)}
+  }
+  #[inline]
+  pub fn kind(&self) -> RaftEntryKind {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<RaftEntryKind>(RaftEntry::VT_KIND, Some(RaftEntryKind::BLANK)).unwrap()}
+  }
+  /// COMMAND: the leader stamp in Unix milliseconds and the raw RESP command.
+  #[inline]
+  pub fn stamp_ms(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(RaftEntry::VT_STAMP_MS, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn command(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(RaftEntry::VT_COMMAND, None)}
+  }
+  #[inline]
+  pub fn membership(&self) -> Option<RaftMembership<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<RaftMembership>>(RaftEntry::VT_MEMBERSHIP, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for RaftEntry<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<RaftLogId>("log_id", Self::VT_LOG_ID, false)?
+     .visit_field::<RaftEntryKind>("kind", Self::VT_KIND, false)?
+     .visit_field::<u64>("stamp_ms", Self::VT_STAMP_MS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("command", Self::VT_COMMAND, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<RaftMembership>>("membership", Self::VT_MEMBERSHIP, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct RaftEntryArgs<'a> {
+    pub log_id: Option<&'a RaftLogId>,
+    pub kind: RaftEntryKind,
+    pub stamp_ms: u64,
+    pub command: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+    pub membership: Option<::flatbuffers::WIPOffset<RaftMembership<'a>>>,
+}
+impl<'a> Default for RaftEntryArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    RaftEntryArgs {
+      log_id: None,
+      kind: RaftEntryKind::BLANK,
+      stamp_ms: 0,
+      command: None,
+      membership: None,
+    }
+  }
+}
+
+pub struct RaftEntryBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> RaftEntryBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_log_id(&mut self, log_id: &RaftLogId) {
+    self.fbb_.push_slot_always::<&RaftLogId>(RaftEntry::VT_LOG_ID, log_id);
+  }
+  #[inline]
+  pub fn add_kind(&mut self, kind: RaftEntryKind) {
+    self.fbb_.push_slot::<RaftEntryKind>(RaftEntry::VT_KIND, kind, RaftEntryKind::BLANK);
+  }
+  #[inline]
+  pub fn add_stamp_ms(&mut self, stamp_ms: u64) {
+    self.fbb_.push_slot::<u64>(RaftEntry::VT_STAMP_MS, stamp_ms, 0);
+  }
+  #[inline]
+  pub fn add_command(&mut self, command: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(RaftEntry::VT_COMMAND, command);
+  }
+  #[inline]
+  pub fn add_membership(&mut self, membership: ::flatbuffers::WIPOffset<RaftMembership<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<RaftMembership>>(RaftEntry::VT_MEMBERSHIP, membership);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> RaftEntryBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    RaftEntryBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<RaftEntry<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for RaftEntry<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("RaftEntry");
+      ds.field("log_id", &self.log_id());
+      ds.field("kind", &self.kind());
+      ds.field("stamp_ms", &self.stamp_ms());
+      ds.field("command", &self.command());
+      ds.field("membership", &self.membership());
+      ds.finish()
+  }
+}
+pub enum RaftHeaderOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// The group, the regime, and the replica ID that a Raft message is for.
+pub struct RaftHeader<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for RaftHeader<'a> {
+  type Inner = RaftHeader<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> RaftHeader<'a> {
+  pub const VT_GROUP: ::flatbuffers::VOffsetT = 4;
+  pub const VT_REGIME: ::flatbuffers::VOffsetT = 6;
+  pub const VT_TARGET: ::flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    RaftHeader { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args RaftHeaderArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<RaftHeader<'bldr>> {
+    let mut builder = RaftHeaderBuilder::new(_fbb);
+    builder.add_target(args.target);
+    if let Some(x) = args.regime { builder.add_regime(x); }
+    builder.add_group(args.group);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn group(&self) -> u16 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u16>(RaftHeader::VT_GROUP, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn regime(&self) -> Option<&'a Regime> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Regime>(RaftHeader::VT_REGIME, None)}
+  }
+  #[inline]
+  pub fn target(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(RaftHeader::VT_TARGET, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for RaftHeader<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u16>("group", Self::VT_GROUP, false)?
+     .visit_field::<Regime>("regime", Self::VT_REGIME, false)?
+     .visit_field::<u64>("target", Self::VT_TARGET, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct RaftHeaderArgs<'a> {
+    pub group: u16,
+    pub regime: Option<&'a Regime>,
+    pub target: u64,
+}
+impl<'a> Default for RaftHeaderArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    RaftHeaderArgs {
+      group: 0,
+      regime: None,
+      target: 0,
+    }
+  }
+}
+
+pub struct RaftHeaderBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> RaftHeaderBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_group(&mut self, group: u16) {
+    self.fbb_.push_slot::<u16>(RaftHeader::VT_GROUP, group, 0);
+  }
+  #[inline]
+  pub fn add_regime(&mut self, regime: &Regime) {
+    self.fbb_.push_slot_always::<&Regime>(RaftHeader::VT_REGIME, regime);
+  }
+  #[inline]
+  pub fn add_target(&mut self, target: u64) {
+    self.fbb_.push_slot::<u64>(RaftHeader::VT_TARGET, target, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> RaftHeaderBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    RaftHeaderBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<RaftHeader<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for RaftHeader<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("RaftHeader");
+      ds.field("group", &self.group());
+      ds.field("regime", &self.regime());
+      ds.field("target", &self.target());
+      ds.finish()
+  }
+}
+pub enum RaftAppendOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct RaftAppend<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for RaftAppend<'a> {
+  type Inner = RaftAppend<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> RaftAppend<'a> {
+  pub const VT_HEADER: ::flatbuffers::VOffsetT = 4;
+  pub const VT_VOTE: ::flatbuffers::VOffsetT = 6;
+  pub const VT_PREV: ::flatbuffers::VOffsetT = 8;
+  pub const VT_ENTRIES: ::flatbuffers::VOffsetT = 10;
+  pub const VT_COMMITTED: ::flatbuffers::VOffsetT = 12;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    RaftAppend { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args RaftAppendArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<RaftAppend<'bldr>> {
+    let mut builder = RaftAppendBuilder::new(_fbb);
+    if let Some(x) = args.committed { builder.add_committed(x); }
+    if let Some(x) = args.entries { builder.add_entries(x); }
+    if let Some(x) = args.prev { builder.add_prev(x); }
+    if let Some(x) = args.vote { builder.add_vote(x); }
+    if let Some(x) = args.header { builder.add_header(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn header(&self) -> Option<RaftHeader<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<RaftHeader>>(RaftAppend::VT_HEADER, None)}
+  }
+  #[inline]
+  pub fn vote(&self) -> Option<&'a RaftVote> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<RaftVote>(RaftAppend::VT_VOTE, None)}
+  }
+  #[inline]
+  pub fn prev(&self) -> Option<&'a RaftLogId> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<RaftLogId>(RaftAppend::VT_PREV, None)}
+  }
+  #[inline]
+  pub fn entries(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RaftEntry<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RaftEntry>>>>(RaftAppend::VT_ENTRIES, None)}
+  }
+  #[inline]
+  pub fn committed(&self) -> Option<&'a RaftLogId> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<RaftLogId>(RaftAppend::VT_COMMITTED, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for RaftAppend<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<RaftHeader>>("header", Self::VT_HEADER, false)?
+     .visit_field::<RaftVote>("vote", Self::VT_VOTE, false)?
+     .visit_field::<RaftLogId>("prev", Self::VT_PREV, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<RaftEntry>>>>("entries", Self::VT_ENTRIES, false)?
+     .visit_field::<RaftLogId>("committed", Self::VT_COMMITTED, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct RaftAppendArgs<'a> {
+    pub header: Option<::flatbuffers::WIPOffset<RaftHeader<'a>>>,
+    pub vote: Option<&'a RaftVote>,
+    pub prev: Option<&'a RaftLogId>,
+    pub entries: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<RaftEntry<'a>>>>>,
+    pub committed: Option<&'a RaftLogId>,
+}
+impl<'a> Default for RaftAppendArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    RaftAppendArgs {
+      header: None,
+      vote: None,
+      prev: None,
+      entries: None,
+      committed: None,
+    }
+  }
+}
+
+pub struct RaftAppendBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> RaftAppendBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_header(&mut self, header: ::flatbuffers::WIPOffset<RaftHeader<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<RaftHeader>>(RaftAppend::VT_HEADER, header);
+  }
+  #[inline]
+  pub fn add_vote(&mut self, vote: &RaftVote) {
+    self.fbb_.push_slot_always::<&RaftVote>(RaftAppend::VT_VOTE, vote);
+  }
+  #[inline]
+  pub fn add_prev(&mut self, prev: &RaftLogId) {
+    self.fbb_.push_slot_always::<&RaftLogId>(RaftAppend::VT_PREV, prev);
+  }
+  #[inline]
+  pub fn add_entries(&mut self, entries: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<RaftEntry<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(RaftAppend::VT_ENTRIES, entries);
+  }
+  #[inline]
+  pub fn add_committed(&mut self, committed: &RaftLogId) {
+    self.fbb_.push_slot_always::<&RaftLogId>(RaftAppend::VT_COMMITTED, committed);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> RaftAppendBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    RaftAppendBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<RaftAppend<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for RaftAppend<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("RaftAppend");
+      ds.field("header", &self.header());
+      ds.field("vote", &self.vote());
+      ds.field("prev", &self.prev());
+      ds.field("entries", &self.entries());
+      ds.field("committed", &self.committed());
+      ds.finish()
+  }
+}
+pub enum RaftVoteRequestOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct RaftVoteRequest<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for RaftVoteRequest<'a> {
+  type Inner = RaftVoteRequest<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> RaftVoteRequest<'a> {
+  pub const VT_HEADER: ::flatbuffers::VOffsetT = 4;
+  pub const VT_VOTE: ::flatbuffers::VOffsetT = 6;
+  pub const VT_LAST: ::flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    RaftVoteRequest { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args RaftVoteRequestArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<RaftVoteRequest<'bldr>> {
+    let mut builder = RaftVoteRequestBuilder::new(_fbb);
+    if let Some(x) = args.last { builder.add_last(x); }
+    if let Some(x) = args.vote { builder.add_vote(x); }
+    if let Some(x) = args.header { builder.add_header(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn header(&self) -> Option<RaftHeader<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<RaftHeader>>(RaftVoteRequest::VT_HEADER, None)}
+  }
+  #[inline]
+  pub fn vote(&self) -> Option<&'a RaftVote> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<RaftVote>(RaftVoteRequest::VT_VOTE, None)}
+  }
+  #[inline]
+  pub fn last(&self) -> Option<&'a RaftLogId> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<RaftLogId>(RaftVoteRequest::VT_LAST, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for RaftVoteRequest<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<RaftHeader>>("header", Self::VT_HEADER, false)?
+     .visit_field::<RaftVote>("vote", Self::VT_VOTE, false)?
+     .visit_field::<RaftLogId>("last", Self::VT_LAST, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct RaftVoteRequestArgs<'a> {
+    pub header: Option<::flatbuffers::WIPOffset<RaftHeader<'a>>>,
+    pub vote: Option<&'a RaftVote>,
+    pub last: Option<&'a RaftLogId>,
+}
+impl<'a> Default for RaftVoteRequestArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    RaftVoteRequestArgs {
+      header: None,
+      vote: None,
+      last: None,
+    }
+  }
+}
+
+pub struct RaftVoteRequestBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> RaftVoteRequestBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_header(&mut self, header: ::flatbuffers::WIPOffset<RaftHeader<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<RaftHeader>>(RaftVoteRequest::VT_HEADER, header);
+  }
+  #[inline]
+  pub fn add_vote(&mut self, vote: &RaftVote) {
+    self.fbb_.push_slot_always::<&RaftVote>(RaftVoteRequest::VT_VOTE, vote);
+  }
+  #[inline]
+  pub fn add_last(&mut self, last: &RaftLogId) {
+    self.fbb_.push_slot_always::<&RaftLogId>(RaftVoteRequest::VT_LAST, last);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> RaftVoteRequestBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    RaftVoteRequestBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<RaftVoteRequest<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for RaftVoteRequest<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("RaftVoteRequest");
+      ds.field("header", &self.header());
+      ds.field("vote", &self.vote());
+      ds.field("last", &self.last());
+      ds.finish()
+  }
+}
+pub enum RaftSnapshotOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// One chunk of a snapshot. The data is a chunk of a CounterSnapshot.
+pub struct RaftSnapshot<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for RaftSnapshot<'a> {
+  type Inner = RaftSnapshot<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> RaftSnapshot<'a> {
+  pub const VT_HEADER: ::flatbuffers::VOffsetT = 4;
+  pub const VT_VOTE: ::flatbuffers::VOffsetT = 6;
+  pub const VT_LAST: ::flatbuffers::VOffsetT = 8;
+  pub const VT_MEMBERSHIP_LOG: ::flatbuffers::VOffsetT = 10;
+  pub const VT_MEMBERSHIP: ::flatbuffers::VOffsetT = 12;
+  pub const VT_SNAPSHOT_ID: ::flatbuffers::VOffsetT = 14;
+  pub const VT_OFFSET: ::flatbuffers::VOffsetT = 16;
+  pub const VT_DATA: ::flatbuffers::VOffsetT = 18;
+  pub const VT_DONE: ::flatbuffers::VOffsetT = 20;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    RaftSnapshot { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args RaftSnapshotArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<RaftSnapshot<'bldr>> {
+    let mut builder = RaftSnapshotBuilder::new(_fbb);
+    builder.add_offset(args.offset);
+    if let Some(x) = args.data { builder.add_data(x); }
+    if let Some(x) = args.snapshot_id { builder.add_snapshot_id(x); }
+    if let Some(x) = args.membership { builder.add_membership(x); }
+    if let Some(x) = args.membership_log { builder.add_membership_log(x); }
+    if let Some(x) = args.last { builder.add_last(x); }
+    if let Some(x) = args.vote { builder.add_vote(x); }
+    if let Some(x) = args.header { builder.add_header(x); }
+    builder.add_done(args.done);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn header(&self) -> Option<RaftHeader<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<RaftHeader>>(RaftSnapshot::VT_HEADER, None)}
+  }
+  #[inline]
+  pub fn vote(&self) -> Option<&'a RaftVote> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<RaftVote>(RaftSnapshot::VT_VOTE, None)}
+  }
+  #[inline]
+  pub fn last(&self) -> Option<&'a RaftLogId> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<RaftLogId>(RaftSnapshot::VT_LAST, None)}
+  }
+  #[inline]
+  pub fn membership_log(&self) -> Option<&'a RaftLogId> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<RaftLogId>(RaftSnapshot::VT_MEMBERSHIP_LOG, None)}
+  }
+  #[inline]
+  pub fn membership(&self) -> Option<RaftMembership<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<RaftMembership>>(RaftSnapshot::VT_MEMBERSHIP, None)}
+  }
+  #[inline]
+  pub fn snapshot_id(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(RaftSnapshot::VT_SNAPSHOT_ID, None)}
+  }
+  #[inline]
+  pub fn offset(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(RaftSnapshot::VT_OFFSET, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn data(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(RaftSnapshot::VT_DATA, None)}
+  }
+  #[inline]
+  pub fn done(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(RaftSnapshot::VT_DONE, Some(false)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for RaftSnapshot<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<RaftHeader>>("header", Self::VT_HEADER, false)?
+     .visit_field::<RaftVote>("vote", Self::VT_VOTE, false)?
+     .visit_field::<RaftLogId>("last", Self::VT_LAST, false)?
+     .visit_field::<RaftLogId>("membership_log", Self::VT_MEMBERSHIP_LOG, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<RaftMembership>>("membership", Self::VT_MEMBERSHIP, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("snapshot_id", Self::VT_SNAPSHOT_ID, false)?
+     .visit_field::<u64>("offset", Self::VT_OFFSET, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("data", Self::VT_DATA, false)?
+     .visit_field::<bool>("done", Self::VT_DONE, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct RaftSnapshotArgs<'a> {
+    pub header: Option<::flatbuffers::WIPOffset<RaftHeader<'a>>>,
+    pub vote: Option<&'a RaftVote>,
+    pub last: Option<&'a RaftLogId>,
+    pub membership_log: Option<&'a RaftLogId>,
+    pub membership: Option<::flatbuffers::WIPOffset<RaftMembership<'a>>>,
+    pub snapshot_id: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub offset: u64,
+    pub data: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+    pub done: bool,
+}
+impl<'a> Default for RaftSnapshotArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    RaftSnapshotArgs {
+      header: None,
+      vote: None,
+      last: None,
+      membership_log: None,
+      membership: None,
+      snapshot_id: None,
+      offset: 0,
+      data: None,
+      done: false,
+    }
+  }
+}
+
+pub struct RaftSnapshotBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> RaftSnapshotBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_header(&mut self, header: ::flatbuffers::WIPOffset<RaftHeader<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<RaftHeader>>(RaftSnapshot::VT_HEADER, header);
+  }
+  #[inline]
+  pub fn add_vote(&mut self, vote: &RaftVote) {
+    self.fbb_.push_slot_always::<&RaftVote>(RaftSnapshot::VT_VOTE, vote);
+  }
+  #[inline]
+  pub fn add_last(&mut self, last: &RaftLogId) {
+    self.fbb_.push_slot_always::<&RaftLogId>(RaftSnapshot::VT_LAST, last);
+  }
+  #[inline]
+  pub fn add_membership_log(&mut self, membership_log: &RaftLogId) {
+    self.fbb_.push_slot_always::<&RaftLogId>(RaftSnapshot::VT_MEMBERSHIP_LOG, membership_log);
+  }
+  #[inline]
+  pub fn add_membership(&mut self, membership: ::flatbuffers::WIPOffset<RaftMembership<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<RaftMembership>>(RaftSnapshot::VT_MEMBERSHIP, membership);
+  }
+  #[inline]
+  pub fn add_snapshot_id(&mut self, snapshot_id: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(RaftSnapshot::VT_SNAPSHOT_ID, snapshot_id);
+  }
+  #[inline]
+  pub fn add_offset(&mut self, offset: u64) {
+    self.fbb_.push_slot::<u64>(RaftSnapshot::VT_OFFSET, offset, 0);
+  }
+  #[inline]
+  pub fn add_data(&mut self, data: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(RaftSnapshot::VT_DATA, data);
+  }
+  #[inline]
+  pub fn add_done(&mut self, done: bool) {
+    self.fbb_.push_slot::<bool>(RaftSnapshot::VT_DONE, done, false);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> RaftSnapshotBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    RaftSnapshotBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<RaftSnapshot<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for RaftSnapshot<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("RaftSnapshot");
+      ds.field("header", &self.header());
+      ds.field("vote", &self.vote());
+      ds.field("last", &self.last());
+      ds.field("membership_log", &self.membership_log());
+      ds.field("membership", &self.membership());
+      ds.field("snapshot_id", &self.snapshot_id());
+      ds.field("offset", &self.offset());
+      ds.field("data", &self.data());
+      ds.field("done", &self.done());
+      ds.finish()
+  }
+}
+pub enum RaftReplyOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// The reply to RAFT_VOTE, RAFT_APPEND, and RAFT_SNAPSHOT.
+pub struct RaftReply<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for RaftReply<'a> {
+  type Inner = RaftReply<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> RaftReply<'a> {
+  pub const VT_OUTCOME: ::flatbuffers::VOffsetT = 4;
+  pub const VT_VOTE: ::flatbuffers::VOffsetT = 6;
+  pub const VT_GRANTED: ::flatbuffers::VOffsetT = 8;
+  pub const VT_LAST: ::flatbuffers::VOffsetT = 10;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    RaftReply { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args RaftReplyArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<RaftReply<'bldr>> {
+    let mut builder = RaftReplyBuilder::new(_fbb);
+    if let Some(x) = args.last { builder.add_last(x); }
+    if let Some(x) = args.vote { builder.add_vote(x); }
+    builder.add_granted(args.granted);
+    builder.add_outcome(args.outcome);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn outcome(&self) -> RaftOutcome {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<RaftOutcome>(RaftReply::VT_OUTCOME, Some(RaftOutcome::OK)).unwrap()}
+  }
+  #[inline]
+  pub fn vote(&self) -> Option<&'a RaftVote> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<RaftVote>(RaftReply::VT_VOTE, None)}
+  }
+  #[inline]
+  pub fn granted(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(RaftReply::VT_GRANTED, Some(false)).unwrap()}
+  }
+  #[inline]
+  pub fn last(&self) -> Option<&'a RaftLogId> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<RaftLogId>(RaftReply::VT_LAST, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for RaftReply<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<RaftOutcome>("outcome", Self::VT_OUTCOME, false)?
+     .visit_field::<RaftVote>("vote", Self::VT_VOTE, false)?
+     .visit_field::<bool>("granted", Self::VT_GRANTED, false)?
+     .visit_field::<RaftLogId>("last", Self::VT_LAST, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct RaftReplyArgs<'a> {
+    pub outcome: RaftOutcome,
+    pub vote: Option<&'a RaftVote>,
+    pub granted: bool,
+    pub last: Option<&'a RaftLogId>,
+}
+impl<'a> Default for RaftReplyArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    RaftReplyArgs {
+      outcome: RaftOutcome::OK,
+      vote: None,
+      granted: false,
+      last: None,
+    }
+  }
+}
+
+pub struct RaftReplyBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> RaftReplyBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_outcome(&mut self, outcome: RaftOutcome) {
+    self.fbb_.push_slot::<RaftOutcome>(RaftReply::VT_OUTCOME, outcome, RaftOutcome::OK);
+  }
+  #[inline]
+  pub fn add_vote(&mut self, vote: &RaftVote) {
+    self.fbb_.push_slot_always::<&RaftVote>(RaftReply::VT_VOTE, vote);
+  }
+  #[inline]
+  pub fn add_granted(&mut self, granted: bool) {
+    self.fbb_.push_slot::<bool>(RaftReply::VT_GRANTED, granted, false);
+  }
+  #[inline]
+  pub fn add_last(&mut self, last: &RaftLogId) {
+    self.fbb_.push_slot_always::<&RaftLogId>(RaftReply::VT_LAST, last);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> RaftReplyBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    RaftReplyBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<RaftReply<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for RaftReply<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("RaftReply");
+      ds.field("outcome", &self.outcome());
+      ds.field("vote", &self.vote());
+      ds.field("granted", &self.granted());
+      ds.field("last", &self.last());
+      ds.finish()
+  }
+}
+pub enum CounterOpOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// One leader-follower op: the leader stamp and the raw RESP command.
+pub struct CounterOp<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for CounterOp<'a> {
+  type Inner = CounterOp<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> CounterOp<'a> {
+  pub const VT_STAMP_MS: ::flatbuffers::VOffsetT = 4;
+  pub const VT_COMMAND: ::flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    CounterOp { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args CounterOpArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<CounterOp<'bldr>> {
+    let mut builder = CounterOpBuilder::new(_fbb);
+    builder.add_stamp_ms(args.stamp_ms);
+    if let Some(x) = args.command { builder.add_command(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn stamp_ms(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(CounterOp::VT_STAMP_MS, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn command(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(CounterOp::VT_COMMAND, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for CounterOp<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("stamp_ms", Self::VT_STAMP_MS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("command", Self::VT_COMMAND, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct CounterOpArgs<'a> {
+    pub stamp_ms: u64,
+    pub command: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+}
+impl<'a> Default for CounterOpArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    CounterOpArgs {
+      stamp_ms: 0,
+      command: None,
+    }
+  }
+}
+
+pub struct CounterOpBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> CounterOpBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_stamp_ms(&mut self, stamp_ms: u64) {
+    self.fbb_.push_slot::<u64>(CounterOp::VT_STAMP_MS, stamp_ms, 0);
+  }
+  #[inline]
+  pub fn add_command(&mut self, command: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(CounterOp::VT_COMMAND, command);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> CounterOpBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    CounterOpBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<CounterOp<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for CounterOp<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("CounterOp");
+      ds.field("stamp_ms", &self.stamp_ms());
+      ds.field("command", &self.command());
+      ds.finish()
+  }
+}
+pub enum CounterSyncOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// COUNTER_SYNC: ops from the leader to the follower. `seq` numbers the first op, or the state of
+/// the snapshot. A sync without ops and without a snapshot is a heartbeat.
+pub struct CounterSync<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for CounterSync<'a> {
+  type Inner = CounterSync<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> CounterSync<'a> {
+  pub const VT_GROUP: ::flatbuffers::VOffsetT = 4;
+  pub const VT_REGIME: ::flatbuffers::VOffsetT = 6;
+  pub const VT_SEQ: ::flatbuffers::VOffsetT = 8;
+  pub const VT_OPS: ::flatbuffers::VOffsetT = 10;
+  pub const VT_SNAPSHOT: ::flatbuffers::VOffsetT = 12;
+  pub const VT_HAS_SNAPSHOT: ::flatbuffers::VOffsetT = 14;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    CounterSync { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args CounterSyncArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<CounterSync<'bldr>> {
+    let mut builder = CounterSyncBuilder::new(_fbb);
+    builder.add_seq(args.seq);
+    if let Some(x) = args.snapshot { builder.add_snapshot(x); }
+    if let Some(x) = args.ops { builder.add_ops(x); }
+    if let Some(x) = args.regime { builder.add_regime(x); }
+    builder.add_group(args.group);
+    builder.add_has_snapshot(args.has_snapshot);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn group(&self) -> u16 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u16>(CounterSync::VT_GROUP, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn regime(&self) -> Option<&'a Regime> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Regime>(CounterSync::VT_REGIME, None)}
+  }
+  #[inline]
+  pub fn seq(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(CounterSync::VT_SEQ, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn ops(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<CounterOp<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<CounterOp>>>>(CounterSync::VT_OPS, None)}
+  }
+  #[inline]
+  pub fn snapshot(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(CounterSync::VT_SNAPSHOT, None)}
+  }
+  #[inline]
+  pub fn has_snapshot(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(CounterSync::VT_HAS_SNAPSHOT, Some(false)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for CounterSync<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u16>("group", Self::VT_GROUP, false)?
+     .visit_field::<Regime>("regime", Self::VT_REGIME, false)?
+     .visit_field::<u64>("seq", Self::VT_SEQ, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<CounterOp>>>>("ops", Self::VT_OPS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("snapshot", Self::VT_SNAPSHOT, false)?
+     .visit_field::<bool>("has_snapshot", Self::VT_HAS_SNAPSHOT, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct CounterSyncArgs<'a> {
+    pub group: u16,
+    pub regime: Option<&'a Regime>,
+    pub seq: u64,
+    pub ops: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<CounterOp<'a>>>>>,
+    pub snapshot: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+    pub has_snapshot: bool,
+}
+impl<'a> Default for CounterSyncArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    CounterSyncArgs {
+      group: 0,
+      regime: None,
+      seq: 0,
+      ops: None,
+      snapshot: None,
+      has_snapshot: false,
+    }
+  }
+}
+
+pub struct CounterSyncBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> CounterSyncBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_group(&mut self, group: u16) {
+    self.fbb_.push_slot::<u16>(CounterSync::VT_GROUP, group, 0);
+  }
+  #[inline]
+  pub fn add_regime(&mut self, regime: &Regime) {
+    self.fbb_.push_slot_always::<&Regime>(CounterSync::VT_REGIME, regime);
+  }
+  #[inline]
+  pub fn add_seq(&mut self, seq: u64) {
+    self.fbb_.push_slot::<u64>(CounterSync::VT_SEQ, seq, 0);
+  }
+  #[inline]
+  pub fn add_ops(&mut self, ops: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<CounterOp<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(CounterSync::VT_OPS, ops);
+  }
+  #[inline]
+  pub fn add_snapshot(&mut self, snapshot: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(CounterSync::VT_SNAPSHOT, snapshot);
+  }
+  #[inline]
+  pub fn add_has_snapshot(&mut self, has_snapshot: bool) {
+    self.fbb_.push_slot::<bool>(CounterSync::VT_HAS_SNAPSHOT, has_snapshot, false);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> CounterSyncBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    CounterSyncBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<CounterSync<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for CounterSync<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("CounterSync");
+      ds.field("group", &self.group());
+      ds.field("regime", &self.regime());
+      ds.field("seq", &self.seq());
+      ds.field("ops", &self.ops());
+      ds.field("snapshot", &self.snapshot());
+      ds.field("has_snapshot", &self.has_snapshot());
+      ds.finish()
+  }
+}
+pub enum CounterAckOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct CounterAck<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for CounterAck<'a> {
+  type Inner = CounterAck<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> CounterAck<'a> {
+  pub const VT_GROUP: ::flatbuffers::VOffsetT = 4;
+  pub const VT_REGIME: ::flatbuffers::VOffsetT = 6;
+  pub const VT_SEQ: ::flatbuffers::VOffsetT = 8;
+  pub const VT_NEED_SNAPSHOT: ::flatbuffers::VOffsetT = 10;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    CounterAck { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args CounterAckArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<CounterAck<'bldr>> {
+    let mut builder = CounterAckBuilder::new(_fbb);
+    builder.add_seq(args.seq);
+    if let Some(x) = args.regime { builder.add_regime(x); }
+    builder.add_group(args.group);
+    builder.add_need_snapshot(args.need_snapshot);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn group(&self) -> u16 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u16>(CounterAck::VT_GROUP, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn regime(&self) -> Option<&'a Regime> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<Regime>(CounterAck::VT_REGIME, None)}
+  }
+  /// The last op that the follower applied.
+  #[inline]
+  pub fn seq(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(CounterAck::VT_SEQ, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn need_snapshot(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(CounterAck::VT_NEED_SNAPSHOT, Some(false)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for CounterAck<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u16>("group", Self::VT_GROUP, false)?
+     .visit_field::<Regime>("regime", Self::VT_REGIME, false)?
+     .visit_field::<u64>("seq", Self::VT_SEQ, false)?
+     .visit_field::<bool>("need_snapshot", Self::VT_NEED_SNAPSHOT, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct CounterAckArgs<'a> {
+    pub group: u16,
+    pub regime: Option<&'a Regime>,
+    pub seq: u64,
+    pub need_snapshot: bool,
+}
+impl<'a> Default for CounterAckArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    CounterAckArgs {
+      group: 0,
+      regime: None,
+      seq: 0,
+      need_snapshot: false,
+    }
+  }
+}
+
+pub struct CounterAckBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> CounterAckBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_group(&mut self, group: u16) {
+    self.fbb_.push_slot::<u16>(CounterAck::VT_GROUP, group, 0);
+  }
+  #[inline]
+  pub fn add_regime(&mut self, regime: &Regime) {
+    self.fbb_.push_slot_always::<&Regime>(CounterAck::VT_REGIME, regime);
+  }
+  #[inline]
+  pub fn add_seq(&mut self, seq: u64) {
+    self.fbb_.push_slot::<u64>(CounterAck::VT_SEQ, seq, 0);
+  }
+  #[inline]
+  pub fn add_need_snapshot(&mut self, need_snapshot: bool) {
+    self.fbb_.push_slot::<bool>(CounterAck::VT_NEED_SNAPSHOT, need_snapshot, false);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> CounterAckBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    CounterAckBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<CounterAck<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for CounterAck<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("CounterAck");
+      ds.field("group", &self.group());
+      ds.field("regime", &self.regime());
+      ds.field("seq", &self.seq());
+      ds.field("need_snapshot", &self.need_snapshot());
+      ds.finish()
+  }
+}
+pub enum CounterEntryOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct CounterEntry<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for CounterEntry<'a> {
+  type Inner = CounterEntry<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> CounterEntry<'a> {
+  pub const VT_KEY: ::flatbuffers::VOffsetT = 4;
+  pub const VT_VALUE: ::flatbuffers::VOffsetT = 6;
+  pub const VT_EXPIRES_AT_MS: ::flatbuffers::VOffsetT = 8;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    CounterEntry { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args CounterEntryArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<CounterEntry<'bldr>> {
+    let mut builder = CounterEntryBuilder::new(_fbb);
+    builder.add_expires_at_ms(args.expires_at_ms);
+    if let Some(x) = args.value { builder.add_value(x); }
+    if let Some(x) = args.key { builder.add_key(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn key(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(CounterEntry::VT_KEY, None)}
+  }
+  #[inline]
+  pub fn value(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(CounterEntry::VT_VALUE, None)}
+  }
+  /// The absolute deadline in Unix milliseconds. Zero means no expiry.
+  #[inline]
+  pub fn expires_at_ms(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(CounterEntry::VT_EXPIRES_AT_MS, Some(0)).unwrap()}
+  }
+}
+
+impl ::flatbuffers::Verifiable for CounterEntry<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("key", Self::VT_KEY, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("value", Self::VT_VALUE, false)?
+     .visit_field::<u64>("expires_at_ms", Self::VT_EXPIRES_AT_MS, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct CounterEntryArgs<'a> {
+    pub key: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+    pub value: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+    pub expires_at_ms: u64,
+}
+impl<'a> Default for CounterEntryArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    CounterEntryArgs {
+      key: None,
+      value: None,
+      expires_at_ms: 0,
+    }
+  }
+}
+
+pub struct CounterEntryBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> CounterEntryBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_key(&mut self, key: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(CounterEntry::VT_KEY, key);
+  }
+  #[inline]
+  pub fn add_value(&mut self, value: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u8>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(CounterEntry::VT_VALUE, value);
+  }
+  #[inline]
+  pub fn add_expires_at_ms(&mut self, expires_at_ms: u64) {
+    self.fbb_.push_slot::<u64>(CounterEntry::VT_EXPIRES_AT_MS, expires_at_ms, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> CounterEntryBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    CounterEntryBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<CounterEntry<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for CounterEntry<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("CounterEntry");
+      ds.field("key", &self.key());
+      ds.field("value", &self.value());
+      ds.field("expires_at_ms", &self.expires_at_ms());
+      ds.finish()
+  }
+}
+pub enum CounterSnapshotOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+/// The snapshot format of a counter group: the clock of the state and every entry.
+pub struct CounterSnapshot<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for CounterSnapshot<'a> {
+  type Inner = CounterSnapshot<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> CounterSnapshot<'a> {
+  pub const VT_CLOCK_MS: ::flatbuffers::VOffsetT = 4;
+  pub const VT_ENTRIES: ::flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    CounterSnapshot { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args CounterSnapshotArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<CounterSnapshot<'bldr>> {
+    let mut builder = CounterSnapshotBuilder::new(_fbb);
+    builder.add_clock_ms(args.clock_ms);
+    if let Some(x) = args.entries { builder.add_entries(x); }
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn clock_ms(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(CounterSnapshot::VT_CLOCK_MS, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn entries(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<CounterEntry<'a>>>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<CounterEntry>>>>(CounterSnapshot::VT_ENTRIES, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for CounterSnapshot<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u64>("clock_ms", Self::VT_CLOCK_MS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<CounterEntry>>>>("entries", Self::VT_ENTRIES, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct CounterSnapshotArgs<'a> {
+    pub clock_ms: u64,
+    pub entries: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<CounterEntry<'a>>>>>,
+}
+impl<'a> Default for CounterSnapshotArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    CounterSnapshotArgs {
+      clock_ms: 0,
+      entries: None,
+    }
+  }
+}
+
+pub struct CounterSnapshotBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> CounterSnapshotBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_clock_ms(&mut self, clock_ms: u64) {
+    self.fbb_.push_slot::<u64>(CounterSnapshot::VT_CLOCK_MS, clock_ms, 0);
+  }
+  #[inline]
+  pub fn add_entries(&mut self, entries: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<CounterEntry<'b >>>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(CounterSnapshot::VT_ENTRIES, entries);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> CounterSnapshotBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    CounterSnapshotBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<CounterSnapshot<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for CounterSnapshot<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("CounterSnapshot");
+      ds.field("clock_ms", &self.clock_ms());
+      ds.field("entries", &self.entries());
       ds.finish()
   }
 }

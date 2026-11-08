@@ -29,15 +29,15 @@ pub enum DecodeError {
     },
 }
 
-fn invalid(e: impl std::fmt::Display) -> DecodeError {
+pub(crate) fn invalid(e: impl std::fmt::Display) -> DecodeError {
     DecodeError::Invalid(e.to_string())
 }
 
-fn id128(bytes: [u8; 16]) -> fb::Id128 {
+pub(crate) fn id128(bytes: [u8; 16]) -> fb::Id128 {
     fb::Id128::new(&bytes)
 }
 
-fn node_of(id: &fb::Id128) -> NodeId {
+pub(crate) fn node_of(id: &fb::Id128) -> NodeId {
     NodeId::from_u128(u128::from_be_bytes(id.bytes().into()))
 }
 
@@ -622,6 +622,16 @@ fn encode_body(message: &Message) -> Vec<u8> {
             let t = fb::Fetch::create(&mut fbb, &fb::FetchArgs { keys: Some(keys) });
             fbb.finish_minimal(t);
         }
+        m @ (Message::RaftLeader(_)
+        | Message::RaftConfig(_)
+        | Message::RaftVote(_)
+        | Message::RaftAppend(_)
+        | Message::RaftSnapshot(_)
+        | Message::RaftReply(_)
+        | Message::CounterSync(_)
+        | Message::CounterAck(_)) => {
+            crate::counter::encode(&mut fbb, m);
+        }
         Message::Digest { from, to, sums } => {
             let sums = fbb.create_vector(sums);
             let t = fb::Digest::create(
@@ -807,13 +817,16 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
                 sums: d.sums().map(|s| s.iter().collect()).unwrap_or_default(),
             }
         }
-        other => {
-            return Err(DecodeError::UnknownType {
-                message_type: other.0,
-                request_id,
-                trace,
-            })
-        }
+        other => match crate::counter::decode(other, payload, &opts) {
+            Some(decoded) => decoded?,
+            None => {
+                return Err(DecodeError::UnknownType {
+                    message_type: other.0,
+                    request_id,
+                    trace,
+                })
+            }
+        },
     };
     Ok(Frame {
         request_id,

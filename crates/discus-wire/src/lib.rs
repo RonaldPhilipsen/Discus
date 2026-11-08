@@ -25,13 +25,20 @@ pub mod fb {
 }
 
 mod codec;
+mod counter;
 mod message;
 mod resp;
 
 pub use codec::{decode_frame, encode_envelope, encode_frame, DecodeError};
+pub use counter::{
+    decode_counter_snapshot, decode_hints, encode_counter_snapshot, encode_hints, SnapshotEntries,
+};
 pub use message::{
-    Batch, BatchAck, Capacity, Forward, ForwardMode, ForwardReply, Frame, Gossip, GossipKind,
-    HandshakeCode, HandshakeFailed, Hello, Liveness, MemberInfo, Message, Rumor, TraceContext,
+    Batch, BatchAck, Capacity, CounterAck, CounterMode, CounterSync, Forward, ForwardMode,
+    ForwardReply, Frame, Gossip, GossipKind, GroupHint, HandshakeCode, HandshakeFailed, Hello,
+    Liveness, MemberInfo, Message, RaftAppend, RaftConfig, RaftEntry, RaftHeader, RaftLogId,
+    RaftMembership, RaftOutcome, RaftPayload, RaftReply, RaftSnapshot, RaftVote, RaftVoteReq,
+    Regime, Rumor, TraceContext,
 };
 pub use resp::encode_command;
 
@@ -45,8 +52,11 @@ pub mod caps {
     /// The node takes replication, hints, handoff, repair, and digests on the bulk lane, and
     /// answers tracked reads.
     pub const REPLICATION: u64 = 4;
+    /// The node runs the counter tier: leader hints, leader-follower sync, and Raft (spec
+    /// section 10).
+    pub const COUNTERS: u64 = 8;
     /// Every bit this build knows.
-    pub const KNOWN: u64 = EPOCH_PUSH | GOSSIP | REPLICATION;
+    pub const KNOWN: u64 = EPOCH_PUSH | GOSSIP | REPLICATION | COUNTERS;
 }
 
 /// The frame limit before `HELLO` completes, and the smallest offer that `HELLO` accepts.

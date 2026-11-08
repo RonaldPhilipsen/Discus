@@ -114,6 +114,178 @@ pub struct BatchAck {
     pub idle: bool,
 }
 
+/// One leadership of a counter group: a leader-follower lease term or a Raft instance (spec
+/// section 10). Ordered by generation, then origin.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Regime {
+    pub generation: u64,
+    pub origin: NodeId,
+}
+
+impl std::fmt::Display for Regime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{}", self.generation, self.origin)
+    }
+}
+
+/// A Raft log position. `leader` is the replica ID of the leader that wrote the entry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RaftLogId {
+    pub term: u64,
+    pub leader: u64,
+    pub index: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RaftVote {
+    pub term: u64,
+    pub leader: u64,
+    pub committed: bool,
+}
+
+/// A Raft membership: the voter sets (two during a joint change) and every node by replica ID.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RaftMembership {
+    pub configs: Vec<Vec<u64>>,
+    pub nodes: Vec<(u64, NodeId)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RaftPayload {
+    Blank,
+    /// The leader stamp in Unix milliseconds and the raw RESP command.
+    Command {
+        stamp_ms: u64,
+        command: Bytes,
+    },
+    Membership(RaftMembership),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftEntry {
+    pub log_id: RaftLogId,
+    pub payload: RaftPayload,
+}
+
+/// The group, the regime, and the replica ID that a Raft message is for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RaftHeader {
+    pub group: u16,
+    pub regime: Regime,
+    pub target: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftAppend {
+    pub header: RaftHeader,
+    pub vote: RaftVote,
+    pub prev: Option<RaftLogId>,
+    pub entries: Vec<RaftEntry>,
+    pub committed: Option<RaftLogId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftVoteReq {
+    pub header: RaftHeader,
+    pub vote: RaftVote,
+    pub last: Option<RaftLogId>,
+}
+
+/// One chunk of a snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftSnapshot {
+    pub header: RaftHeader,
+    pub vote: RaftVote,
+    pub last: Option<RaftLogId>,
+    pub membership_log: Option<RaftLogId>,
+    pub membership: RaftMembership,
+    pub snapshot_id: String,
+    pub offset: u64,
+    pub data: Bytes,
+    pub done: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RaftOutcome {
+    Ok,
+    Conflict,
+    HigherVote,
+    Partial,
+    /// The receiver has no replica for the regime and the target.
+    Refused,
+}
+
+/// The reply to `RAFT_VOTE`, `RAFT_APPEND`, and `RAFT_SNAPSHOT`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftReply {
+    pub outcome: RaftOutcome,
+    pub vote: RaftVote,
+    pub granted: bool,
+    pub last: Option<RaftLogId>,
+}
+
+impl RaftReply {
+    pub fn refused() -> RaftReply {
+        RaftReply {
+            outcome: RaftOutcome::Refused,
+            vote: RaftVote::default(),
+            granted: false,
+            last: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CounterMode {
+    LeaderFollower,
+    Raft,
+}
+
+/// What one node knows about the leader of one group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupHint {
+    pub group: u16,
+    pub mode: CounterMode,
+    pub regime: Regime,
+    pub leader: NodeId,
+    /// The Raft term. Zero in leader-follower mode.
+    pub term: u64,
+    pub follower: Option<NodeId>,
+    pub voters: Vec<NodeId>,
+    pub learners: Vec<NodeId>,
+}
+
+/// `RAFT_CONFIG`: the leader of `regime` asks a target to prepare a learner replica. The reply
+/// carries the replica ID, or zero when the target refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RaftConfig {
+    pub group: u16,
+    pub regime: Regime,
+    pub replica: u64,
+    pub leader: NodeId,
+}
+
+/// `COUNTER_SYNC`: ops from a leader-follower leader to its follower. `seq` numbers the first
+/// op, or the state of the snapshot. A sync without ops and without a snapshot is a heartbeat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CounterSync {
+    pub group: u16,
+    pub regime: Regime,
+    pub seq: u64,
+    /// The leader stamp and the raw RESP command of each op.
+    pub ops: Vec<(u64, Bytes)>,
+    pub snapshot: Option<Bytes>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CounterAck {
+    pub group: u16,
+    pub regime: Regime,
+    /// The last op that the follower applied.
+    pub seq: u64,
+    pub need_snapshot: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     Hello(Hello),
@@ -143,6 +315,15 @@ pub enum Message {
         to: EpochId,
         sums: Vec<u64>,
     },
+    /// A request lists nothing. The reply lists what the receiver knows.
+    RaftLeader(Vec<GroupHint>),
+    RaftConfig(RaftConfig),
+    RaftVote(RaftVoteReq),
+    RaftAppend(RaftAppend),
+    RaftSnapshot(RaftSnapshot),
+    RaftReply(RaftReply),
+    CounterSync(CounterSync),
+    CounterAck(CounterAck),
 }
 
 impl Message {
@@ -165,6 +346,14 @@ impl Message {
             Message::Fetch { .. } => T::FETCH.0,
             Message::Entries(_) => T::ENTRIES.0,
             Message::Digest { .. } => T::DIGEST.0,
+            Message::RaftLeader(_) => T::RAFT_LEADER.0,
+            Message::RaftConfig(_) => T::RAFT_CONFIG.0,
+            Message::RaftVote(_) => T::RAFT_VOTE.0,
+            Message::RaftAppend(_) => T::RAFT_APPEND.0,
+            Message::RaftSnapshot(_) => T::RAFT_SNAPSHOT.0,
+            Message::RaftReply(_) => T::RAFT_REPLY.0,
+            Message::CounterSync(_) => T::COUNTER_SYNC.0,
+            Message::CounterAck(_) => T::COUNTER_ACK.0,
         }
     }
 }
