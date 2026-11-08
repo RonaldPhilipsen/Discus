@@ -115,13 +115,14 @@ impl Pipeline {
 
     /// Prepare one parsed command and queue its reply slot.
     fn submit(&mut self, cmd: Command) {
-        let trace = CommandTrace::begin(self.metrics, &cmd);
+        let spec = crate::command::lookup(&cmd[0]);
+        let trace = CommandTrace::begin(self.metrics, spec, &cmd);
         let span = trace.span().clone();
         let _entered = span.enter();
         // The route span covers the entry checks and the owner choice. A command that waits for
         // an earlier one on the same key ends it and opens another when it runs.
         let route = trace.route_span();
-        let prepared = route.in_scope(|| cluster::prepare(&self.node, &mut self.conn, cmd));
+        let prepared = route.in_scope(|| cluster::prepare(&self.node, &mut self.conn, spec, cmd));
         let job = match prepared {
             Prepared::Done(value) => {
                 trace.finish(&value);

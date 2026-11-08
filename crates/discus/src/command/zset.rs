@@ -15,66 +15,16 @@ use crate::node::{ConnState, Node};
 type Reply = Result<Value, CommandError>;
 
 pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec {
-        name: "ZADD",
-        arity: -4,
-        handler: zadd,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ZSCORE",
-        arity: 3,
-        handler: zscore,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ZMSCORE",
-        arity: -3,
-        handler: zmscore,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ZREM",
-        arity: -3,
-        handler: zrem,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ZCARD",
-        arity: 2,
-        handler: zcard,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ZRANGE",
-        arity: -4,
-        handler: zrange,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ZREVRANGE",
-        arity: -4,
-        handler: zrevrange,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ZRANGEBYSCORE",
-        arity: -4,
-        handler: zrangebyscore,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ZINCRBY",
-        arity: 4,
-        handler: zincrby,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ZCOUNT",
-        arity: 4,
-        handler: zcount,
-        needs_auth: true,
-    },
+    CommandSpec::write("ZADD", -4, zadd),
+    CommandSpec::read("ZSCORE", 3, zscore),
+    CommandSpec::read("ZMSCORE", -3, zmscore),
+    CommandSpec::write("ZREM", -3, zrem),
+    CommandSpec::read("ZCARD", 2, zcard),
+    CommandSpec::read("ZRANGE", -4, zrange),
+    CommandSpec::read("ZREVRANGE", -4, zrevrange),
+    CommandSpec::read("ZRANGEBYSCORE", -4, zrangebyscore),
+    CommandSpec::write("ZINCRBY", 4, zincrby),
+    CommandSpec::read("ZCOUNT", 4, zcount),
 ];
 
 fn score_value(s: f64) -> Value {

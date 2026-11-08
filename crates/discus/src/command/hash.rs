@@ -15,72 +15,17 @@ type Hash = HashMap<Bytes, Bytes>;
 type Reply = Result<Value, CommandError>;
 
 pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec {
-        name: "HSET",
-        arity: -4,
-        handler: hset,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "HSETNX",
-        arity: 4,
-        handler: hsetnx,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "HGET",
-        arity: 3,
-        handler: hget,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "HMGET",
-        arity: -3,
-        handler: hmget,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "HGETALL",
-        arity: 2,
-        handler: hgetall,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "HDEL",
-        arity: -3,
-        handler: hdel,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "HEXISTS",
-        arity: 3,
-        handler: hexists,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "HLEN",
-        arity: 2,
-        handler: hlen,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "HINCRBY",
-        arity: 4,
-        handler: hincrby,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "HKEYS",
-        arity: 2,
-        handler: hkeys,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "HVALS",
-        arity: 2,
-        handler: hvals,
-        needs_auth: true,
-    },
+    CommandSpec::write("HSET", -4, hset),
+    CommandSpec::write("HSETNX", 4, hsetnx),
+    CommandSpec::read("HGET", 3, hget),
+    CommandSpec::read("HMGET", -3, hmget),
+    CommandSpec::read("HGETALL", 2, hgetall),
+    CommandSpec::write("HDEL", -3, hdel),
+    CommandSpec::read("HEXISTS", 3, hexists),
+    CommandSpec::read("HLEN", 2, hlen),
+    CommandSpec::write("HINCRBY", 4, hincrby),
+    CommandSpec::read("HKEYS", 2, hkeys),
+    CommandSpec::read("HVALS", 2, hvals),
 ];
 
 fn hset(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {

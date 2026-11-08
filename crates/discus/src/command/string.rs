@@ -8,105 +8,26 @@ use super::error::CommandError;
 use super::float::{incr_by_float, parse_float_delta};
 use super::table::CommandSpec;
 use super::util::{admit, check_key, check_value, parse_i64, upper};
+use crate::cluster::route::Route;
 use crate::node::{ConnState, Node};
 
 pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec {
-        name: "GET",
-        arity: 2,
-        handler: get,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "SET",
-        arity: -3,
-        handler: set,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "GETDEL",
-        arity: 2,
-        handler: getdel,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "GETEX",
-        arity: -2,
-        handler: getex,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "MGET",
-        arity: -2,
-        handler: mget,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "MSET",
-        arity: -3,
-        handler: mset,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "INCR",
-        arity: -2,
-        handler: incr,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "DECR",
-        arity: -2,
-        handler: decr,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "INCRBY",
-        arity: -3,
-        handler: incrby,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "DECRBY",
-        arity: -3,
-        handler: decrby,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "INCRBYFLOAT",
-        arity: 3,
-        handler: incrbyfloat,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "APPEND",
-        arity: 3,
-        handler: append,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "STRLEN",
-        arity: 2,
-        handler: strlen,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "DEL",
-        arity: -2,
-        handler: del,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "EXISTS",
-        arity: -2,
-        handler: exists,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "TYPE",
-        arity: 2,
-        handler: type_,
-        needs_auth: true,
-    },
+    CommandSpec::read("GET", 2, get),
+    CommandSpec::write("SET", -3, set),
+    CommandSpec::write("GETDEL", 2, getdel),
+    CommandSpec::write("GETEX", -2, getex),
+    CommandSpec::read("MGET", -2, mget).with_route(Route::MultiRead { sum: false }),
+    CommandSpec::write("MSET", -3, mset).with_route(Route::MultiWrite { pairs: true }),
+    CommandSpec::write("INCR", -2, incr),
+    CommandSpec::write("DECR", -2, decr),
+    CommandSpec::write("INCRBY", -3, incrby),
+    CommandSpec::write("DECRBY", -3, decrby),
+    CommandSpec::write("INCRBYFLOAT", 3, incrbyfloat),
+    CommandSpec::write("APPEND", 3, append),
+    CommandSpec::read("STRLEN", 2, strlen),
+    CommandSpec::write("DEL", -2, del).with_route(Route::MultiWrite { pairs: false }),
+    CommandSpec::read("EXISTS", -2, exists).with_route(Route::MultiRead { sum: true }),
+    CommandSpec::read("TYPE", 2, type_),
 ];
 
 type Reply = Result<Value, CommandError>;

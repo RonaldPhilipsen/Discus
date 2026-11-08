@@ -15,54 +15,14 @@ type Set = HashSet<Bytes>;
 type Reply = Result<Value, CommandError>;
 
 pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec {
-        name: "SADD",
-        arity: -3,
-        handler: sadd,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "SREM",
-        arity: -3,
-        handler: srem,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "SMEMBERS",
-        arity: 2,
-        handler: smembers,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "SISMEMBER",
-        arity: 3,
-        handler: sismember,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "SMISMEMBER",
-        arity: -3,
-        handler: smismember,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "SCARD",
-        arity: 2,
-        handler: scard,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "SPOP",
-        arity: -2,
-        handler: spop,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "SRANDMEMBER",
-        arity: -2,
-        handler: srandmember,
-        needs_auth: true,
-    },
+    CommandSpec::write("SADD", -3, sadd),
+    CommandSpec::write("SREM", -3, srem),
+    CommandSpec::read("SMEMBERS", 2, smembers),
+    CommandSpec::read("SISMEMBER", 3, sismember),
+    CommandSpec::read("SMISMEMBER", -3, smismember),
+    CommandSpec::read("SCARD", 2, scard),
+    CommandSpec::write("SPOP", -2, spop),
+    CommandSpec::read("SRANDMEMBER", -2, srandmember),
 ];
 
 fn sadd(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {

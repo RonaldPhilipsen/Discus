@@ -16,9 +16,9 @@ use std::time::Duration;
 use discus_resp::Command;
 use tokio::time::Instant;
 
-use super::route::Route;
 use super::{run_hop, Failure, Hop, Job, Reply};
 use crate::command::util::upper;
+use crate::command::CommandSpec;
 use crate::Node;
 
 /// A held command plans its route again at least this often.
@@ -51,7 +51,13 @@ pub fn resendable(cmd: &Command, failure: Failure) -> bool {
 }
 
 /// Hold `cmd` after its first failure and retry it until it gets an answer or the budget ends.
-pub async fn held(node: &Arc<Node>, cmd: Command, route: Route, hop: Hop, first: Failure) -> Reply {
+pub async fn held(
+    node: &Arc<Node>,
+    spec: &'static CommandSpec,
+    cmd: Command,
+    hop: Hop,
+    first: Failure,
+) -> Reply {
     if !resendable(&cmd, first) {
         return Reply::try_again();
     }
@@ -70,7 +76,8 @@ pub async fn held(node: &Arc<Node>, cmd: Command, route: Route, hop: Hop, first:
         }
         let job = Job {
             cmd: cmd.clone(),
-            route,
+            spec,
+            route: spec.route,
             rr: 0,
             writes: None,
         };

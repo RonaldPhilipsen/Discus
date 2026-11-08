@@ -14,6 +14,7 @@ use discus_telemetry::pipeline::{
 };
 use discus_telemetry::Metrics;
 
+use crate::command::CommandSpec;
 use crate::node::{ConnState, Node};
 use crate::Config;
 
@@ -244,11 +245,12 @@ struct Active {
 }
 
 impl CommandTrace {
-    /// Start the telemetry of `cmd`. With an enabled `metrics`, this opens the command span.
-    pub fn begin(metrics: &Metrics, cmd: &Command) -> CommandTrace {
+    /// Start the telemetry of `cmd`, whose name looked up as `spec`. With an enabled `metrics`,
+    /// this opens the command span.
+    pub fn begin(metrics: &Metrics, spec: Option<&CommandSpec>, cmd: &Command) -> CommandTrace {
         #[cfg(feature = "otel")]
         if metrics.is_enabled() {
-            let label = command_label(cmd);
+            let label = command_label(spec, cmd);
             let span = tracing::info_span!(
                 "command",
                 otel.status_code = tracing::field::Empty,
@@ -264,7 +266,7 @@ impl CommandTrace {
                 }),
             };
         }
-        let _ = (metrics, cmd);
+        let _ = (metrics, spec, cmd);
         CommandTrace {
             span: tracing::Span::none(),
             #[cfg(feature = "otel")]
@@ -302,15 +304,19 @@ impl CommandTrace {
     }
 }
 
-/// The metric label of a command: the table name, never the name the client sent.
-pub fn command_label(cmd: &Command) -> discus_telemetry::attrs::CommandLabel {
+/// The metric label of a command whose name looked up as `spec`: the table name, never the name
+/// the client sent.
+pub fn command_label(
+    spec: Option<&CommandSpec>,
+    cmd: &Command,
+) -> discus_telemetry::attrs::CommandLabel {
     use discus_telemetry::attrs::CommandLabel;
+    if let Some(spec) = spec {
+        return CommandLabel::new(spec.name);
+    }
     let Some(name) = cmd.first() else {
         return CommandLabel::UNKNOWN;
     };
-    if let Some(spec) = crate::command::lookup(name) {
-        return CommandLabel::new(spec.name);
-    }
     let upper = String::from_utf8_lossy(name).to_ascii_uppercase();
     if crate::command::table::is_unsupported(&upper) {
         CommandLabel::UNSUPPORTED
@@ -328,15 +334,18 @@ pub fn dispatch(node: &Node, conn: &mut ConnState, cmd: &Command) -> Value {
 /// execution, as on a node without peers. The connection loop uses `CommandTrace` directly,
 /// because it also forwards. When `metrics` records nothing, no span opens.
 pub fn dispatch_with(metrics: &Metrics, node: &Node, conn: &mut ConnState, cmd: &Command) -> Value {
-    let trace = CommandTrace::begin(metrics, cmd);
+    let spec = crate::command::lookup(&cmd[0]);
+    let trace = CommandTrace::begin(metrics, spec, cmd);
     let span = trace.span().clone();
     let _entered = span.enter();
     let prepared = trace
         .route_span()
-        .in_scope(|| crate::cluster::prepare(node, conn, cmd.clone()));
+        .in_scope(|| crate::cluster::prepare(node, conn, spec, cmd.clone()));
     let value = match prepared {
         crate::cluster::Prepared::Done(value) => value,
-        crate::cluster::Prepared::Data(job) => crate::cluster::local(node, &job.cmd).value,
+        crate::cluster::Prepared::Data(job) => {
+            crate::cluster::local(node, job.spec, &job.cmd).value
+        }
     };
     trace.finish(&value);
     value
@@ -426,7 +435,8 @@ pub fn record_forward(
         Err(discus_transport::TransportError::Timeout) => Status::Timeout,
         Err(_) => Status::Error,
     };
-    metrics.forward(command_label(cmd), status, hops);
+    let spec = cmd.first().and_then(|name| crate::command::lookup(name));
+    metrics.forward(command_label(spec, cmd), status, hops);
 }
 
 /// Record the epoch gauge and the member count of each state.
@@ -505,10 +515,10 @@ pub fn forwarded_span(metrics: &Metrics, inbound: &discus_wire::TraceContext) ->
 }
 
 /// Record the table name of a forwarded command on the current command span.
-pub fn record_operation(cmd: &Command) {
+pub fn record_operation(spec: Option<&CommandSpec>, cmd: &Command) {
     #[cfg(feature = "otel")]
-    tracing::Span::current().record("db.operation.name", command_label(cmd).as_str());
-    let _ = cmd;
+    tracing::Span::current().record("db.operation.name", command_label(spec, cmd).as_str());
+    let _ = (spec, cmd);
 }
 
 /// Mark the current command span as failed when the reply is an error.
