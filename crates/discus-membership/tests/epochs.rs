@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use discus_membership::sim::Sim;
 use discus_membership::{gained_owners, Event, SwimConfig};
 use discus_placement::{ClusterId, Epoch, EpochId, Member, MemberState, NodeId, Weight};
+use discus_wire::{Liveness, Rumor};
 
 fn cfg() -> SwimConfig {
     SwimConfig {
@@ -77,6 +78,83 @@ fn racing_creators_converge() {
         assert!(agreed(&sim, &ids[..4]));
         let after = sim.epoch(ids[0]).id().generation;
         assert!(after <= before + 3, "seed {seed}: {before} -> {after}");
+    }
+}
+
+#[test]
+fn a_join_seen_by_two_members_creates_one_epoch() {
+    for seed in 0..10 {
+        let mut sim = Sim::new(300 + seed, cfg());
+        let mut ids = sim.cluster(4);
+        ids.sort();
+        sim.run_ms(500);
+        let before = sim.epoch(ids[0]).id().generation;
+        let x = sim.add_node();
+        sim.start(x, &[ids[1]]);
+        sim.run_until(3_000, |s| s.node(x).swim.me().state == MemberState::Normal);
+        let now = sim.now();
+        let info = sim.node(x).swim.me().clone();
+        for id in [ids[2], ids[3]] {
+            let rumor = Rumor {
+                info: info.clone(),
+                liveness: Liveness::Alive,
+                accuser: None,
+            };
+            sim.node_mut(id).swim.learn(now, rumor, true);
+        }
+        let mut all = ids.clone();
+        all.push(x);
+        sim.run_until(5_000, |s| agreed(s, &all));
+        sim.run_ms(1_000);
+        assert!(agreed(&sim, &all), "seed {seed}");
+        for id in sim.ids() {
+            for e in sim.events(id) {
+                assert!(
+                    !matches!(e, Event::Rejoining { .. }),
+                    "seed {seed}: {id} rejoined"
+                );
+                if let Event::EpochAdopted { old, new } = e {
+                    assert!(
+                        new.generation > old.generation,
+                        "seed {seed}: {old} -> {new}"
+                    );
+                }
+            }
+        }
+        assert_eq!(sim.epoch(ids[0]).id().generation, before + 1, "seed {seed}");
+    }
+}
+
+#[test]
+fn concurrent_joins_do_not_drop_a_joiner() {
+    for seed in 0..10 {
+        let mut sim = Sim::new(200 + seed, cfg());
+        let ids = sim.cluster(4);
+        sim.run_ms(500);
+        let before = sim.epoch(ids[0]).id().generation;
+        // Two joiners ask two different members at the same time, so two members learn a join
+        // at once and each has a delta of its own.
+        let x = sim.add_node();
+        let y = sim.add_node();
+        sim.start(x, &[ids[1]]);
+        sim.start(y, &[ids[2]]);
+        let mut all = ids.clone();
+        all.extend([x, y]);
+        sim.run_until(5_000, |s| agreed(s, &all));
+        sim.run_ms(1_000);
+        assert!(agreed(&sim, &all), "seed {seed}");
+        for j in [x, y] {
+            let rejoined = sim
+                .events(j)
+                .iter()
+                .any(|e| matches!(e, Event::Rejoining { .. }));
+            assert!(
+                !rejoined,
+                "seed {seed}: joiner {j} was dropped and rejoined"
+            );
+        }
+        let after = sim.epoch(ids[0]).id().generation;
+        assert!(after <= before + 2, "seed {seed}: {before} -> {after}");
     }
 }
 
