@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::counters::{
-    flags, group_of, held, incr_until, join, leader_of, raft_cluster, status, Leases, GROUPS,
+    flags, group_of, held, incr_until, join_to, leader_of, raft_cluster, status, Leases, GROUPS,
 };
-use common::gossip::{agreed, socket, wait_until, GossipNode, Net};
+use common::gossip::{agreed, refs, wait_until, GossipNode, Net};
 use common::status as http_status;
 use discus::counter::group_key;
 use redis::AsyncCommands;
@@ -32,8 +32,7 @@ fn promoted(n: &GossipNode) -> bool {
 async fn startupz_waits_for_counter_promotion() {
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 3, &[]).await;
-    let seeds: Vec<_> = nodes.iter().map(|n| n.cluster_addr).collect();
-    let (fourth, _) = join(&net, &leases, socket().0, &seeds, &flags(&[])).await;
+    let (fourth, _) = join_to(&net, &leases, &refs(&nodes), &flags(&[])).await;
     fourth
         .node
         .faults
@@ -245,7 +244,7 @@ async fn growth_from_one_to_three_and_back() {
     let (net, leases) = (Net::new(), Leases::new());
     let extra: Vec<&'static str> =
         flags(&["--replication-factor", "3", "--shutdown-timeout-secs", "15"]);
-    let (first, _) = join(&net, &leases, socket().0, &[], &extra).await;
+    let (first, _) = join_to(&net, &leases, &[], &extra).await;
     let mut c = first.redis().await;
     for i in 1..=50 {
         assert_eq!(
@@ -261,7 +260,7 @@ async fn growth_from_one_to_three_and_back() {
             .count()
     };
 
-    let (second, _) = join(&net, &leases, socket().0, &[first.cluster_addr], &extra).await;
+    let (second, _) = join_to(&net, &leases, &[&first], &extra).await;
     let two = [&first, &second];
     assert!(wait_until(Duration::from_secs(10), || agreed(&two)).await);
     let g = group_of(&first, "cnt:grow");
@@ -282,14 +281,7 @@ async fn growth_from_one_to_three_and_back() {
         51
     );
 
-    let (third, _) = join(
-        &net,
-        &leases,
-        socket().0,
-        &[first.cluster_addr, second.cluster_addr],
-        &extra,
-    )
-    .await;
+    let (third, _) = join_to(&net, &leases, &[&first, &second], &extra).await;
     let three = [&first, &second, &third];
     assert!(wait_until(Duration::from_secs(10), || agreed(&three)).await);
     assert!(

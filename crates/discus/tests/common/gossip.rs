@@ -154,20 +154,31 @@ impl Net {
 
     /// Start `n` nodes at once, each seeded with all the others.
     pub async fn start_all(&self, n: usize, extra: &[&str]) -> Vec<GossipNode> {
-        let sockets: Vec<(UdpSocket, SocketAddr)> = (0..n).map(|_| socket()).collect();
-        let addrs: Vec<SocketAddr> = sockets.iter().map(|(_, a)| *a).collect();
-        let mut nodes = Vec::new();
-        for (i, (s, _)) in sockets.into_iter().enumerate() {
-            let seeds: Vec<SocketAddr> = addrs
-                .iter()
-                .enumerate()
-                .filter(|(j, _)| *j != i)
-                .map(|(_, a)| *a)
-                .collect();
-            nodes.push(self.start_on(s, &seeds, extra, Opts::default()).await);
-        }
-        nodes
+        start_each(n, async |s, seeds| {
+            self.start_on(s, seeds, extra, Opts::default()).await
+        })
+        .await
     }
+}
+
+/// Bind `n` sockets and call `start` with each socket and the addresses of all the others.
+pub async fn start_each<T>(
+    n: usize,
+    mut start: impl AsyncFnMut(UdpSocket, &[SocketAddr]) -> T,
+) -> Vec<T> {
+    let sockets: Vec<(UdpSocket, SocketAddr)> = (0..n).map(|_| socket()).collect();
+    let addrs: Vec<SocketAddr> = sockets.iter().map(|(_, a)| *a).collect();
+    let mut out = Vec::new();
+    for (i, (s, _)) in sockets.into_iter().enumerate() {
+        let seeds: Vec<SocketAddr> = addrs
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, a)| *a)
+            .collect();
+        out.push(start(s, &seeds).await);
+    }
+    out
 }
 
 /// A test CA, and its CA, certificate, and key files in a new temporary directory.
@@ -255,6 +266,10 @@ pub async fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bo
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+pub fn refs(nodes: &[GossipNode]) -> Vec<&GossipNode> {
+    nodes.iter().collect()
 }
 
 /// Every node in `nodes` is NORMAL, in one cluster, with one epoch that lists exactly them.

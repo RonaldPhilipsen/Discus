@@ -13,7 +13,7 @@ use discus::counter::{CounterLeases, GroupStatus};
 use discus_membership::{LeaseProvider, MemoryLease};
 use redis::aio::MultiplexedConnection;
 
-use super::gossip::{agreed, socket, wait_until, GossipNode, Net, Opts};
+use super::gossip::{agreed, socket, start_each, wait_until, GossipNode, Net, Opts};
 
 pub const GROUPS: u16 = 4;
 
@@ -145,21 +145,21 @@ pub async fn start(
     n: usize,
     extra: &[&str],
 ) -> (Vec<GossipNode>, Vec<Arc<AtomicBool>>) {
-    let sockets: Vec<_> = (0..n).map(|_| socket()).collect();
-    let addrs: Vec<_> = sockets.iter().map(|(_, a)| *a).collect();
-    let (mut nodes, mut gates) = (Vec::new(), Vec::new());
-    for (i, (s, _)) in sockets.into_iter().enumerate() {
-        let seeds: Vec<_> = addrs
-            .iter()
-            .enumerate()
-            .filter(|(j, _)| *j != i)
-            .map(|(_, a)| *a)
-            .collect();
-        let (node, gate) = join(net, leases, s, &seeds, extra).await;
-        nodes.push(node);
-        gates.push(gate);
-    }
-    (nodes, gates)
+    start_each(n, async |s, seeds| join(net, leases, s, seeds, extra).await)
+        .await
+        .into_iter()
+        .unzip()
+}
+
+/// Start one node on a new socket, seeded with `seeds`, like [`join`].
+pub async fn join_to(
+    net: &Net,
+    leases: &Leases,
+    seeds: &[&GossipNode],
+    flags: &[&str],
+) -> (GossipNode, Arc<AtomicBool>) {
+    let addrs: Vec<_> = seeds.iter().map(|n| n.cluster_addr).collect();
+    join(net, leases, socket().0, &addrs, flags).await
 }
 
 /// Start one node on `socket` with the shared leases, `flags`, and the [`FAST`] lease flags that

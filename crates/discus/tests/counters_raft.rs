@@ -7,10 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::counters::{
-    all_raft, flags, group_of, held, incr_once, incr_or_show, incr_until, join, key_in, leader_of,
-    raft_cluster, role, start, status, voters_of, Leases, GROUPS, RAFT, SLOW_DEATH,
+    all_raft, flags, group_of, held, incr_once, incr_or_show, incr_until, join_to, key_in,
+    leader_of, raft_cluster, role, start, status, voters_of, Leases, GROUPS, RAFT, SLOW_DEATH,
 };
-use common::gossip::{agreed, socket, wait_until, GossipNode, Net};
+use common::gossip::{agreed, refs, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
 use serial_test::serial;
 
@@ -58,8 +58,7 @@ async fn a_learner_catches_up_by_snapshot() {
             let _: i64 = incr_once(&mut c, k).await;
         }
     }
-    let seeds: Vec<_> = nodes.iter().map(|n| n.cluster_addr).collect();
-    let (fourth, _) = join(&net, &leases, socket().0, &seeds, &flags(&extra)).await;
+    let (fourth, _) = join_to(&net, &leases, &refs(&nodes), &flags(&extra)).await;
     let mut all: Vec<&GossipNode> = nodes.iter().collect();
     all.push(&fourth);
     assert!(wait_until(Duration::from_secs(15), || agreed(&all)).await);
@@ -132,8 +131,7 @@ async fn a_restarted_node_enters_as_a_learner() {
     victim.kill();
     let rest: Vec<&GossipNode> = nodes.iter().filter(|n| n.id != victim.id).collect();
     assert!(wait_until(Duration::from_secs(15), || agreed(&rest)).await);
-    let seeds: Vec<_> = rest.iter().map(|n| n.cluster_addr).collect();
-    let (fresh, _) = join(&net, &leases, socket().0, &seeds, &flags(&[])).await;
+    let (fresh, _) = join_to(&net, &leases, &rest, &flags(&[])).await;
     let mut all = rest.clone();
     all.push(&fresh);
     assert!(wait_until(Duration::from_secs(15), || agreed(&all)).await);
@@ -289,8 +287,7 @@ async fn the_up_switch_waits_for_the_dwell_time() {
     for _ in 0..5 {
         let _: i64 = incr_until(&mut c, "cnt:up", Duration::from_secs(5)).await;
     }
-    let seeds: Vec<_> = nodes.iter().map(|n| n.cluster_addr).collect();
-    let (third, _) = join(&net, &leases, socket().0, &seeds, &f).await;
+    let (third, _) = join_to(&net, &leases, &refs, &f).await;
     let mut all = refs.clone();
     all.push(&third);
     assert!(wait_until(Duration::from_secs(10), || agreed(&all)).await);

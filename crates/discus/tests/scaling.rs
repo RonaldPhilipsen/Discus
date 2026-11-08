@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::counters::{all_raft, flags, join, status, Leases, GROUPS};
-use common::gossip::{agreed, socket, wait_until, GossipNode, Net};
+use common::counters::{all_raft, flags, join_to, status, Leases, GROUPS};
+use common::gossip::{agreed, refs, wait_until, GossipNode, Net};
 use discus::counter::group_key;
 use redis::AsyncCommands;
 use serial_test::serial;
@@ -175,7 +175,7 @@ async fn growth_from_one_to_five_and_back_under_load() {
     let (net, leases) = (Net::new(), Leases::new());
     let extra = flags(&["--replication-factor", "3", "--shutdown-timeout-secs", "20"]);
 
-    let (first, _) = join(&net, &leases, socket().0, &[], &extra).await;
+    let (first, _) = join_to(&net, &leases, &[], &extra).await;
     assert!(
         wait_until(STEP, || first.is_normal()).await,
         "the first node did not form a cluster"
@@ -206,8 +206,7 @@ async fn growth_from_one_to_five_and_back_under_load() {
     ];
 
     for n in 2..=MAX_NODES {
-        let seeds: Vec<_> = nodes.iter().map(|n| n.cluster_addr).collect();
-        let (node, _) = join(&net, &leases, socket().0, &seeds, &extra).await;
+        let (node, _) = join_to(&net, &leases, &refs(&nodes), &extra).await;
         nodes.push(node);
         let all: Vec<&GossipNode> = nodes.iter().collect();
         settled(&all, &format!("grow to {n}")).await;
