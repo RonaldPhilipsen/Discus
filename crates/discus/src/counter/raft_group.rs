@@ -134,6 +134,23 @@ impl RaftRole {
     }
 }
 
+/// The learners to promote in one change, from the caught-up target learners in `ready`.
+///
+/// A single voter takes at least two new voters at once. One voter plus one learner would make a
+/// group of two, whose quorum needs both. A node that joins again discards its replica (spec
+/// section 6.3), and its replica ID never answers again. If that happens to the one new voter,
+/// neither the joint change nor any later change can commit, and only a new instance could free
+/// the group. Two new voters let the change commit with either of them.
+fn promotion(voters: usize, ready: &[(u64, NodeId)]) -> Option<BTreeSet<u64>> {
+    let take = match voters {
+        0 | 1 if ready.len() < 2 => return None,
+        0 | 1 => ready.len(),
+        _ => 1,
+    };
+    let promote: BTreeSet<u64> = ready.iter().take(take).map(|(id, _)| *id).collect();
+    (!promote.is_empty()).then_some(promote)
+}
+
 /// The Raft network of a node: every Raft message goes on the bulk lane.
 pub struct Link(pub std::sync::Weak<Counters>);
 
@@ -327,7 +344,7 @@ impl Group {
             .leading_since
             .lock()
             .get_or_insert_with(std::time::Instant::now);
-        if replica.in_joint_change() || !counters.may_change() {
+        if replica.in_joint_change() {
             return;
         }
         let settings = &counters.settings;
@@ -342,9 +359,29 @@ impl Group {
                         || m.state == discus_placement::MemberState::Leaving
                 }) || replica.contacts.silent_for(*id, leading_since) > settings.voter_timeout)
         });
+        // Each move takes the rate limit only when it acts. A group with nothing to move must
+        // not take the slot, or it can starve the groups that have a move for many seconds.
         if let Some((id, n)) = gone {
+            if !counters.may_change() {
+                return;
+            }
             tracing::info!(group = self.g, voter = %n, "removing a lost voter");
             let change = ChangeMembers::RemoveVoters(BTreeSet::from([*id]));
+            let _ =
+                tokio::time::timeout(CHANGE_TIMEOUT, raft.change_membership(change, false)).await;
+            return;
+        }
+        // A node that joins again discards its replica, and the replica ID never comes back. The
+        // node stays listed under that ID, so it gets no new replica until the learner goes.
+        let lost_learner = learners.iter().find(|(id, _)| {
+            replica.contacts.silent_for(*id, leading_since) > settings.voter_timeout
+        });
+        if let Some((id, n)) = lost_learner {
+            if !counters.may_change() {
+                return;
+            }
+            tracing::info!(group = self.g, learner = %n, "removing a lost learner");
+            let change = ChangeMembers::RemoveNodes(BTreeSet::from([*id]));
             let _ =
                 tokio::time::timeout(CHANGE_TIMEOUT, raft.change_membership(change, false)).await;
             return;
@@ -352,6 +389,9 @@ impl Group {
         let listed =
             |n: &NodeId| voters.iter().any(|(_, v)| v == n) || learners.iter().any(|(_, l)| l == n);
         if let Some(t) = targets.iter().find(|t| !listed(t)) {
+            if !counters.may_change() {
+                return;
+            }
             let ask = Message::RaftConfig(RaftConfig {
                 group: self.g,
                 regime: r.regime(),
@@ -361,6 +401,8 @@ impl Group {
             if let Ok(Message::RaftConfig(reply)) = counters.send(*t, ask, CHANGE_TIMEOUT).await {
                 if reply.replica != 0 {
                     tracing::info!(group = self.g, learner = %t, "adding a learner");
+                    // A new learner has not replied yet. Its silence counts from here.
+                    replica.contacts.saw(reply.replica);
                     let peer = Peer { node: *t };
                     let _ = tokio::time::timeout(
                         CHANGE_TIMEOUT,
@@ -380,12 +422,22 @@ impl Group {
                 .and_then(|m| m.get(id).cloned().flatten())
                 .is_some_and(|l| l.index + settings.catchup_entries >= last)
         };
-        if let Some((id, n)) = learners
+        let ready: Vec<(u64, NodeId)> = learners
             .iter()
-            .find(|(id, n)| targets.contains(n) && caught_up(id))
-        {
-            tracing::info!(group = self.g, voter = %n, "promoting a learner");
-            let change = ChangeMembers::AddVoterIds(BTreeSet::from([*id]));
+            .filter(|(id, n)| targets.contains(n) && caught_up(id))
+            .copied()
+            .collect();
+        if let Some(promote) = promotion(voters.len(), &ready) {
+            if !counters.may_change() {
+                return;
+            }
+            let nodes: Vec<NodeId> = ready
+                .iter()
+                .filter(|(id, _)| promote.contains(id))
+                .map(|(_, n)| *n)
+                .collect();
+            tracing::info!(group = self.g, voters = ?nodes, "promoting learners");
+            let change = ChangeMembers::AddVoterIds(promote);
             let _ =
                 tokio::time::timeout(CHANGE_TIMEOUT, raft.change_membership(change, false)).await;
             return;
@@ -398,6 +450,9 @@ impl Group {
                 .filter(|(_, n)| !targets.contains(n))
                 .min_by_key(|(_, n)| *n == view.me);
             if let Some((id, n)) = extra {
+                if !counters.may_change() {
+                    return;
+                }
                 tracing::info!(group = self.g, voter = %n, "removing a voter that is not a target");
                 let change = ChangeMembers::RemoveVoters(BTreeSet::from([*id]));
                 let _ = tokio::time::timeout(CHANGE_TIMEOUT, raft.change_membership(change, false))
@@ -406,6 +461,9 @@ impl Group {
             }
         }
         if let Some((id, _)) = learners.iter().find(|(_, n)| !targets.contains(n)) {
+            if !counters.may_change() {
+                return;
+            }
             let change = ChangeMembers::RemoveNodes(BTreeSet::from([*id]));
             let _ =
                 tokio::time::timeout(CHANGE_TIMEOUT, raft.change_membership(change, false)).await;
@@ -531,5 +589,29 @@ impl Group {
             }
             _ => Message::RaftReply(RaftReply::refused()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ready(n: u64) -> Vec<(u64, NodeId)> {
+        (1..=n).map(|i| (i, NodeId::from_u128(i.into()))).collect()
+    }
+
+    #[test]
+    fn a_single_voter_never_takes_one_new_voter() {
+        assert_eq!(promotion(1, &ready(1)), None);
+        assert_eq!(promotion(1, &ready(0)), None);
+        assert_eq!(promotion(1, &ready(2)), Some(BTreeSet::from([1, 2])));
+        assert_eq!(promotion(1, &ready(3)), Some(BTreeSet::from([1, 2, 3])));
+    }
+
+    #[test]
+    fn a_group_of_two_or_more_takes_one_voter_at_a_time() {
+        assert_eq!(promotion(2, &ready(0)), None);
+        assert_eq!(promotion(2, &ready(2)), Some(BTreeSet::from([1])));
+        assert_eq!(promotion(3, &ready(1)), Some(BTreeSet::from([1])));
     }
 }
