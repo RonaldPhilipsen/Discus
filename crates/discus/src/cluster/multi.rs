@@ -14,7 +14,7 @@ use super::{
 use std::time::Instant;
 
 use crate::command::util::{check_key, check_value};
-use crate::command::{self, CommandError, CommandSpec};
+use crate::command::{CommandError, CommandSpec};
 use crate::node::Node;
 use bytes::Bytes;
 
@@ -263,10 +263,7 @@ pub fn dbsize(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> Dis
 }
 
 /// `FLUSHDB` and `FLUSHALL`: every member, best-effort.
-pub fn flush(node: &Arc<Node>, cmd: Command) -> Dispatch {
-    let Some(spec) = command::lookup(&cmd[0]) else {
-        return Dispatch::Ready(Reply::try_again());
-    };
+pub fn flush(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> Dispatch {
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
         let (here, others) = everywhere(&node, spec, &cmd, true).await;

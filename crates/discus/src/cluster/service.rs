@@ -190,7 +190,6 @@ async fn run_forwarded(
     let job = Job {
         cmd,
         spec,
-        route: spec.route,
         rr: 0,
         writes: None,
     };

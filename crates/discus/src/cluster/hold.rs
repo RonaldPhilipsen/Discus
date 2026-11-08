@@ -99,7 +99,6 @@ pub async fn held(
         let job = Job {
             cmd: cmd.clone(),
             spec,
-            route: spec.route,
             rr: 0,
             writes: None,
         };

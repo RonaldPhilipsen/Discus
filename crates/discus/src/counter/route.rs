@@ -18,7 +18,7 @@ use crate::cluster::multi::Merge;
 use crate::cluster::route::{keys_of, Keys, Route};
 use crate::cluster::{forward, Dispatch, Hop, Job, Reply, MAX_HOPS};
 use crate::command::util::upper;
-use crate::command::CommandError;
+use crate::command::{CommandError, CommandSpec};
 use crate::Node;
 
 /// The leader refused before it applied anything. The entry node tries again.
@@ -45,7 +45,7 @@ fn is_no_leader(v: &Value) -> bool {
 /// Take a command with counter keys. `None` for any other command.
 pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
     let counters = node.counters()?.clone();
-    let Keys::Some(keys) = keys_of(job.route, &job.cmd) else {
+    let Keys::Some(keys) = keys_of(job.spec.route, &job.cmd) else {
         return None;
     };
     let strong = keys.iter().filter(|k| node.is_counter_key(k)).count();
@@ -61,7 +61,7 @@ pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
     if let Err(e) = check_sizes(node, &job.cmd) {
         return Some(Dispatch::Ready(Reply::error(e)));
     }
-    let (node, cmd, hop, route) = (node.clone(), job.cmd.clone(), hop.clone(), job.route);
+    let (node, cmd, hop, route) = (node.clone(), job.cmd.clone(), hop.clone(), job.spec.route);
     Some(Dispatch::Pending(Box::pin(async move {
         match route {
             Route::MultiRead { sum } => {
@@ -223,10 +223,10 @@ pub async fn run(
 /// `FLUSHALL` and `FLUSHDB` on the entry node: the cache broadcast, then every counter group
 /// (spec section 12.1). A group without a leader or a quorum keeps its counters, and the reply
 /// says how many groups were cleared.
-pub fn broadcast(node: &Arc<Node>, cmd: Command) -> Dispatch {
+pub fn broadcast(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> Dispatch {
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
-        let cache = crate::cluster::multi::flush(&node, cmd.clone())
+        let cache = crate::cluster::multi::flush(&node, spec, cmd.clone())
             .finish()
             .await;
         let Some(counters) = node.counters().cloned() else {
