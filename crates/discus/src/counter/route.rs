@@ -5,6 +5,7 @@
 //! in one group runs as one entry on its leader. Several groups fan out like a normal multi-key
 //! command. A command that mixes counter keys and other keys is refused.
 
+use std::mem;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -111,7 +112,7 @@ async fn fan_out(
     merge: Merge,
     width: usize,
 ) -> Reply {
-    let Some(groups) = split(&cmd, width, |key| Some(counters.group_of(key))) else {
+    let Some(mut groups) = split(&cmd, width, |key| Some(counters.group_of(key))) else {
         return Reply::try_again();
     };
     if groups.len() == 1 {
@@ -119,8 +120,8 @@ async fn fan_out(
     }
     let parts = join_all(
         groups
-            .iter()
-            .map(|g| run(node, counters, g.target, g.cmd.clone(), hop.clone())),
+            .iter_mut()
+            .map(|g| run(node, counters, g.target, mem::take(&mut g.cmd), hop.clone())),
     )
     .await;
     if parts.iter().any(|r| matches!(r.value, Value::Error(_))) {
@@ -146,7 +147,7 @@ pub async fn run(
     let entry = hop.hops == 0;
     let read = state::is_read(&cmd);
     let deadline = Instant::now() + counters.settings.timeout;
-    let group = counters.group(g).clone();
+    let group = counters.group(g);
     loop {
         let changed = group.changed.notified();
         match counters.leader(g) {
