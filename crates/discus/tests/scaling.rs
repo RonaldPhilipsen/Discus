@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::counters::{all_raft, dump, flags, join_to, outcome, Leases, Outcome};
+use common::counters::{all_raft, dump, flags, is_refused, join_to, Leases};
 use common::gossip::{agreed, refs, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
 use serial_test::serial;
@@ -142,15 +142,19 @@ async fn counter_load(
     stop: Arc<AtomicBool>,
 ) {
     while !stop.load(Ordering::Relaxed) {
-        match outcome(redis::cmd("INCR").arg(COUNTER).query_async(&mut c).await) {
-            Outcome::Ok(_) => {
+        match redis::cmd("INCR")
+            .arg(COUNTER)
+            .query_async::<i64>(&mut c)
+            .await
+        {
+            Ok(_) => {
                 t.increments.fetch_add(1, Ordering::Relaxed);
             }
-            Outcome::Refused => {
+            Err(e) if is_refused(&e) => {
                 t.refused.fetch_add(1, Ordering::Relaxed);
             }
-            o => {
-                eprintln!("ambiguous increment: {o:?}");
+            Err(e) => {
+                eprintln!("ambiguous increment: {e:?}");
                 t.ambiguous.fetch_add(1, Ordering::Relaxed);
             }
         }

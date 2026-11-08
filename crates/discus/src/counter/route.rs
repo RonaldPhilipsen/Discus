@@ -39,8 +39,8 @@ fn error(text: &str) -> Reply {
     Reply::value(Value::error(text))
 }
 
-fn is_no_leader(v: &Value) -> bool {
-    matches!(v, Value::Error(e) if e[..] == *NO_LEADER.as_bytes())
+fn is_error(v: &Value, text: &str) -> bool {
+    matches!(v, Value::Error(e) if e[..] == *text.as_bytes())
 }
 
 /// Take a command with counter keys. `None` for any other command.
@@ -86,35 +86,36 @@ pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
 }
 
 fn check_sizes(node: &Node, name: &str, cmd: &Command) -> Result<(), CommandError> {
-    let (keys, values): (Vec<&Bytes>, Vec<&Bytes>) = match name {
+    let (keys, values) = match name {
         "MSET" => {
             if cmd.len().is_multiple_of(2) {
                 return Err(CommandError::WrongArity("MSET".into()));
             }
-            (
-                cmd[1..].iter().step_by(2).collect(),
-                cmd[2..].iter().step_by(2).collect(),
-            )
+            (cmd.len() / 2, cmd.len() / 2)
         }
-        "SET" | "APPEND" => (vec![&cmd[1]], vec![&cmd[2]]),
-        _ => (vec![&cmd[1]], vec![]),
+        "SET" | "APPEND" => (1, 1),
+        _ => (1, 0),
     };
-    keys.into_iter().try_for_each(|k| check_key(node, k))?;
-    values.into_iter().try_for_each(|v| check_value(node, v))
+    let every_other = |from| cmd[from..].iter().step_by(2);
+    every_other(1)
+        .take(keys)
+        .try_for_each(|k| check_key(node, k))?;
+    every_other(2)
+        .take(values)
+        .try_for_each(|v| check_value(node, v))
 }
 
 /// The reply of a fan-out with a failed part, or `None` when every part succeeded. A client
 /// retries a command after `NO_LEADER`, so one part that can have applied makes the whole reply
 /// `IN_DOUBT`.
 fn failed(parts: &[Reply]) -> Option<Reply> {
-    let is = |v: &Value, text: &str| matches!(v, Value::Error(e) if e[..] == *text.as_bytes());
     if !parts.iter().any(|r| matches!(r.value, Value::Error(_))) {
         return None;
     }
-    if parts.iter().any(|r| is(&r.value, IN_DOUBT)) {
+    if parts.iter().any(|r| is_error(&r.value, IN_DOUBT)) {
         return Some(error(IN_DOUBT));
     }
-    if parts.iter().all(|r| is_no_leader(&r.value)) {
+    if parts.iter().all(|r| is_error(&r.value, NO_LEADER)) {
         return Some(error(NO_LEADER));
     }
     Some(Reply::try_again())
@@ -176,15 +177,15 @@ pub async fn run(
             Some(leader) if hop.hops < MAX_HOPS && !hop.path.contains(&leader) => {
                 let timeout = Some(counters.settings.timeout + FORWARD_SLACK);
                 let sent =
-                    forward::send_for(node, leader, &cmd, &hop, ForwardMode::Route, true, timeout)
+                    forward::send(node, leader, &cmd, &hop, ForwardMode::Route, true, timeout)
                         .await;
                 match sent {
-                    Ok(reply) if is_no_leader(&reply.value) => counters.distrust(g, leader),
+                    Ok(reply) if is_error(&reply.value, NO_LEADER) => group.distrust(leader),
                     Ok(reply) => return reply,
-                    Err(e) if e.is_unsent() || read => counters.distrust(g, leader),
+                    Err(e) if e.is_unsent() || read => group.distrust(leader),
                     // The next command of the group looks for another leader first.
                     Err(_) => {
-                        counters.distrust(g, leader);
+                        group.distrust(leader);
                         return error(IN_DOUBT);
                     }
                 }

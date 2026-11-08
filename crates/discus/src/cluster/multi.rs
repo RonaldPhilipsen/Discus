@@ -248,7 +248,7 @@ async fn everywhere(
     let results = join_all(others.iter().map(|id| {
         let hop = &hop;
         async move {
-            forward::send(node, *id, cmd, hop, ForwardMode::Local, write)
+            forward::send(node, *id, cmd, hop, ForwardMode::Local, write, None)
                 .await
                 .map_err(|_| *id)
         }

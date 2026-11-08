@@ -7,33 +7,15 @@ use std::time::Duration;
 
 use security_support::idp::{unix_now, MockIdp};
 use security_support::{
-    cmd, exchange, start, status, tls_connect, try_start, wait_status, write_file, Node, TestCa,
+    cmd, exchange, send, start, start_oauth2, status, tls_connect, try_start, wait_status,
+    write_file, Node, TestCa,
 };
 use serde_json::json;
 
 /// A plaintext node (with the development flag) that trusts `idps`.
 async fn node(ca: &TestCa, idps: &[&MockIdp], extra_toml: &str, args: &[&str]) -> Node {
     let toml: String = idps.iter().map(|i| i.toml(ca, extra_toml)).collect();
-    let file = write_file(ca, "auth.toml", &toml);
-    let mut argv = vec![
-        "--auth-policy",
-        "any:oauth2",
-        "--dev-insecure-oauth2",
-        "--auth-config",
-        &file,
-    ];
-    argv.extend_from_slice(args);
-    let node = start(&argv).await;
-    assert!(
-        wait_status(node.admin, "/readyz", 200, Duration::from_secs(10)).await,
-        "the node never became ready"
-    );
-    node
-}
-
-async fn send(node: &Node, wire: &[u8]) -> String {
-    let mut s = tokio::net::TcpStream::connect(node.addr).await.unwrap();
-    exchange(&mut s, wire).await
+    start_oauth2(&write_file(ca, "auth.toml", &toml), args).await
 }
 
 async fn auth(node: &Node, token: &str) -> String {

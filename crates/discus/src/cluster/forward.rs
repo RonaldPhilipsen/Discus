@@ -16,20 +16,9 @@ use crate::telemetry;
 /// Forward `cmd` to `target`. The forward carries the current epoch, the full epoch when the
 /// peer has `EPOCH_PUSH` and last reported an older one, the hop count, the path, and the trace
 /// context of the `forward` span. The entry node observes the applied HLC of the reply.
+/// `timeout` replaces the forward timeout of the route. Counter commands wait for a quorum on
+/// the leader, so they need longer than a store write.
 pub async fn send(
-    node: &Arc<Node>,
-    target: NodeId,
-    cmd: &Command,
-    hop: &Hop,
-    mode: ForwardMode,
-    write: bool,
-) -> Result<Reply, TransportError> {
-    send_for(node, target, cmd, hop, mode, write, None).await
-}
-
-/// Like [`send`], with `timeout` instead of the forward timeout of the route. Counter commands
-/// wait for a quorum on the leader, so they need longer than a store write.
-pub async fn send_for(
     node: &Arc<Node>,
     target: NodeId,
     cmd: &Command,
@@ -59,8 +48,7 @@ async fn send_in_span(
     write: bool,
     timeout: Option<std::time::Duration>,
 ) -> Result<Reply, TransportError> {
-    let (link, addr) = node.peer(target).map_err(TransportError::Connect)?;
-    let epoch = node.epochs().current().clone();
+    let (link, addr, epoch) = node.peer(target).map_err(TransportError::Connect)?;
     // The full epoch rides along when the peer can take it and is behind (spec section 7.2).
     let mut peer_caps = 0;
     let build = |info: &PeerInfo| {

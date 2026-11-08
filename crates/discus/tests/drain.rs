@@ -4,11 +4,9 @@ mod common;
 
 use std::time::Duration;
 
-use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
+use common::gossip::{wait_agreed, wait_until, GossipNode, Net};
 use discus_placement::MemberState;
 use redis::AsyncCommands;
-
-const FORM: Duration = Duration::from_secs(10);
 
 fn listed_as(n: &GossipNode, of: &GossipNode) -> Option<MemberState> {
     n.node.epochs().current().member(of.id).map(|m| m.state)
@@ -17,8 +15,7 @@ fn listed_as(n: &GossipNode, of: &GossipNode) -> Option<MemberState> {
 async fn three(net: &Net, extra: &[&str]) -> Vec<GossipNode> {
     let mut args = vec!["--shutdown-timeout-secs", "2"];
     args.extend_from_slice(extra);
-    let nodes = net.start_all(3, &args).await;
-    wait_agreed(&refs(&nodes), FORM).await;
+    let nodes = net.start_agreed(3, &args).await;
     nodes
 }
 

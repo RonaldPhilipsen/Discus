@@ -4,9 +4,8 @@
 mod security_support;
 
 use security_support::idp::{unix_now, MockIdp};
-use security_support::{cmd, exchange, start, try_start, wait_status, write_file, Node, TestCa};
+use security_support::{cmd, send, start_oauth2, try_start, write_file, Node, TestCa};
 use serde_json::{json, Value};
-use std::time::Duration;
 
 /// The `iss` that the mock API server reports, as a real cluster does.
 const CLUSTER_ISS: &str = "https://kubernetes.default.svc.cluster.local";
@@ -34,19 +33,7 @@ async fn node(ca: &TestCa, api: &MockIdp, extra_toml: &str) -> Node {
     let token_file = write_file(ca, "node-token", "node-sa-token\n");
     let toml = format!("{extra_toml}\n{}", k8s_toml(ca, api, &token_file));
     let file = write_file(ca, "auth.toml", &toml);
-    let node = start(&[
-        "--auth-policy",
-        "any:oauth2",
-        "--dev-insecure-oauth2",
-        "--auth-config",
-        &file,
-    ])
-    .await;
-    assert!(
-        wait_status(node.admin, "/readyz", 200, Duration::from_secs(10)).await,
-        "the node never became ready"
-    );
-    node
+    start_oauth2(&file, &[]).await
 }
 
 /// Claims of a projected service account token.
@@ -64,11 +51,6 @@ fn sa(sub: &str) -> Value {
         "exp": unix_now() + 3600,
         "kubernetes.io": {"namespace": ns, "serviceaccount": {"name": name}},
     })
-}
-
-async fn send(node: &Node, wire: &[u8]) -> String {
-    let mut s = tokio::net::TcpStream::connect(node.addr).await.unwrap();
-    exchange(&mut s, wire).await
 }
 
 #[tokio::test]

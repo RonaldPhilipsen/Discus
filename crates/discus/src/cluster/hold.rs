@@ -62,7 +62,7 @@ pub async fn send_or_hold(
     hop: &Hop,
     write: bool,
 ) -> Option<Reply> {
-    match super::forward::send(node, target, cmd, hop, ForwardMode::Route, write).await {
+    match super::forward::send(node, target, cmd, hop, ForwardMode::Route, write, None).await {
         Ok(reply) => Some(reply),
         Err(_) if !write => None,
         Err(e) if hop.hops == 0 && !hop.held => {

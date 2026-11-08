@@ -29,11 +29,7 @@ async fn startupz_waits_for_counter_promotion() {
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 3, &[]).await;
     let (fourth, _) = join_to(&net, &leases, &refs(&nodes), &flags(&[])).await;
-    fourth
-        .node
-        .faults
-        .stall_counter_ms
-        .store(400, Ordering::Relaxed);
+    fourth.stall_counters(400);
     let mut all = refs(&nodes);
     all.push(&fourth);
     wait_agreed(&all, Duration::from_secs(15)).await;
@@ -42,11 +38,7 @@ async fn startupz_waits_for_counter_promotion() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         if tokio::time::Instant::now() >= unstall {
-            fourth
-                .node
-                .faults
-                .stall_counter_ms
-                .store(0, Ordering::Relaxed);
+            fourth.stall_counters(0);
         }
         let code = http_status(fourth.admin, "/startupz").await;
         if code == 200 {

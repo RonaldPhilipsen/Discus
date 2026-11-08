@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use common::cluster::{start_cluster, ClusterNode};
-use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
+use common::gossip::{wait_agreed, wait_until, GossipNode, Net};
 use discus_store::Value;
 use redis::AsyncCommands;
 
@@ -183,8 +183,7 @@ async fn a_long_absence_discards_the_store() {
 async fn gossip_three(net: &Net, extra: &[&str]) -> Vec<GossipNode> {
     let mut args = vec!["--replication-factor", "3"];
     args.extend_from_slice(extra);
-    let nodes = net.start_all(3, &args).await;
-    wait_agreed(&refs(&nodes), Duration::from_secs(10)).await;
+    let nodes = net.start_agreed(3, &args).await;
     nodes
 }
 

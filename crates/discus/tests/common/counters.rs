@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use discus::counter::route::{IN_DOUBT, NO_LEADER};
+use discus::counter::route::NO_LEADER;
 use discus::counter::{group_key, CounterLeases, GroupStatus};
 use discus_membership::{LeaseProvider, MemoryLease};
 use discus_placement::NodeId;
@@ -87,15 +87,6 @@ pub fn leader_of<'a>(nodes: &[&'a GossipNode], g: u16) -> Option<&'a GossipNode>
     (leaders.len() == 1).then(|| leaders[0])
 }
 
-/// What a counter write did, by its reply: see [`NO_LEADER`] and [`IN_DOUBT`].
-#[derive(Debug)]
-pub enum Outcome {
-    Ok(i64),
-    Refused,
-    Ambiguous,
-    Other(RedisError),
-}
-
 /// True when `e` is the server error `text`, given as `CODE detail`.
 fn says(e: &RedisError, text: &str) -> bool {
     e.code()
@@ -107,13 +98,9 @@ pub fn is_try_again(e: &RedisError) -> bool {
     e.code() == Some("TRYAGAIN")
 }
 
-pub fn outcome(r: RedisResult<i64>) -> Outcome {
-    match r {
-        Ok(n) => Outcome::Ok(n),
-        Err(e) if says(&e, NO_LEADER) => Outcome::Refused,
-        Err(e) if says(&e, IN_DOUBT) => Outcome::Ambiguous,
-        Err(e) => Outcome::Other(e),
-    }
+/// The counter write applied nothing, so it is safe to send again.
+pub fn is_refused(e: &RedisError) -> bool {
+    says(e, NO_LEADER)
 }
 
 /// Send `cmd` until it succeeds or `timeout` passes. An error that `retry` accepts is sent
@@ -138,12 +125,11 @@ pub async fn query_until<T: FromRedisValue>(
 /// Send `INCR key` until it succeeds. It retries only refusals that applied nothing, so the
 /// count stays exact.
 pub async fn incr_once(c: &mut MultiplexedConnection, key: &str) -> i64 {
-    let refused = |e: &RedisError| says(e, NO_LEADER);
     query_until(
         c,
         redis::cmd("INCR").arg(key),
         Duration::from_secs(10),
-        refused,
+        is_refused,
     )
     .await
     .unwrap_or_else(|e| panic!("INCR {key} failed: {e}"))

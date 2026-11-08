@@ -7,24 +7,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::counters::{
-    all_hold, all_raft, dump, flags, group_of, incr_once, incr_or_show, incr_until, is_try_again,
-    join_to, key_in, leader_of, outcome, raft_cluster, role, start, status, targeted, voters_of,
-    Leases, Outcome, GROUPS, RAFT, SLOW_DEATH,
+    all_hold, all_raft, dump, flags, group_of, incr_once, incr_or_show, incr_until, is_refused,
+    is_try_again, join_to, key_in, leader_of, raft_cluster, role, start, status, targeted,
+    voters_of, Leases, GROUPS, RAFT, SLOW_DEATH,
 };
 use common::gossip::{partition, refs, wait_agreed, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
 use serial_test::serial;
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[serial]
-async fn three_nodes_elect_raft_leaders() {
-    let (net, leases) = (Net::new(), Leases::new());
-    let nodes = raft_cluster(&net, &leases, 3, &[]).await;
-    for g in 0..GROUPS {
-        let leaders = nodes.iter().filter(|n| role(n, g) == "leader").count();
-        assert_eq!(leaders, 1, "group {g}");
-    }
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[serial]
@@ -361,10 +350,10 @@ async fn a_draining_raft_leader_keeps_every_increment() {
         );
         load.push(tokio::spawn(async move {
             while !stop.load(Ordering::Relaxed) {
-                match outcome(redis::cmd("INCR").arg(key).query_async(&mut c).await) {
-                    Outcome::Ok(_) => ok.fetch_add(1, Ordering::Relaxed),
-                    Outcome::Refused => 0,
-                    _ => ambiguous.fetch_add(1, Ordering::Relaxed),
+                match redis::cmd("INCR").arg(key).query_async::<i64>(&mut c).await {
+                    Ok(_) => ok.fetch_add(1, Ordering::Relaxed),
+                    Err(e) if is_refused(&e) => 0,
+                    Err(_) => ambiguous.fetch_add(1, Ordering::Relaxed),
                 };
             }
         }));

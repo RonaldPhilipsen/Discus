@@ -46,14 +46,11 @@ impl Contacts {
         self.seen.lock().insert(replica, Instant::now());
     }
 
-    /// The time since the last reply. A replica without a reply counts from `since`.
+    /// The time since the last reply, counted from `since` at the earliest. A reply from before
+    /// `since` is from an earlier term of this leader, which sent nothing in between.
     pub fn silent_for(&self, replica: u64, since: Instant) -> Duration {
-        self.seen
-            .lock()
-            .get(&replica)
-            .copied()
-            .unwrap_or(since)
-            .elapsed()
+        let seen = self.seen.lock().get(&replica).copied();
+        seen.map_or(since, |s| s.max(since)).elapsed()
     }
 
     pub fn refuse(&self, replica: u64) {
@@ -181,5 +178,17 @@ mod tests {
         contacts.saw(1);
         assert!(contacts.refused(1));
         assert!(!contacts.refused(2));
+    }
+
+    #[test]
+    fn silence_counts_from_the_later_of_the_last_reply_and_since() {
+        let contacts = Contacts::default();
+        contacts.saw(1);
+        std::thread::sleep(Duration::from_millis(10));
+        let since = Instant::now();
+        assert!(contacts.silent_for(1, since) <= since.elapsed());
+        std::thread::sleep(Duration::from_millis(10));
+        contacts.saw(1);
+        assert!(contacts.silent_for(1, since) < since.elapsed());
     }
 }

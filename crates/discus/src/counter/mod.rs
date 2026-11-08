@@ -590,10 +590,6 @@ impl Counters {
         }
     }
 
-    pub fn distrust(&self, g: u16, leader: NodeId) {
-        self.group(g).distrust(leader);
-    }
-
     /// Ask every other `NORMAL` member who leads group `g`, at most once per
     /// [`group::ASK_EVERY`]. The answers arrive in the background.
     pub fn ask_leader(self: &Arc<Self>, g: u16) {
@@ -667,7 +663,7 @@ impl Counters {
         timeout: Duration,
     ) -> Result<Message, String> {
         let node = self.node().ok_or("the node is gone")?;
-        let (link, addr) = node.peer(to)?;
+        let (link, addr, _) = node.peer(to)?;
         let frame = link
             .transport
             .request_on(

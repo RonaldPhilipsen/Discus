@@ -20,8 +20,9 @@ use super::state::CounterState;
 use super::{normal, Counters, View};
 
 /// The role of this node in one group.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum Role {
+    #[default]
     Idle,
     Follower(Arc<Follower>),
     Leader(Arc<LfLeader>),
@@ -58,6 +59,7 @@ impl Role {
     }
 }
 
+#[derive(Default)]
 pub struct Inner {
     pub role: Role,
     /// Raised on every role change, so a transition that waited can see a newer role.
@@ -96,7 +98,7 @@ pub fn newer(a: &GroupHint, b: &GroupHint) -> bool {
 pub struct Group {
     pub g: u16,
     inner: Mutex<Inner>,
-    lease: Option<Arc<dyn LeaseProvider>>,
+    pub(super) lease: Option<Arc<dyn LeaseProvider>>,
     /// Woken when the role or the known leader changes, so waiting commands look again.
     pub changed: Notify,
 }
@@ -105,17 +107,7 @@ impl Group {
     pub fn new(g: u16, lease: Option<Arc<dyn LeaseProvider>>) -> Group {
         Group {
             g,
-            inner: Mutex::new(Inner {
-                role: Role::Idle,
-                version: 0,
-                known: None,
-                max_generation: 0,
-                distrusted: None,
-                asked: None,
-                leaderless: None,
-                tried: None,
-                first_role: None,
-            }),
+            inner: Mutex::default(),
             lease,
             changed: Notify::new(),
         }
@@ -534,10 +526,6 @@ impl Group {
             counters.settings.lease_renew,
         ));
         self.lead(counters, view, self.version(), &leader).await;
-    }
-
-    pub(super) fn lease_kind(&self) -> bool {
-        self.lease.is_some()
     }
 
     /// One lease call: `Some(Ok(until))` when this node holds the lease, `Some(Err(()))` when

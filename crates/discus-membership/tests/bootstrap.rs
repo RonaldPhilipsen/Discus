@@ -7,13 +7,6 @@ use discus_membership::sim::Sim;
 use discus_membership::{MemoryLease, SwimConfig};
 use discus_placement::{MemberState, NodeId};
 
-fn cfg() -> SwimConfig {
-    SwimConfig {
-        seed: 21,
-        ..SwimConfig::fast()
-    }
-}
-
 const LEASE_MS: u64 = 2_000;
 
 fn all_normal_in_one_cluster(sim: &Sim, ids: &[NodeId]) -> bool {
@@ -40,7 +33,7 @@ fn start_all(sim: &mut Sim, n: usize) -> Vec<NodeId> {
 #[test]
 fn exactly_one_node_forms_a_cluster() {
     for seed in 0..20 {
-        let mut sim = Sim::new(seed, cfg());
+        let mut sim = Sim::new(seed, SwimConfig::fast());
         sim.with_lease(LEASE_MS);
         let ids = start_all(&mut sim, 5);
         sim.run_until(10_000, |s| all_normal_in_one_cluster(s, &ids));
@@ -52,7 +45,7 @@ fn exactly_one_node_forms_a_cluster() {
 
 #[test]
 fn lease_takeover() {
-    let mut sim = Sim::new(1, cfg());
+    let mut sim = Sim::new(1, SwimConfig::fast());
     sim.with_lease(LEASE_MS);
     let ids = start_all(&mut sim, 3);
     sim.run_until(10_000, |s| all_normal_in_one_cluster(s, &ids));
@@ -74,7 +67,7 @@ fn lease_takeover() {
 
 #[test]
 fn an_api_server_outage_keeps_the_cluster_serving() {
-    let mut sim = Sim::new(2, cfg());
+    let mut sim = Sim::new(2, SwimConfig::fast());
     sim.with_lease(LEASE_MS);
     let ids = start_all(&mut sim, 3);
     sim.run_until(10_000, |s| all_normal_in_one_cluster(s, &ids));
@@ -91,7 +84,7 @@ fn an_api_server_outage_keeps_the_cluster_serving() {
 
 #[test]
 fn a_full_cold_restart_forms_a_new_cluster() {
-    let mut sim = Sim::new(3, cfg());
+    let mut sim = Sim::new(3, SwimConfig::fast());
     sim.with_lease(LEASE_MS);
     let old = start_all(&mut sim, 3);
     sim.run_until(10_000, |s| all_normal_in_one_cluster(s, &old));
@@ -110,7 +103,7 @@ fn a_full_cold_restart_forms_a_new_cluster() {
 
 #[test]
 fn a_silent_normal_peer_blocks_formation() {
-    let mut sim = Sim::new(4, cfg());
+    let mut sim = Sim::new(4, SwimConfig::fast());
     sim.with_lease(LEASE_MS);
     let ids = start_all(&mut sim, 1);
     sim.run_until(5_000, |s| s.is_normal(ids[0]));
@@ -125,7 +118,7 @@ fn a_silent_normal_peer_blocks_formation() {
 
 #[test]
 fn the_bootstrap_node_keeps_the_wall_clock() {
-    let mut sim = Sim::new(5, cfg());
+    let mut sim = Sim::new(5, SwimConfig::fast());
     sim.with_lease(LEASE_MS);
     let ids = start_all(&mut sim, 1);
     sim.run_until(5_000, |s| s.is_normal(ids[0]));
@@ -135,11 +128,11 @@ fn the_bootstrap_node_keeps_the_wall_clock() {
 
 #[test]
 fn the_none_provider_forms_after_the_deadline() {
-    let mut sim = Sim::new(6, cfg());
+    let mut sim = Sim::new(6, SwimConfig::fast());
     sim.with_none_lease();
     let ids = start_all(&mut sim, 1);
     let took = sim.run_until(5_000, |s| s.is_normal(ids[0]));
-    assert!(took >= cfg().bootstrap_deadline_ms, "{took}");
+    assert!(took >= SwimConfig::fast().bootstrap_deadline_ms, "{took}");
 }
 
 #[test]
@@ -208,7 +201,7 @@ fn a_discovery_refresh_keeps_learned_seeds() {
         capacity: Capacity::default(),
         leader_hints: Default::default(),
     };
-    let mut swim = Swim::new(cfg(), me);
+    let mut swim = Swim::new(SwimConfig::fast(), me);
     let holder = "10.0.0.9:7379".parse().unwrap();
     swim.add_seed(holder);
     swim.set_seeds(vec!["10.0.0.2:7379".parse().unwrap()]);

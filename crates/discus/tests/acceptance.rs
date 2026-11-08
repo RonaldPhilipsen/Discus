@@ -9,38 +9,16 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
+use common::gossip::{fill, hits, refs, wait_agreed, wait_until, Net};
 use redis::AsyncCommands;
 
 const FORM: Duration = Duration::from_secs(10);
 
-async fn fill(n: &GossipNode, count: usize) -> Vec<String> {
-    let mut c = n.redis().await;
-    let keys: Vec<String> = (0..count).map(|i| format!("acc{i}")).collect();
-    for k in &keys {
-        let _: () = c.set(k, k).await.unwrap();
-    }
-    keys
-}
-
-async fn hits(n: &GossipNode, keys: &[String]) -> usize {
-    let mut c = n.redis().await;
-    let mut hit = 0;
-    for k in keys {
-        let v: Option<String> = c.get(k).await.unwrap();
-        if v.as_deref() == Some(k.as_str()) {
-            hit += 1;
-        }
-    }
-    hit
-}
-
 #[tokio::test]
 async fn a_node_loss_causes_no_read_errors() {
     let net = Net::new();
-    let nodes = net.start_all(4, &["--replication-factor", "3"]).await;
-    wait_agreed(&refs(&nodes), FORM).await;
-    let keys = Arc::new(fill(&nodes[0], 300).await);
+    let nodes = net.start_agreed(4, &["--replication-factor", "3"]).await;
+    let keys = Arc::new(fill(&nodes[0], "acc", 300).await);
     let owners = |k: &String| nodes[0].node.owners(k.as_bytes()).len();
     assert!(
         wait_until(Duration::from_secs(5), || keys.iter().all(|k| {
@@ -88,9 +66,8 @@ async fn a_node_loss_causes_no_read_errors() {
 /// The hits over `keys` once a third node joined a cluster of two with `RF = 1`.
 async fn hits_after_a_join(extra: &[&str]) -> usize {
     let net = Net::new();
-    let nodes = net.start_all(2, extra).await;
-    wait_agreed(&refs(&nodes), FORM).await;
-    let keys = fill(&nodes[0], 400).await;
+    let nodes = net.start_agreed(2, extra).await;
+    let keys = fill(&nodes[0], "acc", 400).await;
     let joiner = net.start(&[nodes[0].cluster_addr], extra).await;
     let mut all = refs(&nodes);
     all.push(&joiner);
