@@ -288,11 +288,10 @@ impl Group {
         let replica = &r.replica;
         let leader = replica.leader_node().filter(|l| view.normal(*l));
         let voters = replica.voter_nodes();
-        let leads = r.leads();
         // A voter that does not lead holds only the entries that it applied. While the `NORMAL`
         // voters can still elect a leader, an old leader that is `LEAVING` or about to be
         // `DEAD` can still commit with them, so the voter waits for the next leader to switch.
-        let takes = if leads {
+        let takes = if r.leads() {
             true
         } else if r.is_voter() && leader.is_none() && !normal_quorum(&voters, |n| view.normal(n)) {
             self.lease_kind()
@@ -311,7 +310,7 @@ impl Group {
         } else {
             None
         };
-        if leads {
+        if r.leads() {
             // The read index waits until this leader applied every entry that a quorum
             // committed, also those of earlier leaders.
             let linearizable = tokio::time::timeout(
