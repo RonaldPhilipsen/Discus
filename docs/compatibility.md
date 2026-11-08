@@ -146,12 +146,12 @@ Run `mise run build-matrix` to check every supported combination.
 - `SET ... NX` or `XX` with `GET` returns the old value, as in Redis 7.
 - `EXPIRE`, `PEXPIRE`, `EXPIREAT`, and `PEXPIREAT` do not accept the `NX`, `XX`, `GT`, or `LT`
   options.
-- `INCRBYFLOAT` adds in the 80-bit extended format and prints the result as Redis does on x86-64
+- `INCRBYFLOAT` adds in the 128-bit IEEE format and prints the result as Redis does on 64-bit ARM
   Linux. It prints 17 digits after the point, then removes the trailing zeros. So `0.1` plus `0.2`
-  gives `0.3`, and `1e30` gives `1000000000000000000024696061952`. Redis on other platforms
-  uses another size of `long double`. Redis on 64-bit ARM Linux uses 128 bits, and Redis on
-  Apple silicon uses 64 bits. Its results on those platforms differ from Discus in the last
-  digits.
+  gives `0.3`, and `1e30` gives `1000000000000000000000000000000`. Redis on other platforms uses
+  another size of `long double`. Redis on x86-64 uses 80 bits and gives
+  `1000000000000000000024696061952` for `1e30`. Redis on Apple silicon uses 64 bits. Its results
+  on those platforms differ from Discus in the last digits of large or long values.
 - `ZADD` does not accept `GT`, `LT`, or `INCR`. Use `ZINCRBY`.
 - `ZRANGE` accepts rank ranges only. It does not accept `BYSCORE`, `BYLEX`, `REV`, or `LIMIT`.
 - `SCAN` counts entries examined, as Redis does, so a `MATCH` batch can be empty before the cursor

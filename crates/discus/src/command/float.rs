@@ -1,31 +1,30 @@
-//! `INCRBYFLOAT` arithmetic as Redis does it on x86-64 Linux (spec: Redis `t_string.c` and
-//! `util.c`).
+//! `INCRBYFLOAT` arithmetic in the `long double` of Redis on 64-bit ARM Linux, IEEE binary128
+//! (spec: Redis `t_string.c` and `util.c`).
 //!
-//! Redis parses both numbers with `strtold` into an x87 80-bit `long double`, adds them, and
-//! stores the sum as text with `ld2string(..., LD_STR_HUMAN)`: `%.17Lf`, then the trailing zeros
-//! and a trailing point go, and `-0` becomes `0`. The text is the state, so the next increment
-//! parses it again. An f64 sum gives other text, for example `0.30000000000000004` for
-//! `0.1 + 0.2` where Redis gives `0.3`. So the sum here runs on a software x87 float
-//! (`rustc_apfloat`), which rounds like the FPU, and the text is the exact decimal expansion of
-//! the sum rounded to 17 places, as glibc `printf` does it.
+//! Redis parses both numbers with `strtold` into a `long double`, adds them, and stores the sum as
+//! text with `ld2string(..., LD_STR_HUMAN)`: `%.17Lf`, then the trailing zeros and a trailing point
+//! go, and `-0` becomes `0`. The text is the state, so the next increment parses it again. An f64
+//! sum gives other text, for example `0.30000000000000004` for `0.1 + 0.2` where Redis gives
+//! `0.3`. So the sum here runs on a software binary128 float (`rustc_apfloat`), and the text is the
+//! exact decimal expansion of the sum rounded to 17 places, as glibc `printf` does it.
 //!
-//! The exact Redis text is a deliberate choice (2026-11-08) over native `f64`, which would drop
-//! `rustc_apfloat` and `num-bigint` but return `0.30000000000000004` for the sum above.
+//! Redis on x86-64 uses the 80-bit x87 format instead and differs in the last digits of large or
+//! long values. Binary128 is a deliberate choice (2026-11-08): it is the format that native `f128`
+//! has, and it keeps the Redis text for short decimals, which native `f64` does not.
 //!
-//! Only `LongDouble`, `parse`, and `parts` know the float type. `human` takes a significand of up
-//! to 128 bits, so a move to `f128` (stable Rust tracks it in rust-lang/rust#116909) replaces only
-//! those three. `f128` gives the digits of Redis on 64-bit ARM Linux, not x86-64. Every counter
-//! replica computes the text from the Raft log itself, so the replicas of one group must all use
-//! one float type: switch it only with a capability bit or a full restart.
+//! Only `LongDouble`, `parse`, and `parts` know the float type. A move to native `f128` (stable
+//! Rust tracks it in rust-lang/rust#116909) replaces only those three, and the digits stay the
+//! same. Every counter replica computes the text from the Raft log itself, so the replicas of one
+//! group must all use one float type: change it only with a capability bit or a full restart.
 
 use bytes::Bytes;
 use num_bigint::BigUint;
-use rustc_apfloat::ieee::X87DoubleExtended;
+use rustc_apfloat::ieee::Quad;
 use rustc_apfloat::{Float, Round, Status, StatusAnd};
 
 use super::error::CommandError;
 
-type LongDouble = X87DoubleExtended;
+type LongDouble = Quad;
 
 /// A parsed `INCRBYFLOAT` increment. Callers never see the float type behind it.
 #[derive(Clone, Copy, Debug)]
@@ -136,14 +135,17 @@ struct Parts {
 }
 
 fn parts(v: LongDouble) -> Parts {
+    const FRACTION_BITS: u32 = 112;
     let bits = v.to_bits();
-    let biased = ((bits >> 64) & 0x7fff) as i64;
-    // The x87 format keeps the integer bit, so a value is `significand * 2^(e - 16383 - 63)`,
-    // and a denormal has the exponent of the smallest normal.
+    let biased = ((bits >> FRACTION_BITS) & 0x7fff) as i64;
+    let fraction = bits & ((1 << FRACTION_BITS) - 1);
+    // A normal value has an implicit integer bit, and a subnormal has the exponent of the
+    // smallest normal.
+    let integer = if biased == 0 { 0 } else { 1 << FRACTION_BITS };
     Parts {
-        negative: (bits >> 79) & 1 == 1,
-        significand: u128::from(bits as u64),
-        exp2: biased.max(1) - 16383 - 63,
+        negative: bits >> 127 == 1,
+        significand: integer | fraction,
+        exp2: biased.max(1) - 16383 - i64::from(FRACTION_BITS),
     }
 }
 
@@ -197,19 +199,19 @@ mod tests {
             .map_err(|e| e.text())
     }
 
-    /// Each answer is what Redis 8.10 on x86-64 Linux returns for `SET k a` then
-    /// `INCRBYFLOAT k b`.
+    /// Each answer is the binary128 sum of `SET k a` then `INCRBYFLOAT k b`, from an exact
+    /// rational reference. Redis on 64-bit ARM Linux computes the same.
     #[test]
     fn sums_match_redis() {
         let cases = [
             ("0.1", "0.2", "0.3"),
             ("10.50", "0.1", "10.6"),
             ("5.0e3", "2.0e2", "5200"),
-            ("0", "1e30", "1000000000000000000024696061952"),
+            ("0", "1e30", "1000000000000000000000000000000"),
             ("0", "1e-20", "0"),
             ("0", "-1e-20", "0"),
             ("1", "1e-16", "1.0000000000000001"),
-            ("12345.678", "0", "12345.67799999999999994"),
+            ("12345.678", "0", "12345.678"),
             ("0", "0x10", "16"),
             ("0", "0x1.8p1", "3"),
             ("0", "3.0e-5", "0.00003"),
@@ -219,20 +221,25 @@ mod tests {
             (
                 "0",
                 "123456789012345678901234567890",
-                "123456789012345678899921813504",
+                "123456789012345678901234567890",
             ),
             ("0", ".5", "0.5"),
             ("0", "+5", "5"),
             ("0", "5.", "5"),
             ("0", "1E5", "100000"),
             ("0", "-0", "0"),
+            (
+                "0.3",
+                "1e30",
+                "1000000000000000000000000000000.300048828125",
+            ),
             ("0", "4e-4951", "0"),
         ];
         for (a, b, want) in cases {
             assert_eq!(incr(a, b).as_deref(), Ok(want), "{a} + {b}");
         }
         let big = incr("0", "1e400").unwrap();
-        assert!(big.starts_with("10000000000000000000281880683947586514586453433629"));
+        assert!(big.starts_with("10000000000000000000000000000000000266443668087601"));
         assert_eq!(big.len(), 401);
     }
 
@@ -250,7 +257,7 @@ mod tests {
         assert_eq!(incr("1e4932", "1e4932"), Err(infinite.to_string()));
     }
 
-    /// An `f128` significand has 113 bits. The text must not depend on the x87 width.
+    /// A binary128 significand has 113 bits, and every one of them reaches the text.
     #[test]
     fn the_text_takes_a_significand_wider_than_64_bits() {
         let text = |negative, significand, exp2| {

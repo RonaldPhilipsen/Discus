@@ -105,16 +105,16 @@ async fn multi_key_and_misc_string_commands() {
     assert_eq!(f, "1.5");
 }
 
-/// Redis adds in an x87 `long double` and prints 17 places without trailing zeros, so these
-/// sums differ from the shortest f64 text.
+/// Redis adds in a `long double` (binary128 here, as on 64-bit ARM Linux) and prints 17 places
+/// without trailing zeros, so these sums differ from the shortest f64 text.
 #[tokio::test]
 async fn incrbyfloat_formats_like_redis() {
     let mut c = common::connect(&[]).await;
     for (start, by, want) in [
         ("0.1", "0.2", "0.3"),
-        ("0", "1e30", "1000000000000000000024696061952"),
+        ("0", "1e30", "1000000000000000000000000000000"),
         ("0", "1e-20", "0"),
-        ("12345.678", "0", "12345.67799999999999994"),
+        ("12345.678", "0", "12345.678"),
     ] {
         let _: () = c.set("f", start).await.unwrap();
         let got: String = redis::cmd("INCRBYFLOAT")
