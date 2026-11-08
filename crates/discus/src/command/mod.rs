@@ -4,6 +4,7 @@ pub mod access;
 pub mod coll;
 pub mod connection;
 pub mod error;
+pub mod float;
 pub mod hash;
 pub mod keys;
 pub mod set;

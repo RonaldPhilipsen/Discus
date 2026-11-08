@@ -12,8 +12,9 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 use discus_resp::{Command, Value};
 
+use crate::command::float::{incr_by_float, parse_long_double, LongDouble};
 use crate::command::string::deadline;
-use crate::command::util::{parse_f64, parse_i64, upper};
+use crate::command::util::{parse_i64, upper};
 use crate::command::CommandError;
 
 /// Bytes that one entry costs beyond its key and value.
@@ -264,7 +265,7 @@ impl CounterState {
                 let expiry = increment_expiry(&cmd[3..], now, &name)?;
                 self.add(now, &cmd[1], delta, expiry)
             }
-            "INCRBYFLOAT" => self.add_float(now, &cmd[1], parse_f64(&cmd[2])?),
+            "INCRBYFLOAT" => self.add_float(now, &cmd[1], parse_long_double(&cmd[2])?),
             "APPEND" => self.append(now, &cmd[1], &cmd[2], limits),
             "DEL" => {
                 let removed = cmd[1..]
@@ -431,19 +432,9 @@ impl CounterState {
         Ok(Value::Integer(next))
     }
 
-    fn add_float(&mut self, now: u64, key: &Bytes, delta: f64) -> Reply {
+    fn add_float(&mut self, now: u64, key: &Bytes, delta: LongDouble) -> Reply {
         let old = self.live(key, now).cloned();
-        let current = match &old {
-            None => 0.0,
-            Some(e) => parse_f64(&e.value)?,
-        };
-        let next = current + delta;
-        if !next.is_finite() {
-            return Err(CommandError::Custom(
-                "ERR increment would produce NaN or Infinity".into(),
-            ));
-        }
-        let text = Bytes::from(format!("{next}"));
+        let text = incr_by_float(old.as_ref().map(|e| &e.value[..]), delta)?;
         self.put(
             key,
             CounterEntry {
@@ -622,6 +613,8 @@ mod tests {
         assert_eq!(run(&mut s, 1, &["GETDEL", "k"]), Value::Null);
         assert_eq!(run(&mut s, 1, &["INCRBYFLOAT", "f", "1.5"]), bulk("1.5"));
         assert_eq!(run(&mut s, 1, &["INCRBYFLOAT", "f", "1"]), bulk("2.5"));
+        run(&mut s, 1, &["SET", "g", "0.1"]);
+        assert_eq!(run(&mut s, 1, &["INCRBYFLOAT", "g", "0.2"]), bulk("0.3"));
         let small = Limits { max_value_bytes: 3 };
         assert!(matches!(
             s.apply(1, &cmd(&["APPEND", "z", "abcd"]), &small),

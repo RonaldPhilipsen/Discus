@@ -100,6 +100,9 @@ ok DECR '^10$' DECR "$p:n"
 ok INCRBY '^15$' INCRBY "$p:n" 5
 ok DECRBY '^12$' DECRBY "$p:n" 3
 ok INCRBYFLOAT '^12\.5$' INCRBYFLOAT "$p:n" 0.5
+ok "SET float" '^OK$' SET "$p:f" 0.1
+ok "INCRBYFLOAT 0.1 + 0.2" '^0\.3$' INCRBYFLOAT "$p:f" 0.2
+ok "INCRBYFLOAT 1e30" '^1000000000000000000024696061952$' INCRBYFLOAT "$p:f" 1e30
 ok MSET '^OK$' MSET "$p:a" 1 "$p:b" 2
 ok MGET '1' MGET "$p:a" "$p:b"
 ok TYPE '^string$' TYPE "$p:s"

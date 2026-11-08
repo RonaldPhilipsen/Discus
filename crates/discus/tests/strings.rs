@@ -105,6 +105,30 @@ async fn multi_key_and_misc_string_commands() {
     assert_eq!(f, "1.5");
 }
 
+/// Redis adds in an x87 `long double` and prints 17 places without trailing zeros, so these
+/// sums differ from the shortest f64 text.
+#[tokio::test]
+async fn incrbyfloat_formats_like_redis() {
+    let mut c = common::connect(&[]).await;
+    for (start, by, want) in [
+        ("0.1", "0.2", "0.3"),
+        ("0", "1e30", "1000000000000000000024696061952"),
+        ("0", "1e-20", "0"),
+        ("12345.678", "0", "12345.67799999999999994"),
+    ] {
+        let _: () = c.set("f", start).await.unwrap();
+        let got: String = redis::cmd("INCRBYFLOAT")
+            .arg("f")
+            .arg(by)
+            .query_async(&mut c)
+            .await
+            .unwrap();
+        assert_eq!(got, want, "{start} + {by}");
+        let stored: String = c.get("f").await.unwrap();
+        assert_eq!(stored, want);
+    }
+}
+
 #[tokio::test]
 async fn key_and_value_limits_are_enforced() {
     let mut c = common::connect(&["--max-key-bytes", "8", "--max-value-bytes", "16"]).await;

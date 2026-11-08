@@ -5,8 +5,9 @@ use discus_resp::{Command, Value};
 use discus_store::{Entry, Value as Stored};
 
 use super::error::CommandError;
+use super::float::{incr_by_float, parse_long_double};
 use super::table::CommandSpec;
-use super::util::{admit, check_key, check_value, parse_f64, parse_i64, upper};
+use super::util::{admit, check_key, check_value, parse_i64, upper};
 use crate::node::{ConnState, Node};
 
 pub const COMMANDS: &[CommandSpec] = &[
@@ -358,23 +359,17 @@ fn decrby(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 fn incrbyfloat(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     check_key(node, &cmd[1])?;
     admit(node, cmd[1].len() + 32)?;
-    let delta = parse_f64(&cmd[2])?;
+    let delta = parse_long_double(&cmd[2])?;
     node.write(&cmd[1], node.stamp()?, |slot| {
         let current = match slot.as_ref() {
-            None => 0.0,
+            None => None,
             Some(Entry {
                 value: Stored::Str(b),
                 ..
-            }) => parse_f64(b)?,
+            }) => Some(b.clone()),
             Some(_) => return Err(CommandError::WrongType),
         };
-        let next = current + delta;
-        if !next.is_finite() {
-            return Err(CommandError::Custom(
-                "ERR increment would produce NaN or Infinity".into(),
-            ));
-        }
-        let text = Bytes::from(format!("{next}"));
+        let text = incr_by_float(current.as_deref(), delta)?;
         let expires = slot.as_ref().and_then(|e| e.expires_at_ms);
         slot.set(Some(new_entry(text.clone(), expires)));
         Ok(Value::Bulk(text))
