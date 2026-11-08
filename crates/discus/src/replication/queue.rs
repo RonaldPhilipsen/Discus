@@ -68,11 +68,10 @@ impl PeerQueue {
         if s.down {
             return Pushed::Down;
         }
-        if s.keys.contains(key) {
-            s.keys.promote(key);
+        // The cache is unbounded, so a returned entry can only be this key, now moved to the back.
+        if s.keys.push(key.clone(), ()).is_some() {
             return Pushed::Queued;
         }
-        s.keys.push(key.clone(), ());
         let out = if s.keys.len() > self.cap {
             s.lagging = true;
             match s.keys.pop_lru() {
