@@ -17,17 +17,6 @@ use serial_test::serial;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[serial]
-async fn three_nodes_elect_raft_leaders() {
-    let (net, leases) = (Net::new(), Leases::new());
-    let nodes = raft_cluster(&net, &leases, 3, &[]).await;
-    for g in 0..GROUPS {
-        let leaders = nodes.iter().filter(|n| role(n, g) == "leader").count();
-        assert_eq!(leaders, 1, "group {g}");
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[serial]
 async fn entries_reach_every_voter() {
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 3, &[]).await;

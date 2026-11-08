@@ -2,6 +2,7 @@
 //! in-memory lease. The timings are fast: a 100 ms gossip period and a 500 ms bootstrap deadline.
 
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,6 +11,7 @@ use discus::{Config, Node, Server};
 use discus_membership::{LeaseProvider, MemoryLease};
 use discus_placement::{Clock, NodeId, NTP64};
 use discus_transport::testing::{TestCa, TEST_SAN};
+use redis::AsyncCommands;
 use tokio_util::sync::CancellationToken;
 
 pub struct GossipNode {
@@ -29,6 +31,14 @@ impl GossipNode {
             link.transport.close();
         }
         self.shutdown.cancel();
+    }
+
+    /// Delay counter messages by `ms`.
+    pub fn stall_counters(&self, ms: u64) {
+        self.node
+            .faults
+            .stall_counter_ms
+            .store(ms, Ordering::Relaxed);
     }
 
     /// True when this node's store holds `key`.
@@ -159,6 +169,13 @@ impl Net {
         })
         .await
     }
+
+    /// [`Net::start_all`], then wait until the nodes agree on one epoch.
+    pub async fn start_agreed(&self, n: usize, extra: &[&str]) -> Vec<GossipNode> {
+        let nodes = self.start_all(n, extra).await;
+        wait_agreed(&refs(&nodes), Duration::from_secs(10)).await;
+        nodes
+    }
 }
 
 /// Bind `n` sockets and call `start` with each socket and the addresses of all the others.
@@ -170,12 +187,8 @@ pub async fn start_each<T>(
     let addrs: Vec<SocketAddr> = sockets.iter().map(|(_, a)| *a).collect();
     let mut out = Vec::new();
     for (i, (s, _)) in sockets.into_iter().enumerate() {
-        let seeds: Vec<SocketAddr> = addrs
-            .iter()
-            .enumerate()
-            .filter(|(j, _)| *j != i)
-            .map(|(_, a)| *a)
-            .collect();
+        let mut seeds = addrs.clone();
+        seeds.remove(i);
         out.push(start(s, &seeds).await);
     }
     out
@@ -266,6 +279,29 @@ pub async fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bo
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// Write `count` keys named `<prefix><i>`, each with the value `v-<key>`, through `n`.
+pub async fn fill(n: &GossipNode, prefix: &str, count: usize) -> Vec<String> {
+    let mut c = n.redis().await;
+    let keys: Vec<String> = (0..count).map(|i| format!("{prefix}{i}")).collect();
+    for k in &keys {
+        let _: () = c.set(k, format!("v-{k}")).await.unwrap();
+    }
+    keys
+}
+
+/// How many of `keys` read back through `n` with the value that [`fill`] wrote.
+pub async fn hits(n: &GossipNode, keys: &[String]) -> usize {
+    let mut c = n.redis().await;
+    let mut hit = 0;
+    for k in keys {
+        let v: Option<String> = c.get(k).await.unwrap();
+        if v.as_deref() == Some(&format!("v-{k}")) {
+            hit += 1;
+        }
+    }
+    hit
 }
 
 pub fn refs(nodes: &[GossipNode]) -> Vec<&GossipNode> {

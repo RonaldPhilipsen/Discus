@@ -4,13 +4,12 @@ mod common;
 
 use std::time::Duration;
 
-use common::gossip::{wait_agreed, Net};
+use common::gossip::Net;
 
 #[tokio::test]
 async fn an_api_server_outage_keeps_the_cluster_ready() {
     let net = Net::new();
-    let nodes = net.start_all(2, &[]).await;
-    wait_agreed(&[&nodes[0], &nodes[1]], Duration::from_secs(10)).await;
+    let nodes = net.start_agreed(2, &[]).await;
     net.lease.set_available(false);
     let lonely = net.start(&[], &[]).await;
     for _ in 0..15 {
@@ -26,14 +25,12 @@ async fn an_api_server_outage_keeps_the_cluster_ready() {
 #[tokio::test]
 async fn a_cold_restart_forms_a_new_cluster() {
     let net = Net::with_lease_ms(1_000);
-    let old = net.start_all(2, &[]).await;
-    wait_agreed(&[&old[0], &old[1]], Duration::from_secs(10)).await;
+    let old = net.start_agreed(2, &[]).await;
     let old_cluster = old[0].node.cluster_id();
     for n in &old {
         n.kill();
     }
-    let fresh = net.start_all(2, &[]).await;
-    wait_agreed(&[&fresh[0], &fresh[1]], Duration::from_secs(10)).await;
+    let fresh = net.start_agreed(2, &[]).await;
     assert_ne!(fresh[0].node.cluster_id(), old_cluster);
     assert_eq!(
         net.lease.holder().unwrap().cluster_id,

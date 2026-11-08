@@ -21,8 +21,7 @@ const FORM: Duration = Duration::from_secs(10);
 #[tokio::test]
 async fn three_nodes_form_one_cluster() {
     let net = Net::new();
-    let nodes = net.start_all(3, &[]).await;
-    wait_agreed(&refs(&nodes), FORM).await;
+    let nodes = net.start_agreed(3, &[]).await;
     let holder = net.lease.holder().unwrap();
     assert_eq!(holder.cluster_id, nodes[0].node.cluster_id());
     for n in &nodes {
@@ -60,8 +59,7 @@ async fn five_nodes_join_one_by_one() {
 #[tokio::test]
 async fn a_dead_node_leaves_the_epoch() {
     let net = Net::new();
-    let nodes = net.start_all(4, &[]).await;
-    wait_agreed(&refs(&nodes), FORM).await;
+    let nodes = net.start_agreed(4, &[]).await;
     let dead = &nodes[3];
     let key = (0..)
         .map(|i| format!("gone:{i}"))
@@ -195,8 +193,7 @@ async fn two_clusters_merge_into_one() {
 async fn ownership_gained_reaches_subscribers() {
     let net = Net::new();
     let rf = ["--replication-factor", "3"];
-    let nodes = net.start_all(3, &rf).await;
-    wait_agreed(&refs(&nodes), FORM).await;
+    let nodes = net.start_agreed(3, &rf).await;
     let mut events = nodes[0].node.membership().unwrap().subscribe();
     let joiner = net.start(&[nodes[0].cluster_addr], &rf).await;
     let gained = tokio::time::timeout(FORM, async {
@@ -217,8 +214,7 @@ async fn ownership_gained_reaches_subscribers() {
 #[tokio::test]
 async fn a_join_leaves_serving_nodes_ready() {
     let net = Net::new();
-    let nodes = net.start_all(3, &[]).await;
-    wait_agreed(&refs(&nodes), FORM).await;
+    let nodes = net.start_agreed(3, &[]).await;
     let joiner = net.start(&[nodes[1].cluster_addr], &[]).await;
     let mut settled = None;
     let deadline = tokio::time::Instant::now() + FORM;

@@ -7,14 +7,12 @@ use std::time::{Duration, Instant};
 
 use common::cluster::start_cluster;
 use common::counters::is_try_again;
-use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
+use common::gossip::{wait_until, GossipNode, Net};
 use redis::AsyncCommands;
-
-const FORM: Duration = Duration::from_secs(10);
 
 async fn three(net: &Net) -> Vec<GossipNode> {
     let nodes = net
-        .start_all(
+        .start_agreed(
             3,
             &[
                 "--replication-factor",
@@ -24,7 +22,6 @@ async fn three(net: &Net) -> Vec<GossipNode> {
             ],
         )
         .await;
-    wait_agreed(&refs(&nodes), FORM).await;
     nodes
 }
 

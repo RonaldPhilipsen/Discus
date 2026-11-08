@@ -58,23 +58,31 @@ async fn a_leader_and_a_follower_per_group() {
     );
 }
 
+/// Increment `key` `count` times, kill its leader, and check that the survivor continues the
+/// count.
+async fn failover_keeps(nodes: &[GossipNode], key: &str, count: i64) {
+    let refs = refs(nodes);
+    let g = group_of(&nodes[0], key);
+    let mut c = nodes[0].redis().await;
+    for _ in 0..count {
+        let _: i64 = c.incr(key, 1).await.unwrap();
+    }
+    let leader = leader_of(&refs, g).unwrap();
+    let survivor = nodes.iter().find(|n| n.id != leader.id).unwrap();
+    assert!(all_hold(&[survivor], key, &count.to_string(), Duration::from_secs(3)).await);
+    leader.kill();
+    let mut c = survivor.redis().await;
+    assert_eq!(
+        incr_until(&mut c, key, Duration::from_secs(8)).await,
+        count + 1
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn failover_keeps_the_value() {
     let (net, leases) = (Net::new(), Leases::new());
     let (nodes, _gates) = two(&net, &leases, &[]).await;
-    let refs = refs(&nodes);
-    let g = group_of(&nodes[0], "cnt:a");
-    let mut c = nodes[0].redis().await;
-    for _ in 0..100 {
-        let _: i64 = c.incr("cnt:a", 1).await.unwrap();
-    }
-    let leader = leader_of(&refs, g).unwrap();
-    let survivor = nodes.iter().find(|n| n.id != leader.id).unwrap();
-    assert!(all_hold(&[survivor], "cnt:a", "100", Duration::from_secs(3)).await);
-    leader.kill();
-    let mut c = survivor.redis().await;
-    let n = incr_until(&mut c, "cnt:a", Duration::from_secs(8)).await;
-    assert_eq!(n, 101);
+    failover_keeps(&nodes, "cnt:a", 100).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -85,11 +93,7 @@ async fn a_lagging_follower_gets_a_snapshot() {
     let g = group_of(&nodes[0], "cnt:lag");
     let leader = leader_of(&refs, g).unwrap();
     let follower = nodes.iter().find(|n| n.id != leader.id).unwrap();
-    follower
-        .node
-        .faults
-        .stall_counter_ms
-        .store(300, Ordering::Relaxed);
+    follower.stall_counters(300);
     let mut c = leader.redis().await;
     for i in 1..=20 {
         let started = Instant::now();
@@ -100,11 +104,7 @@ async fn a_lagging_follower_gets_a_snapshot() {
             "a write waited for the follower"
         );
     }
-    follower
-        .node
-        .faults
-        .stall_counter_ms
-        .store(0, Ordering::Relaxed);
+    follower.stall_counters(0);
     assert!(all_hold(&[follower], "cnt:lag", "20", Duration::from_secs(3)).await);
 }
 
@@ -185,20 +185,7 @@ async fn the_epoch_names_the_leader_without_a_lease() {
     let refs = refs(&nodes);
     wait_agreed(&refs, Duration::from_secs(10)).await;
     assert!(wait_until(Duration::from_secs(10), || settled(&refs)).await);
-    let g = group_of(&nodes[0], "cnt:e");
-    let mut c = nodes[0].redis().await;
-    for _ in 0..10 {
-        let _: i64 = c.incr("cnt:e", 1).await.unwrap();
-    }
-    let leader = leader_of(&refs, g).unwrap();
-    let survivor = nodes.iter().find(|n| n.id != leader.id).unwrap();
-    assert!(all_hold(&[survivor], "cnt:e", "10", Duration::from_secs(3)).await);
-    leader.kill();
-    let mut c = survivor.redis().await;
-    assert_eq!(
-        incr_until(&mut c, "cnt:e", Duration::from_secs(8)).await,
-        11
-    );
+    failover_keeps(&nodes, "cnt:e", 10).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

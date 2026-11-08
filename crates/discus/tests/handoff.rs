@@ -5,46 +5,19 @@ mod common;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
+use common::gossip::{fill, hits, refs, wait_agreed, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
 
 const FORM: Duration = Duration::from_secs(10);
-
-async fn formed(net: &Net, n: usize, extra: &[&str]) -> Vec<GossipNode> {
-    let nodes = net.start_all(n, extra).await;
-    wait_agreed(&refs(&nodes), FORM).await;
-    nodes
-}
-
-async fn fill(n: &GossipNode, prefix: &str, count: usize) -> Vec<String> {
-    let mut c = n.redis().await;
-    let keys: Vec<String> = (0..count).map(|i| format!("{prefix}{i}")).collect();
-    for k in &keys {
-        let _: () = c.set(k, format!("v-{k}")).await.unwrap();
-    }
-    keys
-}
 
 async fn started(n: &GossipNode) -> bool {
     common::wait_status(n.admin, "/startupz", 200, Duration::from_secs(10)).await
 }
 
-async fn hits(n: &GossipNode, keys: &[String]) -> usize {
-    let mut c = n.redis().await;
-    let mut hit = 0;
-    for k in keys {
-        let v: Option<String> = c.get(k).await.unwrap();
-        if v.as_deref() == Some(&format!("v-{k}")) {
-            hit += 1;
-        }
-    }
-    hit
-}
-
 #[tokio::test]
 async fn a_joining_node_receives_its_keys() {
     let net = Net::new();
-    let nodes = formed(&net, 2, &[]).await;
+    let nodes = net.start_agreed(2, &[]).await;
     let keys = fill(&nodes[0], "join", 300).await;
     let joiner = net.start(&[nodes[0].cluster_addr], &[]).await;
     assert!(started(&joiner).await);
@@ -65,7 +38,7 @@ async fn a_joining_node_receives_its_keys() {
 #[tokio::test]
 async fn a_death_refills_the_new_replica() {
     let net = Net::new();
-    let nodes = formed(&net, 4, &["--replication-factor", "2"]).await;
+    let nodes = net.start_agreed(4, &["--replication-factor", "2"]).await;
     let keys = fill(&nodes[0], "death", 200).await;
     nodes[3].kill();
     let rest = refs(&nodes[..3]);
@@ -84,7 +57,7 @@ async fn a_death_refills_the_new_replica() {
 #[tokio::test]
 async fn a_drain_hands_off_before_departing() {
     let net = Net::new();
-    let nodes = formed(&net, 3, &["--shutdown-timeout-secs", "5"]).await;
+    let nodes = net.start_agreed(3, &["--shutdown-timeout-secs", "5"]).await;
     let keys = fill(&nodes[0], "drain", 300).await;
     nodes[2].shutdown.cancel();
     let rest = refs(&nodes[..2]);
@@ -96,7 +69,7 @@ async fn a_drain_hands_off_before_departing() {
 async fn epochs_during_a_scan_wait_for_one_more_scan() {
     let net = Net::new();
     let slow = ["--handoff-rate-bytes", "10000"];
-    let nodes = formed(&net, 2, &slow).await;
+    let nodes = net.start_agreed(2, &slow).await;
     fill(&nodes[0], "scan", 2000).await;
     let rep = nodes[0].node.replicator().unwrap();
     assert!(wait_until(Duration::from_secs(10), || !rep.scanning()).await);
@@ -114,7 +87,7 @@ async fn epochs_during_a_scan_wait_for_one_more_scan() {
 
 /// Two nodes with `RF = 1`, a few keys, and a joiner whose inbound handoff hangs.
 async fn stalled_join(net: &Net, extra: &[&str]) -> (Vec<GossipNode>, GossipNode, Vec<String>) {
-    let nodes = formed(net, 2, extra).await;
+    let nodes = net.start_agreed(2, extra).await;
     let keys = fill(&nodes[0], "fb", 100).await;
     let mut c = nodes[0].redis().await;
     for i in 0..100 {
@@ -188,7 +161,7 @@ async fn a_handoff_ends_when_its_sources_give_up() {
 async fn a_rolling_restart_keeps_the_data_and_a_short_history() {
     let net = Net::new();
     let args = ["--replication-factor", "2", "--shutdown-timeout-secs", "5"];
-    let mut nodes = formed(&net, 3, &args).await;
+    let mut nodes = net.start_agreed(3, &args).await;
     let keys = fill(&nodes[0], "roll", 300).await;
     for _ in 0..3 {
         let seed = nodes.last().unwrap().cluster_addr;
