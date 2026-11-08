@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{Config, Node};
 use budget::Budget;
 use group::{Group, Role};
+use raft::Replica;
 use state::Limits;
 
 /// The seed of the group hash. A change is a re-shard (spec section 10.4).
@@ -94,9 +95,6 @@ impl Settings {
                 heartbeat_ms: c.raft_heartbeat_ms,
                 election_ms: c.raft_election_timeout_ms,
                 snapshot_entries: c.raft_snapshot_entries,
-                limits: Limits {
-                    max_value_bytes: c.max_value_bytes,
-                },
             },
             catchup_entries: c.raft_catchup_entries,
             voter_timeout: Duration::from_millis(c.raft_voter_timeout_ms),
@@ -213,8 +211,18 @@ impl Counters {
         })
     }
 
-    pub fn raft_link(&self) -> Arc<dyn raft::network::RaftLink> {
-        Arc::new(raft_group::Link(self.me.clone()))
+    /// A new replica of group `g` for `regime`, on the transport of this node.
+    pub(super) async fn start_replica(&self, g: u16, regime: Regime) -> Result<Replica, String> {
+        Replica::start(
+            &self.settings.raft,
+            self.settings.limits,
+            g,
+            regime,
+            raft::new_replica_id(),
+            Arc::new(raft_group::Link(self.me.clone())),
+            self.budget.clone(),
+        )
+        .await
     }
 
     /// The wall clock of the node in Unix milliseconds. The leader stamps commands with it.

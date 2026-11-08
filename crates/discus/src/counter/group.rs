@@ -517,22 +517,41 @@ impl Group {
             None
         };
         let state = role.state().unwrap_or_default();
-        let regime = self.next_regime(view.me);
+        let previous = self.inner.lock().known.as_ref().map(|k| k.leader);
+        let Some(leader) =
+            self.become_leader(counters, seen, state, lease_until, "leads a counter group")
+        else {
+            return;
+        };
+        if previous.is_some_and(|p| p != view.me) {
+            discus_telemetry::global().counter_failover();
+        }
+        self.start_leader(counters, view, leader).await;
+    }
+
+    /// Lead a new regime in leader-follower mode from `state`. `None` when the role changed
+    /// after `seen`. The caller starts the sender with [`Group::start_leader`].
+    pub(super) fn become_leader(
+        &self,
+        counters: &Arc<Counters>,
+        seen: u64,
+        state: CounterState,
+        lease_until: Option<Instant>,
+        why: &str,
+    ) -> Option<Arc<LfLeader>> {
+        let regime = self.next_regime(counters.id);
         let leader = LfLeader::new(
             regime,
             state,
             counters.budget(),
             lease_until,
-            settings.lease_margin,
+            counters.settings.lease_margin,
         );
-        let previous = self.inner.lock().known.as_ref().map(|k| k.leader);
-        if self.set_role_if(seen, Role::Leader(leader.clone())) {
-            tracing::info!(group = self.g, %regime, "leads a counter group");
-            if previous.is_some_and(|p| p != view.me) {
-                discus_telemetry::global().counter_failover();
-            }
-            self.start_leader(counters, view, leader).await;
-        }
+        self.set_role_if(seen, Role::Leader(leader.clone()))
+            .then(|| {
+                tracing::info!(group = self.g, %regime, "{why}");
+                leader
+            })
     }
 
     /// Start the sender of a new leader-follower leader and run its first step.

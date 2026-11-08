@@ -50,7 +50,6 @@ pub struct RaftTiming {
     pub heartbeat_ms: u64,
     pub election_ms: u64,
     pub snapshot_entries: u64,
-    pub limits: Limits,
 }
 
 impl RaftTiming {
@@ -84,6 +83,7 @@ impl Replica {
     /// only voter.
     pub async fn start(
         timing: &RaftTiming,
+        limits: Limits,
         group: u16,
         regime: Regime,
         replica: u64,
@@ -97,7 +97,7 @@ impl Replica {
             regime,
             contacts: contacts.clone(),
         };
-        let sm = Arc::new(Mutex::new(Sm::new(budget, timing.limits)));
+        let sm = Arc::new(Mutex::new(Sm::new(budget, limits)));
         let raft = Raft::new(
             replica,
             Arc::new(timing.config()?),
@@ -286,14 +286,15 @@ mod tests {
         }
     }
 
+    const LIMITS: Limits = Limits {
+        max_value_bytes: 1 << 20,
+    };
+
     fn timing(snapshot_entries: u64) -> RaftTiming {
         RaftTiming {
             heartbeat_ms: 50,
             election_ms: 300,
             snapshot_entries,
-            limits: Limits {
-                max_value_bytes: 1 << 20,
-            },
         }
     }
 
@@ -314,6 +315,7 @@ mod tests {
     ) -> Arc<Replica> {
         let r = Replica::start(
             &timing(snapshot_entries),
+            LIMITS,
             0,
             regime(),
             new_replica_id(),
@@ -347,9 +349,8 @@ mod tests {
         let b = replica(&link, 2, 50, &budget).await;
         let c = replica(&link, 3, 50, &budget).await;
         let mut initial = CounterState::new();
-        let limits = timing(50).limits;
         for i in 0..10 {
-            initial.apply(1, &cmd(&["SET", &format!("k{i}"), "v"]), &limits);
+            initial.apply(1, &cmd(&["SET", &format!("k{i}"), "v"]), &LIMITS);
         }
         a.bootstrap(NodeId::from_u128(1), &initial, 5, Duration::from_secs(5))
             .await

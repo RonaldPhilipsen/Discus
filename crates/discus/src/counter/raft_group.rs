@@ -15,9 +15,8 @@ use parking_lot::Mutex;
 use tracing::Instrument;
 
 use super::group::{Group, Role};
-use super::lf::LfLeader;
 use super::raft::network::RaftLink;
-use super::raft::{new_replica_id, Op, Peer, Replica};
+use super::raft::{Op, Peer, Replica};
 use super::state::{self, CounterState};
 use super::{Counters, Refusal, Settings, View};
 
@@ -187,16 +186,7 @@ impl Group {
         why: &str,
     ) -> bool {
         let regime = self.next_regime(view.me);
-        let replica = match Replica::start(
-            &counters.settings.raft,
-            self.g,
-            regime,
-            new_replica_id(),
-            counters.raft_link(),
-            counters.budget().clone(),
-        )
-        .await
-        {
+        let replica = match counters.start_replica(self.g, regime).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(group = self.g, error = %e, "cannot start a Raft replica");
@@ -337,21 +327,14 @@ impl Group {
         // commits through this replica. So the state read after the shutdown holds every write
         // that this leader acknowledged.
         replica.shutdown().await;
-        let state = replica.state();
-        let regime = self.next_regime(view.me);
-        let leader = LfLeader::new(
-            regime,
-            state,
-            counters.budget(),
-            lease_until,
-            counters.settings.lease_margin,
-        );
-        if self.set_role_if(seen, Role::Leader(leader.clone())) {
-            tracing::info!(group = self.g, %regime, "switched down to leader-follower mode");
-            discus_telemetry::global()
-                .counter_mode_switch(discus_telemetry::attrs::CounterMode::LeaderFollower);
-            self.start_leader(counters, view, leader).await;
-        }
+        let why = "switched down to leader-follower mode";
+        let Some(leader) = self.become_leader(counters, seen, replica.state(), lease_until, why)
+        else {
+            return;
+        };
+        discus_telemetry::global()
+            .counter_mode_switch(discus_telemetry::attrs::CounterMode::LeaderFollower);
+        self.start_leader(counters, view, leader).await;
     }
 
     /// The next membership change toward the target voters, in priority order: lost voters and
@@ -570,18 +553,8 @@ impl Group {
             other if other.regime().is_some_and(|reg| reg > c.regime) => return refuse,
             _ => {}
         }
-        let replica = match Replica::start(
-            &counters.settings.raft,
-            self.g,
-            c.regime,
-            new_replica_id(),
-            counters.raft_link(),
-            counters.budget().clone(),
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(_) => return refuse,
+        let Ok(replica) = counters.start_replica(self.g, c.regime).await else {
+            return refuse;
         };
         let id = replica.replica;
         let role = RaftRole::new(replica);
