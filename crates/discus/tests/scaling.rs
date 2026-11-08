@@ -14,6 +14,7 @@ use common::counters::{all_raft, flags, join, status, Leases, GROUPS};
 use common::gossip::{agreed, socket, wait_until, GossipNode, Net};
 use discus::counter::group_key;
 use redis::AsyncCommands;
+use serial_test::serial;
 
 const MAX_NODES: usize = 5;
 const RF: usize = 3;
@@ -169,8 +170,8 @@ async fn counter_load(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn growth_from_one_to_five_and_back_under_load() {
-    let _turn = common::counters::turn("growth_from_one_to_five_and_back_under_load").await;
     let (net, leases) = (Net::new(), Leases::new());
     let extra = flags(&["--replication-factor", "3", "--shutdown-timeout-secs", "20"]);
 

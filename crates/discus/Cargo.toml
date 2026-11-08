@@ -61,6 +61,7 @@ rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "
 base64 = "0.22"
 serde_json = "1"
 discus-telemetry = { path = "../discus-telemetry", features = ["testing"] }
+serial_test = { version = "4.0.1", default-features = false, features = ["async"] }
 
 # Build features, spec §15.5. Exactly one TLS backend and one trust root feature must be on.
 # The TLS backend selects the one cryptography provider of the build. discus-transport owns it

@@ -1,5 +1,9 @@
 //! Helpers for counter tests: shared group leases, a lease that one node can lose, and waits on
 //! the role of each group.
+//!
+//! The multi-node tests of one binary run one at a time (`#[serial]`). Many clusters at once
+//! starve the Raft timers on a busy machine, and an election in the middle of a test makes a
+//! write `-TRYAGAIN`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -14,24 +18,6 @@ use super::gossip::{agreed, socket, wait_until, GossipNode, Net, Opts};
 
 pub const GROUPS: u16 = 4;
 
-/// The multi-node counter tests of one binary take turns. Many clusters at once starve the Raft
-/// timers on a busy machine, and an election in the middle of a test makes a write `-TRYAGAIN`.
-pub static HEAVY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// Take the turn of a heavy test. The log lines show which test held the turn.
-pub async fn turn(name: &'static str) -> Turn {
-    let guard = HEAVY.lock().await;
-    eprintln!("TURN START {name}");
-    Turn(guard, name)
-}
-
-pub struct Turn(tokio::sync::MutexGuard<'static, ()>, &'static str);
-
-impl Drop for Turn {
-    fn drop(&mut self) {
-        eprintln!("TURN END {}", self.1);
-    }
-}
 pub const LEASE_MS: u64 = 2_000;
 
 /// Flags for fast counter leases: duration 2000 ms, renew every 300 ms, margin 500 ms.

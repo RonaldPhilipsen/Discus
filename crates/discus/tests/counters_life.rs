@@ -14,6 +14,7 @@ use common::gossip::{agreed, socket, wait_until, GossipNode, Net};
 use common::status as http_status;
 use discus::counter::group_key;
 use redis::AsyncCommands;
+use serial_test::serial;
 
 fn targets_of(n: &GossipNode, g: u16) -> Vec<discus_placement::NodeId> {
     n.node.epochs().current().owners(&group_key(g), 3)
@@ -27,8 +28,8 @@ fn promoted(n: &GossipNode) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn startupz_waits_for_counter_promotion() {
-    let _turn = common::counters::turn("startupz_waits_for_counter_promotion").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 3, &[]).await;
     let seeds: Vec<_> = nodes.iter().map(|n| n.cluster_addr).collect();
@@ -71,8 +72,8 @@ async fn startupz_waits_for_counter_promotion() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn drain_moves_raft_roles_away() {
-    let _turn = common::counters::turn("drain_moves_raft_roles_away").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 4, &["--shutdown-timeout-secs", "15"]).await;
     let refs: Vec<&GossipNode> = nodes.iter().collect();
@@ -110,8 +111,8 @@ async fn drain_moves_raft_roles_away() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn a_rejoined_node_discards_its_counters() {
-    let _turn = common::counters::turn("a_rejoined_node_discards_its_counters").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 4, &[]).await;
     let replicas = |n: &GossipNode| -> HashSet<u64> {
@@ -177,8 +178,8 @@ async fn a_rejoined_node_discards_its_counters() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn a_false_dead_heals_to_one_value() {
-    let _turn = common::counters::turn("a_false_dead_heals_to_one_value").await;
     let net = Net::new();
     let nodes = net.start_all(3, &["--counter-groups", "4"]).await;
     let refs: Vec<&GossipNode> = nodes.iter().collect();
@@ -239,8 +240,8 @@ async fn a_false_dead_heals_to_one_value() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn growth_from_one_to_three_and_back() {
-    let _turn = common::counters::turn("growth_from_one_to_three_and_back").await;
     let (net, leases) = (Net::new(), Leases::new());
     let extra: Vec<&'static str> =
         flags(&["--replication-factor", "3", "--shutdown-timeout-secs", "15"]);

@@ -12,10 +12,11 @@ use common::counters::{
 };
 use common::gossip::{agreed, socket, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
+use serial_test::serial;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn three_nodes_elect_raft_leaders() {
-    let _turn = common::counters::turn("three_nodes_elect_raft_leaders").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 3, &[]).await;
     for g in 0..GROUPS {
@@ -25,8 +26,8 @@ async fn three_nodes_elect_raft_leaders() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn entries_reach_every_voter() {
-    let _turn = common::counters::turn("entries_reach_every_voter").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 3, &[]).await;
     let mut c = nodes[0].redis().await;
@@ -45,8 +46,8 @@ async fn entries_reach_every_voter() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn a_learner_catches_up_by_snapshot() {
-    let _turn = common::counters::turn("a_learner_catches_up_by_snapshot").await;
     let (net, leases) = (Net::new(), Leases::new());
     let extra: [&'static str; 2] = ["--raft-snapshot-entries", "50"];
     let nodes = raft_cluster(&net, &leases, 3, &extra).await;
@@ -95,8 +96,8 @@ async fn a_learner_catches_up_by_snapshot() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn a_minority_returns_tryagain() {
-    let _turn = common::counters::turn("a_minority_returns_tryagain").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 5, SLOW_DEATH).await;
     let refs: Vec<&GossipNode> = nodes.iter().collect();
@@ -122,8 +123,8 @@ async fn a_minority_returns_tryagain() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn a_restarted_node_enters_as_a_learner() {
-    let _turn = common::counters::turn("a_restarted_node_enters_as_a_learner").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 4, &[]).await;
     let refs: Vec<&GossipNode> = nodes.iter().collect();
@@ -168,8 +169,8 @@ async fn a_restarted_node_enters_as_a_learner() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn two_of_three_voters_lost() {
-    let _turn = common::counters::turn("two_of_three_voters_lost").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 6, &[]).await;
     let refs: Vec<&GossipNode> = nodes.iter().collect();
@@ -198,8 +199,8 @@ async fn two_of_three_voters_lost() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn every_voter_lost() {
-    let _turn = common::counters::turn("every_voter_lost").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 6, &[]).await;
     let refs: Vec<&GossipNode> = nodes.iter().collect();
@@ -228,8 +229,8 @@ async fn every_voter_lost() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn force_reconfigure_acts_before_dead() {
-    let _turn = common::counters::turn("force_reconfigure_acts_before_dead").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 5, SLOW_DEATH).await;
     let refs: Vec<&GossipNode> = nodes.iter().collect();
@@ -276,8 +277,8 @@ async fn force_reconfigure_acts_before_dead() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn the_up_switch_waits_for_the_dwell_time() {
-    let _turn = common::counters::turn("the_up_switch_waits_for_the_dwell_time").await;
     let (net, leases) = (Net::new(), Leases::new());
     let mut f: Vec<&str> = RAFT[2..].to_vec();
     f.extend(["--counter-dwell-ms", "3000"]);
@@ -309,8 +310,8 @@ async fn the_up_switch_waits_for_the_dwell_time() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn the_down_switch_is_at_once() {
-    let _turn = common::counters::turn("the_down_switch_is_at_once").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 3, &[]).await;
     let mut c = nodes[0].redis().await;
@@ -372,8 +373,8 @@ async fn load(nodes: &[&GossipNode], key: &str, clients: usize, each: usize) -> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn the_final_value_counts_every_success() {
-    let _turn = common::counters::turn("the_final_value_counts_every_success").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 4, &[]).await;
     let refs: Vec<&GossipNode> = nodes.iter().collect();
@@ -403,8 +404,8 @@ async fn the_final_value_counts_every_success() {
 /// The Raft leader drains while the other nodes write to its group. The group switches down,
 /// and the counter keeps every increment that a client saw succeed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn a_draining_raft_leader_keeps_every_increment() {
-    let _turn = common::counters::turn("a_draining_raft_leader_keeps_every_increment").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 3, &[]).await;
     let refs: Vec<&GossipNode> = nodes.iter().collect();
