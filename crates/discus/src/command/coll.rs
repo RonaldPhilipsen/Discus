@@ -6,7 +6,7 @@ use bytes::Bytes;
 use discus_store::{Entry, Value as Stored, ZSet};
 
 use super::error::CommandError;
-use super::util::admit;
+use super::util::{admit, check_key};
 use crate::node::Node;
 
 /// A collection type that a key can hold.
@@ -15,76 +15,41 @@ pub trait Collection: Default {
     fn from_ref(v: &Stored) -> Option<&Self>;
     fn into_stored(self) -> Stored;
     fn count(&self) -> usize;
+    fn contains(&self, member: &[u8]) -> bool;
 }
 
-impl Collection for HashMap<Bytes, Bytes> {
-    fn from_mut(v: &mut Stored) -> Option<&mut Self> {
-        if let Stored::Hash(h) = v {
-            Some(h)
-        } else {
-            None
+macro_rules! collection {
+    ($ty:ty, $variant:ident, |$c:ident, $m:ident| $contains:expr) => {
+        impl Collection for $ty {
+            fn from_mut(v: &mut Stored) -> Option<&mut Self> {
+                match v {
+                    Stored::$variant(c) => Some(c),
+                    _ => None,
+                }
+            }
+            fn from_ref(v: &Stored) -> Option<&Self> {
+                match v {
+                    Stored::$variant(c) => Some(c),
+                    _ => None,
+                }
+            }
+            fn into_stored(self) -> Stored {
+                Stored::$variant(self)
+            }
+            fn count(&self) -> usize {
+                self.len()
+            }
+            fn contains(&self, $m: &[u8]) -> bool {
+                let $c = self;
+                $contains
+            }
         }
-    }
-    fn from_ref(v: &Stored) -> Option<&Self> {
-        if let Stored::Hash(h) = v {
-            Some(h)
-        } else {
-            None
-        }
-    }
-    fn into_stored(self) -> Stored {
-        Stored::Hash(self)
-    }
-    fn count(&self) -> usize {
-        self.len()
-    }
+    };
 }
 
-impl Collection for HashSet<Bytes> {
-    fn from_mut(v: &mut Stored) -> Option<&mut Self> {
-        if let Stored::Set(s) = v {
-            Some(s)
-        } else {
-            None
-        }
-    }
-    fn from_ref(v: &Stored) -> Option<&Self> {
-        if let Stored::Set(s) = v {
-            Some(s)
-        } else {
-            None
-        }
-    }
-    fn into_stored(self) -> Stored {
-        Stored::Set(self)
-    }
-    fn count(&self) -> usize {
-        self.len()
-    }
-}
-
-impl Collection for ZSet {
-    fn from_mut(v: &mut Stored) -> Option<&mut Self> {
-        if let Stored::ZSet(z) = v {
-            Some(z)
-        } else {
-            None
-        }
-    }
-    fn from_ref(v: &Stored) -> Option<&Self> {
-        if let Stored::ZSet(z) = v {
-            Some(z)
-        } else {
-            None
-        }
-    }
-    fn into_stored(self) -> Stored {
-        Stored::ZSet(self)
-    }
-    fn count(&self) -> usize {
-        self.len()
-    }
-}
+collection!(HashMap<Bytes, Bytes>, Hash, |h, m| h.contains_key(m));
+collection!(HashSet<Bytes>, Set, |s, m| s.contains(m));
+collection!(ZSet, ZSet, |z, m| z.score(m).is_some());
 
 /// Mutate the collection at `key`. A missing key gives `f` an empty collection, and a collection
 /// that ends up empty is deleted. A key of another type gives `WrongType`.
@@ -93,12 +58,16 @@ impl Collection for ZSet {
 /// unchanged, keeps its version, and does not replicate.
 ///
 /// `grow_bytes` is the payload that the call can add. It is admitted against `maxmemory` first.
-pub fn mutate<C: Collection, R>(
+/// `adds` are the members that `f` may add. The distinct ones that are absent must fit under the
+/// member limit before `f` runs.
+pub fn mutate<'a, C: Collection, R>(
     node: &Node,
     key: &[u8],
     grow_bytes: usize,
+    adds: impl IntoIterator<Item = &'a Bytes>,
     f: impl FnOnce(&mut C) -> Result<R, CommandError>,
 ) -> Result<R, CommandError> {
+    check_key(node, key)?;
     admit(node, key.len() + grow_bytes)?;
     let stamp = node.stamp()?;
     node.write(key, stamp, |slot| {
@@ -110,7 +79,8 @@ pub fn mutate<C: Collection, R>(
             *slot.untracked() = Some(entry);
             return Err(CommandError::WrongType);
         };
-        let result = f(coll);
+        let fresh: HashSet<&Bytes> = adds.into_iter().filter(|m| !coll.contains(m)).collect();
+        let result = guard(node, coll.count() + fresh.len()).and_then(|()| f(coll));
         let keep = coll.count() > 0;
         if keep {
             *slot.untracked() = Some(entry);
@@ -137,7 +107,7 @@ pub fn view<C: Collection, R>(
 }
 
 /// Refuse to grow a collection past the configured member limit.
-pub fn guard(node: &Node, members_after: usize) -> Result<(), CommandError> {
+fn guard(node: &Node, members_after: usize) -> Result<(), CommandError> {
     if members_after > node.config.max_collection_members {
         return Err(CommandError::Custom("ERR collection too large".into()));
     }
