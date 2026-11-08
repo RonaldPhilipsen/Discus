@@ -39,6 +39,20 @@ const MAX_HEADER_LINE: usize = 32;
 pub struct Parser {
     buf: BytesMut,
     limits: Limits,
+    /// The progress on the command at the start of `buf`, kept between reads so a large command
+    /// that arrives in many reads costs time in proportion to its size, not its size squared.
+    pending: Option<Pending>,
+}
+
+/// A command array whose header was read, with the arguments parsed so far.
+struct Pending {
+    len: usize,
+    /// Where the next header starts, or the body of `bulk` when it is set.
+    pos: usize,
+    ranges: Vec<(usize, usize)>,
+    /// The start and length of the bulk string whose header was read and whose body is not
+    /// complete yet.
+    bulk: Option<(usize, usize)>,
 }
 
 impl Parser {
@@ -46,6 +60,7 @@ impl Parser {
         Parser {
             buf: BytesMut::new(),
             limits,
+            pending: None,
         }
     }
 
@@ -77,53 +92,70 @@ impl Parser {
         }
     }
 
-    fn try_parse(&self) -> Result<Attempt, ParseError> {
+    fn try_parse(&mut self) -> Result<Attempt, ParseError> {
         let buf = &self.buf[..];
-        let Some((first, mut pos)) = read_line(buf, 0)? else {
-            return Ok(Attempt::Incomplete);
+        let p = match &mut self.pending {
+            Some(p) => p,
+            None => {
+                let Some((first, pos)) = read_line(buf, 0)? else {
+                    return Ok(Attempt::Incomplete);
+                };
+                if first.first() != Some(&b'*') {
+                    return Err(ParseError::Protocol(
+                        "expected '*' to start a command array".to_string(),
+                    ));
+                }
+                let n = parse_len(&first[1..])?;
+                if n < 0 {
+                    return Err(ParseError::Protocol("invalid multibulk length".to_string()));
+                }
+                let n = n as usize;
+                if n > self.limits.max_array_len {
+                    return Err(ParseError::ArrayTooLarge {
+                        len: n,
+                        limit: self.limits.max_array_len,
+                    });
+                }
+                if n == 0 {
+                    return Ok(Attempt::Empty(pos));
+                }
+                self.pending.insert(Pending {
+                    len: n,
+                    pos,
+                    ranges: Vec::with_capacity(n.min(1024)),
+                    bulk: None,
+                })
+            }
         };
-        if first.first() != Some(&b'*') {
-            return Err(ParseError::Protocol(
-                "expected '*' to start a command array".to_string(),
-            ));
-        }
-        let n = parse_len(&first[1..])?;
-        if n < 0 {
-            return Err(ParseError::Protocol("invalid multibulk length".to_string()));
-        }
-        let n = n as usize;
-        if n > self.limits.max_array_len {
-            return Err(ParseError::ArrayTooLarge {
-                len: n,
-                limit: self.limits.max_array_len,
-            });
-        }
-        if n == 0 {
-            return Ok(Attempt::Empty(pos));
-        }
-        let mut ranges = Vec::with_capacity(n.min(1024));
-        for _ in 0..n {
-            let Some((head, next)) = read_line(buf, pos)? else {
-                return Ok(Attempt::Incomplete);
+        while p.ranges.len() < p.len {
+            let (start, len) = match p.bulk {
+                Some(bulk) => bulk,
+                None => {
+                    let Some((head, next)) = read_line(buf, p.pos)? else {
+                        return Ok(Attempt::Incomplete);
+                    };
+                    if head.first() != Some(&b'$') {
+                        return Err(ParseError::Protocol(format!(
+                            "expected '$', got '{}'",
+                            head.first().map(|b| *b as char).unwrap_or(' ')
+                        )));
+                    }
+                    let len = parse_len(&head[1..])?;
+                    if len < 0 {
+                        return Err(ParseError::Protocol("invalid bulk length".to_string()));
+                    }
+                    let len = len as usize;
+                    if len > self.limits.max_bulk_bytes {
+                        return Err(ParseError::BulkTooLarge {
+                            len,
+                            limit: self.limits.max_bulk_bytes,
+                        });
+                    }
+                    p.bulk = Some((next, len));
+                    (next, len)
+                }
             };
-            if head.first() != Some(&b'$') {
-                return Err(ParseError::Protocol(format!(
-                    "expected '$', got '{}'",
-                    head.first().map(|b| *b as char).unwrap_or(' ')
-                )));
-            }
-            let len = parse_len(&head[1..])?;
-            if len < 0 {
-                return Err(ParseError::Protocol("invalid bulk length".to_string()));
-            }
-            let len = len as usize;
-            if len > self.limits.max_bulk_bytes {
-                return Err(ParseError::BulkTooLarge {
-                    len,
-                    limit: self.limits.max_bulk_bytes,
-                });
-            }
-            let end = next + len;
+            let end = start + len;
             if buf.len() < end + 2 {
                 return Ok(Attempt::Incomplete);
             }
@@ -132,13 +164,16 @@ impl Parser {
                     "bulk string is not CRLF terminated".to_string(),
                 ));
             }
-            ranges.push((next, end));
-            pos = end + 2;
+            p.ranges.push((start, end));
+            p.pos = end + 2;
+            p.bulk = None;
         }
-        Ok(Attempt::Done {
-            consumed: pos,
-            ranges,
-        })
+        let done = Attempt::Done {
+            consumed: p.pos,
+            ranges: std::mem::take(&mut p.ranges),
+        };
+        self.pending = None;
+        Ok(done)
     }
 }
 
@@ -168,4 +203,47 @@ fn parse_len(digits: &[u8]) -> Result<i64, ParseError> {
         .ok()
         .and_then(|s| s.parse::<i64>().ok())
         .ok_or_else(|| ParseError::Protocol("invalid length".to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    /// The headers of a partial command are read once. The parser keeps its progress between
+    /// reads, so it never looks at the bytes it parsed already. This test overwrites those
+    /// bytes: a parser that starts over sees garbage.
+    #[test]
+    fn a_partial_command_is_not_parsed_again() {
+        let mut p = Parser::new(Limits::default());
+        p.feed(b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$5\r\nva");
+        assert!(p.next().unwrap().is_none());
+        p.buf[0] = b'!';
+        p.buf[4] = b'!';
+        p.buf[13] = b'!';
+        p.feed(b"lue\r\n");
+        let cmd = p.next().unwrap().unwrap();
+        assert_eq!(cmd, vec!["SET", "k", "value"]);
+        p.feed(b"*1\r\n$4\r\nPING\r\n");
+        assert_eq!(p.next().unwrap().unwrap(), vec!["PING"]);
+    }
+
+    /// A command of many arguments that arrives one argument per read reads each header once.
+    #[test]
+    fn a_long_command_in_many_reads_keeps_every_argument() {
+        let mut p = Parser::new(Limits::default());
+        p.feed(b"*1000\r\n");
+        for i in 0..1000 {
+            assert!(p.next().unwrap().is_none());
+            p.buf[0] = b'!';
+            if i > 0 {
+                p.buf[7 + 7 * (i - 1)] = b'!';
+            }
+            p.feed(b"$1\r\nx\r\n");
+        }
+        let cmd = p.next().unwrap().unwrap();
+        assert_eq!(cmd.len(), 1000);
+        assert!(cmd.iter().all(|a| a.as_ref() == b"x"));
+    }
 }
