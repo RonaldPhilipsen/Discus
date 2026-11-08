@@ -5,19 +5,9 @@ use discus_membership::sim::Sim;
 use discus_membership::SwimConfig;
 use discus_wire::Liveness;
 
-fn cfg() -> SwimConfig {
-    SwimConfig {
-        seed: 7,
-        ..SwimConfig::fast()
-    }
-}
-
-/// Run until `done` holds, in 10 ms steps, and return the virtual time it took. Panics after
-/// `limit_ms`.
-
 #[test]
 fn a_dead_node_is_detected() {
-    let mut sim = Sim::new(1, cfg());
+    let mut sim = Sim::new(1, SwimConfig::fast());
     let ids = sim.cluster(5);
     sim.run_ms(1_000);
     sim.kill(ids[4]);
@@ -30,7 +20,7 @@ fn a_dead_node_is_detected() {
 
 #[test]
 fn a_healthy_cluster_stays_alive() {
-    let mut sim = Sim::new(2, cfg());
+    let mut sim = Sim::new(2, SwimConfig::fast());
     let ids = sim.cluster(6);
     sim.run_ms(20_000);
     for &o in &ids {
@@ -44,7 +34,7 @@ fn a_healthy_cluster_stays_alive() {
 
 #[test]
 fn suspicion_is_refuted() {
-    let mut sim = Sim::new(3, cfg());
+    let mut sim = Sim::new(3, SwimConfig::fast());
     let ids = sim.cluster(4);
     sim.run_ms(1_000);
     let before = sim.incarnation(ids[2]);
@@ -63,7 +53,7 @@ fn suspicion_is_refuted() {
 
 #[test]
 fn rumors_spread_in_log_rounds() {
-    let mut sim = Sim::new(4, cfg());
+    let mut sim = Sim::new(4, SwimConfig::fast());
     let ids = sim.cluster(16);
     sim.run_ms(1_000);
     sim.set_leader_hints(ids[0], Bytes::from_static(b"g0"));
@@ -77,7 +67,7 @@ fn rumors_spread_in_log_rounds() {
 }
 
 fn time_to_dead(evidence: bool) -> u64 {
-    let mut sim = Sim::new(5, cfg());
+    let mut sim = Sim::new(5, SwimConfig::fast());
     let ids = sim.cluster(6);
     sim.run_ms(1_000);
     sim.kill(ids[5]);
@@ -103,7 +93,7 @@ fn data_path_evidence_speeds_up_dead() {
 }
 
 fn rate(n: usize) -> f64 {
-    let mut sim = Sim::new(6, cfg());
+    let mut sim = Sim::new(6, SwimConfig::fast());
     let ids = sim.cluster(n);
     sim.run_ms(2_000);
     let before: Vec<u64> = ids.iter().map(|&i| sim.messages_sent(i)).collect();
@@ -119,7 +109,7 @@ fn rate(n: usize) -> f64 {
 
 #[test]
 fn the_message_rate_is_constant() {
-    let c = cfg();
+    let c = SwimConfig::fast();
     let bound = 1000.0 / c.period_ms as f64 * (1 + c.indirect_probes) as f64 + 2.0;
     for n in [4, 16] {
         let r = rate(n);

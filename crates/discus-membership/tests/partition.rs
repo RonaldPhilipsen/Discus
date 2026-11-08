@@ -6,13 +6,6 @@ use discus_membership::{Event, SwimConfig};
 use discus_placement::{ClusterId, MemberState, NodeId};
 use proptest::prelude::*;
 
-fn cfg(seed: u64) -> SwimConfig {
-    SwimConfig {
-        seed,
-        ..SwimConfig::fast()
-    }
-}
-
 /// Every live node holds the same epoch, lists every live node as NORMAL, and has no other
 /// member.
 fn converged(sim: &Sim) -> bool {
@@ -39,7 +32,7 @@ proptest! {
         at in 1_000u64..5_000,
         heal_after in 5_000u64..20_000,
     ) {
-        let mut sim = Sim::new(seed, cfg(seed));
+        let mut sim = Sim::new(seed, SwimConfig::fast());
         let ids = sim.cluster(n);
         let split = split.min(n - 1);
         sim.run_ms(at);
@@ -89,7 +82,7 @@ fn the_none_lease_does_not_decide_a_merge() {
 }
 
 fn merge(none_lease: bool) {
-    let mut sim = Sim::new(8, cfg(8));
+    let mut sim = Sim::new(8, SwimConfig::fast());
     if none_lease {
         sim.with_none_lease();
     }

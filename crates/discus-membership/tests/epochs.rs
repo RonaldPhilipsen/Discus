@@ -7,23 +7,11 @@ use discus_membership::{gained_owners, Event, SwimConfig};
 use discus_placement::{ClusterId, Epoch, EpochId, Member, MemberState, NodeId, Weight};
 use discus_wire::{Liveness, Rumor};
 
-fn cfg() -> SwimConfig {
-    SwimConfig {
-        seed: 11,
-        ..SwimConfig::fast()
-    }
-}
-
 /// Every live node holds the same epoch, and its NORMAL members are exactly `want`.
 fn agreed(sim: &Sim, want: &[NodeId]) -> bool {
     let live = sim.alive_ids();
     let first = sim.epoch(live[0]);
-    let mut normal: Vec<NodeId> = first
-        .members()
-        .iter()
-        .filter(|m| m.state == MemberState::Normal)
-        .map(|m| m.id)
-        .collect();
+    let mut normal: Vec<NodeId> = first.normal().map(|m| m.id).collect();
     normal.sort();
     let mut want = want.to_vec();
     want.sort();
@@ -32,7 +20,7 @@ fn agreed(sim: &Sim, want: &[NodeId]) -> bool {
 
 #[test]
 fn a_death_creates_one_new_epoch() {
-    let mut sim = Sim::new(1, cfg());
+    let mut sim = Sim::new(1, SwimConfig::fast());
     let ids = sim.cluster(4);
     sim.run_ms(500);
     let before = sim.epoch(ids[0]).id().generation;
@@ -44,7 +32,7 @@ fn a_death_creates_one_new_epoch() {
 
 #[test]
 fn a_joiner_becomes_normal_in_an_epoch() {
-    let mut sim = Sim::new(2, cfg());
+    let mut sim = Sim::new(2, SwimConfig::fast());
     let ids = sim.cluster(4);
     // Node 0 runs 800 ms ahead, so the cluster maximum is above the joiner's wall clock.
     sim.node_mut(ids[0]).host.clock_offset = 800;
@@ -63,7 +51,7 @@ fn a_joiner_becomes_normal_in_an_epoch() {
 #[test]
 fn racing_creators_converge() {
     for seed in 0..10 {
-        let mut sim = Sim::new(100 + seed, cfg());
+        let mut sim = Sim::new(100 + seed, SwimConfig::fast());
         let ids = sim.cluster(5);
         sim.run_ms(500);
         let before = sim.epoch(ids[0]).id().generation;
@@ -84,7 +72,7 @@ fn racing_creators_converge() {
 #[test]
 fn a_join_seen_by_two_members_creates_one_epoch() {
     for seed in 0..10 {
-        let mut sim = Sim::new(300 + seed, cfg());
+        let mut sim = Sim::new(300 + seed, SwimConfig::fast());
         let mut ids = sim.cluster(4);
         ids.sort();
         sim.run_ms(500);
@@ -128,7 +116,7 @@ fn a_join_seen_by_two_members_creates_one_epoch() {
 #[test]
 fn concurrent_joins_do_not_drop_a_joiner() {
     for seed in 0..10 {
-        let mut sim = Sim::new(200 + seed, cfg());
+        let mut sim = Sim::new(200 + seed, SwimConfig::fast());
         let ids = sim.cluster(4);
         sim.run_ms(500);
         let before = sim.epoch(ids[0]).id().generation;
@@ -160,7 +148,7 @@ fn concurrent_joins_do_not_drop_a_joiner() {
 
 #[test]
 fn an_unseen_change_is_never_undone() {
-    let mut sim = Sim::new(3, cfg());
+    let mut sim = Sim::new(3, SwimConfig::fast());
     let ids = sim.cluster(5);
     sim.run_ms(500);
     let x = ids[4];
@@ -203,7 +191,7 @@ fn forced(sim: &Sim, from: NodeId, members: Vec<Member>) -> Epoch {
 
 #[test]
 fn a_dropped_member_rejoins_with_a_new_incarnation() {
-    let mut sim = Sim::new(4, cfg());
+    let mut sim = Sim::new(4, SwimConfig::fast());
     let ids = sim.cluster(4);
     sim.run_ms(500);
     let c = ids[2];
@@ -229,7 +217,7 @@ fn a_dropped_member_rejoins_with_a_new_incarnation() {
 
 #[test]
 fn a_joiner_does_not_rejoin_before_its_epoch() {
-    let mut sim = Sim::new(5, cfg());
+    let mut sim = Sim::new(5, SwimConfig::fast());
     let ids = sim.cluster(3);
     sim.run_ms(500);
     let j = sim.add_node();
@@ -287,7 +275,7 @@ fn ownership_gain_lists_the_new_owners() {
 
 #[test]
 fn a_drain_during_a_join_stays_leaving() {
-    let mut sim = Sim::new(6, cfg());
+    let mut sim = Sim::new(6, SwimConfig::fast());
     let ids = sim.cluster(3);
     sim.run_ms(500);
     let j = sim.add_node();
