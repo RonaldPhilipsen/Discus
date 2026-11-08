@@ -181,33 +181,20 @@ impl Group {
     /// The node that leads this group, as far as this node knows.
     pub fn leader(&self, view: &View) -> Option<NodeId> {
         let inner = self.inner.lock();
-        match &inner.role {
-            Role::Leader(l) if l.serving() => return Some(view.me),
-            _ => {}
-        }
         let distrusted = inner
             .distrusted
             .filter(|(_, at)| at.elapsed() < DISTRUST)
             .map(|(n, _)| n);
         let usable = |l: &NodeId| *l != view.me && view.normal(*l) && Some(*l) != distrusted;
         let stale = |r: Regime| inner.known.as_ref().is_some_and(|k| k.regime > r);
-        match &inner.role {
-            Role::Follower(f) if !stale(f.regime) => {
-                if let Some(l) = f.leader.filter(usable) {
-                    return Some(l);
-                }
-            }
-            Role::Raft(r) => {
-                if r.leads() {
-                    return Some(view.me);
-                }
-                if let Some(l) = r.replica.leader_node().filter(usable) {
-                    return Some(l);
-                }
-            }
-            _ => {}
-        }
-        inner.known.as_ref().map(|k| k.leader).filter(usable)
+        let held = match &inner.role {
+            Role::Leader(l) if l.serving() => return Some(view.me),
+            Role::Raft(r) if r.leads() => return Some(view.me),
+            Role::Follower(f) if !stale(f.regime) => f.leader.filter(usable),
+            Role::Raft(r) => r.replica.leader_node().filter(usable),
+            _ => None,
+        };
+        held.or_else(|| inner.known.as_ref().map(|k| k.leader).filter(usable))
     }
 
     pub fn distrust(&self, leader: NodeId) {
@@ -229,29 +216,24 @@ impl Group {
     /// answer never replaces a hint that nobody denied, because a replica can answer from an old
     /// view.
     pub fn learn(&self, best: Option<GroupHint>, denied: &[NodeId]) {
+        let mut inner = self.inner.lock();
         let Some(best) = best else {
             // Nobody claims the group. A known leader that denied it leads no more, but its
             // voters stay known for a rebuild.
-            let mut inner = self.inner.lock();
-            if let Some(k) = inner.known.as_mut() {
-                if denied.contains(&k.leader) {
-                    k.leader = NodeId::NIL;
-                }
+            if let Some(k) = inner.known.as_mut().filter(|k| denied.contains(&k.leader)) {
+                k.leader = NodeId::NIL;
             }
             return;
         };
-        let mut inner = self.inner.lock();
         inner.max_generation = inner.max_generation.max(best.regime.generation);
-        let take = match &inner.known {
-            None => true,
-            Some(k) => newer(&best, k) || denied.contains(&k.leader),
-        };
+        let take = inner
+            .known
+            .as_ref()
+            .is_none_or(|k| newer(&best, k) || denied.contains(&k.leader));
         if take {
             inner.distrusted = None;
             inner.known = Some(best);
-        }
-        drop(inner);
-        if take {
+            drop(inner);
             self.changed.notify_waiters();
         }
     }
@@ -427,13 +409,11 @@ impl Group {
             // The up switch: the lease holder becomes the only voter of a new Raft group with its
             // state, and lets the lease expire (spec section 10.3).
             l.stop();
-            let state = l.state();
             if !self
-                .create_instance(counters, view, seen, state.clone(), "the up switch")
+                .create_instance(counters, view, seen, l.state(), "the up switch")
                 .await
             {
-                let follower = Follower::new(l.regime, None, state, counters.budget());
-                self.set_role_if(seen, Role::Follower(Arc::new(follower)));
+                self.step_down(counters, seen, l);
             }
             return;
         }
@@ -443,10 +423,8 @@ impl Group {
         let hint = self.own_hint(view.me);
         let mut inner = self.inner.lock();
         inner.leaderless = None;
-        if let Some(h) = hint {
-            if inner.known.as_ref() != Some(&h) {
-                inner.known = Some(h);
-            }
+        if hint.is_some() {
+            inner.known = hint;
         }
     }
 
@@ -474,25 +452,20 @@ impl Group {
             let mut inner = self.inner.lock();
             if live.is_some() {
                 inner.leaderless = None;
+            } else if inner.leaderless.is_none() {
+                inner.leaderless = Some(Instant::now());
             }
-            match inner.leaderless {
-                Some(since) => since.elapsed(),
-                None if live.is_none() => {
-                    inner.leaderless = Some(Instant::now());
-                    Duration::ZERO
-                }
-                None => Duration::ZERO,
-            }
+            inner.leaderless.map_or(Duration::ZERO, |s| s.elapsed())
         };
         let designated = self.designated(view) == Some(view.me);
         let follower = match &role {
-            Role::Follower(f) => f.leader.is_some(),
-            _ => false,
+            Role::Follower(f) if f.leader.is_some() => Some(f),
+            _ => None,
         };
         let candidate = if self.lease.is_none() {
             designated && live.is_none()
-        } else if follower {
-            matches!(&role, Role::Follower(f) if f.silence() >= settings.lease_duration)
+        } else if let Some(f) = follower {
+            f.silence() >= settings.lease_duration
         } else if live.is_some() {
             false
         } else {
@@ -717,12 +690,13 @@ pub(super) fn pick(
 }
 
 fn stop(role: &Role) {
-    if let Role::Raft(r) = role {
-        let replica = r.replica.clone();
-        tokio::spawn(async move { replica.shutdown().await });
-    }
-    if let Role::Leader(l) = role {
-        l.stop();
+    match role {
+        Role::Raft(r) => {
+            let replica = r.replica.clone();
+            tokio::spawn(async move { replica.shutdown().await });
+        }
+        Role::Leader(l) => l.stop(),
+        _ => {}
     }
 }
 
