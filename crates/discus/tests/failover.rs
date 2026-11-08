@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use common::cluster::start_cluster;
+use common::counters::is_try_again;
 use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
 
@@ -38,10 +39,6 @@ fn key_of(nodes: &[GossipNode], owner: usize, entry: usize, prefix: &str) -> Str
             o[0] == nodes[owner].id && !o.contains(&nodes[entry].id)
         })
         .unwrap()
-}
-
-fn is_try_again(e: &redis::RedisError) -> bool {
-    e.to_string().contains("TRYAGAIN") || e.code() == Some("TRYAGAIN")
 }
 
 #[test]

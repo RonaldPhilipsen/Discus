@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::counters::{
-    all_hold, all_raft, dump, flags, group_of, incr_once, incr_or_show, incr_until, join_to,
-    key_in, leader_of, raft_cluster, role, start, status, targeted, voters_of, Leases, GROUPS,
-    RAFT, SLOW_DEATH,
+    all_hold, all_raft, dump, flags, group_of, incr_once, incr_or_show, incr_until, is_try_again,
+    join_to, key_in, leader_of, outcome, raft_cluster, role, start, status, targeted, voters_of,
+    Leases, Outcome, GROUPS, RAFT, SLOW_DEATH,
 };
 use common::gossip::{partition, refs, wait_agreed, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
@@ -95,7 +95,7 @@ async fn a_minority_returns_tryagain() {
         .query_async::<i64>(&mut lc)
         .await
         .unwrap_err();
-    assert!(err.to_string().to_uppercase().contains("TRYAGAIN"), "{err}");
+    assert!(is_try_again(&err), "{err}");
     let mut oc = rest[0].redis().await;
     let n = incr_or_show(&mut oc, "cnt:min", Duration::from_secs(15), &refs).await;
     assert!(n >= 2, "{n}");
@@ -302,7 +302,7 @@ async fn load(nodes: &[&GossipNode], key: &str, clients: usize, each: usize) -> 
                 match r {
                     Ok(_) => ok.fetch_add(1, Ordering::Relaxed),
                     Err(e) => {
-                        assert!(e.to_string().to_uppercase().contains("TRYAGAIN"), "{e}");
+                        assert!(is_try_again(&e), "{e}");
                         failed.fetch_add(1, Ordering::Relaxed)
                     }
                 };
@@ -369,12 +369,10 @@ async fn a_draining_raft_leader_keeps_every_increment() {
         );
         load.push(tokio::spawn(async move {
             while !stop.load(Ordering::Relaxed) {
-                let r: redis::RedisResult<i64> =
-                    redis::cmd("INCR").arg(key).query_async(&mut c).await;
-                match r {
-                    Ok(_) => ok.fetch_add(1, Ordering::Relaxed),
-                    Err(e) if e.to_string().contains("has no leader") => 0,
-                    Err(_) => ambiguous.fetch_add(1, Ordering::Relaxed),
+                match outcome(redis::cmd("INCR").arg(key).query_async(&mut c).await) {
+                    Outcome::Ok(_) => ok.fetch_add(1, Ordering::Relaxed),
+                    Outcome::Refused => 0,
+                    _ => ambiguous.fetch_add(1, Ordering::Relaxed),
                 };
             }
         }));

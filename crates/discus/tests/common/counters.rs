@@ -9,10 +9,12 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use discus::counter::route::{IN_DOUBT, NO_LEADER};
 use discus::counter::{group_key, CounterLeases, GroupStatus};
 use discus_membership::{LeaseProvider, MemoryLease};
 use discus_placement::NodeId;
 use redis::aio::MultiplexedConnection;
+use redis::{FromRedisValue, RedisError, RedisResult};
 
 use super::gossip::{refs, socket, start_each, wait_agreed, wait_until, GossipNode, Net, Opts};
 
@@ -85,61 +87,83 @@ pub fn leader_of<'a>(nodes: &[&'a GossipNode], g: u16) -> Option<&'a GossipNode>
     (leaders.len() == 1).then(|| leaders[0])
 }
 
-/// Send `INCR key` until it succeeds. It retries only refusals that applied nothing, so the
-/// count stays exact.
-pub async fn incr_once(c: &mut MultiplexedConnection, key: &str) -> i64 {
-    let deadline = Instant::now() + Duration::from_secs(10);
+/// What a counter write did, by its reply: see [`NO_LEADER`] and [`IN_DOUBT`].
+#[derive(Debug)]
+pub enum Outcome {
+    Ok(i64),
+    Refused,
+    Ambiguous,
+    Other(RedisError),
+}
+
+/// True when `e` is the server error `text`, given as `CODE detail`.
+fn says(e: &RedisError, text: &str) -> bool {
+    e.code()
+        .zip(e.detail())
+        .is_some_and(|(code, detail)| format!("{code} {detail}") == text)
+}
+
+pub fn is_try_again(e: &RedisError) -> bool {
+    e.code() == Some("TRYAGAIN")
+}
+
+pub fn outcome(r: RedisResult<i64>) -> Outcome {
+    match r {
+        Ok(n) => Outcome::Ok(n),
+        Err(e) if says(&e, NO_LEADER) => Outcome::Refused,
+        Err(e) if says(&e, IN_DOUBT) => Outcome::Ambiguous,
+        Err(e) => Outcome::Other(e),
+    }
+}
+
+/// Send `cmd` until it succeeds or `timeout` passes. An error that `retry` accepts is sent
+/// again after 50 ms; any other error is returned at once.
+pub async fn query_until<T: FromRedisValue>(
+    c: &mut MultiplexedConnection,
+    cmd: &redis::Cmd,
+    timeout: Duration,
+    retry: fn(&RedisError) -> bool,
+) -> RedisResult<T> {
+    let deadline = Instant::now() + timeout;
     loop {
-        let r: redis::RedisResult<i64> = redis::cmd("INCR").arg(key).query_async(c).await;
-        match r {
-            Ok(n) => return n,
-            Err(e) if e.to_string().contains("has no leader") && Instant::now() < deadline => {
+        match cmd.query_async(c).await {
+            Err(e) if retry(&e) && Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            Err(e) => panic!("INCR {key} failed: {e}"),
+            r => return r,
         }
     }
 }
 
-/// Send `INCR key` until it succeeds or `timeout` passes.
+/// Send `INCR key` until it succeeds. It retries only refusals that applied nothing, so the
+/// count stays exact.
+pub async fn incr_once(c: &mut MultiplexedConnection, key: &str) -> i64 {
+    let refused = |e: &RedisError| says(e, NO_LEADER);
+    query_until(
+        c,
+        redis::cmd("INCR").arg(key),
+        Duration::from_secs(10),
+        refused,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("INCR {key} failed: {e}"))
+}
+
+/// Send `INCR key` through any `-TRYAGAIN` until it succeeds or `timeout` passes.
 pub async fn incr_until(c: &mut MultiplexedConnection, key: &str, timeout: Duration) -> i64 {
     incr_or_show(c, key, timeout, &[]).await
 }
 
-/// Like [`incr_until`]. On a timeout it prints the group of `key` on every node of `nodes`.
+/// Like [`incr_until`]. On a timeout it prints the groups of every node of `nodes`.
 pub async fn incr_or_show(
     c: &mut MultiplexedConnection,
     key: &str,
     timeout: Duration,
     nodes: &[&GossipNode],
 ) -> i64 {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let r: redis::RedisResult<i64> = redis::cmd("INCR").arg(key).query_async(c).await;
-        match r {
-            Ok(n) => return n,
-            Err(e) if Instant::now() < deadline => {
-                assert!(e.to_string().to_uppercase().contains("TRYAGAIN"), "{e}");
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(e) => {
-                for n in nodes {
-                    let g = group_of(n, key);
-                    let epoch = n.node.epochs().current().clone();
-                    eprintln!("{} normal={} {:?}", n.id, n.is_normal(), status(n, g));
-                    eprintln!(
-                        "  epoch {:?}",
-                        epoch
-                            .members()
-                            .iter()
-                            .map(|m| (m.id, m.state))
-                            .collect::<Vec<_>>()
-                    );
-                }
-                panic!("INCR {key} kept failing: {e}");
-            }
-        }
-    }
+    query_until(c, redis::cmd("INCR").arg(key), timeout, is_try_again)
+        .await
+        .unwrap_or_else(|e| panic!("INCR {key} kept failing: {e}\n{}", dump(nodes)))
 }
 
 /// Start `n` nodes on shared counter leases, each seeded with all the others. Every node gets
@@ -310,20 +334,10 @@ pub async fn raft_cluster(
     for n in &nodes {
         let mut c = n.redis().await;
         for g in 0..GROUPS {
-            let key = key_in(n, g, "warm");
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            while redis::cmd("GET")
-                .arg(&key)
-                .query_async::<Option<i64>>(&mut c)
+            let get = redis::cmd("GET").arg(key_in(n, g, "warm")).clone();
+            query_until::<Option<i64>>(&mut c, &get, Duration::from_secs(10), |_| true)
                 .await
-                .is_err()
-            {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "group {g} has no leader"
-                );
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
+                .unwrap_or_else(|e| panic!("group {g} has no leader: {e}"));
         }
     }
     nodes

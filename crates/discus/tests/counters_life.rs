@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::counters::{
-    all_hold, flags, group_of, incr_until, join_to, leader_of, raft_cluster, status, targeted,
-    Leases, GROUPS,
+    all_hold, flags, group_of, incr_until, join_to, leader_of, query_until, raft_cluster, status,
+    targeted, Leases, GROUPS,
 };
 use common::gossip::{heal, partition, refs, wait_agreed, wait_until, GossipNode, Net};
 use common::status as http_status;
@@ -199,16 +199,10 @@ async fn a_false_dead_heals_to_one_value() {
     let mut values = Vec::new();
     for n in &nodes {
         let mut client = n.redis().await;
-        let mut v: Option<i64> = None;
-        for _ in 0..100 {
-            match client.get::<_, Option<i64>>("cnt:fd").await {
-                Ok(got) => {
-                    v = got;
-                    break;
-                }
-                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
-            }
-        }
+        let get = redis::cmd("GET").arg("cnt:fd").clone();
+        let v: Option<i64> = query_until(&mut client, &get, Duration::from_secs(10), |_| true)
+            .await
+            .unwrap();
         values.push(v);
     }
     assert!(values.iter().all(|v| *v == values[0]), "{values:?}");

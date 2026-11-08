@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::counters::{all_raft, dump, flags, join_to, Leases};
+use common::counters::{all_raft, dump, flags, join_to, outcome, Leases, Outcome};
 use common::gossip::{agreed, refs, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
 use serial_test::serial;
@@ -118,23 +118,22 @@ async fn read_load(mut c: redis::aio::MultiplexedConnection, t: Arc<Tally>, stop
     }
 }
 
-/// A `has no leader` refusal applied nothing. Any other error may have applied.
+/// A refusal applied nothing. Any other error may have applied.
 async fn counter_load(
     mut c: redis::aio::MultiplexedConnection,
     t: Arc<Tally>,
     stop: Arc<AtomicBool>,
 ) {
     while !stop.load(Ordering::Relaxed) {
-        let r: redis::RedisResult<i64> = redis::cmd("INCR").arg(COUNTER).query_async(&mut c).await;
-        match r {
-            Ok(_) => {
+        match outcome(redis::cmd("INCR").arg(COUNTER).query_async(&mut c).await) {
+            Outcome::Ok(_) => {
                 t.increments.fetch_add(1, Ordering::Relaxed);
             }
-            Err(e) if e.to_string().contains("has no leader") => {
+            Outcome::Refused => {
                 t.refused.fetch_add(1, Ordering::Relaxed);
             }
-            Err(e) => {
-                eprintln!("ambiguous increment: {e}");
+            o => {
+                eprintln!("ambiguous increment: {o:?}");
                 t.ambiguous.fetch_add(1, Ordering::Relaxed);
             }
         }
