@@ -4,8 +4,9 @@
 mod security_support;
 
 use security_support::idp::{unix_now, MockIdp};
-use security_support::{cmd, exchange, start, try_start, wait_ready, write_file, Node, TestCa};
+use security_support::{cmd, exchange, start, try_start, wait_status, write_file, Node, TestCa};
 use serde_json::{json, Value};
+use std::time::Duration;
 
 /// The `iss` that the mock API server reports, as a real cluster does.
 const CLUSTER_ISS: &str = "https://kubernetes.default.svc.cluster.local";
@@ -41,7 +42,10 @@ async fn node(ca: &TestCa, api: &MockIdp, extra_toml: &str) -> Node {
         &file,
     ])
     .await;
-    assert!(wait_ready(&node, 10).await, "the node never became ready");
+    assert!(
+        wait_status(node.admin, "/readyz", 200, Duration::from_secs(10)).await,
+        "the node never became ready"
+    );
     node
 }
 

@@ -6,7 +6,6 @@
 //! same rules. The metrics handle runs it in debug builds, and the tests run it on every exported
 //! data point.
 
-use std::fmt;
 use std::sync::Arc;
 
 /// The only attribute keys that a metric can carry.
@@ -161,26 +160,15 @@ impl Attribute {
 }
 
 /// Why the guard rejected an attribute.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum GuardError {
     /// The key is not in [`ALLOWED_KEYS`].
+    #[error("metric attribute key {0:?} is not allowed")]
     DisallowedKey(String),
     /// The value is outside the domain of its key.
+    #[error("metric attribute {key:?} has a value outside its domain")]
     InvalidValue { key: &'static str },
 }
-
-impl fmt::Display for GuardError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            GuardError::DisallowedKey(k) => write!(f, "metric attribute key {k:?} is not allowed"),
-            GuardError::InvalidValue { key } => {
-                write!(f, "metric attribute {key:?} has a value outside its domain")
-            }
-        }
-    }
-}
-
-impl std::error::Error for GuardError {}
 
 fn valid_node(id: &str) -> bool {
     (1..=MAX_NODE_LEN).contains(&id.len())

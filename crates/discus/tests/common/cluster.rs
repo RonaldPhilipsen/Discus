@@ -1,47 +1,11 @@
 //! In-process static clusters (`--membership static`) over real QUIC on localhost with a test CA.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-
-use discus::{Config, Node, Server};
+use discus::{Config, Server};
 use discus_placement::{ClusterId, NodeId};
-use discus_transport::testing::{TestCa, TEST_SAN};
-use tokio_util::sync::CancellationToken;
+use discus_transport::testing::TestCa;
 
-pub struct ClusterNode {
-    pub id: NodeId,
-    /// The RESP address.
-    pub addr: SocketAddr,
-    /// The QUIC address.
-    pub cluster_addr: SocketAddr,
-    pub node: Arc<Node>,
-    pub shutdown: CancellationToken,
-}
-
-impl ClusterNode {
-    /// Stop serving node-to-node traffic and client traffic at once.
-    pub fn stop(&self) {
-        if let Some(link) = self.node.link() {
-            link.transport.close();
-        }
-        self.shutdown.cancel();
-    }
-
-    pub async fn redis(&self) -> redis::aio::MultiplexedConnection {
-        let client = redis::Client::open(format!("redis://{}", self.addr)).unwrap();
-        client.get_multiplexed_async_connection().await.unwrap()
-    }
-
-    /// True when this node's store holds `key`.
-    pub fn holds(&self, key: &[u8]) -> bool {
-        self.node.store.read(key, |e| e.is_some())
-    }
-
-    /// The primary of `key` in this node's current epoch.
-    pub fn primary(&self, key: &[u8]) -> NodeId {
-        self.node.epochs().current().primary(key).unwrap()
-    }
-}
+pub use super::gossip::GossipNode as ClusterNode;
+use super::gossip::{argv, ca_files, socket, spawn};
 
 pub struct Cluster {
     pub nodes: Vec<ClusterNode>,
@@ -75,76 +39,31 @@ const DEFAULTS: &[(&str, &str)] = &[
 
 /// Start `n` nodes that list each other as static peers. `extra(i)` adds flags for node `i`.
 pub async fn start_cluster_with(n: usize, extra: impl Fn(usize) -> Vec<String>) -> Cluster {
-    let ca = TestCa::new();
-    let dir = tempfile::tempdir().unwrap();
-    let (cert, key) = ca.issue(TEST_SAN);
-    let path = |name: &str| dir.path().join(name).display().to_string();
-    std::fs::write(path("ca.pem"), ca.ca_pem()).unwrap();
-    std::fs::write(path("cert.pem"), cert).unwrap();
-    std::fs::write(path("key.pem"), key).unwrap();
+    let (ca, dir) = ca_files();
     let cluster_id = ClusterId::mint();
-    let sockets: Vec<std::net::UdpSocket> = (0..n)
-        .map(|_| std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
-        .collect();
-    let addrs: Vec<SocketAddr> = sockets.iter().map(|s| s.local_addr().unwrap()).collect();
+    let sockets: Vec<_> = (0..n).map(|_| socket()).collect();
+    let addrs: Vec<_> = sockets.iter().map(|s| s.1).collect();
     let ids: Vec<NodeId> = (0..n).map(|_| NodeId::random()).collect();
     let mut nodes = Vec::new();
-    for (i, socket) in sockets.into_iter().enumerate() {
-        let extra = extra(i);
-        let mut argv: Vec<String> = [
-            "discus",
-            "--listen",
-            "127.0.0.1:0",
-            "--admin-listen",
-            "127.0.0.1:0",
-            "--cluster-san",
-            TEST_SAN,
-            "--membership",
-            "static",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        argv.extend([
-            "--node-id".into(),
+    for (i, (socket, addr)) in sockets.into_iter().enumerate() {
+        let peers = (0..n)
+            .filter(|&j| j != i)
+            .map(|j| format!("{}@{}", ids[j], addrs[j]));
+        let mut flags: Vec<String> = ["--membership", "static", "--node-id"]
+            .map(String::from)
+            .to_vec();
+        flags.extend([
             ids[i].to_string(),
             "--cluster-id".into(),
             cluster_id.to_string(),
-            "--cluster-listen".into(),
-            addrs[i].to_string(),
-            "--cluster-ca".into(),
-            path("ca.pem"),
-            "--cluster-cert".into(),
-            path("cert.pem"),
-            "--cluster-key".into(),
-            path("key.pem"),
         ]);
-        for j in (0..n).filter(|&j| j != i) {
-            argv.push("--peer".into());
-            argv.push(format!("{}@{}", ids[j], addrs[j]));
-        }
-        for (flag, value) in DEFAULTS {
-            if !extra.iter().any(|e| e == flag) {
-                argv.push(flag.to_string());
-                argv.push(value.to_string());
-            }
-        }
-        argv.extend(extra);
-        let config = Config::parse_from(argv).expect("valid cluster arguments");
+        flags.extend(extra(i));
+        let config = Config::parse_from(argv(&dir, addr, peers, DEFAULTS, &flags))
+            .expect("valid cluster arguments");
         let server = Server::bind_with_cluster_socket(config, socket)
             .await
             .expect("bind");
-        let node = server.node().clone();
-        let addr = server.local_addr();
-        let shutdown = CancellationToken::new();
-        tokio::spawn(server.run(shutdown.clone()));
-        nodes.push(ClusterNode {
-            id: ids[i],
-            addr,
-            cluster_addr: addrs[i],
-            node,
-            shutdown,
-        });
+        nodes.push(spawn(server, addr));
     }
     Cluster {
         nodes,

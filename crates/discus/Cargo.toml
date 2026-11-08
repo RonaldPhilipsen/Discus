@@ -46,6 +46,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-
 serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
+discus = { path = ".", default-features = false, features = ["testing"] }
 discus-membership = { path = "../discus-membership", features = ["testing"] }
 discus-placement = { path = "../discus-placement", features = ["mock-clock"] }
 discus-resp = { path = "../discus-resp" }
@@ -77,3 +78,5 @@ tls-ring = ["discus-transport/tls-ring", "jsonwebtoken?/rust_crypto", "discus-te
 tls-openssl = ["discus-transport/tls-openssl", "jsonwebtoken?/rust_crypto", "discus-telemetry/tls-openssl"]
 roots-system = ["dep:rustls-native-certs", "discus-telemetry/roots-system"]
 roots-webpki = ["dep:webpki-roots", "discus-telemetry/roots-webpki"]
+# Fault injection and hidden flags for tests only. Never enable this in a release build.
+testing = []

@@ -8,105 +8,26 @@ use super::error::CommandError;
 use super::float::{incr_by_float, parse_float_delta};
 use super::table::CommandSpec;
 use super::util::{admit, check_key, check_value, parse_i64, upper};
+use crate::cluster::route::Route;
 use crate::node::{ConnState, Node};
 
 pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec {
-        name: "GET",
-        arity: 2,
-        handler: get,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "SET",
-        arity: -3,
-        handler: set,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "GETDEL",
-        arity: 2,
-        handler: getdel,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "GETEX",
-        arity: -2,
-        handler: getex,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "MGET",
-        arity: -2,
-        handler: mget,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "MSET",
-        arity: -3,
-        handler: mset,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "INCR",
-        arity: -2,
-        handler: incr,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "DECR",
-        arity: -2,
-        handler: decr,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "INCRBY",
-        arity: -3,
-        handler: incrby,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "DECRBY",
-        arity: -3,
-        handler: decrby,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "INCRBYFLOAT",
-        arity: 3,
-        handler: incrbyfloat,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "APPEND",
-        arity: 3,
-        handler: append,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "STRLEN",
-        arity: 2,
-        handler: strlen,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "DEL",
-        arity: -2,
-        handler: del,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "EXISTS",
-        arity: -2,
-        handler: exists,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "TYPE",
-        arity: 2,
-        handler: type_,
-        needs_auth: true,
-    },
+    CommandSpec::read("GET", 2, get),
+    CommandSpec::write("SET", -3, set),
+    CommandSpec::write("GETDEL", 2, getdel),
+    CommandSpec::write("GETEX", -2, getex),
+    CommandSpec::read("MGET", -2, mget).with_route(Route::MultiRead { sum: false }),
+    CommandSpec::write("MSET", -3, mset).with_route(Route::MultiWrite { pairs: true }),
+    CommandSpec::write("INCR", -2, incr),
+    CommandSpec::write("DECR", -2, decr),
+    CommandSpec::write("INCRBY", -3, incrby),
+    CommandSpec::write("DECRBY", -3, decrby),
+    CommandSpec::write("INCRBYFLOAT", 3, incrbyfloat),
+    CommandSpec::write("APPEND", 3, append),
+    CommandSpec::read("STRLEN", 2, strlen),
+    CommandSpec::write("DEL", -2, del).with_route(Route::MultiWrite { pairs: false }),
+    CommandSpec::read("EXISTS", -2, exists).with_route(Route::MultiRead { sum: true }),
+    CommandSpec::read("TYPE", 2, type_),
 ];
 
 type Reply = Result<Value, CommandError>;
@@ -115,15 +36,24 @@ fn new_entry(value: Bytes, expires_at_ms: Option<u64>) -> Entry {
     Entry::new(Stored::Str(value), expires_at_ms)
 }
 
-fn get(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    node.store.read(&cmd[1], |e| match e {
-        None => Ok(Value::Null),
+/// The string of an entry: `None` for a missing key, `WrongType` for another type.
+fn str_of(e: Option<&Entry>) -> Result<Option<&Bytes>, CommandError> {
+    match e {
+        None => Ok(None),
         Some(Entry {
             value: Stored::Str(b),
             ..
-        }) => Ok(Value::Bulk(b.clone())),
+        }) => Ok(Some(b)),
         Some(_) => Err(CommandError::WrongType),
-    })
+    }
+}
+
+fn bulk_or_null(b: Option<&Bytes>) -> Value {
+    b.map_or(Value::Null, |b| Value::Bulk(b.clone()))
+}
+
+fn get(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+    node.store.read(&cmd[1], |e| Ok(bulk_or_null(str_of(e)?)))
 }
 
 /// An expiry option such as `EX 10`, as an absolute deadline.
@@ -181,14 +111,9 @@ fn set(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     admit(node, cmd[1].len() + cmd[2].len())?;
     let value = cmd[2].clone();
     node.write(&cmd[1], node.stamp()?, |slot| {
-        let old = match slot.as_ref() {
-            None => None,
-            Some(Entry {
-                value: Stored::Str(b),
-                ..
-            }) => Some(b.clone()),
-            Some(_) if get_old => return Err(CommandError::WrongType),
-            Some(_) => None,
+        let old = match str_of(slot.as_ref()) {
+            Err(e) if get_old => return Err(e),
+            old => old.ok().flatten().cloned(),
         };
         let exists = slot.is_some();
         let skipped = (nx && exists) || (xx && !exists);
@@ -212,21 +137,11 @@ fn set(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 
 fn getdel(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     node.write(&cmd[1], node.stamp()?, |slot| {
-        match slot.as_ref() {
-            None => return Ok(Value::Null),
-            Some(Entry {
-                value: Stored::Str(_),
-                ..
-            }) => {}
-            Some(_) => return Err(CommandError::WrongType),
-        }
-        Ok(match slot.take() {
-            Some(Entry {
-                value: Stored::Str(b),
-                ..
-            }) => Value::Bulk(b),
-            _ => Value::Null,
-        })
+        let Some(b) = str_of(slot.as_ref())?.cloned() else {
+            return Ok(Value::Null);
+        };
+        slot.take();
+        Ok(Value::Bulk(b))
     })
 }
 
@@ -250,14 +165,10 @@ fn getex(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         _ => None,
     };
     node.write(&cmd[1], node.stamp()?, |slot| {
-        let reply = match slot.as_ref() {
-            None => return Ok(Value::Null),
-            Some(Entry {
-                value: Stored::Str(b),
-                ..
-            }) => Value::Bulk(b.clone()),
-            Some(_) => return Err(CommandError::WrongType),
+        let Some(b) = str_of(slot.as_ref())? else {
+            return Ok(Value::Null);
         };
+        let reply = Value::Bulk(b.clone());
         if let Some(d) = deadline {
             if slot.as_ref().is_some_and(|e| e.expires_at_ms != d) {
                 if let Some(e) = slot.as_mut() {
@@ -273,13 +184,8 @@ fn mget(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     let values = cmd[1..]
         .iter()
         .map(|key| {
-            node.store.read(key, |e| match e {
-                Some(Entry {
-                    value: Stored::Str(b),
-                    ..
-                }) => Value::Bulk(b.clone()),
-                _ => Value::Null,
-            })
+            node.store
+                .read(key, |e| bulk_or_null(str_of(e).ok().flatten()))
         })
         .collect();
     Ok(Value::Array(values))
@@ -309,14 +215,7 @@ fn add_integer(node: &Node, key: &Bytes, delta: i64) -> Reply {
     check_key(node, key)?;
     admit(node, key.len() + 20)?;
     node.write(key, node.stamp()?, |slot| {
-        let current = match slot.as_ref() {
-            None => 0,
-            Some(Entry {
-                value: Stored::Str(b),
-                ..
-            }) => parse_i64(b)?,
-            Some(_) => return Err(CommandError::WrongType),
-        };
+        let current = str_of(slot.as_ref())?.map_or(Ok(0), |b| parse_i64(b))?;
         let next = current.checked_add(delta).ok_or(CommandError::Overflow)?;
         let expires = slot.as_ref().and_then(|e| e.expires_at_ms);
         slot.set(Some(new_entry(Bytes::from(next.to_string()), expires)));
@@ -361,15 +260,7 @@ fn incrbyfloat(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     admit(node, cmd[1].len() + 32)?;
     let delta = parse_float_delta(&cmd[2])?;
     node.write(&cmd[1], node.stamp()?, |slot| {
-        let current = match slot.as_ref() {
-            None => None,
-            Some(Entry {
-                value: Stored::Str(b),
-                ..
-            }) => Some(b.clone()),
-            Some(_) => return Err(CommandError::WrongType),
-        };
-        let text = incr_by_float(current.as_deref(), delta)?;
+        let text = incr_by_float(str_of(slot.as_ref())?.map(|b| &b[..]), delta)?;
         let expires = slot.as_ref().and_then(|e| e.expires_at_ms);
         slot.set(Some(new_entry(text.clone(), expires)));
         Ok(Value::Bulk(text))
@@ -380,15 +271,8 @@ fn append(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     check_key(node, &cmd[1])?;
     admit(node, cmd[2].len())?;
     node.write(&cmd[1], node.stamp()?, |slot| {
-        let (mut bytes, expires) = match slot.as_ref() {
-            None => (Vec::new(), None),
-            Some(Entry {
-                value: Stored::Str(b),
-                expires_at_ms,
-                ..
-            }) => (b.to_vec(), *expires_at_ms),
-            Some(_) => return Err(CommandError::WrongType),
-        };
+        let mut bytes = str_of(slot.as_ref())?.map_or_else(Vec::new, |b| b.to_vec());
+        let expires = slot.as_ref().and_then(|e| e.expires_at_ms);
         bytes.extend_from_slice(&cmd[2]);
         check_value(node, &bytes)?;
         let len = bytes.len() as i64;
@@ -398,13 +282,8 @@ fn append(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 }
 
 fn strlen(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    node.store.read(&cmd[1], |e| match e {
-        None => Ok(Value::Integer(0)),
-        Some(Entry {
-            value: Stored::Str(b),
-            ..
-        }) => Ok(Value::Integer(b.len() as i64)),
-        Some(_) => Err(CommandError::WrongType),
+    node.store.read(&cmd[1], |e| {
+        Ok(Value::Integer(str_of(e)?.map_or(0, |b| b.len() as i64)))
     })
 }
 

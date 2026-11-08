@@ -14,14 +14,6 @@ fn cfg() -> SwimConfig {
 
 /// Run until `done` holds, in 10 ms steps, and return the virtual time it took. Panics after
 /// `limit_ms`.
-fn run_until(sim: &mut Sim, limit_ms: u64, mut done: impl FnMut(&Sim) -> bool) -> u64 {
-    let start = sim.now();
-    while !done(sim) {
-        assert!(sim.now() - start < limit_ms, "not done after {limit_ms} ms");
-        sim.run_ms(10);
-    }
-    sim.now() - start
-}
 
 #[test]
 fn a_dead_node_is_detected() {
@@ -29,7 +21,7 @@ fn a_dead_node_is_detected() {
     let ids = sim.cluster(5);
     sim.run_ms(1_000);
     sim.kill(ids[4]);
-    run_until(&mut sim, 3_000, |s| {
+    sim.run_until(3_000, |s| {
         ids[..4]
             .iter()
             .all(|&o| s.liveness(o, ids[4]) == Some(Liveness::Dead))
@@ -58,7 +50,7 @@ fn suspicion_is_refuted() {
     let before = sim.incarnation(ids[2]);
     sim.isolate(ids[2], 300);
     // Some node suspects it during the isolation.
-    run_until(&mut sim, 300, |s| {
+    sim.run_until(300, |s| {
         ids.iter()
             .any(|&o| s.liveness(o, ids[2]) == Some(Liveness::Suspect))
     });
@@ -76,7 +68,7 @@ fn rumors_spread_in_log_rounds() {
     sim.run_ms(1_000);
     sim.set_leader_hints(ids[0], Bytes::from_static(b"g0"));
     let want = sim.incarnation(ids[0]);
-    let took = run_until(&mut sim, 10 * 5 * 100, |s| {
+    let took = sim.run_until(10 * 5 * 100, |s| {
         ids[1..]
             .iter()
             .all(|&o| s.known_incarnation(o, ids[0]) == Some(want))
@@ -96,7 +88,7 @@ fn time_to_dead(evidence: bool) -> u64 {
             }
         }
     }
-    run_until(&mut sim, 10_000, |s| {
+    sim.run_until(10_000, |s| {
         ids[..5]
             .iter()
             .any(|&o| s.liveness(o, ids[5]) == Some(Liveness::Dead))

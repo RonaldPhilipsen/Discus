@@ -5,81 +5,22 @@ use discus_resp::{Command, Value};
 use super::error::CommandError;
 use super::table::CommandSpec;
 use super::util::{parse_i64, upper};
+use crate::cluster::route::Route;
 use crate::node::{ConnState, Node};
 
 pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec {
-        name: "EXPIRE",
-        arity: 3,
-        handler: expire,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "PEXPIRE",
-        arity: 3,
-        handler: pexpire,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "EXPIREAT",
-        arity: 3,
-        handler: expireat,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "PEXPIREAT",
-        arity: 3,
-        handler: pexpireat,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "TTL",
-        arity: 2,
-        handler: ttl,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "PTTL",
-        arity: 2,
-        handler: pttl,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "PERSIST",
-        arity: 2,
-        handler: persist,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "SCAN",
-        arity: -2,
-        handler: scan,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "RANDOMKEY",
-        arity: 1,
-        handler: randomkey,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "DBSIZE",
-        arity: 1,
-        handler: dbsize,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "FLUSHDB",
-        arity: -1,
-        handler: flush,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "FLUSHALL",
-        arity: -1,
-        handler: flush,
-        needs_auth: true,
-    },
+    CommandSpec::write("EXPIRE", 3, expire),
+    CommandSpec::write("PEXPIRE", 3, pexpire),
+    CommandSpec::write("EXPIREAT", 3, expireat),
+    CommandSpec::write("PEXPIREAT", 3, pexpireat),
+    CommandSpec::read("TTL", 2, ttl),
+    CommandSpec::read("PTTL", 2, pttl),
+    CommandSpec::write("PERSIST", 2, persist),
+    CommandSpec::read("SCAN", -2, scan).with_route(Route::Local),
+    CommandSpec::read("RANDOMKEY", 1, randomkey).with_route(Route::Local),
+    CommandSpec::read("DBSIZE", 1, dbsize).with_route(Route::Fanout),
+    CommandSpec::write("FLUSHDB", -1, flush).with_route(Route::Broadcast),
+    CommandSpec::write("FLUSHALL", -1, flush).with_route(Route::Broadcast),
 ];
 
 type Reply = Result<Value, CommandError>;
@@ -89,7 +30,7 @@ fn invalid(who: &str) -> CommandError {
 }
 
 /// Set an absolute deadline. A deadline that is not in the future deletes the key.
-fn set_deadline(node: &Node, key: &[u8], deadline_ms: i128) -> Reply {
+fn set_deadline(node: &Node, key: &bytes::Bytes, deadline_ms: i128) -> Reply {
     let now = node.store.now_ms() as i128;
     node.write(key, node.stamp()?, |slot| {
         if slot.is_none() {

@@ -391,8 +391,8 @@ pub struct MemberInfo {
     pub leader_hints: Bytes,
 }
 
-/// What the sender believes about a member.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// What the sender believes about a member. The order is the SWIM precedence at one incarnation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Liveness {
     Alive,
     Suspect,

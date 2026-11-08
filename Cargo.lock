@@ -753,6 +753,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "clap",
+ "discus",
  "discus-membership",
  "discus-placement",
  "discus-resp",
@@ -811,6 +812,7 @@ dependencies = [
  "proptest",
  "rustls",
  "serde_json",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
 ]
@@ -823,6 +825,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.3.4",
  "proptest",
+ "thiserror 2.0.21",
  "uhlc",
  "xxhash-rust",
 ]
@@ -832,6 +835,7 @@ name = "discus-resp"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "itoa",
  "thiserror 2.0.21",
 ]
 

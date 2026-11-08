@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::{Algorithm, Validation};
@@ -32,9 +32,7 @@ const MAX_TOKEN_BYTES: usize = 16 * 1024;
 
 /// Seconds since the Unix epoch.
 pub fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64)
+    (discus_store::Clock::now_ms(&discus_store::SystemClock) / 1000) as i64
 }
 
 /// Parse an algorithm allowlist. Symmetric algorithms and `none` are refused, because a
@@ -272,10 +270,6 @@ impl Validator {
         }
     }
 
-    pub fn issuers(&self) -> &[Arc<TrustedIssuer>] {
-        &self.issuers
-    }
-
     pub fn skew(&self) -> i64 {
         self.skew
     }
@@ -421,29 +415,14 @@ impl OAuth2 {
             }
             sources.push(source);
         }
-        #[cfg_attr(not(feature = "oauth2-introspection"), allow(unused_mut))]
-        let mut out = OAuth2::with_sources(sources, generation, skew_secs);
-        #[cfg(feature = "oauth2-introspection")]
-        {
-            out.introspector = introspector;
-        }
-        Ok(out)
-    }
-
-    /// Build from loaders that are already set up.
-    pub fn with_sources(
-        sources: Vec<Arc<issuer::Source>>,
-        generation: Arc<AtomicU64>,
-        skew_secs: u64,
-    ) -> OAuth2 {
         let issuers = sources.iter().map(|s| s.trusted.clone()).collect();
-        OAuth2 {
+        Ok(OAuth2 {
             validator: Validator::new(issuers, skew_secs),
             sources,
             generation,
             #[cfg(feature = "oauth2-introspection")]
-            introspector: None,
-        }
+            introspector,
+        })
     }
 
     /// Add more loaders, for example the Kubernetes issuer.

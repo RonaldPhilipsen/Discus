@@ -52,24 +52,49 @@ fn epoch_id_of(e: &fb::EpochId) -> EpochId {
     }
 }
 
-fn state_to(s: MemberState) -> fb::MemberState {
-    match s {
-        MemberState::Joining => fb::MemberState::JOINING,
-        MemberState::Normal => fb::MemberState::NORMAL,
-        MemberState::Leaving => fb::MemberState::LEAVING,
-        MemberState::Dead => fb::MemberState::DEAD,
-    }
+/// An enum and its FlatBuffers twin, mapped in both directions. An unknown wire value is an
+/// error named by `$what`.
+macro_rules! wire_enum {
+    ($to:ident, $of:ident, $ty:ident, $what:literal, { $($v:ident => $w:ident),+ $(,)? }) => {
+        fn $to(x: $ty) -> fb::$ty {
+            match x {
+                $($ty::$v => fb::$ty::$w,)+
+            }
+        }
+
+        fn $of(x: fb::$ty) -> Result<$ty, DecodeError> {
+            Ok(match x {
+                $(fb::$ty::$w => $ty::$v,)+
+                other => return Err(invalid(format!(concat!("unknown ", $what, " {}"), other.0))),
+            })
+        }
+    };
 }
 
-fn state_of(s: fb::MemberState) -> Result<MemberState, DecodeError> {
-    Ok(match s {
-        fb::MemberState::JOINING => MemberState::Joining,
-        fb::MemberState::NORMAL => MemberState::Normal,
-        fb::MemberState::LEAVING => MemberState::Leaving,
-        fb::MemberState::DEAD => MemberState::Dead,
-        other => return Err(invalid(format!("unknown member state {}", other.0))),
-    })
-}
+wire_enum!(state_to, state_of, MemberState, "member state", {
+    Joining => JOINING,
+    Normal => NORMAL,
+    Leaving => LEAVING,
+    Dead => DEAD,
+});
+
+wire_enum!(liveness_to, liveness_of, Liveness, "liveness", {
+    Alive => ALIVE,
+    Suspect => SUSPECT,
+    Dead => DEAD,
+});
+
+wire_enum!(kind_to, kind_of, GossipKind, "gossip kind", {
+    Ping => PING,
+    Ack => ACK,
+    Nack => NACK,
+    PingReq => PING_REQ,
+    Sync => SYNC,
+    SyncReply => SYNC_REPLY,
+    Join => JOIN,
+    JoinReply => JOIN_REPLY,
+    Leave => LEAVE,
+});
 
 fn code_to(c: HandshakeCode) -> fb::HandshakeCode {
     match c {
@@ -203,52 +228,6 @@ fn info_of(m: fb::MemberInfo<'_>) -> Result<MemberInfo, DecodeError> {
             .leader_hints()
             .map(|h| Bytes::copy_from_slice(h.bytes()))
             .unwrap_or_default(),
-    })
-}
-
-fn liveness_to(l: Liveness) -> fb::Liveness {
-    match l {
-        Liveness::Alive => fb::Liveness::ALIVE,
-        Liveness::Suspect => fb::Liveness::SUSPECT,
-        Liveness::Dead => fb::Liveness::DEAD,
-    }
-}
-
-fn liveness_of(l: fb::Liveness) -> Result<Liveness, DecodeError> {
-    Ok(match l {
-        fb::Liveness::ALIVE => Liveness::Alive,
-        fb::Liveness::SUSPECT => Liveness::Suspect,
-        fb::Liveness::DEAD => Liveness::Dead,
-        other => return Err(invalid(format!("unknown liveness {}", other.0))),
-    })
-}
-
-fn kind_to(k: GossipKind) -> fb::GossipKind {
-    match k {
-        GossipKind::Ping => fb::GossipKind::PING,
-        GossipKind::Ack => fb::GossipKind::ACK,
-        GossipKind::Nack => fb::GossipKind::NACK,
-        GossipKind::PingReq => fb::GossipKind::PING_REQ,
-        GossipKind::Sync => fb::GossipKind::SYNC,
-        GossipKind::SyncReply => fb::GossipKind::SYNC_REPLY,
-        GossipKind::Join => fb::GossipKind::JOIN,
-        GossipKind::JoinReply => fb::GossipKind::JOIN_REPLY,
-        GossipKind::Leave => fb::GossipKind::LEAVE,
-    }
-}
-
-fn kind_of(k: fb::GossipKind) -> Result<GossipKind, DecodeError> {
-    Ok(match k {
-        fb::GossipKind::PING => GossipKind::Ping,
-        fb::GossipKind::ACK => GossipKind::Ack,
-        fb::GossipKind::NACK => GossipKind::Nack,
-        fb::GossipKind::PING_REQ => GossipKind::PingReq,
-        fb::GossipKind::SYNC => GossipKind::Sync,
-        fb::GossipKind::SYNC_REPLY => GossipKind::SyncReply,
-        fb::GossipKind::JOIN => GossipKind::Join,
-        fb::GossipKind::JOIN_REPLY => GossipKind::JoinReply,
-        fb::GossipKind::LEAVE => GossipKind::Leave,
-        other => return Err(invalid(format!("unknown gossip kind {}", other.0))),
     })
 }
 

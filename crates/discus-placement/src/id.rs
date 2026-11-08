@@ -4,16 +4,9 @@ use std::fmt;
 use std::str::FromStr;
 
 /// The text of an ID is not 32 hexadecimal digits.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("an ID is 32 hexadecimal digits")]
 pub struct ParseIdError;
-
-impl fmt::Display for ParseIdError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("an ID is 32 hexadecimal digits")
-    }
-}
-
-impl std::error::Error for ParseIdError {}
 
 /// 128 random bits from the operating system. If the operating system refuses, fall back to the
 /// process-local generator, which is still unique enough for an identity.

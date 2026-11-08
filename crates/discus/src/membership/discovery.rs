@@ -1,6 +1,6 @@
 //! Discovery seeds and the advertised address (spec section 6.2).
 
-use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::net::{SocketAddr, UdpSocket};
 
 use crate::Config;
 
@@ -36,7 +36,7 @@ pub async fn resolve(target: &(String, u16)) -> Vec<SocketAddr> {
 /// The node-to-node address that other members use: `--cluster-advertise`, else a specified
 /// `--cluster-listen`, else the local address of a UDP socket connected to the first seed, else
 /// `127.0.0.1` with the listen port.
-pub fn advertise(config: &Config) -> SocketAddr {
+pub async fn advertise(config: &Config) -> SocketAddr {
     if let Some(a) = config.cluster_advertise {
         return a;
     }
@@ -45,10 +45,8 @@ pub fn advertise(config: &Config) -> SocketAddr {
         return listen;
     }
     let mut seeds = static_seeds(config);
-    if let Some((host, port)) = dns_target(config) {
-        if let Ok(found) = (host.as_str(), port).to_socket_addrs() {
-            seeds.extend(found);
-        }
+    if let Some(target) = dns_target(config) {
+        seeds.extend(resolve(&target).await);
     }
     // Connecting a UDP socket sends nothing. It only picks the outbound interface.
     let local = seeds.iter().find_map(|seed| {

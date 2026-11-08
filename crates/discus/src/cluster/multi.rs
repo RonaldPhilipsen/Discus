@@ -7,14 +7,14 @@ use discus_resp::{Command, Value};
 use discus_wire::ForwardMode;
 use futures::future::join_all;
 
-use super::route::Route;
+use super::route::{keys_of, Keys};
 use super::{
     allowed, candidates, forward, hold, local, spent, Dispatch, Failure, Hop, Job, Reply, Writes,
 };
 use std::time::Instant;
 
 use crate::command::util::{check_key, check_value};
-use crate::command::CommandError;
+use crate::command::{self, CommandError, CommandSpec};
 use crate::node::Node;
 use bytes::Bytes;
 
@@ -42,7 +42,8 @@ fn group(
             Some(w) if !write => w.lock().required(&item[0], now),
             _ => None,
         };
-        let target = *candidates(node, &item[0], write, rr, need).first()?;
+        let owners = node.owners(&item[0]);
+        let target = *candidates(node, &item[0], &owners, write, rr, need).first()?;
         let g = match groups.iter().position(|g| g.target == target) {
             Some(i) => &mut groups[i],
             None => {
@@ -60,33 +61,26 @@ fn group(
     Some(groups)
 }
 
-/// Run one group: inline when local, forwarded otherwise, or the spent-budget rule.
 /// Run one group: inline when local, forwarded otherwise, or the spent-budget rule. A failed
 /// forward of a write part holds on the entry node, like a single-key write (spec section 7.5).
-async fn run_group(node: &Arc<Node>, g: &Group, hop: &Hop, write: bool) -> Option<Reply> {
+async fn run_group(
+    node: &Arc<Node>,
+    spec: &'static CommandSpec,
+    g: &Group,
+    hop: &Hop,
+    write: bool,
+) -> Option<Reply> {
     if g.target == node.id {
-        return Some(local(node, &g.cmd));
+        return Some(local(node, spec, &g.cmd));
     }
-    let pairs = g.cmd[0].eq_ignore_ascii_case(b"MSET");
     if allowed(node, hop, vec![g.target]).is_empty() {
-        let keys: Vec<&[u8]> = g
-            .cmd
-            .iter()
-            .skip(1)
-            .step_by(if pairs { 2 } else { 1 })
-            .map(|k| &k[..])
-            .collect();
-        return Some(spent(node, &g.cmd, &keys, write));
+        let Keys::Some(keys) = keys_of(spec.route, &g.cmd) else {
+            return Some(Reply::try_again());
+        };
+        let keys: Vec<&[u8]> = keys.iter().map(|k| &k[..]).collect();
+        return Some(spent(node, spec, &g.cmd, &keys, write));
     }
-    match forward::send(node, g.target, &g.cmd, hop, ForwardMode::Route, write).await {
-        Ok(reply) => Some(reply),
-        Err(_) if !write => None,
-        Err(e) if hop.hops == 0 && !hop.held => {
-            let route = Route::MultiWrite { pairs };
-            Some(hold::held(node, g.cmd.clone(), route, hop.clone(), Failure::of(&e)).await)
-        }
-        Err(e) => Some(Failure::of(&e).reply()),
-    }
+    hold::send_or_hold(node, spec, g.target, &g.cmd, hop, write).await
 }
 
 /// The newest applied stamp of the parts.
@@ -116,7 +110,11 @@ pub fn multi(
     route: tracing::Span,
 ) -> Dispatch {
     let Job {
-        cmd, rr, writes, ..
+        cmd,
+        spec,
+        rr,
+        writes,
+        ..
     } = job;
     let width = if merge == Merge::AllOk { 2 } else { 1 };
     if width == 2 {
@@ -146,14 +144,19 @@ pub fn multi(
         }
     };
     if groups.iter().all(|g| g.target == node.id) {
-        let reply = local(node, &cmd);
+        let reply = local(node, spec, &cmd);
         note(&cmd[1..], &reply);
         return Dispatch::Ready(reply);
     }
     let node = node.clone();
     let total = (cmd.len() - 1) / width;
     Dispatch::Pending(Box::pin(async move {
-        let parts = join_all(groups.iter().map(|g| run_group(&node, g, &hop, write))).await;
+        let parts = join_all(
+            groups
+                .iter()
+                .map(|g| run_group(&node, spec, g, &hop, write)),
+        )
+        .await;
         for (g, part) in groups.iter().zip(&parts) {
             if let Some(r) = part {
                 note(&g.cmd[1..], r);
@@ -212,10 +215,11 @@ pub fn multi(
 /// Send a `LOCAL` copy of `cmd` to every other member, and run it here too.
 async fn everywhere(
     node: &Arc<Node>,
+    spec: &CommandSpec,
     cmd: &Command,
     write: bool,
 ) -> (Reply, Vec<Result<Reply, NodeId>>) {
-    let here = local(node, cmd);
+    let here = local(node, spec, cmd);
     let others: Vec<NodeId> = node
         .epochs()
         .current()
@@ -239,10 +243,10 @@ async fn everywhere(
 
 /// `DBSIZE`: the sum of the members that answer, divided by the owners per key. Every key lives
 /// on up to `RF` members, so this is an estimate (spec section 7.3).
-pub fn dbsize(node: &Arc<Node>, cmd: Command) -> Dispatch {
+pub fn dbsize(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> Dispatch {
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
-        let (here, others) = everywhere(&node, &cmd, false).await;
+        let (here, others) = everywhere(&node, spec, &cmd, false).await;
         let mut sum = match here.value {
             Value::Integer(n) => n,
             other => return Reply::value(other),
@@ -260,9 +264,12 @@ pub fn dbsize(node: &Arc<Node>, cmd: Command) -> Dispatch {
 
 /// `FLUSHDB` and `FLUSHALL`: every member, best-effort.
 pub fn flush(node: &Arc<Node>, cmd: Command) -> Dispatch {
+    let Some(spec) = command::lookup(&cmd[0]) else {
+        return Dispatch::Ready(Reply::try_again());
+    };
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
-        let (here, others) = everywhere(&node, &cmd, true).await;
+        let (here, others) = everywhere(&node, spec, &cmd, true).await;
         if matches!(here.value, Value::Error(_)) {
             return here;
         }

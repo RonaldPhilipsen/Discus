@@ -1,9 +1,8 @@
 //! Epochs: numbered snapshots of the member list, spec §5.1.
 
-use std::cmp::Ordering;
 use std::fmt;
 
-use crate::{hrw, ClusterId, Member, NodeId};
+use crate::{hrw, ClusterId, Member, MemberState, NodeId};
 
 /// The generation of the first epoch of a cluster.
 pub const FIRST_GENERATION: u64 = 1;
@@ -21,32 +20,18 @@ impl fmt::Display for EpochId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EpochError {
     /// The epoch belongs to another cluster. Epochs of different clusters are never compared.
+    #[error("epoch of cluster {theirs} does not belong to cluster {ours}")]
     ForeignCluster { ours: ClusterId, theirs: ClusterId },
     /// The member list names one node twice.
+    #[error("member {0} appears twice")]
     DuplicateMember(NodeId),
     /// The history does not hold this epoch.
+    #[error("epoch {0} is not in the history")]
     Unknown(EpochId),
 }
-
-impl fmt::Display for EpochError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            EpochError::ForeignCluster { ours, theirs } => {
-                write!(
-                    f,
-                    "epoch of cluster {theirs} does not belong to cluster {ours}"
-                )
-            }
-            EpochError::DuplicateMember(id) => write!(f, "member {id} appears twice"),
-            EpochError::Unknown(id) => write!(f, "epoch {id} is not in the history"),
-        }
-    }
-}
-
-impl std::error::Error for EpochError {}
 
 /// One epoch: its identity, its cluster, and its member list sorted by node ID.
 #[derive(Debug, Clone, PartialEq)]
@@ -98,6 +83,19 @@ impl Epoch {
         &self.members
     }
 
+    /// The members in state `NORMAL`.
+    pub fn normal(&self) -> impl Iterator<Item = &Member> {
+        self.members
+            .iter()
+            .filter(|m| m.state == MemberState::Normal)
+    }
+
+    /// True when `id` is a member in state `NORMAL`.
+    pub fn is_normal(&self, id: NodeId) -> bool {
+        self.member(id)
+            .is_some_and(|m| m.state == MemberState::Normal)
+    }
+
     pub fn member(&self, id: NodeId) -> Option<&Member> {
         self.members
             .binary_search_by_key(&id, |m| m.id)
@@ -113,16 +111,5 @@ impl Epoch {
     /// The primary of `key` in this epoch, if any member is `NORMAL`.
     pub fn primary(&self, key: &[u8]) -> Option<NodeId> {
         hrw::owners(key, &self.members, 1).first().copied()
-    }
-
-    /// Order two epochs of the same cluster. Epochs of different clusters are never compared.
-    pub fn compare(&self, other: &Epoch) -> Result<Ordering, EpochError> {
-        if self.cluster_id != other.cluster_id {
-            return Err(EpochError::ForeignCluster {
-                ours: self.cluster_id,
-                theirs: other.cluster_id,
-            });
-        }
-        Ok(self.id.cmp(&other.id))
     }
 }

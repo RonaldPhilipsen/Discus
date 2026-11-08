@@ -1,6 +1,5 @@
 #![allow(clippy::unwrap_used)]
 
-use std::cmp::Ordering;
 use std::net::SocketAddr;
 
 use discus_placement::{
@@ -50,15 +49,8 @@ fn epoch_ids_order_by_generation_then_origin() {
 }
 
 #[test]
-fn epochs_of_different_clusters_are_never_compared() {
-    let ours = epoch(1);
+fn an_epoch_of_another_cluster_is_refused() {
     let theirs = Epoch::new(id(5, 2), ClusterId::from_u128(7), vec![member(2)]).unwrap();
-    assert!(matches!(
-        ours.compare(&theirs),
-        Err(EpochError::ForeignCluster { .. })
-    ));
-    assert_eq!(ours.compare(&epoch(2)).unwrap(), Ordering::Less);
-
     let mut h = EpochHistory::new(Epoch::bootstrap(member(1), CLUSTER));
     assert!(matches!(
         h.adopt(theirs),
@@ -142,7 +134,6 @@ fn pins_are_counted() {
     h.pin(id(1, 1)).unwrap();
     h.pin(id(1, 1)).unwrap();
     h.pin(id(2, 1)).unwrap();
-    assert_eq!(h.oldest_pinned(), Some(id(1, 1)));
     h.unpin(id(1, 1));
     for g in 3..=8 {
         h.adopt(epoch(g)).unwrap();
@@ -151,7 +142,6 @@ fn pins_are_counted() {
     h.unpin(id(1, 1));
     h.unpin(id(1, 1));
     assert!(h.get(id(1, 1)).is_none());
-    assert_eq!(h.oldest_pinned(), Some(id(2, 1)));
 }
 
 #[test]

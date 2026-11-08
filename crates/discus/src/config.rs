@@ -289,6 +289,7 @@ pub struct Config {
     #[arg(long, default_value_t = 300_000)]
     pub handoff_timeout_ms: u64,
     /// Hand entries to nodes that gain ownership. Off only for comparisons in tests.
+    #[cfg(feature = "testing")]
     #[arg(long, hide = true, default_value_t = true, action = clap::ArgAction::Set)]
     pub handoff: bool,
     /// Hints held for one unreachable peer, at most.
@@ -304,6 +305,7 @@ pub struct Config {
     #[arg(long, default_value_t = 1_000)]
     pub replication_retry_ms: u64,
     /// Capability bits offered in HELLO. For tests of mixed builds.
+    #[cfg(feature = "testing")]
     #[arg(long, hide = true, default_value_t = discus_wire::caps::KNOWN)]
     pub cluster_capabilities: u64,
     /// Security flags (spec §14).

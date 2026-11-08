@@ -30,13 +30,7 @@ async fn fill(n: &GossipNode, prefix: &str, count: usize) -> Vec<String> {
 }
 
 async fn started(n: &GossipNode) -> bool {
-    for _ in 0..500 {
-        if common::status(n.admin, "/startupz").await == 200 {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    false
+    common::wait_status(n.admin, "/startupz", 200, Duration::from_secs(10)).await
 }
 
 async fn hits(n: &GossipNode, keys: &[String]) -> usize {

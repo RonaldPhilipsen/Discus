@@ -5,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
 async fn probes_reflect_the_phase() {
-    let node = common::start_node_full(&[]).await;
+    let mut node = common::try_start_full(&[]).await.unwrap();
     assert_eq!(common::status(node.admin, "/healthz").await, 200);
     assert_eq!(common::status(node.admin, "/startupz").await, 200);
     assert_eq!(common::status(node.admin, "/readyz").await, 200);
@@ -17,19 +17,12 @@ async fn probes_reflect_the_phase() {
     client.read_exact(&mut pong).await.unwrap();
 
     node.shutdown.cancel();
-    let mut ready = 200;
-    for _ in 0..50 {
-        ready = common::status(node.admin, "/readyz").await;
-        if ready == 503 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert_eq!(ready, 503);
+    let second = Duration::from_secs(1);
+    assert!(common::wait_status(node.admin, "/readyz", 503, second).await);
     assert_eq!(common::status(node.admin, "/startupz").await, 200);
     assert_eq!(common::status(node.admin, "/healthz").await, 200);
     drop(client);
-    tokio::time::timeout(Duration::from_secs(5), node.handle)
+    tokio::time::timeout(Duration::from_secs(5), &mut node.handle)
         .await
         .unwrap()
         .unwrap()

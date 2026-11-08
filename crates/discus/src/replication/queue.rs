@@ -16,6 +16,8 @@ use discus_placement::NodeId;
 /// The queue of one peer.
 pub struct PeerQueue {
     pub peer: NodeId,
+    /// The metric label of `peer`, made once.
+    pub label: Option<discus_telemetry::attrs::NodeLabel>,
     state: Mutex<QueueState>,
     pub notify: Notify,
     cap: usize,
@@ -47,6 +49,7 @@ impl PeerQueue {
     pub fn new(peer: NodeId, cap: usize) -> PeerQueue {
         PeerQueue {
             peer,
+            label: crate::telemetry::node_label(peer),
             state: Mutex::new(QueueState {
                 keys: LruCache::unbounded(),
                 inflight: HashSet::new(),

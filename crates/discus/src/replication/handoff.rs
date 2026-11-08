@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use discus_placement::{Epoch, EpochId, MemberState, NodeId, Version};
+use discus_placement::{Epoch, EpochId, NodeId, Version};
 use discus_wire::{Batch, Message};
 
 use crate::node::EpochPin;
@@ -161,11 +161,10 @@ pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits
     tracing::info!(from = %from.id(), to = %to.id(), targets = targets.len(), "handoff scan");
     let mut cursor = 0;
     loop {
-        let (next, entries) = node.store.scan_entries(cursor, STEP);
+        let (next, entries) = node
+            .store
+            .scan_entries(cursor, STEP, |_, e| e.version.time() <= watermark);
         for (k, e) in entries {
-            if e.version.time() > watermark {
-                continue;
-            }
             let old_owners = from.owners(&k, rf);
             let survivors: Vec<NodeId> = old_owners
                 .iter()
@@ -279,14 +278,13 @@ pub fn changes(
     if gained.is_empty() {
         return (None, None);
     }
-    let normal = |e: &Epoch, id| e.member(id).is_some_and(|m| m.state == MemberState::Normal);
-    let outgoing = (normal(old, me) && new.member(me).is_some() && gained.iter().any(|g| *g != me))
-        .then(|| gained.clone());
-    let incoming = (gained.contains(&me) && normal(new, me))
+    let outgoing =
+        (old.is_normal(me) && new.member(me).is_some() && gained.iter().any(|g| *g != me))
+            .then(|| gained.clone());
+    let incoming = (gained.contains(&me) && new.is_normal(me))
         .then(|| {
-            old.members()
-                .iter()
-                .filter(|m| m.state == MemberState::Normal && m.id != me)
+            old.normal()
+                .filter(|m| m.id != me)
                 .filter(|m| new.member(m.id).is_some())
                 .map(|m| m.id)
                 .collect::<BTreeSet<NodeId>>()

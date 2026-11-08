@@ -19,6 +19,7 @@ use discus_membership::{
     Outcome, Phase, Swim,
 };
 use discus_placement::{ClusterId, EpochId, MemberState, NodeId, Weight};
+use discus_store::every;
 use discus_transport::{GossipError, Transport};
 use discus_wire::{Capacity, Gossip, Liveness, MemberInfo, Message};
 use parking_lot::Mutex;
@@ -90,7 +91,10 @@ impl Membership {
             incarnation: 0,
             weight: Weight::new(config.weight).unwrap_or_default(),
             epoch: node.epoch_id(),
+            #[cfg(feature = "testing")]
             capabilities: config.cluster_capabilities,
+            #[cfg(not(feature = "testing"))]
+            capabilities: discus_wire::caps::KNOWN,
             capacity: Capacity::default(),
             leader_hints: Bytes::new(),
         };
@@ -144,49 +148,31 @@ impl Membership {
             "gossip membership starting"
         );
         let me = self.clone();
-        let s = stop.clone();
-        tokio::spawn(async move {
-            let mut every = tokio::time::interval(TICK);
-            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    _ = s.cancelled() => return,
-                    _ = every.tick() => me.tick(),
-                }
-            }
+        every(TICK, stop.clone(), move || {
+            me.tick();
+            std::future::ready(())
         });
         let me = self.clone();
         let s = stop.clone();
         tokio::spawn(async move { me.read_evidence(s).await });
         let me = self.clone();
-        let s = stop.clone();
-        tokio::spawn(async move {
-            let mut every = tokio::time::interval(me.lease_renew);
-            loop {
-                tokio::select! {
-                    _ = s.cancelled() => return,
-                    _ = every.tick() => {
-                        if me.phase() != Phase::Seeking {
-                            me.clone().lease_call().await;
-                        }
-                    }
+        every(self.lease_renew, stop.clone(), move || {
+            let me = me.clone();
+            async move {
+                if me.phase() != Phase::Seeking {
+                    me.lease_call().await;
                 }
             }
         });
         if let Some(target) = self.dns.clone() {
             let me = self.clone();
             let period = Duration::from_millis(self.inner.lock().swim.config().period_ms);
-            tokio::spawn(async move {
-                let mut every = tokio::time::interval(period.max(Duration::from_secs(1)));
-                loop {
-                    tokio::select! {
-                        _ = stop.cancelled() => return,
-                        _ = every.tick() => {
-                            let mut seeds = me.static_seeds.clone();
-                            seeds.extend(discovery::resolve(&target).await);
-                            me.inner.lock().swim.set_seeds(seeds);
-                        }
-                    }
+            every(period.max(Duration::from_secs(1)), stop, move || {
+                let (me, target) = (me.clone(), target.clone());
+                async move {
+                    let mut seeds = me.static_seeds.clone();
+                    seeds.extend(discovery::resolve(&target).await);
+                    me.inner.lock().swim.set_seeds(seeds);
                 }
             });
         }
@@ -201,15 +187,11 @@ impl Membership {
             max: node.config.max_memory,
         };
         let now = self.now();
-        let (actions, events) = {
-            let mut guard = self.inner.lock();
-            let Inner { swim, host } = &mut *guard;
+        let actions = self.drive(|swim, host| {
             swim.set_capacity(capacity);
-            let actions = swim.tick(now, host);
-            (actions, swim.take_events())
-        };
+            swim.tick(now, host)
+        });
         self.dispatch(actions);
-        self.publish(events);
         let count = normal_count(node.epochs().current());
         let mut normal = self.normal.lock();
         if normal.0 != count {
@@ -254,26 +236,14 @@ impl Membership {
             return;
         }
         let now = self.now();
-        let (actions, events) = {
-            let mut guard = self.inner.lock();
-            let Inner { swim, host } = &mut *guard;
-            let actions = swim.outcome(now, token, outcome, host);
-            (actions, swim.take_events())
-        };
+        let actions = self.drive(|swim, host| swim.outcome(now, token, outcome, host));
         self.dispatch(actions);
-        self.publish(events);
     }
 
     /// Answer one inbound gossip message from `src`.
     pub async fn handle(self: &Arc<Self>, src: SocketAddr, msg: Gossip) -> Gossip {
         let now = self.now();
-        let (handled, events) = {
-            let mut guard = self.inner.lock();
-            let Inner { swim, host } = &mut *guard;
-            let handled = swim.handle(now, src, msg, host);
-            (handled, swim.take_events())
-        };
-        self.publish(events);
+        let handled = self.drive(|swim, host| swim.handle(now, src, msg, host));
         let Some(relay) = handled.relay else {
             return handled.reply;
         };
@@ -339,18 +309,26 @@ impl Membership {
             tracing::warn!(error = %e, "the cluster lease call failed");
         }
         let now = self.now();
-        let events = {
-            let mut guard = self.inner.lock();
-            let Inner { swim, host } = &mut *guard;
+        self.drive(|swim, host| {
             if let Ok(LeaseState::Held(h) | LeaseState::HeldByOther(h)) = &result {
                 if self.lease.authoritative() {
                     host.lease_cluster = Some(h.cluster_id);
                 }
             }
             swim.lease_result(now, result, host);
-            swim.take_events()
+        });
+    }
+
+    /// Run `f` on the SWIM state under the lock, then publish the events that it raised.
+    fn drive<R>(self: &Arc<Self>, f: impl FnOnce(&mut Swim, &mut NodeHost) -> R) -> R {
+        let (r, events) = {
+            let mut guard = self.inner.lock();
+            let Inner { swim, host } = &mut *guard;
+            let r = f(swim, host);
+            (r, swim.take_events())
         };
         self.publish(events);
+        r
     }
 
     fn publish(self: &Arc<Self>, events: Vec<CoreEvent>) {
@@ -452,12 +430,7 @@ impl Membership {
     /// Mark the node `LEAVING`. It leaves placement in the next epoch and keeps serving.
     pub fn drain(self: &Arc<Self>) {
         let now = self.now();
-        let events = {
-            let mut guard = self.inner.lock();
-            guard.swim.leave(now);
-            guard.swim.take_events()
-        };
-        self.publish(events);
+        self.drive(|swim, _| swim.leave(now));
     }
 
     /// Tell a few members that this node is gone, then stop gossip.

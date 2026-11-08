@@ -1,5 +1,5 @@
 //! Helpers for the security tests: a test CA, TLS clients, and a node starter.
-#![allow(dead_code, clippy::unwrap_used)]
+#![allow(dead_code, unused_imports, clippy::unwrap_used)]
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -13,7 +13,6 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, Server
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
-use tokio_util::sync::CancellationToken;
 
 /// A certificate and key, on disk and in memory.
 pub struct CertFiles {
@@ -163,11 +162,7 @@ pub async fn tls_connect(
 
 /// Encode a command as a RESP array.
 pub fn cmd(args: &[&str]) -> Vec<u8> {
-    let mut out = format!("*{}\r\n", args.len()).into_bytes();
-    for a in args {
-        out.extend_from_slice(format!("${}\r\n{a}\r\n", a.len()).as_bytes());
-    }
-    out
+    discus_wire::encode_command(&common::cmd(args)).to_vec()
 }
 
 /// Write `wire` and read until the stream goes quiet for 150 ms, closes, or fails. An error or
@@ -192,48 +187,10 @@ pub async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, wire: &[u8])
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-pub struct Node {
-    pub addr: SocketAddr,
-    pub admin: SocketAddr,
-    pub shutdown: CancellationToken,
-}
+#[path = "../common/mod.rs"]
+mod common;
 
-impl Drop for Node {
-    fn drop(&mut self) {
-        self.shutdown.cancel();
-    }
-}
-
-fn argv(args: &[&str]) -> Vec<String> {
-    let mut v: Vec<String> = [
-        "discus",
-        "--listen",
-        "127.0.0.1:0",
-        "--admin-listen",
-        "127.0.0.1:0",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    v.extend(args.iter().map(|s| s.to_string()));
-    v
-}
-
-/// Start a node, or return the reason it refused to start.
-pub async fn try_start(args: &[&str]) -> Result<Node, String> {
-    let config = discus::Config::parse_from(argv(args)).map_err(|e| e.to_string())?;
-    let server = discus::Server::bind(config)
-        .await
-        .map_err(|e| e.to_string())?;
-    let (addr, admin) = (server.local_addr(), server.admin_addr());
-    let shutdown = CancellationToken::new();
-    tokio::spawn(server.run(shutdown.clone()));
-    Ok(Node {
-        addr,
-        admin,
-        shutdown,
-    })
-}
+pub use common::{status, try_start_full as try_start, wait_status, Running as Node};
 
 pub async fn start(args: &[&str]) -> Node {
     try_start(args).await.unwrap()
@@ -247,25 +204,4 @@ pub fn write_file(ca: &TestCa, name: &str, content: &str) -> String {
     let path = ca.path(name);
     std::fs::write(&path, content).unwrap();
     path.to_str().unwrap().to_string()
-}
-
-/// The status code of a plain HTTP GET on the admin port.
-pub async fn admin_status(node: &Node, path: &str) -> u16 {
-    reqwest::get(format!("http://{}{path}", node.admin))
-        .await
-        .unwrap()
-        .status()
-        .as_u16()
-}
-
-/// Poll `/readyz` until it answers 200, for at most `secs` seconds.
-pub async fn wait_ready(node: &Node, secs: u64) -> bool {
-    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
-    while std::time::Instant::now() < deadline {
-        if admin_status(node, "/readyz").await == 200 {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
 }

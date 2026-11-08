@@ -1,6 +1,9 @@
 //! Telemetry wiring: flags, the startup check, command spans, and command metrics (spec §15.4).
 
+mod common;
+
 use bytes::Bytes;
+use common::cmd;
 use std::sync::Arc;
 
 use discus::node::{ConnState, Node};
@@ -17,13 +20,6 @@ fn args(extra: &[&str]) -> discus::Config {
     let mut argv = vec!["discus", "--listen", "127.0.0.1:0"];
     argv.extend_from_slice(extra);
     discus::Config::parse_from(argv).expect("valid test arguments")
-}
-
-fn cmd(parts: &[&str]) -> Vec<Bytes> {
-    parts
-        .iter()
-        .map(|p| Bytes::copy_from_slice(p.as_bytes()))
-        .collect()
 }
 
 #[test]
@@ -104,7 +100,7 @@ fn resolve_identity_still_refuses_peers_without_a_node_id() {
 #[test]
 fn ring_epoch_follows_the_adopted_epoch() {
     let node = node(args(&[]));
-    assert_eq!(discus::telemetry::ring_epoch(&node), 1);
+    assert_eq!(node.epoch_id().generation, 1);
     let members = node.epochs().current().members().to_vec();
     let id = discus_placement::EpochId {
         generation: 4,
@@ -112,7 +108,7 @@ fn ring_epoch_follows_the_adopted_epoch() {
     };
     let next = discus_placement::Epoch::new(id, node.cluster_id(), members).unwrap();
     node.adopt_epoch(next).unwrap();
-    assert_eq!(discus::telemetry::ring_epoch(&node), 4);
+    assert_eq!(node.epoch_id().generation, 4);
 }
 
 #[test]

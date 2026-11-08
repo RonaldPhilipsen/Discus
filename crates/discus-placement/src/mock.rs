@@ -57,3 +57,28 @@ impl<const SLOT: usize> Clock for MockClock<SLOT> {
         Self::slot().load(Ordering::SeqCst)
     }
 }
+
+/// A clock that only moves when a test advances it.
+#[derive(Debug)]
+pub struct ManualClock(AtomicU64);
+
+impl ManualClock {
+    pub fn new(start_ms: u64) -> ManualClock {
+        ManualClock(AtomicU64::new(start_ms))
+    }
+
+    pub fn advance(&self, ms: u64) {
+        self.0.fetch_add(ms, Ordering::SeqCst);
+    }
+
+    /// Jump to `ms`. Unlike a real clock source, this can move backwards, to model an NTP step.
+    pub fn set(&self, ms: u64) {
+        self.0.store(ms, Ordering::SeqCst);
+    }
+}
+
+impl Clock for ManualClock {
+    fn now_ms(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}

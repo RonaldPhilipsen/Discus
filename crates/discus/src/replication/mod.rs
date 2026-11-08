@@ -22,11 +22,11 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use discus_placement::{Epoch, MemberState, NodeId, Version};
+use discus_placement::{Epoch, NodeId, Version};
 use discus_store::{refill_bucket, Entry, Store};
-use discus_transport::{Lane, TransportError};
+use discus_transport::{Lane, PeerInfo, TransportError};
 use discus_wire::{caps, Batch, BatchAck, Message, TraceContext};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::{Config, Node};
@@ -72,7 +72,10 @@ impl Settings {
                 global_bytes: c.max_memory / 100 * c.hint_memory_percent,
                 max_age: Duration::from_millis(c.tombstone_ttl_ms),
             },
+            #[cfg(feature = "testing")]
             handoff: c.handoff,
+            #[cfg(not(feature = "testing"))]
+            handoff: true,
             handoff_rate: c.handoff_rate_bytes,
             handoff_timeout: Duration::from_millis(c.handoff_timeout_ms),
         }
@@ -85,7 +88,7 @@ pub struct Replicator {
     id: NodeId,
     store: Arc<Store>,
     settings: Settings,
-    peers: Mutex<HashMap<NodeId, Arc<PeerQueue>>>,
+    peers: RwLock<HashMap<NodeId, Arc<PeerQueue>>>,
     hints: Mutex<HintStore>,
     /// The hint bytes charged to the store budget.
     charged: AtomicU64,
@@ -111,7 +114,7 @@ impl Replicator {
             id: node.id,
             store: node.store.clone(),
             settings,
-            peers: Mutex::new(HashMap::new()),
+            peers: RwLock::new(HashMap::new()),
             hints: Mutex::new(HintStore::new(settings.hints)),
             charged: AtomicU64::new(0),
             contacts: Mutex::new(HashMap::new()),
@@ -139,18 +142,14 @@ impl Replicator {
         let s = stop.clone();
         tokio::spawn(async move { me.scan_loop(s).await });
         let me = self.clone();
-        let s = stop.clone();
+        discus_store::every(TICK, stop.clone(), move || {
+            me.tick();
+            std::future::ready(())
+        });
+        let (mine, s) = (self.stop.clone(), stop.clone());
         tokio::spawn(async move {
-            let mut every = tokio::time::interval(TICK);
-            loop {
-                tokio::select! {
-                    _ = s.cancelled() => {
-                        me.stop.cancel();
-                        return;
-                    }
-                    _ = every.tick() => me.tick(),
-                }
-            }
+            s.cancelled().await;
+            mine.cancel();
         });
         let Some(membership) = self.node.upgrade().and_then(|n| n.membership().cloned()) else {
             return;
@@ -180,9 +179,9 @@ impl Replicator {
     fn tick(&self) {
         let metrics = discus_telemetry::global();
         metrics.tombstones(self.store.tombstones() as u64);
-        for (peer, q) in self.peers.lock().iter() {
-            if let Some(label) = crate::telemetry::node_label(*peer) {
-                metrics.replication_depth(&label, q.len() as u64);
+        for q in self.peers.read().values() {
+            if let Some(label) = &q.label {
+                metrics.replication_depth(label, q.len() as u64);
             }
         }
         let evicted = self.hints.lock().expire(Instant::now());
@@ -311,9 +310,13 @@ impl Replicator {
 
     /// The previous owners of `key` to ask on a miss while a handoff toward this node is
     /// incomplete: the old owners that are not current owners, that the current epoch still
-    /// lists, and that have not finished their part.
-    pub fn fallback_sources(&self, key: &[u8], current: &Epoch) -> Vec<NodeId> {
-        let owners = current.owners(key, self.settings.rf);
+    /// lists, and that have not finished their part. `owners` are the current owners of `key`.
+    pub fn fallback_sources(&self, node: &Node, key: &[u8], owners: &[NodeId]) -> Vec<NodeId> {
+        if self.handoff.lock().incoming.is_empty() {
+            return Vec::new();
+        }
+        // The epoch lock comes before the handoff lock, as in `register`.
+        let current = node.epochs().current().clone();
         let st = self.handoff.lock();
         let mut out = Vec::new();
         for inc in &st.incoming {
@@ -373,15 +376,10 @@ impl Replicator {
             let Some(node) = self.node.upgrade() else {
                 return;
             };
-            let placed = node.membership().is_some()
-                && node
-                    .epochs()
-                    .current()
-                    .member(self.id)
-                    .is_some_and(|m| m.state == MemberState::Normal);
+            let placed = node.membership().is_some() && node.epochs().current().is_normal(self.id);
             let queued = self
                 .peers
-                .lock()
+                .read()
                 .values()
                 .any(|q| !q.is_empty() && !q.is_down());
             if !placed && !self.scanning() && !queued {
@@ -415,20 +413,28 @@ impl Replicator {
 
     fn count_evicted(&self, evicted: &[(NodeId, u64)]) {
         for (peer, n) in evicted {
-            if let Some(label) = crate::telemetry::node_label(*peer) {
+            if let Some(label) = self.label(*peer) {
                 discus_telemetry::global().hint_evicted(&label, *n);
             }
         }
     }
 
-    /// Record a hint for `peer` with the current entry of `key`.
-    fn hint(&self, peer: NodeId, key: Bytes) {
+    /// The metric label of `peer`, from its queue when it has one.
+    fn label(&self, peer: NodeId) -> Option<discus_telemetry::attrs::NodeLabel> {
+        match self.peers.read().get(&peer) {
+            Some(q) => q.label.clone(),
+            None => crate::telemetry::node_label(peer),
+        }
+    }
+
+    /// Record a hint for the peer of `q` with the current entry of `key`.
+    fn hint(&self, q: &PeerQueue, key: Bytes) {
         let Some(entry) = self.store.entry(&key) else {
             return;
         };
-        let evicted = self.hints.lock().record(peer, key, entry, Instant::now());
-        if let Some(label) = crate::telemetry::node_label(peer) {
-            discus_telemetry::global().hint_recorded(&label);
+        let evicted = self.hints.lock().record(q.peer, key, entry, Instant::now());
+        if let Some(label) = &q.label {
+            discus_telemetry::global().hint_recorded(label);
         }
         self.count_evicted(&evicted);
         self.sync_charge();
@@ -439,48 +445,45 @@ impl Replicator {
         self.hints.lock().count(target)
     }
 
-    /// Queue `keys`, which a local write just stamped, for every other current owner.
-    pub fn written(&self, keys: &[Bytes]) {
-        let Some(node) = self.node.upgrade() else {
-            return;
-        };
-        let epoch = node.epochs().current().clone();
-        for key in keys {
-            for owner in epoch.owners(key, self.settings.rf) {
-                if owner == self.id {
-                    continue;
-                }
-                match self.queue(owner).push(key) {
-                    Pushed::Queued => {}
-                    Pushed::Overflow(old) => self.hint(owner, old),
-                    Pushed::Down => self.hint(owner, key.clone()),
-                }
+    /// Queue `key`, which a local write just changed, for every other current owner.
+    pub fn written(&self, node: &Node, key: &Bytes) {
+        for owner in node.owners(key) {
+            if owner == self.id {
+                continue;
+            }
+            let q = self.queue(owner);
+            match q.push(key) {
+                Pushed::Queued => {}
+                Pushed::Overflow(old) => self.hint(&q, old),
+                Pushed::Down => self.hint(&q, key.clone()),
             }
         }
     }
 
     fn queue(&self, peer: NodeId) -> Arc<PeerQueue> {
-        let mut peers = self.peers.lock();
-        if let Some(q) = peers.get(&peer) {
+        if let Some(q) = self.peers.read().get(&peer) {
             return q.clone();
         }
-        let q = Arc::new(PeerQueue::new(peer, self.settings.queue_keys));
-        peers.insert(peer, q.clone());
-        if let Some(me) = self.me.upgrade() {
-            tokio::spawn(me.send_loop(q.clone()));
-        }
-        q
+        let mut peers = self.peers.write();
+        let q = peers.entry(peer).or_insert_with(|| {
+            let q = Arc::new(PeerQueue::new(peer, self.settings.queue_keys));
+            if let Some(me) = self.me.upgrade() {
+                tokio::spawn(me.send_loop(q.clone()));
+            }
+            q
+        });
+        q.clone()
     }
 
     /// Keys waiting for `peer`.
     pub fn depth(&self, peer: NodeId) -> usize {
-        self.peers.lock().get(&peer).map_or(0, |q| q.len())
+        self.peers.read().get(&peer).map_or(0, |q| q.len())
     }
 
     /// No queue, batch in flight, or hint holds `key`: every replica acknowledged its latest
     /// write.
     pub fn settled(&self, key: &[u8]) -> bool {
-        self.peers.lock().values().all(|q| !q.holds(key)) && !self.hints.lock().holds(key)
+        self.peers.read().values().all(|q| !q.holds(key)) && !self.hints.lock().holds(key)
     }
 
     /// A newer epoch is current. Queues and hints stop carrying keys that the target no longer
@@ -488,7 +491,7 @@ impl Replicator {
     /// 9). A peer that left the epoch is `DEAD` or departed, so it loses its queue and hints.
     pub fn on_epoch(&self, old: &Arc<Epoch>, new: &Arc<Epoch>) {
         let rf = self.settings.rf;
-        self.peers.lock().retain(|peer, q| {
+        self.peers.write().retain(|peer, q| {
             if new.member(*peer).is_none() {
                 q.close();
                 return false;
@@ -510,6 +513,7 @@ impl Replicator {
         }
         self.sync_charge();
         self.prune_handoffs(new);
+        self.contacts.lock().retain(|p, _| new.member(*p).is_some());
         if !digest::removed(old, new).is_empty() && new.member(self.id).is_some() {
             if let Some(node) = self.node.upgrade() {
                 tokio::spawn(digest::reconcile(node, old.clone(), new.clone()));
@@ -519,7 +523,7 @@ impl Replicator {
 
     /// Drop every queue and hint: after a flush or a lost merge.
     pub fn flush(&self) {
-        for q in self.peers.lock().values() {
+        for q in self.peers.read().values() {
             q.clear();
         }
         self.hints.lock().clear();
@@ -607,12 +611,12 @@ impl Replicator {
                 Ok(_) => {
                     q.acked();
                     self.touch(q.peer);
-                    if let Some(label) = crate::telemetry::node_label(q.peer) {
-                        discus_telemetry::global().replication_lag(&label, started.elapsed());
+                    if let Some(label) = &q.label {
+                        discus_telemetry::global().replication_lag(label, started.elapsed());
                     }
                     if q.take_drained() && !self.replay(&node, q.peer).await {
                         for k in q.failed() {
-                            self.hint(q.peer, k);
+                            self.hint(&q, k);
                         }
                     }
                 }
@@ -620,7 +624,7 @@ impl Replicator {
                 Err(e) => {
                     tracing::debug!(peer = %q.peer, error = %e, "a replication batch failed");
                     for k in q.failed() {
-                        self.hint(q.peer, k);
+                        self.hint(&q, k);
                     }
                 }
             }
@@ -639,12 +643,7 @@ impl Replicator {
     /// 9). The first batch names the refill buckets of lost hints. Only a peer that the epoch
     /// lists as `NORMAL` gets a replay. Returns false when a batch failed.
     async fn replay(&self, node: &Arc<Node>, peer: NodeId) -> bool {
-        let normal = node
-            .epochs()
-            .current()
-            .member(peer)
-            .is_some_and(|m| m.state == MemberState::Normal);
-        if !normal {
+        if !node.epochs().current().is_normal(peer) {
             return false;
         }
         let mut first = true;
@@ -705,18 +704,18 @@ impl Replicator {
             .member(peer)
             .map(|m| m.addr)
             .ok_or_else(|| TransportError::Connect(format!("node {peer} is not a member")))?;
-        let info = link.transport.peer(peer, addr).await?;
         let code = message.type_code();
-        if info.capabilities & caps::REPLICATION == 0 {
-            return Err(TransportError::PeerUnsupported(code));
-        }
+        let build = |info: &PeerInfo| match info.capabilities & caps::REPLICATION {
+            0 => Err(TransportError::PeerUnsupported(code)),
+            _ => Ok(message),
+        };
         let frame = link
             .transport
-            .request_on(
+            .request_with(
                 Lane::Bulk,
                 peer,
                 addr,
-                message,
+                build,
                 TraceContext::default(),
                 self.settings.timeout,
                 true,
@@ -739,7 +738,7 @@ impl Replicator {
             }
             Message::HintReplay(b) => {
                 if !b.discard.is_empty() {
-                    self.discard(&node, from, &b.discard);
+                    self.discard(&node, from, b.discard).await;
                 }
                 let applied = self.apply_entries(&node, b.entries);
                 ack(&node, applied, Vec::new())
@@ -817,11 +816,17 @@ impl Replicator {
     }
 
     /// Drop the keys of the lost refill buckets whose primary is `from`, before a replay
-    /// refills what it can (spec section 9).
-    fn discard(&self, node: &Node, from: NodeId, buckets: &[u8]) {
-        let epoch = node.epochs().current().clone();
-        self.store
-            .retain(|k| !(buckets.contains(&refill_bucket(k)) && epoch.primary(k) == Some(from)));
+    /// refills what it can (spec section 9). The walk of the store runs off the async workers.
+    async fn discard(&self, node: &Node, from: NodeId, buckets: Vec<u8>) {
+        let (epoch, store) = (node.epochs().current().clone(), self.store.clone());
+        let walk = move || {
+            store.retain(|k| {
+                !(buckets.contains(&refill_bucket(k)) && epoch.primary(k) == Some(from))
+            })
+        };
+        if let Err(e) = tokio::task::spawn_blocking(walk).await {
+            tracing::warn!(error = %e, "the discard of lost hint buckets failed");
+        }
     }
 
     /// Apply entries that are newer than the local ones. An entry with a version too far ahead
@@ -872,7 +877,8 @@ fn ack(node: &Node, applied: u32, want: Vec<Bytes>) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use discus_store::{ManualClock, StoreConfig, Value};
+    use discus_placement::ManualClock;
+    use discus_store::{StoreConfig, Value};
 
     #[test]
     fn keys_past_the_batch_size_stay_queued() {

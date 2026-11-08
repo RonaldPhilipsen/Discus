@@ -14,6 +14,7 @@ use discus_telemetry::pipeline::{
 };
 use discus_telemetry::Metrics;
 
+use crate::command::CommandSpec;
 use crate::node::{ConnState, Node};
 use crate::Config;
 
@@ -97,12 +98,6 @@ pub fn node_id(id: NodeId) -> String {
 /// The metric label of a node: its `NodeId` in hex.
 pub fn node_label(id: NodeId) -> Option<NodeLabel> {
     NodeLabel::new(&node_id(id)).ok()
-}
-
-/// The generation of the current epoch of `node`. The `discus.ring.epoch` gauge reports it, and
-/// `Node::adopt_epoch` updates the gauge.
-pub fn ring_epoch(node: &Node) -> u64 {
-    node.epoch_id().generation
 }
 
 /// The resource attributes of the node that `config` starts. Call `Config::resolve_identity`
@@ -244,11 +239,12 @@ struct Active {
 }
 
 impl CommandTrace {
-    /// Start the telemetry of `cmd`. With an enabled `metrics`, this opens the command span.
-    pub fn begin(metrics: &Metrics, cmd: &Command) -> CommandTrace {
+    /// Start the telemetry of `cmd`, whose name looked up as `spec`. With an enabled `metrics`,
+    /// this opens the command span.
+    pub fn begin(metrics: &Metrics, spec: Option<&CommandSpec>, cmd: &Command) -> CommandTrace {
         #[cfg(feature = "otel")]
         if metrics.is_enabled() {
-            let label = command_label(cmd);
+            let label = command_label(spec, cmd);
             let span = tracing::info_span!(
                 "command",
                 otel.status_code = tracing::field::Empty,
@@ -264,7 +260,7 @@ impl CommandTrace {
                 }),
             };
         }
-        let _ = (metrics, cmd);
+        let _ = (metrics, spec, cmd);
         CommandTrace {
             span: tracing::Span::none(),
             #[cfg(feature = "otel")]
@@ -302,15 +298,19 @@ impl CommandTrace {
     }
 }
 
-/// The metric label of a command: the table name, never the name the client sent.
-pub fn command_label(cmd: &Command) -> discus_telemetry::attrs::CommandLabel {
+/// The metric label of a command whose name looked up as `spec`: the table name, never the name
+/// the client sent.
+pub fn command_label(
+    spec: Option<&CommandSpec>,
+    cmd: &Command,
+) -> discus_telemetry::attrs::CommandLabel {
     use discus_telemetry::attrs::CommandLabel;
+    if let Some(spec) = spec {
+        return CommandLabel::new(spec.name);
+    }
     let Some(name) = cmd.first() else {
         return CommandLabel::UNKNOWN;
     };
-    if let Some(spec) = crate::command::lookup(name) {
-        return CommandLabel::new(spec.name);
-    }
     let upper = String::from_utf8_lossy(name).to_ascii_uppercase();
     if crate::command::table::is_unsupported(&upper) {
         CommandLabel::UNSUPPORTED
@@ -319,24 +319,22 @@ pub fn command_label(cmd: &Command) -> discus_telemetry::attrs::CommandLabel {
     }
 }
 
-/// Run one command on this node with its span and metrics, through the global metrics handle.
-pub fn dispatch(node: &Node, conn: &mut ConnState, cmd: &Command) -> Value {
-    dispatch_with(discus_telemetry::global(), node, conn, cmd)
-}
-
 /// Run one command on this node with its span and metrics: the entry checks, then local
 /// execution, as on a node without peers. The connection loop uses `CommandTrace` directly,
 /// because it also forwards. When `metrics` records nothing, no span opens.
 pub fn dispatch_with(metrics: &Metrics, node: &Node, conn: &mut ConnState, cmd: &Command) -> Value {
-    let trace = CommandTrace::begin(metrics, cmd);
+    let spec = crate::command::lookup(&cmd[0]);
+    let trace = CommandTrace::begin(metrics, spec, cmd);
     let span = trace.span().clone();
     let _entered = span.enter();
     let prepared = trace
         .route_span()
-        .in_scope(|| crate::cluster::prepare(node, conn, cmd.clone()));
+        .in_scope(|| crate::cluster::prepare(node, conn, spec, cmd.clone()));
     let value = match prepared {
         crate::cluster::Prepared::Done(value) => value,
-        crate::cluster::Prepared::Data(job) => crate::cluster::local(node, &job.cmd).value,
+        crate::cluster::Prepared::Data(job) => {
+            crate::cluster::local(node, job.spec, &job.cmd).value
+        }
     };
     trace.finish(&value);
     value
@@ -369,48 +367,33 @@ pub fn outbound(inbound: &discus_wire::TraceContext) -> discus_wire::TraceContex
     to_wire(&discus_telemetry::context::outbound(&from_wire(inbound)))
 }
 
-/// The `forward` child span of the current span. It opens only under a command span, so a
-/// node without export opens no span.
-pub fn forward_span() -> tracing::Span {
-    if tracing::Span::current().is_none() {
-        return tracing::Span::none();
-    }
-    tracing::info_span!("forward")
+/// Child spans of the current span. Each opens only under a command span, so a node without
+/// export opens no span.
+macro_rules! child_spans {
+    ($($(#[$doc:meta])* $fn:ident => $name:literal;)+) => {
+        $(
+            $(#[$doc])*
+            pub fn $fn() -> tracing::Span {
+                if tracing::Span::current().is_none() {
+                    return tracing::Span::none();
+                }
+                tracing::info_span!($name)
+            }
+        )+
+    };
 }
 
-/// The `store` child span of the current span. It opens only under a command span.
-pub fn store_span() -> tracing::Span {
-    if tracing::Span::current().is_none() {
-        return tracing::Span::none();
-    }
-    tracing::info_span!("store")
-}
-
-/// The `raft` child span of the current span: a counter command on its Raft leader. It opens
-/// only under a command span.
-pub fn raft_span() -> tracing::Span {
-    if tracing::Span::current().is_none() {
-        return tracing::Span::none();
-    }
-    tracing::info_span!("raft")
-}
-
-/// The `counter.sync` child span of the current span: a leader-follower write that waits for its
-/// follower. It opens only under a command span.
-pub fn counter_sync_span() -> tracing::Span {
-    if tracing::Span::current().is_none() {
-        return tracing::Span::none();
-    }
-    tracing::info_span!("counter.sync")
-}
-
-/// The `route` child span of the current span. A node that receives a forward routes in it. It
-/// opens only under a command span.
-pub fn route_span() -> tracing::Span {
-    if tracing::Span::current().is_none() {
-        return tracing::Span::none();
-    }
-    tracing::info_span!("route")
+child_spans! {
+    /// The `forward` span: one forward to another node.
+    forward_span => "forward";
+    /// The `store` span: the command runs on this node.
+    store_span => "store";
+    /// The `raft` span: a counter command on its Raft leader.
+    raft_span => "raft";
+    /// The `counter.sync` span: a leader-follower write that waits for its follower.
+    counter_sync_span => "counter.sync";
+    /// The `route` span. A node that receives a forward routes in it.
+    route_span => "route";
 }
 
 /// Record one forward: the command, the outcome, and the hop count of the forward.
@@ -426,7 +409,8 @@ pub fn record_forward(
         Err(discus_transport::TransportError::Timeout) => Status::Timeout,
         Err(_) => Status::Error,
     };
-    metrics.forward(command_label(cmd), status, hops);
+    let spec = cmd.first().and_then(|name| crate::command::lookup(name));
+    metrics.forward(command_label(spec, cmd), status, hops);
 }
 
 /// Record the epoch gauge and the member count of each state.
@@ -505,10 +489,10 @@ pub fn forwarded_span(metrics: &Metrics, inbound: &discus_wire::TraceContext) ->
 }
 
 /// Record the table name of a forwarded command on the current command span.
-pub fn record_operation(cmd: &Command) {
+pub fn record_operation(spec: Option<&CommandSpec>, cmd: &Command) {
     #[cfg(feature = "otel")]
-    tracing::Span::current().record("db.operation.name", command_label(cmd).as_str());
-    let _ = cmd;
+    tracing::Span::current().record("db.operation.name", command_label(spec, cmd).as_str());
+    let _ = (spec, cmd);
 }
 
 /// Mark the current command span as failed when the reply is an error.

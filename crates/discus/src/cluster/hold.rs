@@ -13,12 +13,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use discus_placement::NodeId;
 use discus_resp::Command;
+use discus_wire::ForwardMode;
 use tokio::time::Instant;
 
-use super::route::Route;
 use super::{run_hop, Failure, Hop, Job, Reply};
 use crate::command::util::upper;
+use crate::command::CommandSpec;
 use crate::Node;
 
 /// A held command plans its route again at least this often.
@@ -50,8 +52,34 @@ pub fn resendable(cmd: &Command, failure: Failure) -> bool {
     failure.unsent || idempotent(cmd)
 }
 
+/// Forward `cmd` to `target`. A failed read gives `None`, so the caller tries the next owner. A
+/// failed write waits for a new primary, on the entry node only.
+pub async fn send_or_hold(
+    node: &Arc<Node>,
+    spec: &'static CommandSpec,
+    target: NodeId,
+    cmd: &Command,
+    hop: &Hop,
+    write: bool,
+) -> Option<Reply> {
+    match super::forward::send(node, target, cmd, hop, ForwardMode::Route, write).await {
+        Ok(reply) => Some(reply),
+        Err(_) if !write => None,
+        Err(e) if hop.hops == 0 && !hop.held => {
+            Some(held(node, spec, cmd.clone(), hop.clone(), Failure::of(&e)).await)
+        }
+        Err(e) => Some(Failure::of(&e).reply()),
+    }
+}
+
 /// Hold `cmd` after its first failure and retry it until it gets an answer or the budget ends.
-pub async fn held(node: &Arc<Node>, cmd: Command, route: Route, hop: Hop, first: Failure) -> Reply {
+pub async fn held(
+    node: &Arc<Node>,
+    spec: &'static CommandSpec,
+    cmd: Command,
+    hop: Hop,
+    first: Failure,
+) -> Reply {
     if !resendable(&cmd, first) {
         return Reply::try_again();
     }
@@ -70,7 +98,8 @@ pub async fn held(node: &Arc<Node>, cmd: Command, route: Route, hop: Hop, first:
         }
         let job = Job {
             cmd: cmd.clone(),
-            route,
+            spec,
+            route: spec.route,
             rr: 0,
             writes: None,
         };

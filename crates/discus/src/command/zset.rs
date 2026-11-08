@@ -6,75 +6,25 @@ use bytes::Bytes;
 use discus_resp::{Command, Protocol, Value};
 use discus_store::ZSet;
 
-use super::coll::{guard, mutate, view};
+use super::coll::{mutate, view};
 use super::error::CommandError;
 use super::table::CommandSpec;
-use super::util::{check_key, check_value, parse_f64, parse_i64, upper};
+use super::util::{check_value, parse_f64, parse_i64, upper};
 use crate::node::{ConnState, Node};
 
 type Reply = Result<Value, CommandError>;
 
 pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec {
-        name: "ZADD",
-        arity: -4,
-        handler: zadd,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ZSCORE",
-        arity: 3,
-        handler: zscore,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ZMSCORE",
-        arity: -3,
-        handler: zmscore,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ZREM",
-        arity: -3,
-        handler: zrem,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ZCARD",
-        arity: 2,
-        handler: zcard,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ZRANGE",
-        arity: -4,
-        handler: zrange,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ZREVRANGE",
-        arity: -4,
-        handler: zrevrange,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ZRANGEBYSCORE",
-        arity: -4,
-        handler: zrangebyscore,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ZINCRBY",
-        arity: 4,
-        handler: zincrby,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ZCOUNT",
-        arity: 4,
-        handler: zcount,
-        needs_auth: true,
-    },
+    CommandSpec::write("ZADD", -4, zadd),
+    CommandSpec::read("ZSCORE", 3, zscore),
+    CommandSpec::read("ZMSCORE", -3, zmscore),
+    CommandSpec::write("ZREM", -3, zrem),
+    CommandSpec::read("ZCARD", 2, zcard),
+    CommandSpec::read("ZRANGE", -4, zrange),
+    CommandSpec::read("ZREVRANGE", -4, zrevrange),
+    CommandSpec::read("ZRANGEBYSCORE", -4, zrangebyscore),
+    CommandSpec::write("ZINCRBY", 4, zincrby),
+    CommandSpec::read("ZCOUNT", 4, zcount),
 ];
 
 fn score_value(s: f64) -> Value {
@@ -128,7 +78,6 @@ fn members_reply(items: Vec<(&Bytes, f64)>, with_scores: bool, protocol: Protoco
 }
 
 fn zadd(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    check_key(node, &cmd[1])?;
     let (mut nx, mut xx, mut ch) = (false, false, false);
     let mut i = 2;
     while i < cmd.len() {
@@ -156,15 +105,8 @@ fn zadd(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         grow += p[1].len() + 8;
         pairs.push((parse_f64(&p[0])?, p[1].clone()));
     }
-    mutate(node, &cmd[1], grow, |z: &mut ZSet| {
-        if !xx {
-            let fresh: std::collections::HashSet<&Bytes> = pairs
-                .iter()
-                .map(|(_, m)| m)
-                .filter(|m| z.score(m).is_none())
-                .collect();
-            guard(node, z.len() + fresh.len())?;
-        }
+    let adds = rest.iter().skip(1).step_by(2).filter(|_| !xx);
+    mutate(node, &cmd[1], grow, adds, |z: &mut ZSet| {
         let (mut added, mut changed) = (0, 0);
         for (score, member) in pairs {
             match z.score(&member) {
@@ -204,7 +146,7 @@ fn zmscore(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 }
 
 fn zrem(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    mutate(node, &cmd[1], 0, |z: &mut ZSet| {
+    mutate(node, &cmd[1], 0, [], |z: &mut ZSet| {
         Ok(Value::Integer(
             cmd[2..].iter().filter(|m| z.remove(m)).count() as i64,
         ))
@@ -269,22 +211,24 @@ fn zrangebyscore(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
 }
 
 fn zincrby(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    check_key(node, &cmd[1])?;
     check_value(node, &cmd[3])?;
     let delta = parse_f64(&cmd[2])?;
-    mutate(node, &cmd[1], cmd[3].len() + 8, |z: &mut ZSet| {
-        let next = z.score(&cmd[3]).unwrap_or(0.0) + delta;
-        if next.is_nan() {
-            return Err(CommandError::Custom(
-                "ERR resulting score is not a number (NaN)".into(),
-            ));
-        }
-        if z.score(&cmd[3]).is_none() {
-            guard(node, z.len() + 1)?;
-        }
-        z.insert(cmd[3].clone(), next);
-        Ok(score_value(next))
-    })
+    mutate(
+        node,
+        &cmd[1],
+        cmd[3].len() + 8,
+        [&cmd[3]],
+        |z: &mut ZSet| {
+            let next = z.score(&cmd[3]).unwrap_or(0.0) + delta;
+            if next.is_nan() {
+                return Err(CommandError::Custom(
+                    "ERR resulting score is not a number (NaN)".into(),
+                ));
+            }
+            z.insert(cmd[3].clone(), next);
+            Ok(score_value(next))
+        },
+    )
 }
 
 fn zcount(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {

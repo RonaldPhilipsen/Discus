@@ -5,17 +5,12 @@
 
 use std::sync::Arc;
 
-use bytes::Bytes;
+mod common;
+
+use common::cmd;
 use discus::node::{ConnState, Node};
 use discus::security::{ConnAuth, Security};
 use discus_telemetry::testing::TraceHarness;
-
-fn cmd(parts: &[&str]) -> Vec<Bytes> {
-    parts
-        .iter()
-        .map(|p| Bytes::copy_from_slice(p.as_bytes()))
-        .collect()
-}
 
 #[test]
 fn every_auth_attempt_is_counted() {
@@ -33,7 +28,7 @@ fn every_auth_attempt_is_counted() {
         &["HELLO", "3", "AUTH", "default", "t"],
         &["GET", "k"],
     ] {
-        discus::command::dispatch(&node, &mut conn, &cmd(c));
+        discus::telemetry::dispatch_with(discus_telemetry::global(), &node, &mut conn, &cmd(c));
     }
     let points = h.points();
     let count = |status: &str| -> f64 {

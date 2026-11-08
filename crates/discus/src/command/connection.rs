@@ -5,6 +5,7 @@ use std::fmt::Write;
 use bytes::Bytes;
 use discus_resp::{Command, Protocol, Value};
 
+use super::access::Access;
 use super::error::CommandError;
 use super::table::{names, CommandSpec};
 use super::util::{glob_match, parse_i64, upper};
@@ -15,72 +16,17 @@ use crate::node::{ConnState, Node};
 pub const REDIS_VERSION: &str = "7.2.0";
 
 pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec {
-        name: "PING",
-        arity: -1,
-        handler: ping,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "ECHO",
-        arity: 2,
-        handler: echo,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "QUIT",
-        arity: -1,
-        handler: quit,
-        needs_auth: false,
-    },
-    CommandSpec {
-        name: "AUTH",
-        arity: -2,
-        handler: auth,
-        needs_auth: false,
-    },
-    CommandSpec {
-        name: "HELLO",
-        arity: -1,
-        handler: hello,
-        needs_auth: false,
-    },
-    CommandSpec {
-        name: "SELECT",
-        arity: 2,
-        handler: select,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "COMMAND",
-        arity: -1,
-        handler: command,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "CLIENT",
-        arity: -2,
-        handler: client,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "INFO",
-        arity: -1,
-        handler: info,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "CONFIG",
-        arity: -2,
-        handler: config,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "CLUSTER",
-        arity: -1,
-        handler: cluster,
-        needs_auth: true,
-    },
+    CommandSpec::connection("PING", -1, ping),
+    CommandSpec::connection("ECHO", 2, echo),
+    CommandSpec::connection("QUIT", -1, quit).with_access(Access::Public),
+    CommandSpec::connection("AUTH", -2, auth).with_access(Access::Public),
+    CommandSpec::connection("HELLO", -1, hello).with_access(Access::Public),
+    CommandSpec::connection("SELECT", 2, select),
+    CommandSpec::connection("COMMAND", -1, command),
+    CommandSpec::connection("CLIENT", -2, client),
+    CommandSpec::connection("INFO", -1, info).with_access(Access::Read),
+    CommandSpec::connection("CONFIG", -2, config).with_access(Access::Read),
+    CommandSpec::connection("CLUSTER", -1, cluster),
 ];
 
 type Reply = Result<Value, CommandError>;

@@ -28,19 +28,15 @@ impl TraceParent {
         if &b[..2] != b"00" {
             return None;
         }
-        let mut trace_id = [0u8; 16];
-        let mut parent_id = [0u8; 8];
-        let mut flags = [0u8; 1];
-        hex_into(&b[3..35], &mut trace_id)?;
-        hex_into(&b[36..52], &mut parent_id)?;
-        hex_into(&b[53..55], &mut flags)?;
-        if trace_id == [0; 16] || parent_id == [0; 8] {
+        let trace_id = hex(s.get(3..35)?)?;
+        let parent_id = hex(s.get(36..52)?)? as u64;
+        if trace_id == 0 || parent_id == 0 {
             return None;
         }
         Some(TraceParent {
-            trace_id,
-            parent_id,
-            flags: flags[0],
+            trace_id: trace_id.to_be_bytes(),
+            parent_id: parent_id.to_be_bytes(),
+            flags: hex(s.get(53..55)?)? as u8,
         })
     }
 
@@ -52,33 +48,22 @@ impl TraceParent {
 
 impl fmt::Display for TraceParent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("00-")?;
-        write_hex(f, &self.trace_id)?;
-        f.write_str("-")?;
-        write_hex(f, &self.parent_id)?;
-        write!(f, "-{:02x}", self.flags)
+        write!(
+            f,
+            "00-{:032x}-{:016x}-{:02x}",
+            u128::from_be_bytes(self.trace_id),
+            u64::from_be_bytes(self.parent_id),
+            self.flags
+        )
     }
 }
 
-fn write_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
-    for byte in bytes {
-        write!(f, "{byte:02x}")?;
+/// Lower-case hex digits only: W3C Trace Context refuses upper case.
+fn hex(s: &str) -> Option<u128> {
+    if !s.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')) {
+        return None;
     }
-    Ok(())
-}
-
-fn hex_into(src: &[u8], dst: &mut [u8]) -> Option<()> {
-    fn nibble(c: u8) -> Option<u8> {
-        match c {
-            b'0'..=b'9' => Some(c - b'0'),
-            b'a'..=b'f' => Some(c - b'a' + 10),
-            _ => None,
-        }
-    }
-    for (i, out) in dst.iter_mut().enumerate() {
-        *out = nibble(src[2 * i])? << 4 | nibble(src[2 * i + 1])?;
-    }
-    Some(())
+    u128::from_str_radix(s, 16).ok()
 }
 
 /// The trace context carrier. Empty strings mean "no context".

@@ -99,15 +99,8 @@ async fn hits_after_a_join(extra: &[&str]) -> usize {
     let mut all = refs(&nodes);
     all.push(&joiner);
     assert!(wait_until(FORM, || agreed(&all)).await);
-    let mut ready = false;
-    for _ in 0..500 {
-        if common::status(joiner.admin, "/startupz").await == 200 {
-            ready = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(ready);
+    let ten = Duration::from_secs(10);
+    assert!(common::wait_status(joiner.admin, "/startupz", 200, ten).await);
     hits(&nodes[0], &keys).await
 }
 

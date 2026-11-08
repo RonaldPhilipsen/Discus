@@ -22,7 +22,7 @@ pub use endpoint::{
 };
 pub use events::{PeerEvent, PeerEventKind, StatsSnapshot, TransportStats, EVENT_CAPACITY};
 pub use provider::{crypto_provider, PROVIDER_NAME};
-pub use tls::{TlsError, TlsMaterial};
+pub use tls::{pem_certs, pem_key, pem_roots, TlsError, TlsMaterial};
 
 /// ALPN for forwarded commands and other request-reply traffic.
 pub const ALPN_RPC: &[u8] = b"discus-rpc";

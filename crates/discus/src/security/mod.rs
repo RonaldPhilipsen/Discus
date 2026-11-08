@@ -31,8 +31,8 @@ pub use policy::{Factor, Policy, Scopes};
 pub use session::{CertGrant, ConnAuth, TokenGrant};
 pub use stream::ClientStream;
 
-use crate::command::access::{access, Access};
-use crate::command::CommandError;
+use crate::command::access::Access;
+use crate::command::{CommandError, CommandSpec};
 use crate::node::ConnState;
 use crate::Config;
 use limiter::FailureLimiter;
@@ -392,7 +392,7 @@ impl Security {
     ) -> io::Result<(ClientStream, ConnAuth)> {
         let mut auth = ConnAuth::new(Some(peer.ip()));
         let Some(config) = &self.server_tls else {
-            return Ok((ClientStream::Plain(tcp), auth));
+            return Ok((ClientStream::Left(tcp), auth));
         };
         let forwarded = if self.mode == TlsMode::Lb {
             if !self.lb_sources.iter().any(|n| n.contains(&peer.ip())) {
@@ -418,7 +418,7 @@ impl Security {
                 tracing::debug!(%identity, "forwarded client identity");
                 auth.cert = Some(CertGrant { identity, scopes });
             }
-            return Ok((ClientStream::Tls(Box::new(tls)), auth));
+            return Ok((ClientStream::Right(Box::new(tls)), auth));
         }
         auth.tls = true;
         if let Some(leaf) = tls.get_ref().1.peer_certificates().and_then(|c| c.first()) {
@@ -427,7 +427,7 @@ impl Security {
             tracing::debug!(%identity, "client certificate verified");
             auth.cert = Some(CertGrant { identity, scopes });
         }
-        Ok((ClientStream::Tls(Box::new(tls)), auth))
+        Ok((ClientStream::Right(Box::new(tls)), auth))
     }
 
     /// True when the connection meets the policy.
@@ -550,23 +550,23 @@ impl Security {
         CommandError::Custom("WRONGPASS invalid username-password pair or user is disabled.".into())
     }
 
-    /// Check that the connection can run the command `name` (upper case).
-    pub fn authorize(&self, conn: &mut ConnState, name: &str) -> Result<(), CommandError> {
-        if self.policy == Policy::None {
+    /// Check that the connection can run the command `spec`.
+    pub fn authorize(&self, conn: &mut ConnState, spec: &CommandSpec) -> Result<(), CommandError> {
+        if self.policy == Policy::None || spec.access == Access::Public {
             return Ok(());
         }
         #[cfg(feature = "oauth2")]
         self.recheck_token(conn);
         let scopes = conn.auth.scopes(&self.policy).ok_or(CommandError::NoAuth)?;
-        let allowed = match access(name) {
-            Access::Connection => true,
+        let allowed = match spec.access {
+            Access::Public | Access::Connection => true,
             Access::Read => scopes.can_read(),
             Access::Write => scopes.can_write(),
         };
         if allowed {
             Ok(())
         } else {
-            Err(CommandError::NoPerm(name.to_ascii_lowercase()))
+            Err(CommandError::NoPerm(spec.name.to_ascii_lowercase()))
         }
     }
 }
@@ -590,6 +590,10 @@ fn token_arg(cmd: &discus_resp::Command) -> Option<&[u8]> {
 mod tests {
     use super::*;
 
+    fn spec(name: &[u8]) -> &'static CommandSpec {
+        crate::command::lookup(name).unwrap()
+    }
+
     fn security(args: &[&str]) -> Security {
         let mut argv = vec!["discus"];
         argv.extend_from_slice(args);
@@ -600,9 +604,12 @@ mod tests {
     fn a_read_only_connection_cannot_write() {
         let s = security(&["--shared-token", "x"]);
         let mut conn = ConnState::new(1, ConnAuth::default());
-        assert_eq!(s.authorize(&mut conn, "GET"), Err(CommandError::NoAuth));
+        assert_eq!(
+            s.authorize(&mut conn, spec(b"GET")),
+            Err(CommandError::NoAuth)
+        );
         conn.auth.shared = true;
-        assert_eq!(s.authorize(&mut conn, "SET"), Ok(()));
+        assert_eq!(s.authorize(&mut conn, spec(b"SET")), Ok(()));
         // Only an mTLS or OAuth 2.0 grant can be read-only, so fake one through a policy that
         // takes the intersection.
         let ro = Security {
@@ -613,9 +620,9 @@ mod tests {
             identity: "ro".into(),
             scopes: Scopes::READ,
         });
-        assert_eq!(ro.authorize(&mut conn, "GET"), Ok(()));
+        assert_eq!(ro.authorize(&mut conn, spec(b"GET")), Ok(()));
         assert_eq!(
-            ro.authorize(&mut conn, "SET"),
+            ro.authorize(&mut conn, spec(b"SET")),
             Err(CommandError::NoPerm("set".into()))
         );
         assert_eq!(

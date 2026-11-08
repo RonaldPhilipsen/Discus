@@ -13,15 +13,6 @@ fn cfg() -> SwimConfig {
     }
 }
 
-fn run_until(sim: &mut Sim, limit_ms: u64, mut done: impl FnMut(&Sim) -> bool) -> u64 {
-    let start = sim.now();
-    while !done(sim) {
-        assert!(sim.now() - start < limit_ms, "not done after {limit_ms} ms");
-        sim.run_ms(10);
-    }
-    sim.now() - start
-}
-
 /// Every live node holds the same epoch, and its NORMAL members are exactly `want`.
 fn agreed(sim: &Sim, want: &[NodeId]) -> bool {
     let live = sim.alive_ids();
@@ -45,7 +36,7 @@ fn a_death_creates_one_new_epoch() {
     sim.run_ms(500);
     let before = sim.epoch(ids[0]).id().generation;
     sim.kill(ids[3]);
-    run_until(&mut sim, 3_000, |s| agreed(s, &ids[..3]));
+    sim.run_until(3_000, |s| agreed(s, &ids[..3]));
     let after = sim.epoch(ids[0]).id().generation;
     assert!(after > before && after <= before + 2, "{before} -> {after}");
 }
@@ -59,14 +50,12 @@ fn a_joiner_becomes_normal_in_an_epoch() {
     sim.run_ms(500);
     let j = sim.add_node();
     sim.start(j, &[ids[1]]);
-    run_until(&mut sim, 3_000, |s| {
-        s.node(j).swim.me().state == MemberState::Normal
-    });
+    sim.run_until(3_000, |s| s.node(j).swim.me().state == MemberState::Normal);
     let floor = sim.node(j).host.hlc;
     assert!(floor >= sim.now() + 600, "floor {floor} at {}", sim.now());
     let mut all = ids.clone();
     all.push(j);
-    run_until(&mut sim, 5_000, |s| agreed(s, &all));
+    sim.run_until(5_000, |s| agreed(s, &all));
     assert!(sim.is_normal(j));
 }
 
@@ -83,7 +72,7 @@ fn racing_creators_converge() {
             sim.data_path_failure(ids[0], ids[4]);
             sim.data_path_failure(ids[1], ids[4]);
         }
-        run_until(&mut sim, 3_000, |s| agreed(s, &ids[..4]));
+        sim.run_until(3_000, |s| agreed(s, &ids[..4]));
         sim.run_ms(1_000);
         assert!(agreed(&sim, &ids[..4]));
         let after = sim.epoch(ids[0]).id().generation;
@@ -152,7 +141,7 @@ fn a_dropped_member_rejoins_with_a_new_incarnation() {
     for &id in &ids {
         sim.adopt(id, e.clone());
     }
-    run_until(&mut sim, 5_000, |s| agreed(s, &ids));
+    sim.run_until(5_000, |s| agreed(s, &ids));
     assert!(sim
         .events(c)
         .iter()
@@ -167,9 +156,7 @@ fn a_joiner_does_not_rejoin_before_its_epoch() {
     sim.run_ms(500);
     let j = sim.add_node();
     sim.start(j, &[ids[0]]);
-    run_until(&mut sim, 3_000, |s| {
-        s.node(j).swim.me().state == MemberState::Normal
-    });
+    sim.run_until(3_000, |s| s.node(j).swim.me().state == MemberState::Normal);
     // An epoch that does not list the joiner yet arrives right after its join.
     let members = sim.epoch(j).members().to_vec();
     if members.iter().all(|m| m.id != j) {
@@ -178,7 +165,7 @@ fn a_joiner_does_not_rejoin_before_its_epoch() {
     }
     let mut all = ids.clone();
     all.push(j);
-    run_until(&mut sim, 5_000, |s| agreed(s, &all));
+    sim.run_until(5_000, |s| agreed(s, &all));
     assert!(!sim
         .events(j)
         .iter()

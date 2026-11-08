@@ -14,16 +14,16 @@ use std::time::Duration;
 use discus_placement::{EpochId, NodeId, Version};
 use discus_resp::{Command, Value};
 use discus_transport::Transport;
-use discus_wire::{ForwardMode, TraceContext};
+use discus_wire::TraceContext;
 use futures::future::BoxFuture;
 use parking_lot::Mutex;
 use tracing::Span;
 
-use crate::command::{self, CommandError};
+use crate::command::{self, CommandError, CommandSpec};
 use crate::node::{ConnState, Node};
 use crate::telemetry;
 use crate::Config;
-use route::{keys_of, route_of, Keys, Route};
+use route::{keys_of, Keys, Route};
 
 /// A forward may hop at most this many times (spec section 7.2).
 pub const MAX_HOPS: u8 = 2;
@@ -51,6 +51,13 @@ impl ClusterLink {
 
     pub fn peer_epoch(&self, peer: NodeId) -> Option<EpochId> {
         self.peer_epochs.lock().get(&peer).copied()
+    }
+
+    /// Forget the peers that `epoch` does not list, so departed nodes leave no record.
+    pub fn forget_non_members(&self, epoch: &discus_placement::Epoch) {
+        self.peer_epochs
+            .lock()
+            .retain(|p, _| epoch.member(*p).is_some());
     }
 
     /// Record the epoch a peer reported. Only a newer one replaces the record.
@@ -134,6 +141,7 @@ pub struct Hop {
 #[derive(Debug)]
 pub struct Job {
     pub cmd: Command,
+    pub spec: &'static CommandSpec,
     pub route: Route,
     /// The per-connection round-robin position for reads.
     pub rr: u64,
@@ -175,46 +183,40 @@ impl Dispatch {
 /// Check a command on the entry node: lookup, arity, authentication, and authorization.
 /// Connection commands run here, because they read and change the connection state. Only the
 /// entry node authorizes. A forwarded command arrives over cluster mTLS and is not checked again.
-pub fn prepare(node: &Node, conn: &mut ConnState, cmd: Command) -> Prepared {
-    let spec = match command::check(&cmd).and_then(|spec| {
-        command::authorize(node, conn, spec)?;
+pub fn prepare(
+    node: &Node,
+    conn: &mut ConnState,
+    spec: Option<&'static CommandSpec>,
+    cmd: Command,
+) -> Prepared {
+    let spec = match command::check(spec, &cmd).and_then(|spec| {
+        node.security.authorize(conn, spec)?;
         Ok(spec)
     }) {
         Ok(spec) => spec,
         Err(e) => return Prepared::Done(e.to_value()),
     };
-    let route = route_of(spec.name);
-    if route == Route::Connection {
+    if spec.route == Route::Connection {
         return Prepared::Done((spec.handler)(node, conn, &cmd).unwrap_or_else(|e| e.to_value()));
     }
     Prepared::Data(Job {
         cmd,
-        route,
+        spec,
+        route: spec.route,
         rr: conn.next_rr(),
         writes: conn.writes.clone(),
     })
 }
 
 /// Execute on this node and report the stamp that the command took. The work runs in the `store`
-/// span. A command that took a stamp is queued for replication to the other owners of its keys
-/// (spec section 8.2).
-pub fn local(node: &Node, cmd: &Command) -> Reply {
+/// span. `Node::write` queues each key that the command changed for the other owners.
+pub fn local(node: &Node, spec: &CommandSpec, cmd: &Command) -> Reply {
     let _store = telemetry::store_span().entered();
     Node::take_applied();
-    let value = command::execute_local(node, cmd);
-    let applied = Node::take_applied();
-    if applied.is_some() {
-        if let Some(replicator) = node.replicator() {
-            if let Some(spec) = command::lookup(&cmd[0]) {
-                if let Keys::Some(keys) = keys_of(route_of(spec.name), cmd) {
-                    replicator.written(&keys);
-                }
-            }
-        }
-    }
+    let value = command::execute_local(node, spec, cmd);
     Reply {
         value,
-        applied,
+        applied: Node::take_applied(),
         observed: None,
         settled: false,
         failed: None,
@@ -230,17 +232,23 @@ fn track_here(node: &Node, key: &[u8], reply: &mut Reply) {
 }
 
 /// Serve a single-key command on this node. A replica without an entry for the key first asks
-/// the other owners (read repair).
-pub fn serve_here(node: &Arc<Node>, cmd: Command, write: bool) -> Dispatch {
+/// the other owners (read repair). `owners` are the current owners of the key.
+pub fn serve_here(
+    node: &Arc<Node>,
+    spec: &'static CommandSpec,
+    cmd: Command,
+    write: bool,
+    owners: &[NodeId],
+) -> Dispatch {
     let key = cmd[1].clone();
-    let sources = crate::replication::repair::sources(node, &key, write);
+    let sources = crate::replication::repair::sources(node, &key, write, owners);
     if sources.is_empty() {
-        return Dispatch::Ready(local(node, &cmd));
+        return Dispatch::Ready(local(node, spec, &cmd));
     }
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
         crate::replication::repair::fetch(&node, &key, sources).await;
-        local(&node, &cmd)
+        local(&node, spec, &cmd)
     }))
 }
 
@@ -263,7 +271,7 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
     }
     if node.link().is_none() {
         drop(route);
-        return Dispatch::Ready(local(node, &job.cmd));
+        return Dispatch::Ready(local(node, job.spec, &job.cmd));
     }
     match job.route {
         Route::Single { write } => single(node, job, hop, write, route),
@@ -287,11 +295,11 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
         // owner, so the route span ends at once.
         Route::Fanout if hop.hops == 0 => {
             drop(route);
-            multi::dbsize(node, job.cmd)
+            multi::dbsize(node, job.spec, job.cmd)
         }
         Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => {
             drop(route);
-            Dispatch::Ready(local(node, &job.cmd))
+            Dispatch::Ready(local(node, job.spec, &job.cmd))
         }
     }
 }
@@ -303,25 +311,25 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
 pub fn candidates(
     node: &Node,
     key: &[u8],
+    owners: &[NodeId],
     write: bool,
     rr: u64,
     need: Option<Version>,
 ) -> Vec<NodeId> {
-    let owners = node.owners(key);
     if let Some(need) = need.filter(|_| !write) {
         if owners.contains(&node.id) && node.store.version(key).is_some_and(|v| v >= need) {
             return vec![node.id];
         }
-        return owners.into_iter().take(1).collect();
+        return owners.iter().take(1).copied().collect();
     }
     let replicas = !write && node.link().is_some_and(|l| l.read_from_replicas);
     if !replicas {
-        return owners.into_iter().take(1).collect();
+        return owners.iter().take(1).copied().collect();
     }
     if owners.contains(&node.id) {
         return vec![node.id];
     }
-    let mut owners = owners;
+    let mut owners = owners.to_vec();
     if !owners.is_empty() {
         let n = owners.len();
         owners.rotate_left((rr % n as u64) as usize);
@@ -331,7 +339,7 @@ pub fn candidates(
 
 /// The budget is spent or every target is on the path. Serve locally if this node was the
 /// required owner in the previous epoch, else `-TRYAGAIN`.
-fn spent(node: &Node, cmd: &Command, keys: &[&[u8]], write: bool) -> Reply {
+fn spent(node: &Node, spec: &CommandSpec, cmd: &Command, keys: &[&[u8]], write: bool) -> Reply {
     let replicas = !write && node.link().is_some_and(|l| l.read_from_replicas);
     let owned_before = keys.iter().all(|key| match node.previous_owners(key) {
         Some(owners) if replicas => owners.contains(&node.id),
@@ -339,7 +347,7 @@ fn spent(node: &Node, cmd: &Command, keys: &[&[u8]], write: bool) -> Reply {
         None => false,
     });
     if owned_before {
-        local(node, cmd)
+        local(node, spec, cmd)
     } else {
         Reply::try_again()
     }
@@ -371,7 +379,7 @@ fn single(node: &Arc<Node>, job: Job, hop: Hop, write: bool, route: Span) -> Dis
         (Some(w), false) => w.lock().required(&key, std::time::Instant::now()),
         _ => None,
     };
-    let dispatch = single_planned(node, job.cmd, hop, write, job.rr, need, route);
+    let dispatch = single_planned(node, job.spec, job.cmd, hop, write, job.rr, need, route);
     let Some(writes) = job.writes else {
         return dispatch;
     };
@@ -399,8 +407,10 @@ fn single(node: &Arc<Node>, job: Job, hop: Hop, write: bool, route: Span) -> Dis
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn single_planned(
     node: &Arc<Node>,
+    spec: &'static CommandSpec,
     cmd: Command,
     mut hop: Hop,
     write: bool,
@@ -409,42 +419,36 @@ fn single_planned(
     route: Span,
 ) -> Dispatch {
     let key = cmd[1].clone();
-    let plan = route.in_scope(|| {
-        let targets = candidates(node, &key, write, rr, need);
-        match targets.first() {
+    let (plan, owners) = route.in_scope(|| {
+        let owners = node.owners(&key);
+        let targets = candidates(node, &key, &owners, write, rr, need);
+        let plan = match targets.first() {
             None => Plan::Retry,
             Some(first) if *first == node.id => Plan::Local,
             Some(_) => Plan::Forward(allowed(node, &hop, targets)),
-        }
+        };
+        (plan, owners)
     });
     drop(route);
     let targets = match plan {
         Plan::Retry => return Dispatch::Ready(Reply::try_again()),
         Plan::Local if need.is_some() || hop.track => {
-            let mut reply = local(node, &cmd);
+            let mut reply = local(node, spec, &cmd);
             track_here(node, &key, &mut reply);
             return Dispatch::Ready(reply);
         }
-        Plan::Local => return serve_here(node, cmd, write),
+        Plan::Local => return serve_here(node, spec, cmd, write, &owners),
         Plan::Forward(targets) => targets,
     };
     if targets.is_empty() {
-        return Dispatch::Ready(spent(node, &cmd, &[&key], write));
+        return Dispatch::Ready(spent(node, spec, &cmd, &[&key], write));
     }
     hop.track |= need.is_some();
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
         for target in targets {
-            match forward::send(&node, target, &cmd, &hop, ForwardMode::Route, write).await {
-                Ok(reply) => return reply,
-                // A read tries the next owner.
-                Err(_) if !write => continue,
-                // A write waits for a new primary, on the entry node only.
-                Err(e) if hop.hops == 0 && !hop.held => {
-                    let route = Route::Single { write: true };
-                    return hold::held(&node, cmd, route, hop, Failure::of(&e)).await;
-                }
-                Err(e) => return Failure::of(&e).reply(),
+            if let Some(reply) = hold::send_or_hold(&node, spec, target, &cmd, &hop, write).await {
+                return reply;
             }
         }
         Reply::try_again()

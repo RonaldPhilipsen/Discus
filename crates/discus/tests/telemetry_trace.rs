@@ -116,6 +116,6 @@ async fn one_trace_id_covers_the_forward() {
     assert_eq!(sum("discus.ring.epoch", None), 1.0);
     assert_eq!(sum("discus.members", Some(("state", "normal"))), 2.0);
     for n in &c.nodes {
-        n.stop();
+        n.kill();
     }
 }

@@ -12,7 +12,7 @@ pub mod ttl;
 pub mod value;
 pub mod zset;
 
-pub use discus_placement::clock::{self, Clock, ManualClock, SystemClock};
+pub use discus_placement::clock::{self, Clock, SystemClock};
 pub use discus_placement::{NodeId, Version, NTP64};
 pub use entry::{estimate_size, Entry};
 pub use evict::Admit;
@@ -20,6 +20,6 @@ pub use glob::glob_match;
 pub use store::{
     refill_bucket, Pressure, Slot, Store, StoreConfig, DEFAULT_TOMBSTONE_TTL_MS, HASH_SEED,
 };
-pub use ttl::spawn_sweeper;
+pub use ttl::{every, spawn_sweeper};
 pub use value::Value;
 pub use zset::ZSet;

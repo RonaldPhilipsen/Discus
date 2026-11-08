@@ -31,12 +31,9 @@ fn op() -> impl Strategy<Value = Op> {
     ]
 }
 
-fn wire(args: &[String]) -> Vec<u8> {
-    let mut out = format!("*{}\r\n", args.len()).into_bytes();
-    for a in args {
-        out.extend_from_slice(format!("${}\r\n{a}\r\n", a.len()).as_bytes());
-    }
-    out
+fn wire(args: &[String]) -> bytes::Bytes {
+    let args: Vec<bytes::Bytes> = args.iter().map(|a| a.clone().into()).collect();
+    discus_wire::encode_command(&args)
 }
 
 fn bulk(v: Option<&String>) -> String {

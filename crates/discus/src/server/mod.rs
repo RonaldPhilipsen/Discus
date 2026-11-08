@@ -164,7 +164,10 @@ impl Server {
         if let Some(tls) = tls {
             let cfg = &node.config;
             let mut tc = TransportConfig::new(cfg.cluster_listen, tls, node.id, node.cluster_id());
-            tc.capabilities = cfg.cluster_capabilities;
+            #[cfg(feature = "testing")]
+            {
+                tc.capabilities = cfg.cluster_capabilities;
+            }
             tc.max_frame = cfg.cluster_max_frame_bytes;
             tc.idle_timeout = Duration::from_millis(cfg.cluster_idle_timeout_ms);
             tc.keep_alive = Duration::from_millis(cfg.cluster_keep_alive_ms);
@@ -175,7 +178,7 @@ impl Server {
                 None => Transport::bind(tc, service).await?,
             };
             if let Some(lease) = lease {
-                let advertise = discovery::advertise(&node.config);
+                let advertise = discovery::advertise(&node.config).await;
                 let membership = Membership::new(&node, transport.clone(), lease, advertise);
                 node.set_membership(membership);
             }

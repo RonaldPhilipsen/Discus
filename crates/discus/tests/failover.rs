@@ -207,7 +207,7 @@ async fn the_hold_budget_expires() {
     .await;
     let k = c.key_on(0, "budget");
     let mut client = c.nodes[1].redis().await;
-    c.nodes[0].stop();
+    c.nodes[0].kill();
     tokio::time::sleep(Duration::from_millis(200)).await;
     let started = Instant::now();
     let err = client.set::<_, _, ()>(&k, "v").await.unwrap_err();

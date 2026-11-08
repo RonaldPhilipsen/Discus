@@ -104,7 +104,7 @@ async fn replicas_serve_reads_by_default() {
             .all(|n| n.holds(key.as_bytes())))
         .await
     );
-    c.nodes[0].stop();
+    c.nodes[0].kill();
     for n in &c.nodes[1..] {
         let mut client = n.redis().await;
         let v: Option<String> = client.get(&key).await.unwrap();

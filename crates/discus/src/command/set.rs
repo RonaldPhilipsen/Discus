@@ -5,85 +5,40 @@ use std::collections::HashSet;
 use bytes::Bytes;
 use discus_resp::{Command, Value};
 
-use super::coll::{guard, mutate, view};
+use super::coll::{mutate, view};
 use super::error::CommandError;
 use super::table::CommandSpec;
-use super::util::{check_key, check_value, parse_i64};
+use super::util::{check_value, parse_i64};
 use crate::node::{ConnState, Node};
 
 type Set = HashSet<Bytes>;
 type Reply = Result<Value, CommandError>;
 
 pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec {
-        name: "SADD",
-        arity: -3,
-        handler: sadd,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "SREM",
-        arity: -3,
-        handler: srem,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "SMEMBERS",
-        arity: 2,
-        handler: smembers,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "SISMEMBER",
-        arity: 3,
-        handler: sismember,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "SMISMEMBER",
-        arity: -3,
-        handler: smismember,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "SCARD",
-        arity: 2,
-        handler: scard,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "SPOP",
-        arity: -2,
-        handler: spop,
-        needs_auth: true,
-    },
-    CommandSpec {
-        name: "SRANDMEMBER",
-        arity: -2,
-        handler: srandmember,
-        needs_auth: true,
-    },
+    CommandSpec::write("SADD", -3, sadd),
+    CommandSpec::write("SREM", -3, srem),
+    CommandSpec::read("SMEMBERS", 2, smembers),
+    CommandSpec::read("SISMEMBER", 3, sismember),
+    CommandSpec::read("SMISMEMBER", -3, smismember),
+    CommandSpec::read("SCARD", 2, scard),
+    CommandSpec::write("SPOP", -2, spop),
+    CommandSpec::read("SRANDMEMBER", -2, srandmember),
 ];
 
 fn sadd(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    check_key(node, &cmd[1])?;
     for m in &cmd[2..] {
         check_value(node, m)?;
     }
     let grow = cmd[2..].iter().map(|m| m.len()).sum();
-    mutate(node, &cmd[1], grow, |s: &mut Set| {
-        let fresh: HashSet<&Bytes> = cmd[2..].iter().filter(|m| !s.contains(*m)).collect();
-        guard(node, s.len() + fresh.len())?;
-        let added = fresh.len() as i64;
-        for m in &cmd[2..] {
-            s.insert(m.clone());
-        }
-        Ok(Value::Integer(added))
+    mutate(node, &cmd[1], grow, &cmd[2..], |s: &mut Set| {
+        let before = s.len();
+        s.extend(cmd[2..].iter().cloned());
+        Ok(Value::Integer((s.len() - before) as i64))
     })
 }
 
 fn srem(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    mutate(node, &cmd[1], 0, |s: &mut Set| {
+    mutate(node, &cmd[1], 0, [], |s: &mut Set| {
         Ok(Value::Integer(
             cmd[2..].iter().filter(|m| s.remove(*m)).count() as i64,
         ))
@@ -150,7 +105,7 @@ fn spop(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
             "ERR value is out of range, must be positive".into(),
         ));
     }
-    mutate(node, &cmd[1], 0, |s: &mut Set| {
+    mutate(node, &cmd[1], 0, [], |s: &mut Set| {
         let popped = pick_distinct(s, count.unwrap_or(1) as usize);
         for m in &popped {
             s.remove(m);

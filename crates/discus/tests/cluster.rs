@@ -257,7 +257,7 @@ async fn local_keys_never_leave_the_node() {
     // The counter tier talks in the background. A long heartbeat keeps it quiet once every
     // follower holds its snapshot.
     let c = start_cluster(2, &["--counter-lease-renew-ms", "600000"]).await;
-    let settled = |n: &common::cluster::ClusterNode| {
+    let settled = |n: &common::gossip::GossipNode| {
         n.node
             .counters()
             .unwrap()
@@ -265,14 +265,9 @@ async fn local_keys_never_leave_the_node() {
             .iter()
             .all(|g| g.synced && matches!(g.role, "leader" | "follower"))
     };
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !c.nodes.iter().all(settled) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the counter groups did not settle"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let ten = Duration::from_secs(10);
+    let settled = common::gossip::wait_until(ten, || c.nodes.iter().all(settled)).await;
+    assert!(settled, "the counter groups did not settle");
     let key = c.key_on(0, "local");
     let mut a = c.nodes[0].redis().await;
     let before = c.nodes[0].node.link().unwrap().transport.stats().snapshot();

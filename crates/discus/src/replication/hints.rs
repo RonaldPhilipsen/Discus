@@ -45,29 +45,31 @@ struct Target {
 }
 
 impl Target {
-    /// Store a hint and return the hint it replaced.
-    fn put(&mut self, key: Bytes, hint: Hint) -> Option<Hint> {
-        let old = self.pop(&key);
+    /// Store a hint in place of an older hint of the key.
+    fn put(&mut self, key: Bytes, hint: Hint) {
+        self.pop(&key);
+        self.bytes += hint.size;
         self.order.insert((hint.entry.version, key.clone()));
         self.hints.push(key, hint);
-        old
     }
 
     fn pop(&mut self, key: &[u8]) -> Option<Hint> {
         let (k, h) = self.hints.pop_entry(key)?;
         self.order.remove(&(h.entry.version, k));
+        self.bytes -= h.size;
         Some(h)
     }
 
-    fn pop_lru(&mut self) -> Option<(Bytes, Hint)> {
-        let (k, h) = self.hints.pop_lru()?;
+    /// Evict the oldest hint and mark its bucket lost. False when no hint is left.
+    fn evict(&mut self) -> bool {
+        let Some((k, h)) = self.hints.pop_lru() else {
+            return false;
+        };
         self.order.remove(&(h.entry.version, k.clone()));
-        Some((k, h))
-    }
-
-    fn mark_lost(&mut self, key: &[u8]) {
+        self.bytes -= h.size;
         self.marks += 1;
-        self.lost.insert(refill_bucket(key), self.marks);
+        self.lost.insert(refill_bucket(&k), self.marks);
+        true
     }
 }
 
@@ -92,7 +94,6 @@ impl Target {
 
 pub struct HintStore {
     targets: HashMap<NodeId, Target>,
-    bytes: u64,
     limits: HintLimits,
 }
 
@@ -100,14 +101,13 @@ impl HintStore {
     pub fn new(limits: HintLimits) -> HintStore {
         HintStore {
             targets: HashMap::new(),
-            bytes: 0,
             limits,
         }
     }
 
     /// Bytes that every hint holds together.
     pub fn bytes(&self) -> u64 {
-        self.bytes
+        self.targets.values().map(|t| t.bytes).sum()
     }
 
     pub fn count(&self, target: NodeId) -> usize {
@@ -130,34 +130,23 @@ impl HintStore {
     ) -> Vec<(NodeId, u64)> {
         let size = estimate_size(&key, &entry) + HINT_OVERHEAD;
         let t = self.targets.entry(target).or_insert_with(Target::new);
-        if let Some(old) = t.put(
-            key,
-            Hint {
-                entry,
-                at: now,
-                size,
-            },
-        ) {
-            t.bytes -= old.size;
-            self.bytes -= old.size;
-        }
-        t.bytes += size;
-        self.bytes += size;
+        let hint = Hint {
+            entry,
+            at: now,
+            size,
+        };
+        t.put(key, hint);
         let mut evicted = 0;
-        while t.hints.len() > self.limits.max_entries || t.bytes > self.limits.max_bytes {
-            let Some((k, h)) = t.pop_lru() else {
-                break;
-            };
-            t.bytes -= h.size;
-            self.bytes -= h.size;
-            t.mark_lost(&k);
+        while (t.hints.len() > self.limits.max_entries || t.bytes > self.limits.max_bytes)
+            && t.evict()
+        {
             evicted += 1;
         }
         let mut out = Vec::new();
         if evicted > 0 {
             out.push((target, evicted));
         }
-        while self.bytes > self.limits.global_bytes {
+        while self.bytes() > self.limits.global_bytes {
             match self.evict_oldest() {
                 Some(t) => bump(&mut out, t),
                 None => break,
@@ -174,12 +163,7 @@ impl HintStore {
             .filter_map(|(id, t)| t.hints.peek_lru().map(|(_, h)| (h.at, *id)))
             .min()?
             .1;
-        let t = self.targets.get_mut(&target)?;
-        let (k, h) = t.pop_lru()?;
-        t.bytes -= h.size;
-        self.bytes -= h.size;
-        t.mark_lost(&k);
-        Some(target)
+        self.targets.get_mut(&target)?.evict().then_some(target)
     }
 
     /// Evict hints older than the maximum age. Returns the evictions by target.
@@ -190,13 +174,8 @@ impl HintStore {
                 .hints
                 .peek_lru()
                 .is_some_and(|(_, h)| now.duration_since(h.at) >= self.limits.max_age)
+                && t.evict()
             {
-                let Some((k, h)) = t.pop_lru() else {
-                    break;
-                };
-                t.bytes -= h.size;
-                self.bytes -= h.size;
-                t.mark_lost(&k);
                 bump(&mut out, *id);
             }
         }
@@ -206,15 +185,15 @@ impl HintStore {
     /// Evict the oldest hints until `want` bytes are free or no hint is left. Returns the bytes
     /// freed and the evictions by target.
     pub fn free(&mut self, want: u64) -> (u64, Vec<(NodeId, u64)>) {
-        let before = self.bytes;
+        let before = self.bytes();
         let mut out = Vec::new();
-        while before - self.bytes < want {
+        while before - self.bytes() < want {
             match self.evict_oldest() {
                 Some(t) => bump(&mut out, t),
                 None => break,
             }
         }
-        (before - self.bytes, out)
+        (before - self.bytes(), out)
     }
 
     /// Up to `max` hints of `target` in HLC order, oldest version first.
@@ -236,10 +215,7 @@ impl HintStore {
         };
         for (k, v) in sent {
             if t.hints.peek(k).is_some_and(|h| h.entry.version == *v) {
-                if let Some(h) = t.pop(k) {
-                    t.bytes -= h.size;
-                    self.bytes -= h.size;
-                }
+                t.pop(k);
             }
         }
     }
@@ -269,9 +245,7 @@ impl HintStore {
 
     /// Drop every hint of `target`, which never returns.
     pub fn drop_target(&mut self, target: NodeId) {
-        if let Some(t) = self.targets.remove(&target) {
-            self.bytes -= t.bytes;
-        }
+        self.targets.remove(&target);
     }
 
     /// Keep only the hints for which `keep(target, key)` holds. Dropped hints are not lost:
@@ -286,10 +260,7 @@ impl HintStore {
                 .cloned()
                 .collect();
             for k in drop {
-                if let Some(h) = t.pop(&k) {
-                    t.bytes -= h.size;
-                    self.bytes -= h.size;
-                }
+                t.pop(&k);
             }
         }
         self.targets
@@ -302,7 +273,6 @@ impl HintStore {
 
     pub fn clear(&mut self) {
         self.targets.clear();
-        self.bytes = 0;
     }
 }
 

@@ -29,15 +29,8 @@ async fn leaving_turns_readiness_off() {
     let mut client = nodes[2].redis().await;
     let _: () = client.set("k", "v").await.unwrap();
     nodes[2].shutdown.cancel();
-    let mut ready = 200;
-    for _ in 0..25 {
-        ready = common::status(nodes[2].admin, "/readyz").await;
-        if ready == 503 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert_eq!(ready, 503);
+    let half = Duration::from_millis(500);
+    assert!(common::wait_status(nodes[2].admin, "/readyz", 503, half).await);
     assert!(
         wait_until(Duration::from_secs(1), || {
             listed_as(&nodes[0], &nodes[2]) == Some(MemberState::Leaving)

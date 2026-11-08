@@ -10,9 +10,9 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
+use discus_transport::{pem_certs, pem_key, pem_roots, TlsError};
 use rustls::crypto::CryptoProvider;
 use rustls::{ClientConfig, RootCertStore};
-use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 
 /// The crypto provider of the TLS backend feature, with every cipher suite it offers. It is the
@@ -58,36 +58,45 @@ fn invalid(path: &Path, what: &str, e: impl std::fmt::Display) -> io::Error {
     )
 }
 
+/// Read a PEM file and parse it with `parse`. `what` names a failure to read or parse it.
+fn load<T>(
+    path: &Path,
+    what: (&str, &str),
+    parse: fn(&[u8]) -> Result<T, TlsError>,
+) -> io::Result<T> {
+    let pem = std::fs::read(path).map_err(|e| invalid(path, what.0, format!("I/O error: {e}")))?;
+    parse(&pem).map_err(|e| match e {
+        TlsError::NoCertificate => {
+            invalid(path, "no certificate", "the file has no CERTIFICATE block")
+        }
+        TlsError::Ca(e) => invalid(path, "bad CA certificate", e),
+        TlsError::Pem(e) => invalid(path, what.1, e),
+        e => invalid(path, what.1, e),
+    })
+}
+
 /// Every certificate in a PEM file.
 pub fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
-    let certs = CertificateDer::pem_file_iter(path)
-        .map_err(|e| invalid(path, "cannot read certificates", e))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| invalid(path, "bad certificate", e))?;
-    if certs.is_empty() {
-        return Err(invalid(
-            path,
-            "no certificate",
-            "the file has no CERTIFICATE block",
-        ));
-    }
-    Ok(certs)
+    load(
+        path,
+        ("cannot read certificates", "bad certificate"),
+        pem_certs,
+    )
 }
 
 /// The first private key in a PEM file.
 pub fn load_key(path: &Path) -> io::Result<PrivateKeyDer<'static>> {
-    PrivateKeyDer::from_pem_file(path).map_err(|e| invalid(path, "cannot read the private key", e))
+    let what = "cannot read the private key";
+    load(path, (what, what), pem_key)
 }
 
 /// A root store with every certificate in a PEM file.
 pub fn load_roots(path: &Path) -> io::Result<RootCertStore> {
-    let mut roots = RootCertStore::empty();
-    for cert in load_certs(path)? {
-        roots
-            .add(cert)
-            .map_err(|e| invalid(path, "bad CA certificate", e))?;
-    }
-    Ok(roots)
+    load(
+        path,
+        ("cannot read certificates", "bad certificate"),
+        pem_roots,
+    )
 }
 
 /// A server config for a listener. With `client_ca`, the listener asks for a client

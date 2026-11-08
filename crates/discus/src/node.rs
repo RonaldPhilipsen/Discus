@@ -68,13 +68,13 @@ pub struct Node {
     epoch_tx: tokio::sync::watch::Sender<EpochId>,
     write_budget: Arc<WriteSetBudget>,
     drain: tokio_util::sync::CancellationToken,
-    /// Test-only faults. Production code never sets them.
-    #[doc(hidden)]
+    /// Faults that tests inject.
+    #[cfg(feature = "testing")]
     pub faults: Faults,
 }
 
 /// Faults that tests inject into one node.
-#[doc(hidden)]
+#[cfg(feature = "testing")]
 #[derive(Debug, Default)]
 pub struct Faults {
     /// Delay inbound `REPLICATE`, `HINT_REPLAY`, and `HANDOFF` by this many milliseconds.
@@ -86,6 +86,37 @@ pub struct Faults {
     /// Never answer an inbound message of any kind from these peers. Blocking both sides makes
     /// a partition.
     pub blocked: parking_lot::Mutex<std::collections::HashSet<NodeId>>,
+}
+
+#[cfg(feature = "testing")]
+impl Faults {
+    /// How long to hold an inbound message from `peer` before it runs. `Duration::MAX` means
+    /// that it never gets an answer.
+    pub fn delay(&self, peer: NodeId, m: &discus_wire::Message) -> Option<std::time::Duration> {
+        use discus_wire::Message as M;
+        let ms = |a: &AtomicU64| {
+            Some(a.load(Ordering::Relaxed))
+                .filter(|&n| n > 0)
+                .map(std::time::Duration::from_millis)
+        };
+        if self.blocked.lock().contains(&peer) {
+            return Some(std::time::Duration::MAX);
+        }
+        match m {
+            M::Replicate(_) | M::HintReplay(_) | M::Handoff(_) => ms(&self.stall_bulk_ms),
+            M::Forward(_) if self.stall_forwards.load(Ordering::Relaxed) => {
+                Some(std::time::Duration::MAX)
+            }
+            M::RaftLeader(_)
+            | M::RaftConfig(_)
+            | M::RaftVote(_)
+            | M::RaftAppend(_)
+            | M::RaftSnapshot(_)
+            | M::CounterSync(_)
+            | M::CounterAck(_) => ms(&self.stall_counter_ms),
+            _ => None,
+        }
+    }
 }
 
 /// Keeps one epoch in the history until it is dropped (spec section 5.1). Handoff holds one for
@@ -178,6 +209,7 @@ impl Node {
             counters: OnceLock::new(),
             epoch_tx,
             drain: tokio_util::sync::CancellationToken::new(),
+            #[cfg(feature = "testing")]
             faults: Faults::default(),
         }
     }
@@ -270,7 +302,6 @@ impl Node {
                 keys: c.write_set_keys.max(1),
                 bytes: c.write_set_bytes,
                 max_age: std::time::Duration::from_millis(c.write_set_ttl_ms),
-                counter_prefix: Bytes::copy_from_slice(c.counter_prefix.as_bytes()),
             },
             self.write_budget.clone(),
         )
@@ -328,6 +359,9 @@ impl Node {
         drop(epochs);
         if let Some(r) = self.replicator() {
             r.on_epoch(&old, &new);
+        }
+        if let Some(link) = self.link() {
+            link.forget_non_members(&new);
         }
         self.epoch_tx.send_replace(id);
         result
@@ -401,12 +435,15 @@ impl Node {
     }
 
     /// Run a store write with `stamp`. A write that changed its key records `stamp` as the
-    /// applied stamp of the command, so the key replicates. A write that changed nothing leaves
-    /// no trace.
-    pub fn write<R>(&self, key: &[u8], stamp: Version, f: impl FnOnce(&mut Slot) -> R) -> R {
+    /// applied stamp of the command and queues the key for the other owners (spec section 8.2).
+    /// A write that changed nothing leaves no trace.
+    pub fn write<R>(&self, key: &Bytes, stamp: Version, f: impl FnOnce(&mut Slot) -> R) -> R {
         let (result, changed) = self.store.write_changed(key, stamp, f);
         if changed {
             APPLIED.with(|a| a.set(Some(stamp)));
+            if let Some(replicator) = self.replicator() {
+                replicator.written(self, key);
+            }
         }
         result
     }

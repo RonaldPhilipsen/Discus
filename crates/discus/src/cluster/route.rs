@@ -22,55 +22,6 @@ pub enum Route {
     Broadcast,
 }
 
-const CONNECTION: &[&str] = &[
-    "PING", "ECHO", "QUIT", "AUTH", "HELLO", "SELECT", "COMMAND", "CLIENT", "INFO", "CONFIG",
-    "CLUSTER",
-];
-
-const READS: &[&str] = &[
-    "GET",
-    "STRLEN",
-    "TYPE",
-    "TTL",
-    "PTTL",
-    "HGET",
-    "HMGET",
-    "HGETALL",
-    "HEXISTS",
-    "HLEN",
-    "HKEYS",
-    "HVALS",
-    "SMEMBERS",
-    "SISMEMBER",
-    "SMISMEMBER",
-    "SCARD",
-    "SRANDMEMBER",
-    "ZSCORE",
-    "ZMSCORE",
-    "ZCARD",
-    "ZRANGE",
-    "ZREVRANGE",
-    "ZRANGEBYSCORE",
-    "ZCOUNT",
-];
-
-/// The route of a supported command, by its upper-case name.
-pub fn route_of(name: &str) -> Route {
-    match name {
-        "MGET" => Route::MultiRead { sum: false },
-        "EXISTS" => Route::MultiRead { sum: true },
-        "MSET" => Route::MultiWrite { pairs: true },
-        "DEL" => Route::MultiWrite { pairs: false },
-        "SCAN" | "RANDOMKEY" => Route::Local,
-        "DBSIZE" => Route::Fanout,
-        "FLUSHDB" | "FLUSHALL" => Route::Broadcast,
-        n if CONNECTION.contains(&n) => Route::Connection,
-        n => Route::Single {
-            write: !READS.contains(&n),
-        },
-    }
-}
-
 /// The keys that a command orders on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Keys {

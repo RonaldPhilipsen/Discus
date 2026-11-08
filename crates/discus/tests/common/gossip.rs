@@ -22,12 +22,23 @@ pub struct GossipNode {
 }
 
 impl GossipNode {
-    /// Stop at once, as a crash would: no drain, no goodbye.
+    /// Stop serving node-to-node traffic and client traffic at once, as a crash would: no
+    /// drain, no goodbye.
     pub fn kill(&self) {
         if let Some(link) = self.node.link() {
             link.transport.close();
         }
         self.shutdown.cancel();
+    }
+
+    /// True when this node's store holds `key`.
+    pub fn holds(&self, key: &[u8]) -> bool {
+        self.node.store.read(key, |e| e.is_some())
+    }
+
+    /// The primary of `key` in this node's current epoch.
+    pub fn primary(&self, key: &[u8]) -> NodeId {
+        self.node.epochs().current().primary(key).unwrap()
     }
 
     pub fn is_normal(&self) -> bool {
@@ -93,21 +104,12 @@ impl Net {
 
     pub fn with_lease_ms(ms: u64) -> Net {
         discus::security::tls::install_default();
-        let ca = TestCa::new();
-        let dir = tempfile::tempdir().unwrap();
-        let (cert, key) = ca.issue(TEST_SAN);
-        std::fs::write(dir.path().join("ca.pem"), ca.ca_pem()).unwrap();
-        std::fs::write(dir.path().join("cert.pem"), cert).unwrap();
-        std::fs::write(dir.path().join("key.pem"), key).unwrap();
+        let (ca, dir) = ca_files();
         Net {
             ca,
             dir,
             lease: MemoryLease::system(ms),
         }
-    }
-
-    fn path(&self, name: &str) -> String {
-        self.dir.path().join(name).display().to_string()
     }
 
     /// Start a node on `socket`, seeded with `seeds`.
@@ -119,39 +121,9 @@ impl Net {
         opts: Opts,
     ) -> GossipNode {
         let cluster_addr = socket.local_addr().unwrap();
-        let mut argv: Vec<String> = [
-            "discus",
-            "--listen",
-            "127.0.0.1:0",
-            "--admin-listen",
-            "127.0.0.1:0",
-            "--cluster-san",
-            TEST_SAN,
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        argv.extend([
-            "--cluster-listen".into(),
-            cluster_addr.to_string(),
-            "--cluster-ca".into(),
-            self.path("ca.pem"),
-            "--cluster-cert".into(),
-            self.path("cert.pem"),
-            "--cluster-key".into(),
-            self.path("key.pem"),
-        ]);
-        for seed in seeds {
-            argv.push("--peer".into());
-            argv.push(seed.to_string());
-        }
-        for (flag, value) in DEFAULTS {
-            if !extra.iter().any(|e| e == flag) {
-                argv.push(flag.to_string());
-                argv.push(value.to_string());
-            }
-        }
-        argv.extend(extra.iter().map(|s| s.to_string()));
+        let peers = seeds.iter().map(|s| s.to_string());
+        let extra: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+        let argv = argv(&self.dir, cluster_addr, peers, DEFAULTS, &extra);
         let config = Config::parse_from(argv).expect("valid gossip arguments");
         let lease = opts
             .lease
@@ -172,18 +144,7 @@ impl Net {
         )
         .await
         .expect("bind");
-        let node = server.node().clone();
-        let (addr, admin) = (server.local_addr(), server.admin_addr());
-        let shutdown = CancellationToken::new();
-        tokio::spawn(server.run(shutdown.clone()));
-        GossipNode {
-            id: node.id,
-            addr,
-            admin,
-            cluster_addr,
-            node,
-            shutdown,
-        }
+        spawn(server, cluster_addr)
     }
 
     pub async fn start(&self, seeds: &[SocketAddr], extra: &[&str]) -> GossipNode {
@@ -206,6 +167,79 @@ impl Net {
             nodes.push(self.start_on(s, &seeds, extra, Opts::default()).await);
         }
         nodes
+    }
+}
+
+/// A test CA, and its CA, certificate, and key files in a new temporary directory.
+pub fn ca_files() -> (TestCa, tempfile::TempDir) {
+    let ca = TestCa::new();
+    let dir = tempfile::tempdir().unwrap();
+    let (cert, key) = ca.issue(TEST_SAN);
+    std::fs::write(dir.path().join("ca.pem"), ca.ca_pem()).unwrap();
+    std::fs::write(dir.path().join("cert.pem"), cert).unwrap();
+    std::fs::write(dir.path().join("key.pem"), key).unwrap();
+    (ca, dir)
+}
+
+/// The arguments of a node on `cluster_addr` with the files of [`ca_files`] in `dir`, then a
+/// `--peer` flag for each of `peers`, the `defaults` that `extra` does not set, and `extra`.
+pub fn argv(
+    dir: &tempfile::TempDir,
+    cluster_addr: SocketAddr,
+    peers: impl IntoIterator<Item = String>,
+    defaults: &[(&str, &str)],
+    extra: &[String],
+) -> Vec<String> {
+    let path = |name: &str| dir.path().join(name).display().to_string();
+    let mut argv: Vec<String> = [
+        "discus",
+        "--listen",
+        "127.0.0.1:0",
+        "--admin-listen",
+        "127.0.0.1:0",
+        "--cluster-san",
+        TEST_SAN,
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    argv.extend([
+        "--cluster-listen".into(),
+        cluster_addr.to_string(),
+        "--cluster-ca".into(),
+        path("ca.pem"),
+        "--cluster-cert".into(),
+        path("cert.pem"),
+        "--cluster-key".into(),
+        path("key.pem"),
+    ]);
+    for peer in peers {
+        argv.push("--peer".into());
+        argv.push(peer);
+    }
+    for (flag, value) in defaults {
+        if !extra.iter().any(|e| e == flag) {
+            argv.push(flag.to_string());
+            argv.push(value.to_string());
+        }
+    }
+    argv.extend(extra.iter().cloned());
+    argv
+}
+
+/// Run a bound server until its node's shutdown token is cancelled.
+pub fn spawn(server: Server, cluster_addr: SocketAddr) -> GossipNode {
+    let node = server.node().clone();
+    let (addr, admin) = (server.local_addr(), server.admin_addr());
+    let shutdown = CancellationToken::new();
+    tokio::spawn(server.run(shutdown.clone()));
+    GossipNode {
+        id: node.id,
+        addr,
+        admin,
+        cluster_addr,
+        node,
+        shutdown,
     }
 }
 

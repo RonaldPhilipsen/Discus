@@ -1,5 +1,6 @@
+use discus_placement::ManualClock;
 use discus_store::Version;
-use discus_store::{Entry, ManualClock, Store, StoreConfig, Value, HASH_SEED};
+use discus_store::{Entry, Store, StoreConfig, Value, HASH_SEED};
 use std::sync::Arc;
 
 #[test]
