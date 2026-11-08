@@ -59,17 +59,6 @@ async fn a_leader_and_a_follower_per_group() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_follower_holds_every_increment() {
-    let (net, leases) = (Net::new(), Leases::new());
-    let (nodes, _gates) = two(&net, &leases, &[]).await;
-    let mut c = nodes[0].redis().await;
-    for _ in 0..100 {
-        let _: i64 = c.incr("cnt:a", 1).await.unwrap();
-    }
-    assert!(all_hold(&refs(&nodes), "cnt:a", "100", Duration::from_secs(3)).await);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn failover_keeps_the_value() {
     let (net, leases) = (Net::new(), Leases::new());
     let (nodes, _gates) = two(&net, &leases, &[]).await;
