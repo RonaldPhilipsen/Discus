@@ -142,7 +142,6 @@ pub struct Hop {
 pub struct Job {
     pub cmd: Command,
     pub spec: &'static CommandSpec,
-    pub route: Route,
     /// The per-connection round-robin position for reads.
     pub rr: u64,
     /// The write set of the client connection. Forwarded jobs have none.
@@ -153,7 +152,7 @@ pub type Writes = Arc<Mutex<writeset::WriteSet>>;
 
 impl Job {
     pub fn keys(&self) -> Keys {
-        keys_of(self.route, &self.cmd)
+        keys_of(self.spec.route, &self.cmd)
     }
 }
 
@@ -202,7 +201,6 @@ pub fn prepare(
     Prepared::Data(Job {
         cmd,
         spec,
-        route: spec.route,
         rr: conn.next_rr(),
         writes: conn.writes.clone(),
     })
@@ -265,15 +263,15 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
         drop(route);
         return dispatch;
     }
-    if job.route == Route::Broadcast && hop.hops == 0 && node.counters().is_some() {
+    if job.spec.route == Route::Broadcast && hop.hops == 0 && node.counters().is_some() {
         drop(route);
-        return crate::counter::route::broadcast(node, job.cmd);
+        return crate::counter::route::broadcast(node, job.spec, job.cmd);
     }
     if node.link().is_none() {
         drop(route);
         return Dispatch::Ready(local(node, job.spec, &job.cmd));
     }
-    match job.route {
+    match job.spec.route {
         Route::Single { write } => single(node, job, hop, write, route),
         Route::MultiRead { sum } => {
             let merge = if sum {

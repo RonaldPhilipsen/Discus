@@ -13,7 +13,8 @@ use bytes::Bytes;
 use discus_resp::{Command, Value};
 
 use crate::command::float::{incr_by_float, parse_float_delta, FloatDelta};
-use crate::command::string::deadline;
+use crate::command::keys::{span, ttl_value};
+use crate::command::string::{deadline, set_options, Expiry};
 use crate::command::util::{parse_i64, upper};
 use crate::command::CommandError;
 
@@ -83,28 +84,23 @@ pub fn accepts(name: &str) -> bool {
     COMMANDS.contains(&name)
 }
 
+/// True when the command is one of the space-separated `names`, in any case.
+fn named(cmd: &Command, names: &str) -> bool {
+    names
+        .split(' ')
+        .any(|n| cmd[0].eq_ignore_ascii_case(n.as_bytes()))
+}
+
 /// True for the commands that only read. The leader serves them without a log entry.
 pub fn is_read(cmd: &Command) -> bool {
-    matches!(
-        upper(&cmd[0]).as_str(),
-        "GET" | "EXISTS" | "TTL" | "PTTL" | "TYPE" | "MGET" | "STRLEN"
-    )
+    named(cmd, "GET EXISTS TTL PTTL TYPE MGET STRLEN")
 }
 
 /// True for the writes that never grow the state. A full reserve still accepts them.
 pub fn is_shrinking(cmd: &Command) -> bool {
-    matches!(
-        upper(&cmd[0]).as_str(),
-        "DEL"
-            | "GETDEL"
-            | "PERSIST"
-            | "EXPIRE"
-            | "PEXPIRE"
-            | "EXPIREAT"
-            | "PEXPIREAT"
-            | "FLUSHALL"
-            | "FLUSHDB"
-            | "PURGE"
+    named(
+        cmd,
+        "DEL GETDEL PERSIST EXPIRE PEXPIRE EXPIREAT PEXPIREAT FLUSHALL FLUSHDB PURGE",
     )
 }
 
@@ -206,6 +202,7 @@ impl CounterState {
             self.peek(key, now)
                 .map_or(Value::Null, |e| Value::Bulk(e.value.clone()))
         };
+        let expires = |key: &[u8]| self.peek(key, now).map(|e| e.expires_at_ms);
         Ok(match name.as_str() {
             "GET" => bulk(&cmd[1]),
             "MGET" => Value::Array(cmd[1..].iter().map(|k| bulk(k)).collect()),
@@ -221,10 +218,8 @@ impl CounterState {
             } else {
                 "none"
             }),
-            "TTL" => remaining(self.peek(&cmd[1], now), now, |ms| {
-                ((ms + 500) / 1000) as i64
-            }),
-            "PTTL" => remaining(self.peek(&cmd[1], now), now, |ms| ms as i64),
+            "TTL" => ttl_value(expires(&cmd[1]), now, |ms| ((ms + 500) / 1000) as i64),
+            "PTTL" => ttl_value(expires(&cmd[1]), now, |ms| ms as i64),
             other => return Err(CommandError::UnknownCommand(other.to_lowercase())),
         })
     }
@@ -278,16 +273,12 @@ impl CounterState {
                     .count();
                 Ok(Value::Integer(removed as i64))
             }
-            "EXPIRE" => {
-                let ms = span(&cmd[2], 1000, "expire")?;
-                Ok(self.set_deadline(now, &cmd[1], now as i128 + ms))
+            "EXPIRE" | "PEXPIRE" | "EXPIREAT" | "PEXPIREAT" => {
+                let unit = if name.starts_with('P') { 1 } else { 1000 };
+                let base = if name.ends_with("AT") { 0 } else { now as i128 };
+                let ms = span(&cmd[2], unit, &name.to_lowercase())?;
+                Ok(self.set_deadline(now, &cmd[1], base + ms))
             }
-            "PEXPIRE" => {
-                let ms = span(&cmd[2], 1, "pexpire")?;
-                Ok(self.set_deadline(now, &cmd[1], now as i128 + ms))
-            }
-            "EXPIREAT" => Ok(self.set_deadline(now, &cmd[1], span(&cmd[2], 1000, "expireat")?)),
-            "PEXPIREAT" => Ok(self.set_deadline(now, &cmd[1], span(&cmd[2], 1, "pexpireat")?)),
             "PERSIST" => Ok(Value::Integer(match self.live(&cmd[1], now) {
                 Some(e) if e.expires_at_ms.is_some() => {
                     e.expires_at_ms = None;
@@ -317,53 +308,27 @@ impl CounterState {
     }
 
     fn set(&mut self, now: u64, cmd: &Command) -> Reply {
-        #[derive(Clone, Copy)]
-        enum Ttl {
-            At(u64),
-            Keep,
-        }
-        let (mut nx, mut xx, mut get_old) = (false, false, false);
-        let mut ttl: Option<Ttl> = None;
-        let mut i = 3;
-        while i < cmd.len() {
-            let opt = upper(&cmd[i]);
-            match opt.as_str() {
-                "NX" => nx = true,
-                "XX" => xx = true,
-                "GET" => get_old = true,
-                "KEEPTTL" if ttl.is_none() => ttl = Some(Ttl::Keep),
-                "EX" | "PX" | "EXAT" | "PXAT" if ttl.is_none() => {
-                    let arg = cmd.get(i + 1).ok_or(CommandError::Syntax)?;
-                    ttl = Some(Ttl::At(deadline(&opt, arg, now, "set")?));
-                    i += 1;
-                }
-                _ => return Err(CommandError::Syntax),
-            }
-            i += 1;
-        }
-        if nx && xx {
-            return Err(CommandError::Syntax);
-        }
+        let o = set_options(cmd, now)?;
         let key = &cmd[1];
         let old = self.live(key, now).cloned();
         let reply = |old: Option<&CounterEntry>| {
-            if get_old {
+            if o.get {
                 old.map_or(Value::Null, |e| Value::Bulk(e.value.clone()))
             } else {
                 Value::ok()
             }
         };
-        if (nx && old.is_some()) || (xx && old.is_none()) {
-            return Ok(if get_old {
+        if (o.nx && old.is_some()) || (o.xx && old.is_none()) {
+            return Ok(if o.get {
                 reply(old.as_ref())
             } else {
                 Value::Null
             });
         }
-        let expires_at_ms = match ttl {
-            Some(Ttl::At(t)) => Some(t),
-            Some(Ttl::Keep) => old.as_ref().and_then(|e| e.expires_at_ms),
-            None => None,
+        let expires_at_ms = match o.expiry {
+            Some(Expiry::At(t)) => Some(t),
+            Some(Expiry::Keep) => old.as_ref().and_then(|e| e.expires_at_ms),
+            _ => None,
         };
         self.put(
             key,
@@ -474,26 +439,6 @@ impl CounterState {
         }
         Value::Integer(1)
     }
-}
-
-fn remaining(entry: Option<&CounterEntry>, now: u64, to_unit: impl Fn(u64) -> i64) -> Value {
-    Value::Integer(match entry {
-        None => -2,
-        Some(e) => match e.expires_at_ms {
-            None => -1,
-            Some(t) => to_unit(t.saturating_sub(now)),
-        },
-    })
-}
-
-fn span(arg: &[u8], unit_ms: i128, who: &str) -> Result<i128, CommandError> {
-    let ms = parse_i64(arg)? as i128 * unit_ms;
-    if ms.abs() > (i64::MAX / 2) as i128 {
-        return Err(CommandError::Custom(format!(
-            "ERR invalid expire time in '{who}' command"
-        )));
-    }
-    Ok(ms)
 }
 
 /// The deadline of `INCR key [EX s | PX ms | EXAT s | PXAT ms]`, from the arguments after the

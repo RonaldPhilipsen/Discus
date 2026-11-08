@@ -5,6 +5,7 @@
 //! in one group runs as one entry on its leader. Several groups fan out like a normal multi-key
 //! command. A command that mixes counter keys and other keys is refused.
 
+use std::mem;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,11 +15,11 @@ use discus_wire::ForwardMode;
 use futures::future::join_all;
 
 use super::{state, Counters, Refusal};
-use crate::cluster::multi::Merge;
+use crate::cluster::multi::{split, Merge};
 use crate::cluster::route::{keys_of, Keys, Route};
 use crate::cluster::{forward, Dispatch, Hop, Job, Reply, MAX_HOPS};
-use crate::command::util::upper;
-use crate::command::CommandError;
+use crate::command::util::{check_key, check_value};
+use crate::command::{CommandError, CommandSpec};
 use crate::Node;
 
 /// The leader refused before it applied anything. The entry node tries again.
@@ -45,7 +46,7 @@ fn is_no_leader(v: &Value) -> bool {
 /// Take a command with counter keys. `None` for any other command.
 pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
     let counters = node.counters()?.clone();
-    let Keys::Some(keys) = keys_of(job.route, &job.cmd) else {
+    let Keys::Some(keys) = keys_of(job.spec.route, &job.cmd) else {
         return None;
     };
     let strong = keys.iter().filter(|k| node.is_counter_key(k)).count();
@@ -55,13 +56,13 @@ pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
     if strong != keys.len() {
         return Some(Dispatch::Ready(error(MIXED)));
     }
-    if !state::accepts(&upper(&job.cmd[0])) {
+    if !state::accepts(job.spec.name) {
         return Some(Dispatch::Ready(error(ONLY_STRINGS)));
     }
-    if let Err(e) = check_sizes(node, &job.cmd) {
+    if let Err(e) = check_sizes(node, job.spec.name, &job.cmd) {
         return Some(Dispatch::Ready(Reply::error(e)));
     }
-    let (node, cmd, hop, route) = (node.clone(), job.cmd.clone(), hop.clone(), job.route);
+    let (node, cmd, hop, route) = (node.clone(), job.cmd.clone(), hop.clone(), job.spec.route);
     Some(Dispatch::Pending(Box::pin(async move {
         match route {
             Route::MultiRead { sum } => {
@@ -84,9 +85,8 @@ pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
     })))
 }
 
-fn check_sizes(node: &Node, cmd: &Command) -> Result<(), CommandError> {
-    let name = upper(&cmd[0]);
-    let (keys, values): (Vec<&Bytes>, Vec<&Bytes>) = match name.as_str() {
+fn check_sizes(node: &Node, name: &str, cmd: &Command) -> Result<(), CommandError> {
+    let (keys, values): (Vec<&Bytes>, Vec<&Bytes>) = match name {
         "MSET" => {
             if cmd.len().is_multiple_of(2) {
                 return Err(CommandError::WrongArity("MSET".into()));
@@ -99,13 +99,8 @@ fn check_sizes(node: &Node, cmd: &Command) -> Result<(), CommandError> {
         "SET" | "APPEND" => (vec![&cmd[1]], vec![&cmd[2]]),
         _ => (vec![&cmd[1]], vec![]),
     };
-    if keys.iter().any(|k| k.len() > node.config.max_key_bytes) {
-        return Err(CommandError::KeyTooLarge);
-    }
-    if values.iter().any(|v| v.len() > node.config.max_value_bytes) {
-        return Err(CommandError::ValueTooLarge);
-    }
-    Ok(())
+    keys.into_iter().try_for_each(|k| check_key(node, k))?;
+    values.into_iter().try_for_each(|v| check_value(node, v))
 }
 
 /// Split by group and merge like a normal multi-key command (spec section 7.3).
@@ -117,60 +112,26 @@ async fn fan_out(
     merge: Merge,
     width: usize,
 ) -> Reply {
-    if width == 2 && cmd.len().is_multiple_of(2) {
-        return Reply::error(CommandError::WrongArity("MSET".into()));
-    }
-    let mut groups: Vec<(u16, Command, Vec<usize>)> = Vec::new();
-    for (pos, item) in cmd[1..].chunks(width).enumerate() {
-        let g = counters.group_of(&item[0]);
-        let i = match groups.iter().position(|(x, _, _)| *x == g) {
-            Some(i) => i,
-            None => {
-                groups.push((g, vec![cmd[0].clone()], Vec::new()));
-                groups.len() - 1
-            }
-        };
-        groups[i].1.extend(item.iter().cloned());
-        groups[i].2.push(pos);
-    }
+    let Some(mut groups) = split(&cmd, width, |key| Some(counters.group_of(key))) else {
+        return Reply::try_again();
+    };
     if groups.len() == 1 {
-        return run(node, counters, groups[0].0, cmd, hop).await;
+        return run(node, counters, groups[0].target, cmd, hop).await;
     }
     let parts = join_all(
         groups
-            .iter()
-            .map(|(g, sub, _)| run(node, counters, *g, sub.clone(), hop.clone())),
+            .iter_mut()
+            .map(|g| run(node, counters, g.target, mem::take(&mut g.cmd), hop.clone())),
     )
     .await;
     if parts.iter().any(|r| matches!(r.value, Value::Error(_))) {
         return Reply::try_again();
     }
     let total = (cmd.len() - 1) / width;
-    let value = match merge {
-        Merge::InOrder => {
-            let mut out = vec![Value::Null; total];
-            for ((_, _, positions), r) in groups.iter().zip(parts) {
-                let Value::Array(values) = r.value else {
-                    return Reply::try_again();
-                };
-                for (pos, v) in positions.iter().zip(values) {
-                    out[*pos] = v;
-                }
-            }
-            Value::Array(out)
-        }
-        Merge::Sum => Value::Integer(
-            parts
-                .iter()
-                .map(|r| match r.value {
-                    Value::Integer(n) => n,
-                    _ => 0,
-                })
-                .sum(),
-        ),
-        Merge::AllOk => Value::ok(),
-    };
-    Reply::value(value)
+    match merge.apply(total, &groups, parts.into_iter().map(|r| r.value)) {
+        Some(value) => Reply::value(value),
+        None => Reply::try_again(),
+    }
 }
 
 /// Run one command of group `g` on its leader. The entry node waits up to the counter timeout
@@ -186,7 +147,7 @@ pub async fn run(
     let entry = hop.hops == 0;
     let read = state::is_read(&cmd);
     let deadline = Instant::now() + counters.settings.timeout;
-    let group = counters.group(g).clone();
+    let group = counters.group(g);
     loop {
         let changed = group.changed.notified();
         match counters.leader(g) {
@@ -223,10 +184,10 @@ pub async fn run(
 /// `FLUSHALL` and `FLUSHDB` on the entry node: the cache broadcast, then every counter group
 /// (spec section 12.1). A group without a leader or a quorum keeps its counters, and the reply
 /// says how many groups were cleared.
-pub fn broadcast(node: &Arc<Node>, cmd: Command) -> Dispatch {
+pub fn broadcast(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> Dispatch {
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
-        let cache = crate::cluster::multi::flush(&node, cmd.clone())
+        let cache = crate::cluster::multi::flush(&node, spec, cmd.clone())
             .finish()
             .await;
         let Some(counters) = node.counters().cloned() else {

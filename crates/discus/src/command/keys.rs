@@ -46,7 +46,7 @@ fn set_deadline(node: &Node, key: &bytes::Bytes, deadline_ms: i128) -> Reply {
 }
 
 /// `n` units of `unit_ms` milliseconds, as a signed value that cannot overflow.
-fn span(arg: &[u8], unit_ms: i128, who: &str) -> Result<i128, CommandError> {
+pub(crate) fn span(arg: &[u8], unit_ms: i128, who: &str) -> Result<i128, CommandError> {
     let n = parse_i64(arg)? as i128;
     let ms = n * unit_ms;
     if ms.abs() > (i64::MAX / 2) as i128 {
@@ -73,16 +73,24 @@ fn pexpireat(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     set_deadline(node, &cmd[1], span(&cmd[2], 1, "pexpireat")?)
 }
 
-/// Remaining time: -2 for a missing key, -1 for a key without expiry.
+/// Remaining time of a key with `expires` (`None` for a missing key): -2 when missing, -1 when
+/// it never expires.
+pub(crate) fn ttl_value(
+    expires: Option<Option<u64>>,
+    now: u64,
+    to_unit: impl Fn(u64) -> i64,
+) -> Value {
+    Value::Integer(match expires {
+        None => -2,
+        Some(None) => -1,
+        Some(Some(t)) => to_unit(t.saturating_sub(now)),
+    })
+}
+
 fn remaining(node: &Node, key: &[u8], to_unit: impl Fn(u64) -> i64) -> Reply {
     let now = node.store.now_ms();
-    Ok(Value::Integer(node.store.read(key, |e| match e {
-        None => -2,
-        Some(e) => match e.expires_at_ms {
-            None => -1,
-            Some(t) => to_unit(t.saturating_sub(now)),
-        },
-    })))
+    let expires = node.store.read(key, |e| e.map(|e| e.expires_at_ms));
+    Ok(ttl_value(expires, now, to_unit))
 }
 
 fn ttl(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {

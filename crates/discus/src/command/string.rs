@@ -82,50 +82,62 @@ pub fn deadline(option: &str, arg: &[u8], now_ms: u64, who: &str) -> Result<u64,
     ms.ok_or_else(invalid)
 }
 
-fn set(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    check_key(node, &cmd[1])?;
-    check_value(node, &cmd[2])?;
-    let (mut nx, mut xx, mut get_old) = (false, false, false);
-    let mut expiry: Option<Expiry> = None;
-    let now = node.store.now_ms();
+/// The options of `SET` after the value.
+#[derive(Clone, Copy, Default)]
+pub struct SetOptions {
+    pub nx: bool,
+    pub xx: bool,
+    pub get: bool,
+    pub expiry: Option<Expiry>,
+}
+
+pub fn set_options(cmd: &Command, now_ms: u64) -> Result<SetOptions, CommandError> {
+    let mut o = SetOptions::default();
     let mut i = 3;
     while i < cmd.len() {
         let opt = upper(&cmd[i]);
         match opt.as_str() {
-            "NX" => nx = true,
-            "XX" => xx = true,
-            "GET" => get_old = true,
-            "KEEPTTL" if expiry.is_none() => expiry = Some(Expiry::Keep),
-            "EX" | "PX" | "EXAT" | "PXAT" if expiry.is_none() => {
+            "NX" => o.nx = true,
+            "XX" => o.xx = true,
+            "GET" => o.get = true,
+            "KEEPTTL" if o.expiry.is_none() => o.expiry = Some(Expiry::Keep),
+            "EX" | "PX" | "EXAT" | "PXAT" if o.expiry.is_none() => {
                 let arg = cmd.get(i + 1).ok_or(CommandError::Syntax)?;
-                expiry = Some(Expiry::At(deadline(&opt, arg, now, "set")?));
+                o.expiry = Some(Expiry::At(deadline(&opt, arg, now_ms, "set")?));
                 i += 1;
             }
             _ => return Err(CommandError::Syntax),
         }
         i += 1;
     }
-    if nx && xx {
+    if o.nx && o.xx {
         return Err(CommandError::Syntax);
     }
+    Ok(o)
+}
+
+fn set(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+    check_key(node, &cmd[1])?;
+    check_value(node, &cmd[2])?;
+    let o = set_options(cmd, node.store.now_ms())?;
     admit(node, cmd[1].len() + cmd[2].len())?;
     let value = cmd[2].clone();
     node.write(&cmd[1], node.stamp()?, |slot| {
         let old = match str_of(slot.as_ref()) {
-            Err(e) if get_old => return Err(e),
+            Err(e) if o.get => return Err(e),
             old => old.ok().flatten().cloned(),
         };
         let exists = slot.is_some();
-        let skipped = (nx && exists) || (xx && !exists);
-        let reply = |old: Option<Bytes>| match (get_old, old) {
+        let skipped = (o.nx && exists) || (o.xx && !exists);
+        let reply = |old: Option<Bytes>| match (o.get, old) {
             (true, Some(b)) => Value::Bulk(b),
             (true, None) => Value::Null,
             (false, _) => Value::ok(),
         };
         if skipped {
-            return Ok(if get_old { reply(old) } else { Value::Null });
+            return Ok(if o.get { reply(old) } else { Value::Null });
         }
-        let expires = match expiry {
+        let expires = match o.expiry {
             Some(Expiry::At(t)) => Some(t),
             Some(Expiry::Keep) => slot.as_ref().and_then(|e| e.expires_at_ms),
             _ => None,
