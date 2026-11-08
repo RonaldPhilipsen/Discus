@@ -31,7 +31,18 @@ async fn three_nodes_form_one_cluster() {
     assert_eq!(holder.cluster_id, nodes[0].node.cluster_id());
     for n in &nodes {
         assert_eq!(common::status(n.admin, "/readyz").await, 200);
-        assert_eq!(common::status(n.admin, "/startupz").await, 200);
+    }
+    // Startup also waits for the handoff of each joiner, which follows the epoch shortly.
+    for n in &nodes {
+        let mut startup = 503;
+        for _ in 0..250 {
+            startup = common::status(n.admin, "/startupz").await;
+            if startup == 200 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(startup, 200);
     }
     let mut a = nodes[0].redis().await;
     let mut b = nodes[2].redis().await;
