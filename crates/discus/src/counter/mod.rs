@@ -618,50 +618,41 @@ impl Counters {
         }
         let me = self.clone();
         tokio::spawn(async move {
-            me.ask_round(g).await;
+            me.ask_now(g).await;
         });
     }
 
     /// Ask now and wait for the answers. Returns the best hint with a `NORMAL` leader.
-    pub async fn ask_now(self: &Arc<Self>, g: u16) -> Option<GroupHint> {
-        self.ask_round(g).await
+    pub async fn ask_now(&self, g: u16) -> Option<GroupHint> {
+        let view = self.view()?;
+        let answers = self.ask_all(&view, g).await;
+        let (best, denied) = group::pick(g, &view, answers);
+        self.group(g).learn(best.clone(), &denied);
+        best
     }
 
     /// Ask every other `NORMAL` member about group `g`. Returns the members that answered, and
     /// the ones among them that hold a Raft replica of the group.
-    pub async fn holders(self: &Arc<Self>, g: u16) -> (Vec<NodeId>, Vec<NodeId>) {
+    pub async fn holders(&self, g: u16) -> (Vec<NodeId>, Vec<NodeId>) {
         let Some(view) = self.view() else {
             return (Vec::new(), Vec::new());
         };
-        let peers: Vec<NodeId> = view
-            .ranked(g)
-            .into_iter()
-            .filter(|p| *p != view.me)
-            .collect();
-        let answers = futures::future::join_all(
-            peers
-                .iter()
-                .map(|p| self.send(*p, Message::RaftLeader(Vec::new()), ASK_TIMEOUT)),
-        )
-        .await;
         let (mut answered, mut holders) = (Vec::new(), Vec::new());
-        for (peer, answer) in peers.iter().zip(answers) {
-            let Ok(Message::RaftLeader(hints)) = answer else {
-                continue;
-            };
-            answered.push(*peer);
+        for (peer, hints) in self.ask_all(&view, g).await {
+            answered.push(peer);
             if hints
                 .iter()
                 .any(|h| h.group == g && h.mode == discus_wire::CounterMode::Raft)
             {
-                holders.push(*peer);
+                holders.push(peer);
             }
         }
         (answered, holders)
     }
 
-    async fn ask_round(self: &Arc<Self>, g: u16) -> Option<GroupHint> {
-        let view = self.view()?;
+    /// `RAFT_LEADER` to every other `NORMAL` member, best first for group `g`: the members that
+    /// answered, with their hints.
+    async fn ask_all(&self, view: &View, g: u16) -> Vec<(NodeId, Vec<GroupHint>)> {
         let peers: Vec<NodeId> = view
             .ranked(g)
             .into_iter()
@@ -673,17 +664,14 @@ impl Counters {
                 .map(|p| self.send(*p, Message::RaftLeader(Vec::new()), ASK_TIMEOUT)),
         )
         .await;
-        let answers = peers
-            .iter()
+        peers
+            .into_iter()
             .zip(answers)
             .filter_map(|(peer, answer)| match answer {
-                Ok(Message::RaftLeader(hints)) => Some((*peer, hints)),
+                Ok(Message::RaftLeader(hints)) => Some((peer, hints)),
                 _ => None,
             })
-            .collect();
-        let (best, denied) = group::pick(g, &view, answers);
-        self.group(g).learn(best.clone(), &denied);
-        best
+            .collect()
     }
 
     /// Send one counter message on the bulk lane. A bulk timeout is not data-path evidence, so a
