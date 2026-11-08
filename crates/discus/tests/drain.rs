@@ -69,23 +69,6 @@ async fn a_leaving_node_departs_after_the_deadline() {
     let _client = nodes[2].redis().await;
     nodes[2].shutdown.cancel();
     let rest = [&nodes[0], &nodes[1]];
-    let t0 = std::time::Instant::now();
-    for _ in 0..20 {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        eprintln!(
-            "DBG {:?} {:?} {:?}",
-            t0.elapsed(),
-            nodes[0]
-                .node
-                .membership()
-                .unwrap()
-                .members()
-                .iter()
-                .find(|(i, _)| i.id == nodes[2].id)
-                .map(|(i, l)| (i.state, *l)),
-            nodes[0].node.epochs().current().members().len()
-        );
-    }
     // The open connection holds the drain for the 2 s deadline.
     assert!(wait_until(Duration::from_secs(4), || agreed(&rest)).await);
     assert_eq!(listed_as(&nodes[0], &nodes[2]), None);
