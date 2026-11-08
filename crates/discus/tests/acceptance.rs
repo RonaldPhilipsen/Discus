@@ -9,14 +9,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::gossip::{agreed, wait_until, GossipNode, Net};
+use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
 
 const FORM: Duration = Duration::from_secs(10);
-
-fn refs(nodes: &[GossipNode]) -> Vec<&GossipNode> {
-    nodes.iter().collect()
-}
 
 async fn fill(n: &GossipNode, count: usize) -> Vec<String> {
     let mut c = n.redis().await;
@@ -43,7 +39,7 @@ async fn hits(n: &GossipNode, keys: &[String]) -> usize {
 async fn a_node_loss_causes_no_read_errors() {
     let net = Net::new();
     let nodes = net.start_all(4, &["--replication-factor", "3"]).await;
-    assert!(wait_until(FORM, || agreed(&refs(&nodes))).await);
+    wait_agreed(&refs(&nodes), FORM).await;
     let keys = Arc::new(fill(&nodes[0], 300).await);
     let owners = |k: &String| nodes[0].node.owners(k.as_bytes()).len();
     assert!(
@@ -77,7 +73,7 @@ async fn a_node_loss_causes_no_read_errors() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     nodes[3].kill();
     let rest = refs(&nodes[..3]);
-    assert!(wait_until(FORM, || agreed(&rest)).await);
+    wait_agreed(&rest, FORM).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     stop.store(true, Ordering::Relaxed);
     for r in readers {
@@ -93,12 +89,12 @@ async fn a_node_loss_causes_no_read_errors() {
 async fn hits_after_a_join(extra: &[&str]) -> usize {
     let net = Net::new();
     let nodes = net.start_all(2, extra).await;
-    assert!(wait_until(FORM, || agreed(&refs(&nodes))).await);
+    wait_agreed(&refs(&nodes), FORM).await;
     let keys = fill(&nodes[0], 400).await;
     let joiner = net.start(&[nodes[0].cluster_addr], extra).await;
     let mut all = refs(&nodes);
     all.push(&joiner);
-    assert!(wait_until(FORM, || agreed(&all)).await);
+    wait_agreed(&all, FORM).await;
     let ten = Duration::from_secs(10);
     assert!(common::wait_status(joiner.admin, "/startupz", 200, ten).await);
     hits(&nodes[0], &keys).await

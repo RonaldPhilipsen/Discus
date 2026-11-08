@@ -10,7 +10,7 @@ use std::time::Duration;
 use common::counters::{
     flags, group_of, held, incr_until, join_to, leader_of, raft_cluster, status, Leases, GROUPS,
 };
-use common::gossip::{agreed, refs, wait_until, GossipNode, Net};
+use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
 use common::status as http_status;
 use discus::counter::group_key;
 use redis::AsyncCommands;
@@ -38,9 +38,9 @@ async fn startupz_waits_for_counter_promotion() {
         .faults
         .stall_counter_ms
         .store(400, Ordering::Relaxed);
-    let mut all: Vec<&GossipNode> = nodes.iter().collect();
+    let mut all = refs(&nodes);
     all.push(&fourth);
-    assert!(wait_until(Duration::from_secs(15), || agreed(&all)).await);
+    wait_agreed(&all, Duration::from_secs(15)).await;
     let mut waited = false;
     let unstall = tokio::time::Instant::now() + Duration::from_secs(3);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -75,7 +75,7 @@ async fn startupz_waits_for_counter_promotion() {
 async fn drain_moves_raft_roles_away() {
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 4, &["--shutdown-timeout-secs", "15"]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     let leaving = nodes
         .iter()
         .find(|n| (0..GROUPS).any(|g| status(n, g).role == "leader"))
@@ -157,11 +157,8 @@ async fn a_rejoined_node_discards_its_counters() {
         n.node.faults.blocked.lock().remove(&x.id);
         x.node.faults.blocked.lock().remove(&n.id);
     }
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
-    assert!(
-        wait_until(Duration::from_secs(30), || agreed(&refs)).await,
-        "the partition did not heal"
-    );
+    let refs = refs(&nodes);
+    wait_agreed(&refs, Duration::from_secs(30)).await;
     let losers: Vec<usize> = (0..nodes.len())
         .filter(|i| rejoined[*i].load(Ordering::Relaxed))
         .collect();
@@ -181,8 +178,8 @@ async fn a_rejoined_node_discards_its_counters() {
 async fn a_false_dead_heals_to_one_value() {
     let net = Net::new();
     let nodes = net.start_all(3, &["--counter-groups", "4"]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
-    assert!(wait_until(Duration::from_secs(10), || agreed(&refs)).await);
+    let refs = refs(&nodes);
+    wait_agreed(&refs, Duration::from_secs(10)).await;
     let mut c = nodes[0].redis().await;
     assert_eq!(
         incr_until(&mut c, "cnt:fd", Duration::from_secs(10)).await,
@@ -214,7 +211,7 @@ async fn a_false_dead_heals_to_one_value() {
         n.node.faults.blocked.lock().remove(&x.id);
         x.node.faults.blocked.lock().remove(&n.id);
     }
-    assert!(wait_until(Duration::from_secs(30), || agreed(&refs)).await);
+    wait_agreed(&refs, Duration::from_secs(30)).await;
     let mut values = Vec::new();
     for n in &nodes {
         let mut client = n.redis().await;
@@ -262,7 +259,7 @@ async fn growth_from_one_to_three_and_back() {
 
     let (second, _) = join_to(&net, &leases, &[&first], &extra).await;
     let two = [&first, &second];
-    assert!(wait_until(Duration::from_secs(10), || agreed(&two)).await);
+    wait_agreed(&two, Duration::from_secs(10)).await;
     let g = group_of(&first, "cnt:grow");
     assert!(
         wait_until(Duration::from_secs(10), || [&first, &second]
@@ -283,7 +280,7 @@ async fn growth_from_one_to_three_and_back() {
 
     let (third, _) = join_to(&net, &leases, &[&first, &second], &extra).await;
     let three = [&first, &second, &third];
-    assert!(wait_until(Duration::from_secs(10), || agreed(&three)).await);
+    wait_agreed(&three, Duration::from_secs(10)).await;
     assert!(
         wait_until(Duration::from_secs(20), || common::counters::all_raft(
             &three
@@ -301,7 +298,7 @@ async fn growth_from_one_to_three_and_back() {
     );
 
     third.node.drain_token().cancel();
-    assert!(wait_until(Duration::from_secs(20), || agreed(&two)).await);
+    wait_agreed(&two, Duration::from_secs(20)).await;
     assert!(
         wait_until(Duration::from_secs(10), || leader_of(&two, g)
             .is_some_and(|l| status(l, g).voters.is_empty()))
@@ -314,7 +311,7 @@ async fn growth_from_one_to_three_and_back() {
     );
 
     second.node.drain_token().cancel();
-    assert!(wait_until(Duration::from_secs(20), || agreed(&[&first])).await);
+    wait_agreed(&[&first], Duration::from_secs(20)).await;
     assert_eq!(
         incr_until(&mut c, "cnt:grow", Duration::from_secs(10)).await,
         54

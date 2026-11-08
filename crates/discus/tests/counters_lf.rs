@@ -10,7 +10,7 @@ use bytes::Bytes;
 use common::counters::{
     group_of, held, incr_until, leader_of, role, start, status, Leases, FAST, GROUPS,
 };
-use common::gossip::{agreed, socket, wait_until, GossipNode, Net, Opts};
+use common::gossip::{refs, socket, wait_agreed, wait_until, GossipNode, Net, Opts};
 use discus::counter::Refusal;
 use discus_placement::mock::MockClock;
 use discus_placement::{Clock, SystemClock};
@@ -34,8 +34,8 @@ async fn two(
     extra: &[&str],
 ) -> (Vec<GossipNode>, Vec<Arc<AtomicBool>>) {
     let (nodes, gates) = start(net, leases, 2, extra).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
-    assert!(wait_until(Duration::from_secs(10), || agreed(&refs)).await);
+    let refs = refs(&nodes);
+    wait_agreed(&refs, Duration::from_secs(10)).await;
     assert!(
         wait_until(Duration::from_secs(10), || settled(&refs)).await,
         "the groups did not settle"
@@ -47,7 +47,7 @@ async fn two(
 async fn a_leader_and_a_follower_per_group() {
     let (net, leases) = (Net::new(), Leases::new());
     let (nodes, _gates) = two(&net, &leases, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     assert!(
         wait_until(Duration::from_secs(5), || (0..GROUPS).all(|g| {
             let l = leader_of(&refs, g).map(|l| l.id);
@@ -80,7 +80,7 @@ async fn the_follower_holds_every_increment() {
 async fn failover_keeps_the_value() {
     let (net, leases) = (Net::new(), Leases::new());
     let (nodes, _gates) = two(&net, &leases, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     let g = group_of(&nodes[0], "cnt:a");
     let mut c = nodes[0].redis().await;
     for _ in 0..100 {
@@ -104,7 +104,7 @@ async fn failover_keeps_the_value() {
 async fn a_lagging_follower_gets_a_snapshot() {
     let (net, leases) = (Net::new(), Leases::new());
     let (nodes, _gates) = two(&net, &leases, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     let g = group_of(&nodes[0], "cnt:lag");
     let leader = leader_of(&refs, g).unwrap();
     let follower = nodes.iter().find(|n| n.id != leader.id).unwrap();
@@ -140,7 +140,7 @@ async fn a_lagging_follower_gets_a_snapshot() {
 async fn a_leader_stops_at_the_lease_margin() {
     let (net, leases) = (Net::new(), Leases::new());
     let (nodes, gates) = two(&net, &leases, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     let g = group_of(&nodes[0], "cnt:fence");
     let mut c = nodes[0].redis().await;
     let _: i64 = c.incr("cnt:fence", 1).await.unwrap();
@@ -181,8 +181,8 @@ async fn a_leader_stops_at_the_lease_margin() {
 async fn the_follower_acquires_first() {
     let (net, leases) = (Net::new(), Leases::new());
     let (nodes, _gates) = start(&net, &leases, 3, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
-    assert!(wait_until(Duration::from_secs(10), || agreed(&refs)).await);
+    let refs = refs(&nodes);
+    wait_agreed(&refs, Duration::from_secs(10)).await;
     let g = group_of(&nodes[0], "cnt:first");
     assert!(
         wait_until(Duration::from_secs(10), || leader_of(&refs, g)
@@ -210,8 +210,8 @@ async fn the_follower_acquires_first() {
 async fn the_epoch_names_the_leader_without_a_lease() {
     let net = Net::new();
     let nodes = net.start_all(2, &["--counter-groups", "4"]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
-    assert!(wait_until(Duration::from_secs(10), || agreed(&refs)).await);
+    let refs = refs(&nodes);
+    wait_agreed(&refs, Duration::from_secs(10)).await;
     assert!(wait_until(Duration::from_secs(10), || settled(&refs)).await);
     let g = group_of(&nodes[0], "cnt:e");
     let mut c = nodes[0].redis().await;
@@ -279,7 +279,7 @@ async fn expiry_is_identical_under_clock_skew() {
         )
         .await;
     let refs = [&na, &nb];
-    assert!(wait_until(Duration::from_secs(10), || agreed(&refs)).await);
+    wait_agreed(&refs, Duration::from_secs(10)).await;
     assert!(wait_until(Duration::from_secs(10), || settled(&refs)).await);
     for (i, entry) in refs.iter().enumerate() {
         let key = format!("cnt:r{i}");

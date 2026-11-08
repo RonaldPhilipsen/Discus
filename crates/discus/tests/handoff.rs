@@ -5,18 +5,14 @@ mod common;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use common::gossip::{agreed, wait_until, GossipNode, Net};
+use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
 
 const FORM: Duration = Duration::from_secs(10);
 
-fn refs(nodes: &[GossipNode]) -> Vec<&GossipNode> {
-    nodes.iter().collect()
-}
-
 async fn formed(net: &Net, n: usize, extra: &[&str]) -> Vec<GossipNode> {
     let nodes = net.start_all(n, extra).await;
-    assert!(wait_until(FORM, || agreed(&refs(&nodes))).await);
+    wait_agreed(&refs(&nodes), FORM).await;
     nodes
 }
 
@@ -73,7 +69,7 @@ async fn a_death_refills_the_new_replica() {
     let keys = fill(&nodes[0], "death", 200).await;
     nodes[3].kill();
     let rest = refs(&nodes[..3]);
-    assert!(wait_until(FORM, || agreed(&rest)).await);
+    wait_agreed(&rest, FORM).await;
     assert!(
         wait_until(Duration::from_secs(10), || keys.iter().all(|k| {
             rest.iter()
@@ -92,7 +88,7 @@ async fn a_drain_hands_off_before_departing() {
     let keys = fill(&nodes[0], "drain", 300).await;
     nodes[2].shutdown.cancel();
     let rest = refs(&nodes[..2]);
-    assert!(wait_until(FORM, || agreed(&rest)).await);
+    wait_agreed(&rest, FORM).await;
     assert_eq!(hits(&nodes[0], &keys).await, keys.len());
 }
 
@@ -110,7 +106,7 @@ async fn epochs_during_a_scan_wait_for_one_more_scan() {
         joined.push(net.start(&[nodes[i % 2].cluster_addr], &slow).await);
     }
     let all: Vec<&GossipNode> = nodes.iter().chain(joined.iter()).collect();
-    assert!(wait_until(Duration::from_secs(20), || agreed(&all)).await);
+    wait_agreed(&all, Duration::from_secs(20)).await;
     assert!(wait_until(Duration::from_secs(60), || !rep.scanning()).await);
     let scans = rep.scans() - before;
     assert!((1..=2).contains(&scans), "{scans} scans");
@@ -134,7 +130,7 @@ async fn stalled_join(net: &Net, extra: &[&str]) -> (Vec<GossipNode>, GossipNode
         .stall_bulk_ms
         .store(60_000, Ordering::Relaxed);
     let all: Vec<&GossipNode> = nodes.iter().chain([&joiner]).collect();
-    assert!(wait_until(FORM, || agreed(&all)).await);
+    wait_agreed(&all, FORM).await;
     (nodes, joiner, keys)
 }
 
@@ -201,7 +197,7 @@ async fn a_rolling_restart_keeps_the_data_and_a_short_history() {
         let old = nodes.remove(0);
         old.shutdown.cancel();
         nodes.push(fresh);
-        assert!(wait_until(Duration::from_secs(15), || agreed(&refs(&nodes))).await);
+        wait_agreed(&refs(&nodes), Duration::from_secs(15)).await;
     }
     let hit = hits(&nodes[0], &keys).await;
     assert!(hit * 100 >= keys.len() * 99, "{hit} of {} hit", keys.len());

@@ -208,7 +208,7 @@ async fn growth_from_one_to_five_and_back_under_load() {
     for n in 2..=MAX_NODES {
         let (node, _) = join_to(&net, &leases, &refs(&nodes), &extra).await;
         nodes.push(node);
-        let all: Vec<&GossipNode> = nodes.iter().collect();
+        let all = refs(&nodes);
         settled(&all, &format!("grow to {n}")).await;
     }
 
@@ -230,7 +230,7 @@ async fn growth_from_one_to_five_and_back_under_load() {
     while nodes.len() > 1 {
         let leaving = nodes.pop().unwrap();
         leaving.node.drain_token().cancel();
-        let rest: Vec<&GossipNode> = nodes.iter().collect();
+        let rest = refs(&nodes);
         settled(&rest, &format!("shrink to {}", nodes.len())).await;
     }
 

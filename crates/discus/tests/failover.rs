@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use common::cluster::start_cluster;
-use common::gossip::{agreed, wait_until, GossipNode, Net};
+use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
 
 const FORM: Duration = Duration::from_secs(10);
@@ -23,7 +23,7 @@ async fn three(net: &Net) -> Vec<GossipNode> {
             ],
         )
         .await;
-    assert!(wait_until(FORM, || agreed(&nodes.iter().collect::<Vec<_>>())).await);
+    wait_agreed(&refs(&nodes), FORM).await;
     nodes
 }
 

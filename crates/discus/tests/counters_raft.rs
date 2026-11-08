@@ -10,7 +10,7 @@ use common::counters::{
     all_raft, flags, group_of, held, incr_once, incr_or_show, incr_until, join_to, key_in,
     leader_of, raft_cluster, role, start, status, voters_of, Leases, GROUPS, RAFT, SLOW_DEATH,
 };
-use common::gossip::{agreed, refs, wait_until, GossipNode, Net};
+use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
 use serial_test::serial;
 
@@ -59,9 +59,9 @@ async fn a_learner_catches_up_by_snapshot() {
         }
     }
     let (fourth, _) = join_to(&net, &leases, &refs(&nodes), &flags(&extra)).await;
-    let mut all: Vec<&GossipNode> = nodes.iter().collect();
+    let mut all = refs(&nodes);
     all.push(&fourth);
-    assert!(wait_until(Duration::from_secs(15), || agreed(&all)).await);
+    wait_agreed(&all, Duration::from_secs(15)).await;
     let epoch = fourth.node.epochs().current().clone();
     let targeted: Vec<u16> = (0..GROUPS)
         .filter(|g| {
@@ -99,7 +99,7 @@ async fn a_learner_catches_up_by_snapshot() {
 async fn a_minority_returns_tryagain() {
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 5, SLOW_DEATH).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     let g = group_of(&nodes[0], "cnt:min");
     let mut c = nodes[0].redis().await;
     let _: i64 = incr_once(&mut c, "cnt:min").await;
@@ -126,15 +126,15 @@ async fn a_minority_returns_tryagain() {
 async fn a_restarted_node_enters_as_a_learner() {
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 4, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     let victim = voters_of(&refs, 0)[0];
     victim.kill();
     let rest: Vec<&GossipNode> = nodes.iter().filter(|n| n.id != victim.id).collect();
-    assert!(wait_until(Duration::from_secs(15), || agreed(&rest)).await);
+    wait_agreed(&rest, Duration::from_secs(15)).await;
     let (fresh, _) = join_to(&net, &leases, &rest, &flags(&[])).await;
     let mut all = rest.clone();
     all.push(&fresh);
-    assert!(wait_until(Duration::from_secs(15), || agreed(&all)).await);
+    wait_agreed(&all, Duration::from_secs(15)).await;
     let targeted: Vec<u16> = (0..GROUPS)
         .filter(|g| {
             fresh
@@ -171,7 +171,7 @@ async fn a_restarted_node_enters_as_a_learner() {
 async fn two_of_three_voters_lost() {
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 6, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     let g = group_of(&nodes[0], "cnt:two");
     let mut c = nodes[0].redis().await;
     for _ in 0..10 {
@@ -201,7 +201,7 @@ async fn two_of_three_voters_lost() {
 async fn every_voter_lost() {
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 6, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     let g = group_of(&nodes[0], "cnt:all");
     let mut c = nodes[0].redis().await;
     for _ in 0..10 {
@@ -231,7 +231,7 @@ async fn every_voter_lost() {
 async fn force_reconfigure_acts_before_dead() {
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 5, SLOW_DEATH).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     let g = group_of(&nodes[0], "cnt:force");
     let mut c = nodes[0].redis().await;
     for _ in 0..5 {
@@ -281,8 +281,8 @@ async fn the_up_switch_waits_for_the_dwell_time() {
     let mut f: Vec<&str> = RAFT[2..].to_vec();
     f.extend(["--counter-dwell-ms", "3000"]);
     let (nodes, _) = start(&net, &leases, 2, &f).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
-    assert!(wait_until(Duration::from_secs(10), || agreed(&refs)).await);
+    let refs = refs(&nodes);
+    wait_agreed(&refs, Duration::from_secs(10)).await;
     let mut c = nodes[0].redis().await;
     for _ in 0..5 {
         let _: i64 = incr_until(&mut c, "cnt:up", Duration::from_secs(5)).await;
@@ -290,7 +290,7 @@ async fn the_up_switch_waits_for_the_dwell_time() {
     let (third, _) = join_to(&net, &leases, &refs, &f).await;
     let mut all = refs.clone();
     all.push(&third);
-    assert!(wait_until(Duration::from_secs(10), || agreed(&all)).await);
+    wait_agreed(&all, Duration::from_secs(10)).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(
         (0..GROUPS).all(|g| all.iter().all(|n| status(n, g).voters.is_empty())),
@@ -325,7 +325,7 @@ async fn the_down_switch_is_at_once() {
     );
     nodes[2].kill();
     let rest = [&nodes[0], &nodes[1]];
-    assert!(wait_until(Duration::from_secs(10), || agreed(&rest)).await);
+    wait_agreed(&rest, Duration::from_secs(10)).await;
     assert!(
         wait_until(Duration::from_secs(8), || (0..GROUPS)
             .all(
@@ -374,7 +374,7 @@ async fn load(nodes: &[&GossipNode], key: &str, clients: usize, each: usize) -> 
 async fn the_final_value_counts_every_success() {
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 4, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     let (ok, failed) = load(&refs, "cnt:lin", 4, 250).await;
     assert_eq!(failed, 0, "a steady cluster refused increments");
     let mut c = nodes[0].redis().await;
@@ -405,7 +405,7 @@ async fn the_final_value_counts_every_success() {
 async fn a_draining_raft_leader_keeps_every_increment() {
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 3, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     let key = "cnt:drain";
     let g = group_of(&nodes[0], key);
     let leader = leader_of(&refs, g).unwrap();
@@ -436,7 +436,7 @@ async fn a_draining_raft_leader_keeps_every_increment() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     leader.node.drain_token().cancel();
-    assert!(wait_until(Duration::from_secs(20), || agreed(&rest)).await);
+    wait_agreed(&rest, Duration::from_secs(20)).await;
     assert!(
         wait_until(Duration::from_secs(15), || leader_of(&rest, g)
             .is_some_and(|l| status(l, g).voters.is_empty()))

@@ -13,7 +13,7 @@ use discus::counter::{CounterLeases, GroupStatus};
 use discus_membership::{LeaseProvider, MemoryLease};
 use redis::aio::MultiplexedConnection;
 
-use super::gossip::{agreed, socket, start_each, wait_until, GossipNode, Net, Opts};
+use super::gossip::{refs, socket, start_each, wait_agreed, wait_until, GossipNode, Net, Opts};
 
 pub const GROUPS: u16 = 4;
 
@@ -254,11 +254,8 @@ pub async fn raft_cluster(
     extra: &[&'static str],
 ) -> Vec<GossipNode> {
     let (nodes, _) = start(net, leases, n, &flags(extra)).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
-    assert!(
-        wait_until(Duration::from_secs(15), || agreed(&refs)).await,
-        "no agreement"
-    );
+    let refs = refs(&nodes);
+    wait_agreed(&refs, Duration::from_secs(15)).await;
     if !wait_until(Duration::from_secs(20), || all_raft(&refs)).await {
         for n in &nodes {
             for g in 0..GROUPS {

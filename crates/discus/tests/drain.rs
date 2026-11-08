@@ -4,7 +4,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::gossip::{agreed, wait_until, GossipNode, Net};
+use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
 use discus_placement::MemberState;
 use redis::AsyncCommands;
 
@@ -18,7 +18,7 @@ async fn three(net: &Net, extra: &[&str]) -> Vec<GossipNode> {
     let mut args = vec!["--shutdown-timeout-secs", "2"];
     args.extend_from_slice(extra);
     let nodes = net.start_all(3, &args).await;
-    assert!(wait_until(FORM, || agreed(&nodes.iter().collect::<Vec<_>>())).await);
+    wait_agreed(&refs(&nodes), FORM).await;
     nodes
 }
 
@@ -63,6 +63,6 @@ async fn a_leaving_node_departs_after_the_deadline() {
     nodes[2].shutdown.cancel();
     let rest = [&nodes[0], &nodes[1]];
     // The open connection holds the drain for the 2 s deadline.
-    assert!(wait_until(Duration::from_secs(4), || agreed(&rest)).await);
+    wait_agreed(&rest, Duration::from_secs(4)).await;
     assert_eq!(listed_as(&nodes[0], &nodes[2]), None);
 }

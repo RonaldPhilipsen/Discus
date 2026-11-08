@@ -272,6 +272,14 @@ pub fn refs(nodes: &[GossipNode]) -> Vec<&GossipNode> {
     nodes.iter().collect()
 }
 
+/// Wait until `nodes` are [`agreed`], or fail the test.
+pub async fn wait_agreed(nodes: &[&GossipNode], timeout: Duration) {
+    assert!(
+        wait_until(timeout, || agreed(nodes)).await,
+        "the nodes did not agree on one epoch"
+    );
+}
+
 /// Every node in `nodes` is NORMAL, in one cluster, with one epoch that lists exactly them.
 pub fn agreed(nodes: &[&GossipNode]) -> bool {
     let first = nodes[0].node.epochs().current().clone();
