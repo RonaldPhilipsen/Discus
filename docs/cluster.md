@@ -121,7 +121,7 @@ roleRef:
 | Path | Answers 200 when |
 | --- | --- |
 | `/healthz` | The process runs. |
-| `/startupz` | The node was `NORMAL` at least once, the store is ready, and the counter tier is settled. Counters do not exist yet, so the last condition always holds. |
+| `/startupz` | The node was `NORMAL` at least once, the store is ready, and the counter tier is settled. The store is ready once the node received its handoff (see [Handoff](#handoff)). Counters do not exist yet, so the last condition always holds. |
 | `/readyz` | The node is `NORMAL` in its current epoch and does not drain. |
 
 A join does not make the serving nodes unready.
@@ -133,8 +133,10 @@ route under `/admin/`.
 
 1. The node turns unready and marks itself `LEAVING`. The next epoch keeps it out of placement,
    so its keys move to other members.
-2. The node stops accepting connections. It keeps serving the open connections until they close
-   or `--shutdown-timeout-secs` (default 30 s) ends.
+2. The node stops accepting connections. It keeps serving the open connections, sends the
+   entries of its keys to their new owners, and empties its replication queues. It stops waiting
+   when all three are done or `--shutdown-timeout-secs` (default 30 s) ends. Keys that did not
+   move in time refill as misses.
 3. The node tells three members that it is gone, leaves gossip, and stops. The other members
    remove it from the epoch at once, without the suspicion timeout.
 
@@ -269,6 +271,24 @@ Follow these rules:
 | `--cluster-keep-alive-ms` | 5000 | Interval of keep-alive packets on a quiet connection. |
 | `--cluster-max-frame-bytes` | 135266304 | The largest message this node accepts from a peer. |
 | `--read-from-replicas` | `true` | Read from any owner. With `false`, every read goes to the primary. |
+| `--replication-factor` | 3 | The owners of each key: the primary and its secondaries. |
+| `--replication-queue-keys` | 65536 | Keys that wait in the replication queue of one peer. Past it, the oldest keys go to hints. |
+| `--replication-batch-keys` | 512 | Keys in one replication batch. |
+| `--replication-timeout-ms` | 1000 | Time for a peer to acknowledge a replication batch. |
+| `--replication-retry-ms` | 1000 | Time between probes of a peer that missed a batch. |
+| `--hint-max-entries` | 262144 | Hints for one peer, at most. |
+| `--hint-max-bytes` | 67108864 | Bytes of hints for one peer, at most. |
+| `--hint-memory-percent` | 5 | The share of `--max-memory` for all hints. |
+| `--handoff-rate-bytes` | 33554432 | Bytes per second that one handoff scan sends, at most. |
+| `--handoff-timeout-ms` | 300000 | Time after which a node gives up on an incoming handoff. |
+| `--tombstone-ttl-ms` | 3600000 | How long a delete marker lives. |
+| `--tombstone-reserve-percent` | 5 | The share of `--max-memory` for tombstones. |
+| `--write-set-keys` | 4096 | Keys in the write set of one connection, at most. |
+| `--write-set-bytes` | 1048576 | Bytes in the write set of one connection, at most. |
+| `--write-set-memory-percent` | 1 | The share of `--max-memory` for all write sets. |
+| `--write-set-ttl-ms` | 5000 | Time that a written key stays in the write set. |
+| `--hold-budget-ms` | 3000 | Time that a write to a failed primary waits for a new primary. |
+| `--counter-prefix` | `cnt:` | Keys with this prefix are counter keys. They never enter a write set. |
 
 A node with `--peer` and without the three certificate flags does not start. The error names the
 missing flags. With `static`, `--weight` must be 1, because every member has weight 1.
@@ -345,10 +365,163 @@ The members form one epoch. Every node computes the same owners for a key from t
   newer one before it acts.
 - A command hops at most twice. After two hops, a node that owned the key in its previous epoch
   serves the command. Otherwise it returns `-TRYAGAIN the cluster is changing, try again later`.
-- If the owner of a write does not answer in time, the command returns the same `-TRYAGAIN`.
+- If the primary of a write does not answer in time, the entry node holds the write for a new
+  primary (see [Failover](#failover)).
 
 Replies keep the order of the pipeline. Commands on the same key run in the order that the client
 sent them. Commands on different keys run at the same time.
+
+## Replication
+
+Each key has up to three owners (`--replication-factor`, default 3). The first owner is the
+primary, and the others are secondaries. A cluster of one node has no secondaries, and a cluster
+of two nodes has one.
+
+1. A write goes to the primary. The primary applies the write, gives it an HLC timestamp (a
+   version from a hybrid logical clock), and replies at once.
+2. Then the primary puts the key in one queue per secondary. A queue holds each key once. As the
+   queue drains, the primary sends the latest value of the key.
+3. A secondary ignores an entry that is not newer than the one it holds. So the order of the
+   batches does not matter, and a repeated batch changes nothing.
+
+Replication uses a second QUIC connection per peer. A slow replication stream therefore does not
+hold up forwarded commands.
+
+A delete writes a tombstone (a delete marker) with a TTL of `--tombstone-ttl-ms` (default one
+hour). A tombstone replicates like a value, so an older copy of the key cannot come back. A
+tombstone reads as a miss. `SCAN`, `DBSIZE`, `RANDOMKEY`, `TYPE`, and `EXISTS` ignore it.
+
+A TTL replicates as an absolute deadline in Unix milliseconds. The clocks of the nodes need to
+agree within about 100 ms, so run NTP.
+
+When a new epoch changes the owners of a key, the queues stop carrying the key to nodes that no
+longer own it.
+
+## Reads
+
+A node that owns the key serves a read itself. Otherwise it asks the owners in turn, starting at
+a different owner for each command of the connection. Reads of a hot key therefore spread over
+every owner. A read moves to the next owner after `--forward-read-timeout-ms`.
+
+A secondary that has no entry for a key asks the primary, then the other owners, and stores what
+it finds. This is read repair. A secondary that holds a tombstone does not ask.
+
+Reads can be stale, because replication is asynchronous. Each connection gets read-your-writes
+on a best-effort basis through its write set:
+
+- After a write, the entry node records the key and the version that the primary acknowledged.
+- A read of a key in the write set goes to the primary. If the entry node owns the key and
+  already holds the version, it serves the read itself.
+- A key leaves the write set after 5 s (`--write-set-ttl-ms`), by LRU, or after a read that shows
+  that every secondary holds the version.
+- The bounds are 4096 keys or 1 MiB per connection, and 1% of `--max-memory` for the whole node.
+  A write that does not fit is not recorded. The write set never takes memory from the cache.
+- The write set ends with the connection. A new connection, also to the same node, can read a
+  stale value.
+- Keys with the `--counter-prefix` (default `cnt:`) never enter a write set.
+
+## Hinted handoff
+
+If the primary cannot deliver a write to a secondary, it records a hint. A hint holds the latest
+entry of one key for one secondary. These events record hints:
+
+- A replication batch fails or times out (`--replication-timeout-ms`). The secondary is then down
+  for the primary, and later writes go to hints at once.
+- The queue of a secondary overflows (`--replication-queue-keys`). The oldest keys go to hints,
+  and the secondary is lagging.
+
+The primary probes a down secondary every `--replication-retry-ms`. The primary replays the hints
+in two cases:
+
+- A probe succeeds, and the epoch lists the secondary as `NORMAL`.
+- The queue of a lagging secondary drains below a quarter of its size.
+
+A replay sends the hints in HLC order, one acknowledged batch at a time.
+
+Hints have these bounds:
+
+- `--hint-max-entries` and `--hint-max-bytes` per secondary.
+- 5% of `--max-memory` for all secondaries together (`--hint-memory-percent`).
+- An age of the tombstone TTL.
+
+A bound evicts the oldest hints. An evicted hint is lost. The first replay then names the part of
+the key space of each lost hint. The secondary drops its copies of those keys, and they refill
+from the primary as misses.
+
+The primary drops the hints of a secondary that becomes `DEAD` or no longer owns the key. Hints
+live only in the memory of the primary.
+
+## Failover
+
+A node loss changes no data placement until the failure detector declares the node `DEAD`. Then
+the next epoch removes the node, and the next owner of each of its keys becomes the primary.
+Reads go on during detection, because the other owners answer them.
+
+After a promotion, the new primary compares a digest of the moved keys with each other owner once.
+It pulls the entries that are newer there. This covers the writes that the old primary replicated
+to only some of the secondaries.
+
+A write to a primary that fails or times out (`--forward-write-timeout-ms`) is held:
+
+1. The transport reports the peer to the failure detector.
+2. The entry node waits for an epoch with a new primary, and tries again at least every 200 ms.
+3. After `--hold-budget-ms` (default 3000), the command returns `-TRYAGAIN`.
+
+A held command keeps its place in the pipeline. Later commands on the same key wait for it.
+
+A command that never left the entry node is always sent again. A command that was sent but got no
+reply can have run already. The entry node sends such a command again for these commands only,
+because they are safe to apply twice:
+
+`SET` without `NX` or `XX`, `DEL`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `PERSIST`,
+`MSET`, `HSET`, `HDEL`, `SADD`, `SREM`, `ZADD` without `INCR`, and `ZREM`.
+
+Every other command returns `-TRYAGAIN` at once, because it can have run already.
+
+## Handoff
+
+A node that gains owner slots receives the entries of those keys. A join, a death, and a drain all
+start a handoff, so a new owner does not start empty.
+
+- Each node that held the keys scans its store and sends the entries that the new owner gained.
+  For each key, the first old owner that is still a member sends the full entry. The other old
+  owners send only the key and its version, and the new owner asks for the keys it lacks.
+- A node runs one scan at a time. A scan covers every ownership change since the oldest change
+  that waits. Changes that arrive during a scan wait for the next scan, so a burst of epochs costs
+  one or two scans.
+- A scan sends at most `--handoff-rate-bytes` per second (default 32 MiB). Entries that change
+  after the scan starts replicate as usual.
+- While its handoff is incomplete, a new owner that misses a key asks the old owners that no
+  longer own it. This applies to reads and writes, so an `INCR` of a moved key starts from the old
+  value. The fallback ends in three cases: every old owner finished or gave up, the old owners
+  leave, or `--handoff-timeout-ms` (default 5 minutes) ends. After that, a miss is a miss.
+
+`/startupz` passes only after the node received its handoff. A rolling restart therefore waits for
+each new pod to fill before it replaces the next one.
+
+## Rejoin after a partition
+
+A node that the winning epoch does not list joins again. The node measures the time since it last
+heard from the winning members:
+
+- Shorter than the tombstone TTL: it keeps its store. It clears only the parts of the store that
+  dropped tombstones early.
+- The tombstone TTL or longer: it clears the store, because the deletes that it missed can be gone
+  everywhere.
+
+## Memory
+
+`--max-memory` is one budget for entries, tombstones, hints, and write sets. At the limit, the
+node evicts in this order:
+
+1. Normal entries, by sampled LRU.
+2. The oldest hints.
+3. The oldest tombstones. The node marks their part of the store for a refill, and a rejoin
+   clears that part.
+
+Tombstones also have their own share, `--tombstone-reserve-percent` (default 5). Past it, the oldest
+tombstones go first. Write sets are never evicted for memory. Each key that enters a write set must
+fit its bounds.
 
 ## Multi-key and keyspace commands
 
@@ -358,11 +531,13 @@ sent them. Commands on different keys run at the same time.
 | `EXISTS` | Groups the keys by owner and adds the counts. |
 | `MSET`, `DEL` | Group the keys by owner. This is not atomic. If one part fails, the command returns `-TRYAGAIN` and the other parts stay applied. A retry of the whole command is safe. |
 | `SCAN`, `RANDOMKEY` | Look at the keys of the node that the client is connected to only. |
-| `DBSIZE` | Adds the key counts of every member that answers. |
-| `FLUSHDB`, `FLUSHALL` | Clear every member that answers and return `OK`. |
+| `DBSIZE` | Adds the key counts of every member that answers and divides the sum by the replication factor. The result is an estimate. |
+| `FLUSHDB`, `FLUSHALL` | Clear every member that answers and return `OK`. Each member also drops its replication queues, its hints, and its handoffs. A write that is on its way during the flush can survive it. |
 
 ## Limits of this release
 
-- There is no replication and no handoff. A node that stops loses its keys, and a node that gains
-  keys starts empty. The next release adds both.
+- Replication is asynchronous. A node loss can lose the last writes, including deletes, that the
+  primary did not replicate yet.
+- Multi-key reads (`MGET`, `EXISTS`) do not use read repair or the previous-epoch fallback. A
+  missing key reads as a miss.
 - 0-RTT is off. Every new connection takes a full handshake.

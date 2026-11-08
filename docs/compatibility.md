@@ -41,10 +41,12 @@ behave differently from Redis:
 - `MSET` and `DEL` with several keys are not atomic. If one part fails, the command returns
   `-TRYAGAIN` and the other parts stay applied. A retry of the whole command is safe.
 - `SCAN` and `RANDOMKEY` see only the keys of the node that the client is connected to.
-- `DBSIZE` adds the counts of every member that answers.
-- `FLUSHDB` and `FLUSHALL` clear every member that answers.
+- `DBSIZE` adds the counts of every member that answers and divides the sum by the replication
+  factor. The result is an estimate.
+- `FLUSHDB` and `FLUSHALL` clear every member that answers. This is best-effort. A write that is on
+  its way during the flush can survive it.
 
-See [Running a static cluster](cluster.md) for the details.
+See [Running a cluster](cluster.md) for the details.
 
 ## Authentication
 
@@ -120,6 +122,23 @@ Run `mise run build-matrix` to check every supported combination.
 - Collections keep the whole value under one lock. Every write to a very large collection costs
   time in proportion to its size, so keep collections far below the member limit.
 - There is no persistence. A restart starts with an empty cache.
+
+In a cluster, replication adds these deviations:
+
+- Reads can be stale, because a secondary can serve a read before it receives the last write.
+  Read-your-writes holds on a best-effort basis for one connection only. It ends with the
+  connection, and it does not cover a key that did not fit the write set.
+- A node loss can lose the last writes, including deletes. After a lost `DEL`, the old value stays
+  until its TTL ends. A cache that relies on deletes for invalidation needs a TTL as a backstop.
+- A write to a failed primary waits up to 3 s for a new primary. If the delivery of a write is in
+  doubt and the write is not safe to send twice, the write returns `-TRYAGAIN`. Examples are
+  `INCR`, `APPEND`, `GETDEL`, `SPOP`, and `SET NX`. A retried `SET NX` can report a failure for a
+  value that the client did set.
+- A normal-key `INCR` can lose increments across a failover. Collections replicate as whole
+  values, so during a split-brain only the field updates of one side survive.
+- A delete leaves a tombstone for one hour. Tombstones take memory, up to 5% of `--max-memory`.
+- `MSET` and multi-key `DEL` hold their failed parts like single writes. If a part still fails,
+  the command returns `-TRYAGAIN` with the other parts applied.
 
 ## Baseline
 

@@ -41,7 +41,7 @@ pub enum Event {
     },
     /// The node adopted a newer epoch.
     EpochAdopted { old: EpochId, new: EpochId },
-    /// The new epoch gives owner slots to these members. Handoff (plan 4) starts from here.
+    /// The new epoch gives owner slots to these members.
     OwnershipGained {
         old: EpochId,
         new: EpochId,

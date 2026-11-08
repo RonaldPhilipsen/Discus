@@ -34,7 +34,7 @@ use host::NodeHost;
 pub enum Event {
     Core(CoreEvent),
     /// The new epoch gives owner slots to `gained`. The pin keeps `old` in the history until
-    /// every holder drops it, so a handoff (plan 4) can compute the moved keys.
+    /// every holder drops it, so a subscriber can compute the moved keys.
     OwnershipGained(OwnershipGained),
 }
 

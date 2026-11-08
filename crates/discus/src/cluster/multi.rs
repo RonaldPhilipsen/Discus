@@ -237,7 +237,8 @@ async fn everywhere(
     (here, results)
 }
 
-/// `DBSIZE`: the sum of the members that answer. Plan 4 divides by the replication factor.
+/// `DBSIZE`: the sum of the members that answer, divided by the owners per key. Every key lives
+/// on up to `RF` members, so this is an estimate (spec section 7.3).
 pub fn dbsize(node: &Arc<Node>, cmd: Command) -> Dispatch {
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
@@ -251,7 +252,9 @@ pub fn dbsize(node: &Arc<Node>, cmd: Command) -> Dispatch {
                 sum += n;
             }
         }
-        Reply::value(Value::Integer(sum))
+        let normal = discus_membership::normal_count(node.epochs().current());
+        let copies = node.config.replication_factor.min(normal).max(1) as i64;
+        Reply::value(Value::Integer(sum / copies))
     }))
 }
 

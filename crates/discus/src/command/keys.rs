@@ -206,6 +206,11 @@ fn flush(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     {
         return Err(CommandError::Syntax);
     }
+    // In-flight batches can still land after this point, so a flush is best-effort.
+    if let Some(r) = node.replicator() {
+        r.flush();
+        r.reset_handoffs();
+    }
     node.store.clear();
     Ok(Value::ok())
 }

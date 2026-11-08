@@ -4,7 +4,7 @@ This page tells operators how to secure the client side of a Discus node. It cov
 client listener, client authentication, scopes, OAuth 2.0 tokens, Kubernetes service account
 tokens, and the admin port.
 
-Node-to-node traffic uses QUIC with mTLS. See [Running a static cluster](cluster.md) for its
+Node-to-node traffic uses QUIC with mTLS. See [Running a cluster](cluster.md) for its
 certificates. The section [Commands from other nodes](#commands-from-other-nodes) tells how the two
 sides meet.
 

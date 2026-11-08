@@ -130,22 +130,16 @@ and 100.
 | `discus.transport.handshake.failures` | counter | none | Failed QUIC handshakes and `HELLO` exchanges. |
 | `discus.transport.requests.in` | counter | none | Node-to-node requests that this node served. |
 | `discus.transport.requests.out` | counter | none | Node-to-node requests that this node sent. |
+| `discus.replication.queue.depth` | gauge | `peer` | Keys that wait in the replication queue of a peer. |
+| `discus.replication.lag` | gauge (ms) | `peer` | The time that the last replication batch to a peer took. |
+| `discus.hints.recorded` | counter | `peer` | Hints that the primary recorded for a peer that it cannot reach. |
+| `discus.hints.replayed` | counter | `peer` | Hints that a peer acknowledged after a replay. |
+| `discus.hints.evicted` | counter | `peer` | Hints lost to a bound before a replay. |
+| `discus.gossip.rtt` | histogram (ms) | `peer` | The round-trip time of gossip requests. |
+| `discus.tombstones` | gauge | none | Stored tombstones (delete markers). |
 
 The `peer` attribute is the node ID of the peer in hex. A transport event without a known peer is
 not counted.
-
-These metrics belong to subsystems that later releases add. The node defines them now, and they
-stay empty until their subsystem exists:
-
-| Metric | Type | Attributes |
-| --- | --- | --- |
-| `discus.replication.queue.depth` | gauge | `peer` |
-| `discus.replication.lag` | gauge (ms) | `peer` |
-| `discus.hints.recorded` | counter | `peer` |
-| `discus.hints.replayed` | counter | `peer` |
-| `discus.hints.evicted` | counter | `peer` |
-| `discus.gossip.rtt` | histogram (ms) | `peer` |
-| `discus.tombstones` | gauge | none |
 
 ## Resource attributes
 

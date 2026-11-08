@@ -230,3 +230,60 @@ async fn read_from_replicas_falls_over_to_the_next_owner() {
         assert_eq!(got, "from-replica");
     }
 }
+
+#[tokio::test]
+async fn dbsize_divides_by_the_replication_factor() {
+    let c = start_cluster(3, &["--replication-factor", "3"]).await;
+    let mut a = c.nodes[0].redis().await;
+    for i in 0..30 {
+        let _: () = a.set(format!("rf{i}"), i).await.unwrap();
+    }
+    assert!(
+        common::gossip::wait_until(Duration::from_secs(3), || c.nodes.iter().all(|n| n
+            .node
+            .store
+            .len()
+            == 30))
+        .await
+    );
+    for n in &c.nodes {
+        let mut conn = n.redis().await;
+        let size: i64 = redis::cmd("DBSIZE").query_async(&mut conn).await.unwrap();
+        assert_eq!(size, 30);
+    }
+}
+
+#[tokio::test]
+async fn a_flush_clears_every_owner() {
+    let c = start_cluster(
+        3,
+        &[
+            "--replication-factor",
+            "3",
+            "--replication-timeout-ms",
+            "200",
+        ],
+    )
+    .await;
+    let mut a = c.nodes[0].redis().await;
+    // One replica stops taking replication, so the primary holds hints for it.
+    c.nodes[2]
+        .node
+        .faults
+        .stall_bulk_ms
+        .store(60_000, std::sync::atomic::Ordering::Relaxed);
+    let keys: Vec<String> = (0..20).map(|i| c.key_on(0, &format!("fl{i}"))).collect();
+    for k in &keys {
+        let _: () = a.set(k, "v").await.unwrap();
+    }
+    let rep = c.nodes[0].node.replicator().unwrap();
+    assert!(
+        common::gossip::wait_until(Duration::from_secs(3), || rep.hints(c.nodes[2].id) > 0).await
+    );
+    let _: () = redis::cmd("FLUSHALL").query_async(&mut a).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    for n in &c.nodes {
+        assert_eq!(n.node.store.len(), 0);
+    }
+    assert_eq!(rep.hints(c.nodes[2].id), 0);
+}

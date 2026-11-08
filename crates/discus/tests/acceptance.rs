@@ -1,0 +1,120 @@
+#![allow(clippy::unwrap_used)]
+
+//! The acceptance criteria of spec section 16: a node loss causes no read errors, only misses,
+//! and a join causes no errors and a smaller hit-rate dip than a cold start.
+
+mod common;
+
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use common::gossip::{agreed, wait_until, GossipNode, Net};
+use redis::AsyncCommands;
+
+const FORM: Duration = Duration::from_secs(10);
+
+fn refs(nodes: &[GossipNode]) -> Vec<&GossipNode> {
+    nodes.iter().collect()
+}
+
+async fn fill(n: &GossipNode, count: usize) -> Vec<String> {
+    let mut c = n.redis().await;
+    let keys: Vec<String> = (0..count).map(|i| format!("acc{i}")).collect();
+    for k in &keys {
+        let _: () = c.set(k, k).await.unwrap();
+    }
+    keys
+}
+
+async fn hits(n: &GossipNode, keys: &[String]) -> usize {
+    let mut c = n.redis().await;
+    let mut hit = 0;
+    for k in keys {
+        let v: Option<String> = c.get(k).await.unwrap();
+        if v.as_deref() == Some(k.as_str()) {
+            hit += 1;
+        }
+    }
+    hit
+}
+
+#[tokio::test]
+async fn a_node_loss_causes_no_read_errors() {
+    let net = Net::new();
+    let nodes = net.start_all(4, &["--replication-factor", "3"]).await;
+    assert!(wait_until(FORM, || agreed(&refs(&nodes))).await);
+    let keys = Arc::new(fill(&nodes[0], 300).await);
+    let owners = |k: &String| nodes[0].node.owners(k.as_bytes()).len();
+    assert!(
+        wait_until(Duration::from_secs(5), || keys.iter().all(|k| {
+            nodes
+                .iter()
+                .filter(|n| n.node.store.read(k.as_bytes(), |e| e.is_some()))
+                .count()
+                == owners(k)
+        }))
+        .await
+    );
+    let stop = Arc::new(AtomicBool::new(false));
+    let errors = Arc::new(AtomicUsize::new(0));
+    let mut readers = Vec::new();
+    for n in &nodes[..2] {
+        let mut c = n.redis().await;
+        let (keys, stop, errors) = (keys.clone(), stop.clone(), errors.clone());
+        readers.push(tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                for k in keys.iter() {
+                    let r: redis::RedisResult<Option<String>> = c.get(k).await;
+                    if let Err(e) = r {
+                        eprintln!("read error: {e}");
+                        errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    nodes[3].kill();
+    let rest = refs(&nodes[..3]);
+    assert!(wait_until(FORM, || agreed(&rest)).await);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    stop.store(true, Ordering::Relaxed);
+    for r in readers {
+        r.await.unwrap();
+    }
+    assert_eq!(errors.load(Ordering::Relaxed), 0);
+    for n in &nodes[..3] {
+        assert_eq!(hits(n, &keys).await, keys.len());
+    }
+}
+
+/// The hits over `keys` once a third node joined a cluster of two with `RF = 1`.
+async fn hits_after_a_join(extra: &[&str]) -> usize {
+    let net = Net::new();
+    let nodes = net.start_all(2, extra).await;
+    assert!(wait_until(FORM, || agreed(&refs(&nodes))).await);
+    let keys = fill(&nodes[0], 400).await;
+    let joiner = net.start(&[nodes[0].cluster_addr], extra).await;
+    let mut all = refs(&nodes);
+    all.push(&joiner);
+    assert!(wait_until(FORM, || agreed(&all)).await);
+    let mut ready = false;
+    for _ in 0..500 {
+        if common::status(joiner.admin, "/startupz").await == 200 {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(ready);
+    hits(&nodes[0], &keys).await
+}
+
+#[tokio::test]
+async fn a_join_dips_less_than_a_cold_start() {
+    let warm = hits_after_a_join(&[]).await;
+    let cold = hits_after_a_join(&["--handoff", "false"]).await;
+    assert!(warm * 100 >= 400 * 99, "{warm} of 400 hit with handoff");
+    assert!(warm > cold, "{warm} with handoff, {cold} without");
+}
