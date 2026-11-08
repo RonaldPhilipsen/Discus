@@ -165,6 +165,12 @@ pub fn cmd(args: &[&str]) -> Vec<u8> {
     discus_wire::encode_command(&common::cmd(args)).to_vec()
 }
 
+/// [`exchange`] on a new plaintext connection to `node`.
+pub async fn send(node: &Node, wire: &[u8]) -> String {
+    let mut s = TcpStream::connect(node.addr).await.unwrap();
+    exchange(&mut s, wire).await
+}
+
 /// Write `wire` and read until the stream goes quiet for 150 ms, closes, or fails. An error or
 /// a close before any byte gives an empty string.
 pub async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, wire: &[u8]) -> String {
@@ -194,6 +200,25 @@ pub use common::{status, try_start_full as try_start, wait_status, Running as No
 
 pub async fn start(args: &[&str]) -> Node {
     try_start(args).await.unwrap()
+}
+
+/// A plaintext node, with the development flag, that trusts the OAuth2 issuers of `file`. It
+/// waits until the node is ready.
+pub async fn start_oauth2(file: &str, args: &[&str]) -> Node {
+    let mut argv = vec![
+        "--auth-policy",
+        "any:oauth2",
+        "--dev-insecure-oauth2",
+        "--auth-config",
+        file,
+    ];
+    argv.extend_from_slice(args);
+    let node = start(&argv).await;
+    assert!(
+        wait_status(node.admin, "/readyz", 200, Duration::from_secs(10)).await,
+        "the node never became ready"
+    );
+    node
 }
 
 #[cfg(feature = "oauth2")]

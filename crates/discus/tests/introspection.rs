@@ -6,24 +6,14 @@ mod security_support;
 use std::time::Duration;
 
 use security_support::idp::{unix_now, MockIdp};
-use security_support::{cmd, exchange, start, wait_status, write_file, Node, TestCa};
+use security_support::{cmd, exchange, send, start_oauth2, write_file, Node, TestCa};
 use serde_json::json;
 
 async fn node(ca: &TestCa, idp: &MockIdp, secret: &str, args: &[&str]) -> Node {
     let secret_file = write_file(ca, "secret", secret);
     let extra = format!("client_id = \"discus\"\nclient_secret_file = \"{secret_file}\"");
     let file = write_file(ca, "auth.toml", &idp.toml(ca, &extra));
-    let mut argv = vec![
-        "--auth-policy",
-        "any:oauth2",
-        "--dev-insecure-oauth2",
-        "--auth-config",
-        &file,
-    ];
-    argv.extend_from_slice(args);
-    let node = start(&argv).await;
-    assert!(wait_status(node.admin, "/readyz", 200, Duration::from_secs(10)).await);
-    node
+    start_oauth2(&file, args).await
 }
 
 fn active(idp: &MockIdp, exp: i64) -> serde_json::Value {
@@ -35,11 +25,6 @@ fn active(idp: &MockIdp, exp: i64) -> serde_json::Value {
         "exp": exp,
         "scope": "discus.read",
     })
-}
-
-async fn send(node: &Node, wire: &[u8]) -> String {
-    let mut s = tokio::net::TcpStream::connect(node.addr).await.unwrap();
-    exchange(&mut s, wire).await
 }
 
 #[tokio::test]

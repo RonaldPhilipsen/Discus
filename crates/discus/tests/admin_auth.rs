@@ -161,28 +161,11 @@ async fn admin_identities_need_admin_tls() {
 mod tokens {
     use super::*;
     use security_support::idp::MockIdp;
-    use security_support::wait_status;
+    use security_support::start_oauth2;
 
     async fn node(ca: &TestCa, idp: &MockIdp) -> security_support::Node {
         let file = write_file(ca, "auth.toml", &idp.toml(ca, ""));
-        let node = start(&[
-            "--auth-policy",
-            "any:oauth2",
-            "--dev-insecure-oauth2",
-            "--auth-config",
-            &file,
-        ])
-        .await;
-        assert!(
-            wait_status(
-                node.admin,
-                "/readyz",
-                200,
-                std::time::Duration::from_secs(10)
-            )
-            .await
-        );
-        node
+        start_oauth2(&file, &[]).await
     }
 
     #[tokio::test]
