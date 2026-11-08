@@ -117,3 +117,22 @@ async fn key_and_value_limits_are_enforced() {
     assert!(err.to_string().contains("value too large"), "{err}");
     let _: () = c.set("k", "x".repeat(16)).await.unwrap();
 }
+
+#[tokio::test]
+async fn incr_with_extra_arguments_keeps_the_redis_error() {
+    let mut c = common::connect(&[]).await;
+    for args in [
+        &["INCR", "n", "EX", "10"][..],
+        &["INCRBY", "n", "1", "EX", "10"][..],
+    ] {
+        let mut cmd = redis::cmd(args[0]);
+        for a in &args[1..] {
+            cmd.arg(*a);
+        }
+        let err = cmd.query_async::<i64>(&mut c).await.unwrap_err();
+        assert!(
+            err.to_string().contains("wrong number of arguments"),
+            "{err}"
+        );
+    }
+}

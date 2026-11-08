@@ -48,25 +48,25 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "INCR",
-        arity: 2,
+        arity: -2,
         handler: incr,
         needs_auth: true,
     },
     CommandSpec {
         name: "DECR",
-        arity: 2,
+        arity: -2,
         handler: decr,
         needs_auth: true,
     },
     CommandSpec {
         name: "INCRBY",
-        arity: 3,
+        arity: -3,
         handler: incrby,
         needs_auth: true,
     },
     CommandSpec {
         name: "DECRBY",
-        arity: 3,
+        arity: -3,
         handler: decrby,
         needs_auth: true,
     },
@@ -310,19 +310,32 @@ fn add_integer(node: &Node, key: &Bytes, delta: i64) -> Reply {
     })
 }
 
+/// The table admits `INCR key EX ...` for counter keys (spec section 10.4). A normal key keeps
+/// the Redis arity.
+fn exact_arity(cmd: &Command, arity: usize) -> Result<(), CommandError> {
+    if cmd.len() != arity {
+        return Err(CommandError::WrongArity(upper(&cmd[0])));
+    }
+    Ok(())
+}
+
 fn incr(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+    exact_arity(cmd, 2)?;
     add_integer(node, &cmd[1], 1)
 }
 
 fn decr(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+    exact_arity(cmd, 2)?;
     add_integer(node, &cmd[1], -1)
 }
 
 fn incrby(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+    exact_arity(cmd, 3)?;
     add_integer(node, &cmd[1], parse_i64(&cmd[2])?)
 }
 
 fn decrby(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+    exact_arity(cmd, 3)?;
     let delta = parse_i64(&cmd[2])?
         .checked_neg()
         .ok_or(CommandError::Overflow)?;

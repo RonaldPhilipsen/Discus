@@ -5,6 +5,7 @@ pub mod build;
 pub mod cluster;
 pub mod command;
 pub mod config;
+pub mod counter;
 pub mod membership;
 pub mod node;
 pub mod replication;
