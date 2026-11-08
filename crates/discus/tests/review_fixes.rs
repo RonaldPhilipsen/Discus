@@ -74,7 +74,10 @@ async fn counters_respect_maxmemory() {
 /// I1: the drain must finish even when a client never reads its replies.
 #[tokio::test]
 async fn drain_finishes_when_a_client_never_reads() {
-    let (addr, handle, shutdown) = common::start_node_raw(&["--shutdown-timeout-secs", "1"]).await;
+    let mut node = common::try_start_full(&["--shutdown-timeout-secs", "1"])
+        .await
+        .unwrap();
+    let (addr, shutdown) = (node.addr, node.shutdown.clone());
     let client = redis::Client::open(format!("redis://{addr}")).unwrap();
     let mut c = client.get_multiplexed_async_connection().await.unwrap();
     let _: () = c.set("big", "x".repeat(1_000_000)).await.unwrap();
@@ -88,7 +91,7 @@ async fn drain_finishes_when_a_client_never_reads() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     shutdown.cancel();
-    let done = tokio::time::timeout(Duration::from_secs(5), handle).await;
+    let done = tokio::time::timeout(Duration::from_secs(5), &mut node.handle).await;
     assert!(
         done.is_ok(),
         "the drain hung on a connection blocked in a write"

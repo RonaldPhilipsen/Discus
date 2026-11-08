@@ -91,7 +91,7 @@ async fn mset_partial_failure_returns_tryagain() {
     let mut a = c.nodes[0].redis().await;
     let on_a = c.key_on(0, "pa");
     let on_c = c.key_on(2, "pc");
-    c.nodes[2].stop();
+    c.nodes[2].kill();
     tokio::time::sleep(Duration::from_millis(100)).await;
     let start = Instant::now();
     let err = a
@@ -122,7 +122,7 @@ async fn a_forward_to_a_stopped_node_returns_tryagain() {
     let mut a = c.nodes[0].redis().await;
     let on_c = c.key_on(2, "gone");
     let mut events = c.nodes[0].node.link().unwrap().transport.events();
-    c.nodes[2].stop();
+    c.nodes[2].kill();
     tokio::time::sleep(Duration::from_millis(100)).await;
     let start = Instant::now();
     let err = a.get::<_, Option<String>>(&on_c).await.unwrap_err();
@@ -222,7 +222,7 @@ async fn read_from_replicas_falls_over_to_the_next_owner() {
     live.node.store.write(key.as_bytes(), stamp, |slot| {
         slot.set(Some(Entry::new(Stored::Str("from-replica".into()), None)))
     });
-    down.stop();
+    down.kill();
     tokio::time::sleep(Duration::from_millis(100)).await;
     let mut conn = c.nodes[entry].redis().await;
     for _ in 0..4 {

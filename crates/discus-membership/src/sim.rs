@@ -453,6 +453,17 @@ impl Sim {
         }
     }
 
+    /// Run in steps of 10 ms until `done` holds, and return the time that took. Panics when it
+    /// takes `limit_ms` or longer.
+    pub fn run_until(&mut self, limit_ms: Millis, mut done: impl FnMut(&Sim) -> bool) -> Millis {
+        let start = self.now;
+        while !done(self) {
+            assert!(self.now - start < limit_ms, "not done after {limit_ms} ms");
+            self.run_ms(10);
+        }
+        self.now - start
+    }
+
     /// Advance the time by `ms` in steps of [`STEP_MS`].
     pub fn run_ms(&mut self, ms: Millis) {
         let end = self.now + ms;

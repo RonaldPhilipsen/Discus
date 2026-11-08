@@ -16,15 +16,6 @@ fn cfg() -> SwimConfig {
 
 const LEASE_MS: u64 = 2_000;
 
-fn run_until(sim: &mut Sim, limit_ms: u64, mut done: impl FnMut(&Sim) -> bool) -> u64 {
-    let start = sim.now();
-    while !done(sim) {
-        assert!(sim.now() - start < limit_ms, "not done after {limit_ms} ms");
-        sim.run_ms(10);
-    }
-    sim.now() - start
-}
-
 fn all_normal_in_one_cluster(sim: &Sim, ids: &[NodeId]) -> bool {
     let cluster = sim.cluster_id(ids[0]);
     let epoch = sim.epoch(ids[0]);
@@ -52,7 +43,7 @@ fn exactly_one_node_forms_a_cluster() {
         let mut sim = Sim::new(seed, cfg());
         sim.with_lease(LEASE_MS);
         let ids = start_all(&mut sim, 5);
-        run_until(&mut sim, 10_000, |s| all_normal_in_one_cluster(s, &ids));
+        sim.run_until(10_000, |s| all_normal_in_one_cluster(s, &ids));
         assert_eq!(sim.formed(), 1, "seed {seed}");
         let holder = sim.lease().holder().unwrap();
         assert_eq!(holder.cluster_id, sim.cluster_id(ids[0]));
@@ -64,7 +55,7 @@ fn lease_takeover() {
     let mut sim = Sim::new(1, cfg());
     sim.with_lease(LEASE_MS);
     let ids = start_all(&mut sim, 3);
-    run_until(&mut sim, 10_000, |s| all_normal_in_one_cluster(s, &ids));
+    sim.run_until(10_000, |s| all_normal_in_one_cluster(s, &ids));
     let cluster = sim.cluster_id(ids[0]);
     let holder = sim.lease().holder().unwrap();
     let dead = *ids
@@ -73,7 +64,7 @@ fn lease_takeover() {
         .unwrap();
     sim.kill(dead);
     let rest: Vec<NodeId> = ids.iter().copied().filter(|&i| i != dead).collect();
-    run_until(&mut sim, LEASE_MS * 4, |s| {
+    sim.run_until(LEASE_MS * 4, |s| {
         s.lease()
             .holder()
             .is_some_and(|h| h.identity != holder.identity && h.cluster_id == cluster)
@@ -86,7 +77,7 @@ fn an_api_server_outage_keeps_the_cluster_serving() {
     let mut sim = Sim::new(2, cfg());
     sim.with_lease(LEASE_MS);
     let ids = start_all(&mut sim, 3);
-    run_until(&mut sim, 10_000, |s| all_normal_in_one_cluster(s, &ids));
+    sim.run_until(10_000, |s| all_normal_in_one_cluster(s, &ids));
     sim.lease().set_available(false);
     let lonely = sim.add_node();
     sim.start(lonely, &[]);
@@ -103,7 +94,7 @@ fn a_full_cold_restart_forms_a_new_cluster() {
     let mut sim = Sim::new(3, cfg());
     sim.with_lease(LEASE_MS);
     let old = start_all(&mut sim, 3);
-    run_until(&mut sim, 10_000, |s| all_normal_in_one_cluster(s, &old));
+    sim.run_until(10_000, |s| all_normal_in_one_cluster(s, &old));
     let old_cluster = sim.cluster_id(old[0]);
     for &id in &old {
         sim.kill(id);
@@ -112,7 +103,7 @@ fn a_full_cold_restart_forms_a_new_cluster() {
     // The lease of the dead cluster still runs, so nobody forms at once.
     sim.run_ms(LEASE_MS / 2);
     assert!(fresh.iter().all(|&id| !sim.is_normal(id)));
-    run_until(&mut sim, 10_000, |s| all_normal_in_one_cluster(s, &fresh));
+    sim.run_until(10_000, |s| all_normal_in_one_cluster(s, &fresh));
     assert_ne!(sim.cluster_id(fresh[0]), old_cluster);
     assert_eq!(sim.formed(), 2);
 }
@@ -122,7 +113,7 @@ fn a_silent_normal_peer_blocks_formation() {
     let mut sim = Sim::new(4, cfg());
     sim.with_lease(LEASE_MS);
     let ids = start_all(&mut sim, 1);
-    run_until(&mut sim, 5_000, |s| s.is_normal(ids[0]));
+    sim.run_until(5_000, |s| s.is_normal(ids[0]));
     sim.silence(ids[0]);
     let joiner = sim.add_node();
     sim.start(joiner, &[ids[0]]);
@@ -137,7 +128,7 @@ fn the_bootstrap_node_keeps_the_wall_clock() {
     let mut sim = Sim::new(5, cfg());
     sim.with_lease(LEASE_MS);
     let ids = start_all(&mut sim, 1);
-    run_until(&mut sim, 5_000, |s| s.is_normal(ids[0]));
+    sim.run_until(5_000, |s| s.is_normal(ids[0]));
     // No floor raised the clock: it is still the wall clock.
     assert_eq!(sim.node(ids[0]).host.hlc, 0);
 }
@@ -147,7 +138,7 @@ fn the_none_provider_forms_after_the_deadline() {
     let mut sim = Sim::new(6, cfg());
     sim.with_none_lease();
     let ids = start_all(&mut sim, 1);
-    let took = run_until(&mut sim, 5_000, |s| s.is_normal(ids[0]));
+    let took = sim.run_until(5_000, |s| s.is_normal(ids[0]));
     assert!(took >= cfg().bootstrap_deadline_ms, "{took}");
 }
 

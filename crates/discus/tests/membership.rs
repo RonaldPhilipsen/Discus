@@ -34,15 +34,8 @@ async fn three_nodes_form_one_cluster() {
     }
     // Startup also waits for the handoff of each joiner, which follows the epoch shortly.
     for n in &nodes {
-        let mut startup = 503;
-        for _ in 0..250 {
-            startup = common::status(n.admin, "/startupz").await;
-            if startup == 200 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert_eq!(startup, 200);
+        let five = Duration::from_secs(5);
+        assert!(common::wait_status(n.admin, "/startupz", 200, five).await);
     }
     let mut a = nodes[0].redis().await;
     let mut b = nodes[2].redis().await;

@@ -3,9 +3,7 @@
 #![allow(clippy::unwrap_used)]
 mod security_support;
 
-use security_support::{
-    admin_status, start, tls_connect, try_start, write_file, CertFiles, TestCa,
-};
+use security_support::{start, status, tls_connect, try_start, write_file, CertFiles, TestCa};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// A plain HTTP GET with an optional bearer token. Returns the status code and the body.
@@ -55,8 +53,8 @@ async fn raw_request<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
 async fn admin_routes_are_closed_by_default() {
     let node = start(&[]).await;
     assert_eq!(get(&node, "/admin/security", None).await.0, 401);
-    assert_eq!(admin_status(&node, "/healthz").await, 200);
-    assert_eq!(admin_status(&node, "/readyz").await, 200);
+    assert_eq!(status(node.admin, "/healthz").await, 200);
+    assert_eq!(status(node.admin, "/readyz").await, 200);
 }
 
 #[tokio::test]
@@ -163,7 +161,7 @@ async fn admin_identities_need_admin_tls() {
 mod tokens {
     use super::*;
     use security_support::idp::MockIdp;
-    use security_support::wait_ready;
+    use security_support::wait_status;
 
     async fn node(ca: &TestCa, idp: &MockIdp) -> security_support::Node {
         let file = write_file(ca, "auth.toml", &idp.toml(ca, ""));
@@ -175,7 +173,15 @@ mod tokens {
             &file,
         ])
         .await;
-        assert!(wait_ready(&node, 10).await);
+        assert!(
+            wait_status(
+                node.admin,
+                "/readyz",
+                200,
+                std::time::Duration::from_secs(10)
+            )
+            .await
+        );
         node
     }
 

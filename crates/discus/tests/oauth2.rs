@@ -7,8 +7,7 @@ use std::time::Duration;
 
 use security_support::idp::{unix_now, MockIdp};
 use security_support::{
-    admin_status, cmd, exchange, start, tls_connect, try_start, wait_ready, write_file, Node,
-    TestCa,
+    cmd, exchange, start, status, tls_connect, try_start, wait_status, write_file, Node, TestCa,
 };
 use serde_json::json;
 
@@ -25,7 +24,10 @@ async fn node(ca: &TestCa, idps: &[&MockIdp], extra_toml: &str, args: &[&str]) -
     ];
     argv.extend_from_slice(args);
     let node = start(&argv).await;
-    assert!(wait_ready(&node, 10).await, "the node never became ready");
+    assert!(
+        wait_status(node.admin, "/readyz", 200, Duration::from_secs(10)).await,
+        "the node never became ready"
+    );
     node
 }
 
@@ -158,13 +160,13 @@ async fn the_node_is_unready_until_the_jwks_loads() {
     ])
     .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(admin_status(&node, "/readyz").await, 503);
-    assert_eq!(admin_status(&node, "/startupz").await, 503);
+    assert_eq!(status(node.admin, "/readyz").await, 503);
+    assert_eq!(status(node.admin, "/startupz").await, 503);
     assert!(auth(&node, &idp.token("discus.read"))
         .await
         .starts_with("-WRONGPASS"));
     idp.set_down(false);
-    assert!(wait_ready(&node, 10).await);
+    assert!(wait_status(node.admin, "/readyz", 200, Duration::from_secs(10)).await);
     assert_eq!(auth(&node, &idp.token("discus.read")).await, "+OK\r\n");
 }
 
@@ -217,7 +219,7 @@ async fn all_mtls_oauth2_needs_both_factors() {
         &file,
     ])
     .await;
-    assert!(wait_ready(&node, 10).await);
+    assert!(wait_status(node.admin, "/readyz", 200, Duration::from_secs(10)).await);
     let mut s = tls_connect(node.addr, &ca, Some(&client)).await.unwrap();
     assert!(exchange(&mut s, &cmd(&["PING"]))
         .await

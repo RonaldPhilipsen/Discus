@@ -1,6 +1,9 @@
 //! Telemetry wiring: flags, the startup check, command spans, and command metrics (spec §15.4).
 
+mod common;
+
 use bytes::Bytes;
+use common::cmd;
 use std::sync::Arc;
 
 use discus::node::{ConnState, Node};
@@ -17,13 +20,6 @@ fn args(extra: &[&str]) -> discus::Config {
     let mut argv = vec!["discus", "--listen", "127.0.0.1:0"];
     argv.extend_from_slice(extra);
     discus::Config::parse_from(argv).expect("valid test arguments")
-}
-
-fn cmd(parts: &[&str]) -> Vec<Bytes> {
-    parts
-        .iter()
-        .map(|p| Bytes::copy_from_slice(p.as_bytes()))
-        .collect()
 }
 
 #[test]

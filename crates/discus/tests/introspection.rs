@@ -6,7 +6,7 @@ mod security_support;
 use std::time::Duration;
 
 use security_support::idp::{unix_now, MockIdp};
-use security_support::{cmd, exchange, start, wait_ready, write_file, Node, TestCa};
+use security_support::{cmd, exchange, start, wait_status, write_file, Node, TestCa};
 use serde_json::json;
 
 async fn node(ca: &TestCa, idp: &MockIdp, secret: &str, args: &[&str]) -> Node {
@@ -22,7 +22,7 @@ async fn node(ca: &TestCa, idp: &MockIdp, secret: &str, args: &[&str]) -> Node {
     ];
     argv.extend_from_slice(args);
     let node = start(&argv).await;
-    assert!(wait_ready(&node, 10).await);
+    assert!(wait_status(node.admin, "/readyz", 200, Duration::from_secs(10)).await);
     node
 }
 
