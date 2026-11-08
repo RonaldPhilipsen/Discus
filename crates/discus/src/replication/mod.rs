@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use discus_placement::{Epoch, NodeId, Version};
 use discus_store::{refill_bucket, Entry, Store};
-use discus_transport::{Lane, TransportError};
+use discus_transport::{Lane, PeerInfo, TransportError};
 use discus_wire::{caps, Batch, BatchAck, Message, TraceContext};
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -142,18 +142,14 @@ impl Replicator {
         let s = stop.clone();
         tokio::spawn(async move { me.scan_loop(s).await });
         let me = self.clone();
-        let s = stop.clone();
+        discus_store::every(TICK, stop.clone(), move || {
+            me.tick();
+            std::future::ready(())
+        });
+        let (mine, s) = (self.stop.clone(), stop.clone());
         tokio::spawn(async move {
-            let mut every = tokio::time::interval(TICK);
-            loop {
-                tokio::select! {
-                    _ = s.cancelled() => {
-                        me.stop.cancel();
-                        return;
-                    }
-                    _ = every.tick() => me.tick(),
-                }
-            }
+            s.cancelled().await;
+            mine.cancel();
         });
         let Some(membership) = self.node.upgrade().and_then(|n| n.membership().cloned()) else {
             return;
@@ -437,22 +433,16 @@ impl Replicator {
         self.hints.lock().count(target)
     }
 
-    /// Queue `keys`, which a local write just stamped, for every other current owner.
-    pub fn written(&self, keys: &[Bytes]) {
-        let Some(node) = self.node.upgrade() else {
-            return;
-        };
-        let epoch = node.epochs().current().clone();
-        for key in keys {
-            for owner in epoch.owners(key, self.settings.rf) {
-                if owner == self.id {
-                    continue;
-                }
-                match self.queue(owner).push(key) {
-                    Pushed::Queued => {}
-                    Pushed::Overflow(old) => self.hint(owner, old),
-                    Pushed::Down => self.hint(owner, key.clone()),
-                }
+    /// Queue `key`, which a local write just changed, for every other current owner.
+    pub fn written(&self, node: &Node, key: &Bytes) {
+        for owner in node.owners(key) {
+            if owner == self.id {
+                continue;
+            }
+            match self.queue(owner).push(key) {
+                Pushed::Queued => {}
+                Pushed::Overflow(old) => self.hint(owner, old),
+                Pushed::Down => self.hint(owner, key.clone()),
             }
         }
     }
@@ -698,18 +688,18 @@ impl Replicator {
             .member(peer)
             .map(|m| m.addr)
             .ok_or_else(|| TransportError::Connect(format!("node {peer} is not a member")))?;
-        let info = link.transport.peer(peer, addr).await?;
         let code = message.type_code();
-        if info.capabilities & caps::REPLICATION == 0 {
-            return Err(TransportError::PeerUnsupported(code));
-        }
+        let build = |info: &PeerInfo| match info.capabilities & caps::REPLICATION {
+            0 => Err(TransportError::PeerUnsupported(code)),
+            _ => Ok(message),
+        };
         let frame = link
             .transport
-            .request_on(
+            .request_with(
                 Lane::Bulk,
                 peer,
                 addr,
-                message,
+                build,
                 TraceContext::default(),
                 self.settings.timeout,
                 true,

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use discus_placement::NodeId;
 use discus_resp::Command;
-use discus_transport::TransportError;
+use discus_transport::{Lane, PeerInfo, TransportError};
 use discus_wire::{caps, encode_command, Forward, ForwardMode, Message};
 
 use tracing::Instrument;
@@ -67,38 +67,36 @@ async fn send_in_span(
         .member(target)
         .map(|m| m.addr)
         .ok_or_else(|| TransportError::Connect(format!("node {target} is not a member")))?;
-    let info = link.transport.peer(target, addr).await?;
-    let known = link
-        .peer_epoch(target)
-        .unwrap_or(info.epoch)
-        .max(info.epoch);
-    let push = info.capabilities & caps::EPOCH_PUSH != 0 && epoch.id() > known;
-    let mut path = hop.path.clone();
-    path.push(node.id);
-    let forward = Forward {
-        command: encode_command(cmd),
-        epoch: epoch.id(),
-        epoch_body: push.then(|| (*epoch).clone()),
-        hops: hop.hops.saturating_add(1),
-        path,
-        mode,
-        track: hop.track,
+    // The full epoch rides along when the peer can take it and is behind (spec section 7.2).
+    let mut peer_caps = 0;
+    let build = |info: &PeerInfo| {
+        peer_caps = info.capabilities;
+        let known = link
+            .peer_epoch(target)
+            .unwrap_or(info.epoch)
+            .max(info.epoch);
+        let push = info.capabilities & caps::EPOCH_PUSH != 0 && epoch.id() > known;
+        let mut path = hop.path.clone();
+        path.push(node.id);
+        Ok(Message::Forward(Forward {
+            command: encode_command(cmd),
+            epoch: epoch.id(),
+            epoch_body: push.then(|| (*epoch).clone()),
+            hops: hop.hops.saturating_add(1),
+            path,
+            mode,
+            track: hop.track,
+        }))
     };
     let timeout = timeout.unwrap_or(if write {
         link.write_timeout
     } else {
         link.read_timeout
     });
+    let trace = telemetry::outbound(&hop.trace);
     let frame = link
         .transport
-        .request(
-            target,
-            addr,
-            Message::Forward(forward),
-            telemetry::outbound(&hop.trace),
-            timeout,
-            write,
-        )
+        .request_with(Lane::Command, target, addr, build, trace, timeout, write)
         .await?;
     match frame.message {
         Message::ForwardReply(reply) => {
@@ -108,7 +106,7 @@ async fn send_in_span(
                 let _ = node.hlc.observe(applied);
             }
             // A peer without replication cannot know whether its replicas caught up.
-            let replicates = info.capabilities & caps::REPLICATION != 0;
+            let replicates = peer_caps & caps::REPLICATION != 0;
             Ok(Reply {
                 value: reply.value,
                 applied: reply.applied,

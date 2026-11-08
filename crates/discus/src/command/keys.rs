@@ -30,7 +30,7 @@ fn invalid(who: &str) -> CommandError {
 }
 
 /// Set an absolute deadline. A deadline that is not in the future deletes the key.
-fn set_deadline(node: &Node, key: &[u8], deadline_ms: i128) -> Reply {
+fn set_deadline(node: &Node, key: &bytes::Bytes, deadline_ms: i128) -> Reply {
     let now = node.store.now_ms() as i128;
     node.write(key, node.stamp()?, |slot| {
         if slot.is_none() {

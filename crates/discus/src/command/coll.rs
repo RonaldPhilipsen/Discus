@@ -62,7 +62,7 @@ collection!(ZSet, ZSet, |z, m| z.score(m).is_some());
 /// member limit before `f` runs.
 pub fn mutate<'a, C: Collection, R>(
     node: &Node,
-    key: &[u8],
+    key: &Bytes,
     grow_bytes: usize,
     adds: impl IntoIterator<Item = &'a Bytes>,
     f: impl FnOnce(&mut C) -> Result<R, CommandError>,

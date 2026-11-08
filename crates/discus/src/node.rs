@@ -432,12 +432,15 @@ impl Node {
     }
 
     /// Run a store write with `stamp`. A write that changed its key records `stamp` as the
-    /// applied stamp of the command, so the key replicates. A write that changed nothing leaves
-    /// no trace.
-    pub fn write<R>(&self, key: &[u8], stamp: Version, f: impl FnOnce(&mut Slot) -> R) -> R {
+    /// applied stamp of the command and queues the key for the other owners (spec section 8.2).
+    /// A write that changed nothing leaves no trace.
+    pub fn write<R>(&self, key: &Bytes, stamp: Version, f: impl FnOnce(&mut Slot) -> R) -> R {
         let (result, changed) = self.store.write_changed(key, stamp, f);
         if changed {
             APPLIED.with(|a| a.set(Some(stamp)));
+            if let Some(replicator) = self.replicator() {
+                replicator.written(self, key);
+            }
         }
         result
     }

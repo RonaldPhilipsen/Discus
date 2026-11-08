@@ -1,5 +1,6 @@
 //! Active expiry: a sampled sweep, never a walk of a whole shard.
 
+use std::future::Future;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,12 +63,26 @@ pub fn spawn_sweeper(
     samples_per_shard: usize,
     shutdown: CancellationToken,
 ) -> JoinHandle<()> {
+    every(interval, shutdown, move || {
+        store.sweep_expired(samples_per_shard);
+        std::future::ready(())
+    })
+}
+
+/// Spawn a task that runs `f` every `period` until `stop` is cancelled. Ticks that a slow `f`
+/// missed are skipped, so `f` never runs back to back to catch up.
+pub fn every<F, Fut>(period: Duration, stop: CancellationToken, mut f: F) -> JoinHandle<()>
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send,
+{
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(interval);
+        let mut ticker = tokio::time::interval(period);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
-                _ = shutdown.cancelled() => return,
-                _ = ticker.tick() => { store.sweep_expired(samples_per_shard); }
+                _ = stop.cancelled() => return,
+                _ = ticker.tick() => f().await,
             }
         }
     })

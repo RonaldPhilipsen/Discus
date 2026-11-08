@@ -79,14 +79,7 @@ async fn run_group(
         let keys: Vec<&[u8]> = keys.iter().map(|k| &k[..]).collect();
         return Some(spent(node, spec, &g.cmd, &keys, write));
     }
-    match forward::send(node, g.target, &g.cmd, hop, ForwardMode::Route, write).await {
-        Ok(reply) => Some(reply),
-        Err(_) if !write => None,
-        Err(e) if hop.hops == 0 && !hop.held => {
-            Some(hold::held(node, spec, g.cmd.clone(), hop.clone(), Failure::of(&e)).await)
-        }
-        Err(e) => Some(Failure::of(&e).reply()),
-    }
+    hold::send_or_hold(node, spec, g.target, &g.cmd, hop, write).await
 }
 
 /// The newest applied stamp of the parts.

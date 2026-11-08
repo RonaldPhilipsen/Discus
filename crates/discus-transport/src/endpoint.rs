@@ -321,7 +321,14 @@ impl Transport {
         message: Message,
         timeout: Duration,
     ) -> Result<(PeerInfo, Message), GossipError> {
-        let (conn, info) = self.gossip_connection(addr).await?;
+        let pool = &self.0.gossip_pool;
+        let (conn, info) = self
+            .cached_or_dial(pool, addr, None, addr, Channel::Gossip)
+            .await
+            .map_err(|e| match e {
+                TransportError::Handshake { reason, .. } => GossipError::Refused(reason),
+                e => GossipError::Unreachable(e.to_string()),
+            })?;
         if let Some(want) = expected {
             if info.node_id != want {
                 return Err(GossipError::Refused(format!(
@@ -365,34 +372,6 @@ impl Transport {
         }
     }
 
-    async fn gossip_connection(
-        &self,
-        addr: SocketAddr,
-    ) -> Result<(quinn::Connection, PeerInfo), GossipError> {
-        if self.0.closed.is_cancelled() {
-            return Err(GossipError::Unreachable("the transport is closed".into()));
-        }
-        let slot = self.0.gossip_pool.lock().entry(addr).or_default().clone();
-        let mut guard = slot.lock().await;
-        if let Some(c) = guard.as_ref() {
-            if c.conn.close_reason().is_none() {
-                return Ok((c.conn.clone(), c.info));
-            }
-        }
-        *guard = None;
-        let dial = self.dial(None, addr, Channel::Gossip);
-        match tokio::time::timeout(self.0.handshake_timeout, dial).await {
-            Err(_) => Err(GossipError::Unreachable("the handshake timed out".into())),
-            Ok(Err(TransportError::Handshake { reason, .. })) => Err(GossipError::Refused(reason)),
-            Ok(Err(e)) => Err(GossipError::Unreachable(e.to_string())),
-            Ok(Ok(conn)) => {
-                let out = (conn.conn.clone(), conn.info);
-                *guard = Some(conn);
-                Ok(out)
-            }
-        }
-    }
-
     /// Subscribe to data-path evidence.
     pub fn events(&self) -> broadcast::Receiver<PeerEvent> {
         self.0.events.subscribe()
@@ -412,9 +391,11 @@ impl Transport {
 
     /// Connect to `node` at `addr` and run `HELLO`, unless a live connection exists.
     pub async fn peer(&self, node: NodeId, addr: SocketAddr) -> Result<PeerInfo, TransportError> {
-        self.connection(Lane::Command, node, addr)
-            .await
-            .map(|(_, info)| info)
+        let pool = self.pool(Lane::Command);
+        let (_, info) = self
+            .cached_or_dial(pool, node, Some(node), addr, Channel::Rpc)
+            .await?;
+        Ok(info)
     }
 
     /// Send one request on the command lane. See [`Transport::request_on`].
@@ -431,10 +412,7 @@ impl Transport {
             .await
     }
 
-    /// Send one request on a new stream of `lane` and wait for its reply frame. `timeout`
-    /// covers the request after the connection exists. `write` labels a timeout in the evidence
-    /// channel. A bulk timeout is not evidence, because a large batch can be slow on a healthy
-    /// peer.
+    /// Send one request on `lane`. See [`Transport::request_with`].
     #[allow(clippy::too_many_arguments)]
     pub async fn request_on(
         &self,
@@ -446,11 +424,34 @@ impl Transport {
         timeout: Duration,
         write: bool,
     ) -> Result<Frame, TransportError> {
-        let (conn, info) = self.connection(lane, node, addr).await?;
+        let build = |_: &PeerInfo| Ok(message);
+        self.request_with(lane, node, addr, build, trace, timeout, write)
+            .await
+    }
+
+    /// Send one request on a new stream of `lane` and wait for its reply frame. `build` makes
+    /// the request from the `PeerInfo` of the connection, or refuses to send it. `timeout`
+    /// covers the request after the connection exists. `write` labels a timeout in the evidence
+    /// channel. A bulk timeout is not evidence, because a large batch can be slow on a healthy
+    /// peer.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn request_with(
+        &self,
+        lane: Lane,
+        node: NodeId,
+        addr: SocketAddr,
+        build: impl FnOnce(&PeerInfo) -> Result<Message, TransportError>,
+        trace: TraceContext,
+        timeout: Duration,
+        write: bool,
+    ) -> Result<Frame, TransportError> {
+        let (conn, info) = self
+            .cached_or_dial(self.pool(lane), node, Some(node), addr, Channel::Rpc)
+            .await?;
         let frame = Frame {
             request_id: self.0.next_request.fetch_add(1, Ordering::Relaxed),
             trace,
-            message,
+            message: build(&info)?,
         };
         let sent_type = frame.message.type_code();
         TransportStats::bump(&self.0.stats.requests_out);
@@ -512,20 +513,21 @@ impl Transport {
         }
     }
 
-    fn slot(&self, lane: Lane, node: NodeId) -> Slot {
-        self.pool(lane).lock().entry(node).or_default().clone()
-    }
-
-    async fn connection(
+    /// The live pooled connection under `key`, or a new one to `addr`. Concurrent callers wait
+    /// on the slot lock, so they share one dial. `node` is the expected peer of an RPC
+    /// connection: its connection is watched, and its failed dial is evidence.
+    async fn cached_or_dial<K: std::hash::Hash + Eq>(
         &self,
-        lane: Lane,
-        node: NodeId,
+        pool: &Mutex<HashMap<K, Slot>>,
+        key: K,
+        node: Option<NodeId>,
         addr: SocketAddr,
+        channel: Channel,
     ) -> Result<(quinn::Connection, PeerInfo), TransportError> {
         if self.0.closed.is_cancelled() {
             return Err(TransportError::Connect("the transport is closed".into()));
         }
-        let slot = self.slot(lane, node);
+        let slot = pool.lock().entry(key).or_default().clone();
         let mut guard = slot.lock().await;
         if let Some(c) = guard.as_ref() {
             if c.conn.close_reason().is_none() {
@@ -533,29 +535,27 @@ impl Transport {
             }
         }
         *guard = None;
-        let dial = self.dial(Some(node), addr, Channel::Rpc);
-        let result = tokio::time::timeout(self.0.handshake_timeout, dial).await;
-        let result = match result {
+        let dial = tokio::time::timeout(self.0.handshake_timeout, self.dial(node, addr, channel));
+        let result = match dial.await {
             Ok(r) => r,
             Err(_) => Err(TransportError::Connect("the handshake timed out".into())),
         };
-        match result {
-            Ok(conn) => {
+        match (result, node) {
+            (Ok(conn), node) => {
                 let out = (conn.conn.clone(), conn.info);
-                tokio::spawn(watch(self.0.clone(), node, conn.conn.clone()));
+                if let Some(node) = node {
+                    tokio::spawn(watch(self.0.clone(), node, conn.conn.clone()));
+                }
                 *guard = Some(conn);
                 Ok(out)
             }
-            Err(e) => {
+            (Err(e), Some(node)) => {
                 TransportStats::bump(&self.0.stats.handshake_failures);
-                emit(
-                    &self.0,
-                    Some(node),
-                    addr,
-                    PeerEventKind::HandshakeFailed(e.to_string()),
-                );
+                let kind = PeerEventKind::HandshakeFailed(e.to_string());
+                emit(&self.0, Some(node), addr, kind);
                 Err(e)
             }
+            (Err(e), None) => Err(e),
         }
     }
 

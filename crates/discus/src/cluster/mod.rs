@@ -14,7 +14,7 @@ use std::time::Duration;
 use discus_placement::{EpochId, NodeId, Version};
 use discus_resp::{Command, Value};
 use discus_transport::Transport;
-use discus_wire::{ForwardMode, TraceContext};
+use discus_wire::TraceContext;
 use futures::future::BoxFuture;
 use parking_lot::Mutex;
 use tracing::Span;
@@ -202,23 +202,14 @@ pub fn prepare(
 }
 
 /// Execute on this node and report the stamp that the command took. The work runs in the `store`
-/// span. A command that took a stamp is queued for replication to the other owners of its keys
-/// (spec section 8.2).
+/// span. `Node::write` queues each key that the command changed for the other owners.
 pub fn local(node: &Node, spec: &CommandSpec, cmd: &Command) -> Reply {
     let _store = telemetry::store_span().entered();
     Node::take_applied();
     let value = command::execute_local(node, spec, cmd);
-    let applied = Node::take_applied();
-    if applied.is_some() {
-        if let Some(replicator) = node.replicator() {
-            if let Keys::Some(keys) = keys_of(spec.route, cmd) {
-                replicator.written(&keys);
-            }
-        }
-    }
     Reply {
         value,
-        applied,
+        applied: Node::take_applied(),
         observed: None,
         settled: false,
         failed: None,
@@ -446,15 +437,8 @@ fn single_planned(
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
         for target in targets {
-            match forward::send(&node, target, &cmd, &hop, ForwardMode::Route, write).await {
-                Ok(reply) => return reply,
-                // A read tries the next owner.
-                Err(_) if !write => continue,
-                // A write waits for a new primary, on the entry node only.
-                Err(e) if hop.hops == 0 && !hop.held => {
-                    return hold::held(&node, spec, cmd, hop, Failure::of(&e)).await;
-                }
-                Err(e) => return Failure::of(&e).reply(),
+            if let Some(reply) = hold::send_or_hold(&node, spec, target, &cmd, &hop, write).await {
+                return reply;
             }
         }
         Reply::try_again()

@@ -20,6 +20,6 @@ pub use glob::glob_match;
 pub use store::{
     refill_bucket, Pressure, Slot, Store, StoreConfig, DEFAULT_TOMBSTONE_TTL_MS, HASH_SEED,
 };
-pub use ttl::spawn_sweeper;
+pub use ttl::{every, spawn_sweeper};
 pub use value::Value;
 pub use zset::ZSet;
