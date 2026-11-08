@@ -38,6 +38,8 @@ jobs:
       - uses: jdx/mise-action@v2
       - uses: Swatinem/rust-cache@v2
       - run: mise run test
+        env:
+          NEXTEST_PROFILE: ci
 
   build-matrix:
     runs-on: ubuntu-latest

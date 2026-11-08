@@ -1,9 +1,9 @@
 //! Helpers for counter tests: shared group leases, a lease that one node can lose, and waits on
 //! the role of each group.
 //!
-//! The multi-node tests of one binary run one at a time (`#[serial]`). Many clusters at once
-//! starve the Raft timers on a busy machine, and an election in the middle of a test makes a
-//! write `-TRYAGAIN`.
+//! The multi-node tests of one binary run one at a time (a test group in
+//! `.config/nextest.toml`). Many clusters at once starve the Raft timers on a busy machine, and
+//! an election in the middle of a test makes a write `-TRYAGAIN`.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;

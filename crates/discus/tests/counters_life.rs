@@ -14,7 +14,6 @@ use common::counters::{
 use common::gossip::{heal, partition, refs, wait_agreed, wait_until, GossipNode, Net};
 use common::status as http_status;
 use redis::AsyncCommands;
-use serial_test::serial;
 
 /// Every group whose targets include `n` has `n` as a voter or the leader.
 fn promoted(n: &GossipNode) -> bool {
@@ -24,7 +23,6 @@ fn promoted(n: &GossipNode) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[serial]
 async fn startupz_waits_for_counter_promotion() {
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 3, &[]).await;
@@ -59,7 +57,6 @@ async fn startupz_waits_for_counter_promotion() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[serial]
 async fn drain_moves_raft_roles_away() {
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 4, &["--shutdown-timeout-secs", "15"]).await;
@@ -98,7 +95,6 @@ async fn drain_moves_raft_roles_away() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[serial]
 async fn a_rejoined_node_discards_its_counters() {
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 4, &[]).await;
@@ -156,7 +152,6 @@ async fn a_rejoined_node_discards_its_counters() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[serial]
 async fn a_false_dead_heals_to_one_value() {
     let net = Net::new();
     let nodes = net.start_all(3, &["--counter-groups", "4"]).await;
@@ -206,7 +201,6 @@ async fn a_false_dead_heals_to_one_value() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[serial]
 async fn growth_from_one_to_three_and_back() {
     let (net, leases) = (Net::new(), Leases::new());
     let extra: Vec<&'static str> =
