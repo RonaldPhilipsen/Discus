@@ -4,25 +4,26 @@ mod common;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use common::counters::{
-    group_of, held, incr_until, leader_of, role, start, status, Leases, FAST, GROUPS,
+    all_hold, group_of, incr_until, leader_of, role, start, status, Leases, FAST, GROUPS,
 };
-use common::gossip::{agreed, socket, wait_until, GossipNode, Net, Opts};
+use common::gossip::{refs, socket, wait_agreed, wait_until, GossipNode, Net, Opts};
 use discus::counter::Refusal;
 use discus_placement::mock::MockClock;
+use discus_placement::{Clock, SystemClock};
 use redis::AsyncCommands;
 
 /// Every group has one leader and a synced follower among `nodes`.
 fn settled(nodes: &[&GossipNode]) -> bool {
     (0..GROUPS).all(|g| {
         leader_of(nodes, g).is_some_and(|l| {
-            nodes
-                .iter()
-                .filter(|n| n.id != l.id)
-                .all(|n| status(n, g).role == "follower" && status(n, g).synced)
+            nodes.iter().filter(|n| n.id != l.id).all(|n| {
+                let s = status(n, g);
+                s.role == "follower" && s.synced
+            })
         })
     })
 }
@@ -33,8 +34,8 @@ async fn two(
     extra: &[&str],
 ) -> (Vec<GossipNode>, Vec<Arc<AtomicBool>>) {
     let (nodes, gates) = start(net, leases, 2, extra).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
-    assert!(wait_until(Duration::from_secs(10), || agreed(&refs)).await);
+    let refs = refs(&nodes);
+    wait_agreed(&refs, Duration::from_secs(10)).await;
     assert!(
         wait_until(Duration::from_secs(10), || settled(&refs)).await,
         "the groups did not settle"
@@ -46,7 +47,7 @@ async fn two(
 async fn a_leader_and_a_follower_per_group() {
     let (net, leases) = (Net::new(), Leases::new());
     let (nodes, _gates) = two(&net, &leases, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     assert!(
         wait_until(Duration::from_secs(5), || (0..GROUPS).all(|g| {
             let l = leader_of(&refs, g).map(|l| l.id);
@@ -58,28 +59,10 @@ async fn a_leader_and_a_follower_per_group() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_follower_holds_every_increment() {
-    let (net, leases) = (Net::new(), Leases::new());
-    let (nodes, _gates) = two(&net, &leases, &[]).await;
-    let mut c = nodes[0].redis().await;
-    for _ in 0..100 {
-        let _: i64 = c.incr("cnt:a", 1).await.unwrap();
-    }
-    assert!(
-        wait_until(Duration::from_secs(3), || nodes.iter().all(|n| held(
-            n, "cnt:a"
-        )
-        .as_deref()
-            == Some("100")))
-        .await
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn failover_keeps_the_value() {
     let (net, leases) = (Net::new(), Leases::new());
     let (nodes, _gates) = two(&net, &leases, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     let g = group_of(&nodes[0], "cnt:a");
     let mut c = nodes[0].redis().await;
     for _ in 0..100 {
@@ -87,12 +70,7 @@ async fn failover_keeps_the_value() {
     }
     let leader = leader_of(&refs, g).unwrap();
     let survivor = nodes.iter().find(|n| n.id != leader.id).unwrap();
-    assert!(
-        wait_until(Duration::from_secs(3), || held(survivor, "cnt:a")
-            .as_deref()
-            == Some("100"))
-        .await
-    );
+    assert!(all_hold(&[survivor], "cnt:a", "100", Duration::from_secs(3)).await);
     leader.kill();
     let mut c = survivor.redis().await;
     let n = incr_until(&mut c, "cnt:a", Duration::from_secs(8)).await;
@@ -103,7 +81,7 @@ async fn failover_keeps_the_value() {
 async fn a_lagging_follower_gets_a_snapshot() {
     let (net, leases) = (Net::new(), Leases::new());
     let (nodes, _gates) = two(&net, &leases, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     let g = group_of(&nodes[0], "cnt:lag");
     let leader = leader_of(&refs, g).unwrap();
     let follower = nodes.iter().find(|n| n.id != leader.id).unwrap();
@@ -127,19 +105,14 @@ async fn a_lagging_follower_gets_a_snapshot() {
         .faults
         .stall_counter_ms
         .store(0, Ordering::Relaxed);
-    assert!(
-        wait_until(Duration::from_secs(3), || held(follower, "cnt:lag")
-            .as_deref()
-            == Some("20"))
-        .await
-    );
+    assert!(all_hold(&[follower], "cnt:lag", "20", Duration::from_secs(3)).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_leader_stops_at_the_lease_margin() {
     let (net, leases) = (Net::new(), Leases::new());
     let (nodes, gates) = two(&net, &leases, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     let g = group_of(&nodes[0], "cnt:fence");
     let mut c = nodes[0].redis().await;
     let _: i64 = c.incr("cnt:fence", 1).await.unwrap();
@@ -180,8 +153,8 @@ async fn a_leader_stops_at_the_lease_margin() {
 async fn the_follower_acquires_first() {
     let (net, leases) = (Net::new(), Leases::new());
     let (nodes, _gates) = start(&net, &leases, 3, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
-    assert!(wait_until(Duration::from_secs(10), || agreed(&refs)).await);
+    let refs = refs(&nodes);
+    wait_agreed(&refs, Duration::from_secs(10)).await;
     let g = group_of(&nodes[0], "cnt:first");
     assert!(
         wait_until(Duration::from_secs(10), || leader_of(&refs, g)
@@ -209,8 +182,8 @@ async fn the_follower_acquires_first() {
 async fn the_epoch_names_the_leader_without_a_lease() {
     let net = Net::new();
     let nodes = net.start_all(2, &["--counter-groups", "4"]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
-    assert!(wait_until(Duration::from_secs(10), || agreed(&refs)).await);
+    let refs = refs(&nodes);
+    wait_agreed(&refs, Duration::from_secs(10)).await;
     assert!(wait_until(Duration::from_secs(10), || settled(&refs)).await);
     let g = group_of(&nodes[0], "cnt:e");
     let mut c = nodes[0].redis().await;
@@ -219,12 +192,7 @@ async fn the_epoch_names_the_leader_without_a_lease() {
     }
     let leader = leader_of(&refs, g).unwrap();
     let survivor = nodes.iter().find(|n| n.id != leader.id).unwrap();
-    assert!(
-        wait_until(Duration::from_secs(3), || held(survivor, "cnt:e")
-            .as_deref()
-            == Some("10"))
-        .await
-    );
+    assert!(all_hold(&[survivor], "cnt:e", "10", Duration::from_secs(3)).await);
     leader.kill();
     let mut c = survivor.redis().await;
     assert_eq!(
@@ -233,17 +201,11 @@ async fn the_epoch_names_the_leader_without_a_lease() {
     );
 }
 
-fn real_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn expiry_is_identical_under_clock_skew() {
     const SKEW: u64 = 400;
     let (a, b) = (MockClock::<20>, MockClock::<21>);
+    let real_ms = || SystemClock.now_ms();
     a.set(real_ms());
     b.set(real_ms() + SKEW);
     let ticking = tokio::spawn(async move {
@@ -256,16 +218,16 @@ async fn expiry_is_identical_under_clock_skew() {
     let (net, leases) = (Net::new(), Leases::new());
     let (sa, aa) = socket();
     let (sb, ab) = socket();
-    let flags: Vec<&str> = FAST.to_vec();
     let gate = Arc::new(AtomicBool::new(true));
     let na = net
         .start_on(
             sa,
             &[ab],
-            &flags,
+            &[],
             Opts {
                 clocks: Some((a.hlc_clock(), Arc::new(a))),
                 counter_leases: Some(leases.for_node(gate.clone())),
+                defaults: FAST,
                 ..Opts::default()
             },
         )
@@ -274,16 +236,17 @@ async fn expiry_is_identical_under_clock_skew() {
         .start_on(
             sb,
             &[aa],
-            &flags,
+            &[],
             Opts {
                 clocks: Some((b.hlc_clock(), Arc::new(b))),
                 counter_leases: Some(leases.for_node(gate)),
+                defaults: FAST,
                 ..Opts::default()
             },
         )
         .await;
     let refs = [&na, &nb];
-    assert!(wait_until(Duration::from_secs(10), || agreed(&refs)).await);
+    wait_agreed(&refs, Duration::from_secs(10)).await;
     assert!(wait_until(Duration::from_secs(10), || settled(&refs)).await);
     for (i, entry) in refs.iter().enumerate() {
         let key = format!("cnt:r{i}");

@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use common::cluster::{start_cluster, ClusterNode};
-use common::gossip::{agreed, wait_until, GossipNode, Net};
+use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
 use discus_store::Value;
 use redis::AsyncCommands;
 
@@ -184,12 +184,7 @@ async fn gossip_three(net: &Net, extra: &[&str]) -> Vec<GossipNode> {
     let mut args = vec!["--replication-factor", "3"];
     args.extend_from_slice(extra);
     let nodes = net.start_all(3, &args).await;
-    assert!(
-        wait_until(Duration::from_secs(10), || agreed(
-            &nodes.iter().collect::<Vec<_>>()
-        ))
-        .await
-    );
+    wait_agreed(&refs(&nodes), Duration::from_secs(10)).await;
     nodes
 }
 
@@ -227,7 +222,7 @@ async fn a_promoted_primary_pulls_newer_entries() {
     assert!(x.node.store.apply(key.as_bytes(), old));
     p.kill();
     let rest: Vec<&GossipNode> = nodes.iter().filter(|n| n.id != p.id).collect();
-    assert!(wait_until(Duration::from_secs(10), || agreed(&rest)).await);
+    wait_agreed(&rest, Duration::from_secs(10)).await;
     assert_eq!(
         x.node.epochs().current().primary(key.as_bytes()),
         Some(x.id)
@@ -261,6 +256,6 @@ async fn hints_for_a_dead_target_are_dropped() {
     let rep = p.node.replicator().unwrap();
     assert!(wait_until(Duration::from_secs(3), || rep.hints(z.id) > 0).await);
     let rest = [&nodes[0], &nodes[1]];
-    assert!(wait_until(Duration::from_secs(10), || agreed(&rest)).await);
+    wait_agreed(&rest, Duration::from_secs(10)).await;
     assert!(wait_until(Duration::from_secs(2), || rep.hints(z.id) == 0).await);
 }

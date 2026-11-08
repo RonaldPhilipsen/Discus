@@ -5,7 +5,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::gossip::{agreed, socket, wait_until, GossipNode, Net, Opts};
+use common::gossip::{refs, socket, wait_agreed, wait_until, Net, Opts};
 use discus::membership::Event;
 use discus_membership::{LeaseProvider, NoneLease};
 use discus_placement::mock::MockClock;
@@ -18,15 +18,11 @@ use redis::AsyncCommands;
 
 const FORM: Duration = Duration::from_secs(10);
 
-fn refs(nodes: &[GossipNode]) -> Vec<&GossipNode> {
-    nodes.iter().collect()
-}
-
 #[tokio::test]
 async fn three_nodes_form_one_cluster() {
     let net = Net::new();
     let nodes = net.start_all(3, &[]).await;
-    assert!(wait_until(FORM, || agreed(&refs(&nodes))).await);
+    wait_agreed(&refs(&nodes), FORM).await;
     let holder = net.lease.holder().unwrap();
     assert_eq!(holder.cluster_id, nodes[0].node.cluster_id());
     for n in &nodes {
@@ -58,14 +54,14 @@ async fn five_nodes_join_one_by_one() {
         let seed = nodes[0].cluster_addr;
         nodes.push(net.start(&[seed], &[]).await);
     }
-    assert!(wait_until(FORM, || agreed(&refs(&nodes))).await);
+    wait_agreed(&refs(&nodes), FORM).await;
 }
 
 #[tokio::test]
 async fn a_dead_node_leaves_the_epoch() {
     let net = Net::new();
     let nodes = net.start_all(4, &[]).await;
-    assert!(wait_until(FORM, || agreed(&refs(&nodes))).await);
+    wait_agreed(&refs(&nodes), FORM).await;
     let dead = &nodes[3];
     let key = (0..)
         .map(|i| format!("gone:{i}"))
@@ -73,7 +69,7 @@ async fn a_dead_node_leaves_the_epoch() {
         .unwrap();
     dead.kill();
     let rest = refs(&nodes[..3]);
-    assert!(wait_until(Duration::from_secs(5), || agreed(&rest)).await);
+    wait_agreed(&rest, Duration::from_secs(5)).await;
     let mut c = nodes[0].redis().await;
     let v: Option<String> = c.get(&key).await.unwrap();
     assert_eq!(v, None);
@@ -185,12 +181,12 @@ async fn two_clusters_merge_into_one() {
     let b = net.start_on(s, &[], &[], none()).await;
     assert!(wait_until(FORM, || lone.is_normal() && b.is_normal()).await);
     let c = net.start_on(socket().0, &[b_addr], &[], none()).await;
-    assert!(wait_until(FORM, || agreed(&[&b, &c])).await);
+    wait_agreed(&[&b, &c], FORM).await;
     assert_ne!(lone.node.cluster_id(), b.node.cluster_id());
     let mut conn = lone.redis().await;
     let _: () = conn.set("lost", "1").await.unwrap();
     lone.node.membership().unwrap().add_seed(b_addr);
-    assert!(wait_until(Duration::from_secs(20), || agreed(&[&lone, &b, &c])).await);
+    wait_agreed(&[&lone, &b, &c], Duration::from_secs(20)).await;
     assert_eq!(lone.node.cluster_id(), b.node.cluster_id());
     assert!(!lone.node.store.read(b"lost", |e| e.is_some()));
 }
@@ -200,7 +196,7 @@ async fn ownership_gained_reaches_subscribers() {
     let net = Net::new();
     let rf = ["--replication-factor", "3"];
     let nodes = net.start_all(3, &rf).await;
-    assert!(wait_until(FORM, || agreed(&refs(&nodes))).await);
+    wait_agreed(&refs(&nodes), FORM).await;
     let mut events = nodes[0].node.membership().unwrap().subscribe();
     let joiner = net.start(&[nodes[0].cluster_addr], &rf).await;
     let gained = tokio::time::timeout(FORM, async {
@@ -222,7 +218,7 @@ async fn ownership_gained_reaches_subscribers() {
 async fn a_join_leaves_serving_nodes_ready() {
     let net = Net::new();
     let nodes = net.start_all(3, &[]).await;
-    assert!(wait_until(FORM, || agreed(&refs(&nodes))).await);
+    wait_agreed(&refs(&nodes), FORM).await;
     let joiner = net.start(&[nodes[1].cluster_addr], &[]).await;
     let mut settled = None;
     let deadline = tokio::time::Instant::now() + FORM;

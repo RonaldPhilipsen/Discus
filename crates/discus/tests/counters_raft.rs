@@ -7,15 +7,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::counters::{
-    all_raft, flags, group_of, held, incr_once, incr_or_show, incr_until, join, key_in, leader_of,
-    raft_cluster, role, start, status, voters_of, Leases, GROUPS, RAFT, SLOW_DEATH,
+    all_hold, all_raft, dump, flags, group_of, incr_once, incr_or_show, incr_until, is_try_again,
+    join_to, key_in, leader_of, outcome, raft_cluster, role, start, status, targeted, voters_of,
+    Leases, Outcome, GROUPS, RAFT, SLOW_DEATH,
 };
-use common::gossip::{agreed, socket, wait_until, GossipNode, Net};
+use common::gossip::{partition, refs, wait_agreed, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
+use serial_test::serial;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn three_nodes_elect_raft_leaders() {
-    let _turn = common::counters::turn("three_nodes_elect_raft_leaders").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 3, &[]).await;
     for g in 0..GROUPS {
@@ -25,8 +27,8 @@ async fn three_nodes_elect_raft_leaders() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn entries_reach_every_voter() {
-    let _turn = common::counters::turn("entries_reach_every_voter").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 3, &[]).await;
     let mut c = nodes[0].redis().await;
@@ -34,19 +36,12 @@ async fn entries_reach_every_voter() {
         let n: i64 = incr_once(&mut c, "cnt:a").await;
         assert_eq!(n, i);
     }
-    assert!(
-        wait_until(Duration::from_secs(5), || nodes.iter().all(|n| held(
-            n, "cnt:a"
-        )
-        .as_deref()
-            == Some("100")))
-        .await
-    );
+    assert!(all_hold(&refs(&nodes), "cnt:a", "100", Duration::from_secs(5)).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn a_learner_catches_up_by_snapshot() {
-    let _turn = common::counters::turn("a_learner_catches_up_by_snapshot").await;
     let (net, leases) = (Net::new(), Leases::new());
     let extra: [&'static str; 2] = ["--raft-snapshot-entries", "50"];
     let nodes = raft_cluster(&net, &leases, 3, &extra).await;
@@ -57,19 +52,11 @@ async fn a_learner_catches_up_by_snapshot() {
             let _: i64 = incr_once(&mut c, k).await;
         }
     }
-    let seeds: Vec<_> = nodes.iter().map(|n| n.cluster_addr).collect();
-    let (fourth, _) = join(&net, &leases, socket().0, &seeds, &flags(&extra)).await;
-    let mut all: Vec<&GossipNode> = nodes.iter().collect();
+    let (fourth, _) = join_to(&net, &leases, &refs(&nodes), &flags(&extra)).await;
+    let mut all = refs(&nodes);
     all.push(&fourth);
-    assert!(wait_until(Duration::from_secs(15), || agreed(&all)).await);
-    let epoch = fourth.node.epochs().current().clone();
-    let targeted: Vec<u16> = (0..GROUPS)
-        .filter(|g| {
-            epoch
-                .owners(&discus::counter::group_key(*g), 3)
-                .contains(&fourth.id)
-        })
-        .collect();
+    wait_agreed(&all, Duration::from_secs(15)).await;
+    let targeted = targeted(&fourth);
     assert!(
         !targeted.is_empty(),
         "the fourth node is a target of no group"
@@ -82,11 +69,7 @@ async fn a_learner_catches_up_by_snapshot() {
             .await,
             "the fourth node never became a voter of group {g}"
         );
-        assert!(
-            wait_until(Duration::from_secs(5), || held(&fourth, key).as_deref()
-                == Some("300"))
-            .await
-        );
+        assert!(all_hold(&[&fourth], key, "300", Duration::from_secs(5)).await);
         assert!(
             status(&fourth, g).installed >= 1,
             "group {g} sent no snapshot"
@@ -95,70 +78,54 @@ async fn a_learner_catches_up_by_snapshot() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn a_minority_returns_tryagain() {
-    let _turn = common::counters::turn("a_minority_returns_tryagain").await;
     let (net, leases) = (Net::new(), Leases::new());
-    let nodes = raft_cluster(&net, &leases, 5, SLOW_DEATH).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let nodes = raft_cluster(&net, &leases, 4, SLOW_DEATH).await;
+    let refs = refs(&nodes);
     let g = group_of(&nodes[0], "cnt:min");
     let mut c = nodes[0].redis().await;
     let _: i64 = incr_once(&mut c, "cnt:min").await;
     let leader = leader_of(&refs, g).unwrap();
-    for n in nodes.iter().filter(|n| n.id != leader.id) {
-        n.node.faults.blocked.lock().insert(leader.id);
-        leader.node.faults.blocked.lock().insert(n.id);
-    }
+    let rest: Vec<&GossipNode> = nodes.iter().filter(|n| n.id != leader.id).collect();
+    partition(leader, &rest);
     let mut lc = leader.redis().await;
     let err = redis::cmd("INCR")
         .arg("cnt:min")
         .query_async::<i64>(&mut lc)
         .await
         .unwrap_err();
-    assert!(err.to_string().to_uppercase().contains("TRYAGAIN"), "{err}");
-    let other = nodes.iter().find(|n| n.id != leader.id).unwrap();
-    let mut oc = other.redis().await;
+    assert!(is_try_again(&err), "{err}");
+    let mut oc = rest[0].redis().await;
     let n = incr_or_show(&mut oc, "cnt:min", Duration::from_secs(15), &refs).await;
     assert!(n >= 2, "{n}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn a_restarted_node_enters_as_a_learner() {
-    let _turn = common::counters::turn("a_restarted_node_enters_as_a_learner").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 4, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     let victim = voters_of(&refs, 0)[0];
     victim.kill();
     let rest: Vec<&GossipNode> = nodes.iter().filter(|n| n.id != victim.id).collect();
-    assert!(wait_until(Duration::from_secs(15), || agreed(&rest)).await);
-    let seeds: Vec<_> = rest.iter().map(|n| n.cluster_addr).collect();
-    let (fresh, _) = join(&net, &leases, socket().0, &seeds, &flags(&[])).await;
+    wait_agreed(&rest, Duration::from_secs(15)).await;
+    let (fresh, _) = join_to(&net, &leases, &rest, &flags(&[])).await;
     let mut all = rest.clone();
     all.push(&fresh);
-    assert!(wait_until(Duration::from_secs(15), || agreed(&all)).await);
-    let targeted: Vec<u16> = (0..GROUPS)
-        .filter(|g| {
-            fresh
-                .node
-                .epochs()
-                .current()
-                .owners(&discus::counter::group_key(*g), 3)
-                .contains(&fresh.id)
-        })
-        .collect();
+    wait_agreed(&all, Duration::from_secs(15)).await;
+    let targeted = targeted(&fresh);
     let promoted = || {
         targeted
             .iter()
             .all(|g| matches!(role(&fresh, *g), "voter" | "leader"))
     };
-    if !wait_until(Duration::from_secs(30), promoted).await {
-        for n in &all {
-            for g in 0..GROUPS {
-                eprintln!("{} g{g}: {:?}", n.id, status(n, g));
-            }
-        }
-        panic!("the new node did not become a voter of {targeted:?}");
-    }
+    assert!(
+        wait_until(Duration::from_secs(30), promoted).await,
+        "the new node did not become a voter of {targeted:?}\n{}",
+        dump(&all)
+    );
     for g in 0..GROUPS {
         let s = status(&fresh, g);
         if s.regime.is_some() && matches!(s.role, "voter" | "learner") {
@@ -167,30 +134,32 @@ async fn a_restarted_node_enters_as_a_learner() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn two_of_three_voters_lost() {
-    let _turn = common::counters::turn("two_of_three_voters_lost").await;
-    let (net, leases) = (Net::new(), Leases::new());
-    let nodes = raft_cluster(&net, &leases, 6, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
-    let g = group_of(&nodes[0], "cnt:two");
+/// `incrs` increments of `key` through `nodes[0]`, then the group of `key` and its voters, once
+/// every voter holds the value.
+async fn voters_holding<'a>(
+    nodes: &'a [GossipNode],
+    key: &str,
+    incrs: i64,
+) -> (u16, Vec<&'a GossipNode>) {
+    let g = group_of(&nodes[0], key);
     let mut c = nodes[0].redis().await;
-    for _ in 0..10 {
-        let _: i64 = incr_once(&mut c, "cnt:two").await;
+    for _ in 0..incrs {
+        incr_once(&mut c, key).await;
     }
-    let voters = voters_of(&refs, g);
-    assert!(
-        wait_until(Duration::from_secs(5), || voters.iter().all(|v| held(
-            v, "cnt:two"
-        )
-        .as_deref()
-            == Some("10")))
-        .await
-    );
+    let voters = voters_of(&refs(nodes), g);
+    assert!(all_hold(&voters, key, &incrs.to_string(), Duration::from_secs(5)).await);
+    (g, voters)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
+async fn two_of_three_voters_lost() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let nodes = raft_cluster(&net, &leases, 5, &[]).await;
+    let (_, voters) = voters_holding(&nodes, "cnt:two", 10).await;
     voters[0].kill();
     voters[1].kill();
-    let survivor = voters[2];
-    let mut sc = survivor.redis().await;
+    let mut sc = voters[2].redis().await;
     assert_eq!(
         incr_until(&mut sc, "cnt:two", Duration::from_secs(20)).await,
         11
@@ -198,29 +167,19 @@ async fn two_of_three_voters_lost() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn every_voter_lost() {
-    let _turn = common::counters::turn("every_voter_lost").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 6, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
-    let g = group_of(&nodes[0], "cnt:all");
-    let mut c = nodes[0].redis().await;
-    for _ in 0..10 {
-        let _: i64 = incr_once(&mut c, "cnt:all").await;
-    }
-    let voters = voters_of(&refs, g);
+    let (_, voters) = voters_holding(&nodes, "cnt:all", 10).await;
     for v in &voters {
         v.kill();
     }
-    let other = nodes
-        .iter()
-        .find(|n| !voters.iter().any(|v| v.id == n.id))
-        .unwrap();
-    let mut oc = other.redis().await;
     let rest: Vec<&GossipNode> = nodes
         .iter()
         .filter(|n| !voters.iter().any(|v| v.id == n.id))
         .collect();
+    let mut oc = rest[0].redis().await;
     assert_eq!(
         incr_or_show(&mut oc, "cnt:all", Duration::from_secs(25), &rest).await,
         1
@@ -228,26 +187,11 @@ async fn every_voter_lost() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn force_reconfigure_acts_before_dead() {
-    let _turn = common::counters::turn("force_reconfigure_acts_before_dead").await;
     let (net, leases) = (Net::new(), Leases::new());
-    let nodes = raft_cluster(&net, &leases, 5, SLOW_DEATH).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
-    let g = group_of(&nodes[0], "cnt:force");
-    let mut c = nodes[0].redis().await;
-    for _ in 0..5 {
-        let _: i64 = incr_once(&mut c, "cnt:force").await;
-    }
-    let voters = voters_of(&refs, g);
-    assert!(
-        wait_until(Duration::from_secs(5), || voters.iter().all(|v| held(
-            v,
-            "cnt:force"
-        )
-        .as_deref()
-            == Some("5")))
-        .await
-    );
+    let nodes = raft_cluster(&net, &leases, 3, SLOW_DEATH).await;
+    let (g, voters) = voters_holding(&nodes, "cnt:force", 5).await;
     voters[0].kill();
     voters[1].kill();
     let survivor = voters[2];
@@ -276,23 +220,22 @@ async fn force_reconfigure_acts_before_dead() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn the_up_switch_waits_for_the_dwell_time() {
-    let _turn = common::counters::turn("the_up_switch_waits_for_the_dwell_time").await;
     let (net, leases) = (Net::new(), Leases::new());
     let mut f: Vec<&str> = RAFT[2..].to_vec();
     f.extend(["--counter-dwell-ms", "3000"]);
     let (nodes, _) = start(&net, &leases, 2, &f).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
-    assert!(wait_until(Duration::from_secs(10), || agreed(&refs)).await);
+    let refs = refs(&nodes);
+    wait_agreed(&refs, Duration::from_secs(10)).await;
     let mut c = nodes[0].redis().await;
     for _ in 0..5 {
         let _: i64 = incr_until(&mut c, "cnt:up", Duration::from_secs(5)).await;
     }
-    let seeds: Vec<_> = nodes.iter().map(|n| n.cluster_addr).collect();
-    let (third, _) = join(&net, &leases, socket().0, &seeds, &f).await;
+    let (third, _) = join_to(&net, &leases, &refs, &f).await;
     let mut all = refs.clone();
     all.push(&third);
-    assert!(wait_until(Duration::from_secs(10), || agreed(&all)).await);
+    wait_agreed(&all, Duration::from_secs(10)).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(
         (0..GROUPS).all(|g| all.iter().all(|n| status(n, g).voters.is_empty())),
@@ -309,25 +252,18 @@ async fn the_up_switch_waits_for_the_dwell_time() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn the_down_switch_is_at_once() {
-    let _turn = common::counters::turn("the_down_switch_is_at_once").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 3, &[]).await;
     let mut c = nodes[0].redis().await;
     for _ in 0..7 {
         let _: i64 = incr_once(&mut c, "cnt:down").await;
     }
-    assert!(
-        wait_until(Duration::from_secs(5), || nodes.iter().all(|n| held(
-            n, "cnt:down"
-        )
-        .as_deref()
-            == Some("7")))
-        .await
-    );
+    assert!(all_hold(&refs(&nodes), "cnt:down", "7", Duration::from_secs(5)).await);
     nodes[2].kill();
     let rest = [&nodes[0], &nodes[1]];
-    assert!(wait_until(Duration::from_secs(10), || agreed(&rest)).await);
+    wait_agreed(&rest, Duration::from_secs(10)).await;
     assert!(
         wait_until(Duration::from_secs(8), || (0..GROUPS)
             .all(
@@ -358,7 +294,7 @@ async fn load(nodes: &[&GossipNode], key: &str, clients: usize, each: usize) -> 
                 match r {
                     Ok(_) => ok.fetch_add(1, Ordering::Relaxed),
                     Err(e) => {
-                        assert!(e.to_string().to_uppercase().contains("TRYAGAIN"), "{e}");
+                        assert!(is_try_again(&e), "{e}");
                         failed.fetch_add(1, Ordering::Relaxed)
                     }
                 };
@@ -372,11 +308,11 @@ async fn load(nodes: &[&GossipNode], key: &str, clients: usize, each: usize) -> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn the_final_value_counts_every_success() {
-    let _turn = common::counters::turn("the_final_value_counts_every_success").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 4, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     let (ok, failed) = load(&refs, "cnt:lin", 4, 250).await;
     assert_eq!(failed, 0, "a steady cluster refused increments");
     let mut c = nodes[0].redis().await;
@@ -403,11 +339,11 @@ async fn the_final_value_counts_every_success() {
 /// The Raft leader drains while the other nodes write to its group. The group switches down,
 /// and the counter keeps every increment that a client saw succeed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn a_draining_raft_leader_keeps_every_increment() {
-    let _turn = common::counters::turn("a_draining_raft_leader_keeps_every_increment").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 3, &[]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     let key = "cnt:drain";
     let g = group_of(&nodes[0], key);
     let leader = leader_of(&refs, g).unwrap();
@@ -425,12 +361,10 @@ async fn a_draining_raft_leader_keeps_every_increment() {
         );
         load.push(tokio::spawn(async move {
             while !stop.load(Ordering::Relaxed) {
-                let r: redis::RedisResult<i64> =
-                    redis::cmd("INCR").arg(key).query_async(&mut c).await;
-                match r {
-                    Ok(_) => ok.fetch_add(1, Ordering::Relaxed),
-                    Err(e) if e.to_string().contains("has no leader") => 0,
-                    Err(_) => ambiguous.fetch_add(1, Ordering::Relaxed),
+                match outcome(redis::cmd("INCR").arg(key).query_async(&mut c).await) {
+                    Outcome::Ok(_) => ok.fetch_add(1, Ordering::Relaxed),
+                    Outcome::Refused => 0,
+                    _ => ambiguous.fetch_add(1, Ordering::Relaxed),
                 };
             }
         }));
@@ -438,7 +372,7 @@ async fn a_draining_raft_leader_keeps_every_increment() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     leader.node.drain_token().cancel();
-    assert!(wait_until(Duration::from_secs(20), || agreed(&rest)).await);
+    wait_agreed(&rest, Duration::from_secs(20)).await;
     assert!(
         wait_until(Duration::from_secs(15), || leader_of(&rest, g)
             .is_some_and(|l| status(l, g).voters.is_empty()))

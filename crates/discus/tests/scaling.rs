@@ -10,10 +10,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::counters::{all_raft, flags, join, status, Leases, GROUPS};
-use common::gossip::{agreed, socket, wait_until, GossipNode, Net};
-use discus::counter::group_key;
+use common::counters::{all_raft, dump, flags, join_to, outcome, Leases, Outcome};
+use common::gossip::{agreed, refs, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
+use serial_test::serial;
 
 const MAX_NODES: usize = 5;
 const RF: usize = 3;
@@ -46,32 +46,6 @@ fn missing(nodes: &[&GossipNode], key: &[u8]) -> Vec<String> {
         .collect()
 }
 
-/// The role, leader, and voters of every group on every node, for a failure message.
-fn groups(nodes: &[&GossipNode]) -> String {
-    let short =
-        |id: &discus_placement::NodeId| format!("{id:?}").chars().take(12).collect::<String>();
-    let mut out = String::new();
-    for g in 0..GROUPS {
-        let targets = nodes[0].node.epochs().current().owners(&group_key(g), 3);
-        out += &format!(
-            "group {g}, targets {:?}\n",
-            targets.iter().map(short).collect::<Vec<_>>()
-        );
-        for n in nodes {
-            let s = status(n, g);
-            out += &format!(
-                "  {} {:>8} leader {:?} voters {:?} learners {:?}\n",
-                short(&n.id),
-                s.role,
-                s.leader.as_ref().map(short),
-                s.voters.iter().map(short).collect::<Vec<_>>(),
-                s.learners.iter().map(short).collect::<Vec<_>>(),
-            );
-        }
-    }
-    out
-}
-
 /// The cluster of `nodes` agrees on one epoch, every owner of the probe key holds it, and, from
 /// three nodes, every counter group runs in Raft mode with its target voters.
 async fn settled(nodes: &[&GossipNode], phase: &str) {
@@ -88,7 +62,7 @@ async fn settled(nodes: &[&GossipNode], phase: &str) {
         assert!(
             wait_until(STEP, || all_raft(nodes)).await,
             "{phase}: the counter groups did not reach Raft mode\n{}",
-            groups(nodes)
+            dump(nodes)
         );
     }
 }
@@ -144,23 +118,39 @@ async fn read_load(mut c: redis::aio::MultiplexedConnection, t: Arc<Tally>, stop
     }
 }
 
-/// A `has no leader` refusal applied nothing. Any other error may have applied.
+/// The values of `keys` through `c`, in pipelines of 500.
+async fn gets(c: &mut redis::aio::MultiplexedConnection, keys: &[&String]) -> Vec<Option<String>> {
+    let mut out = Vec::with_capacity(keys.len());
+    for chunk in keys.chunks(500) {
+        let mut pipe = redis::pipe();
+        for key in chunk {
+            pipe.get(*key);
+        }
+        out.extend(
+            pipe.query_async::<Vec<Option<String>>>(&mut *c)
+                .await
+                .unwrap(),
+        );
+    }
+    out
+}
+
+/// A refusal applied nothing. Any other error may have applied.
 async fn counter_load(
     mut c: redis::aio::MultiplexedConnection,
     t: Arc<Tally>,
     stop: Arc<AtomicBool>,
 ) {
     while !stop.load(Ordering::Relaxed) {
-        let r: redis::RedisResult<i64> = redis::cmd("INCR").arg(COUNTER).query_async(&mut c).await;
-        match r {
-            Ok(_) => {
+        match outcome(redis::cmd("INCR").arg(COUNTER).query_async(&mut c).await) {
+            Outcome::Ok(_) => {
                 t.increments.fetch_add(1, Ordering::Relaxed);
             }
-            Err(e) if e.to_string().contains("has no leader") => {
+            Outcome::Refused => {
                 t.refused.fetch_add(1, Ordering::Relaxed);
             }
-            Err(e) => {
-                eprintln!("ambiguous increment: {e}");
+            o => {
+                eprintln!("ambiguous increment: {o:?}");
                 t.ambiguous.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -169,12 +159,12 @@ async fn counter_load(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn growth_from_one_to_five_and_back_under_load() {
-    let _turn = common::counters::turn("growth_from_one_to_five_and_back_under_load").await;
     let (net, leases) = (Net::new(), Leases::new());
     let extra = flags(&["--replication-factor", "3", "--shutdown-timeout-secs", "20"]);
 
-    let (first, _) = join(&net, &leases, socket().0, &[], &extra).await;
+    let (first, _) = join_to(&net, &leases, &[], &extra).await;
     assert!(
         wait_until(STEP, || first.is_normal()).await,
         "the first node did not form a cluster"
@@ -205,19 +195,18 @@ async fn growth_from_one_to_five_and_back_under_load() {
     ];
 
     for n in 2..=MAX_NODES {
-        let seeds: Vec<_> = nodes.iter().map(|n| n.cluster_addr).collect();
-        let (node, _) = join(&net, &leases, socket().0, &seeds, &extra).await;
+        let (node, _) = join_to(&net, &leases, &refs(&nodes), &extra).await;
         nodes.push(node);
-        let all: Vec<&GossipNode> = nodes.iter().collect();
+        let all = refs(&nodes);
         settled(&all, &format!("grow to {n}")).await;
     }
 
     // Every node serves every key that the load wrote, whichever node owns it.
     let written = tally.written.lock().unwrap().clone();
+    let sample: Vec<&String> = written.iter().step_by(7).collect();
     for node in &nodes {
-        let mut c = node.redis().await;
-        for key in written.iter().step_by(7) {
-            let v: Option<String> = c.get(key).await.unwrap();
+        let got = gets(&mut node.redis().await, &sample).await;
+        for (key, v) in sample.iter().zip(got) {
             assert_eq!(
                 v.as_deref(),
                 Some(key.as_str()),
@@ -230,7 +219,7 @@ async fn growth_from_one_to_five_and_back_under_load() {
     while nodes.len() > 1 {
         let leaving = nodes.pop().unwrap();
         leaving.node.drain_token().cancel();
-        let rest: Vec<&GossipNode> = nodes.iter().collect();
+        let rest = refs(&nodes);
         settled(&rest, &format!("shrink to {}", nodes.len())).await;
     }
 
@@ -269,13 +258,10 @@ async fn growth_from_one_to_five_and_back_under_load() {
 
     // Writes are acknowledged at W = 1 and copied asynchronously, so a write that lands on a node
     // as it leaves can become a miss (spec section 15.3). Anything beyond a few is a handoff bug.
-    let mut lost = Vec::new();
-    for (i, key) in written.iter().enumerate() {
-        let v: Option<String> = setup.get(key).await.unwrap();
-        if v.as_deref() != Some(key.as_str()) {
-            lost.push(i);
-        }
-    }
+    let got = gets(&mut setup, &written.iter().collect::<Vec<_>>()).await;
+    let lost: Vec<usize> = (0..written.len())
+        .filter(|i| got[*i].as_deref() != Some(written[*i].as_str()))
+        .collect();
     assert!(
         lost.len() <= written.len() / 1000,
         "lost {} of {} entries while the cluster shrank, at write positions {lost:?}",

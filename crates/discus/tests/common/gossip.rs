@@ -95,6 +95,8 @@ pub struct Opts {
     pub lease: Option<Arc<dyn LeaseProvider>>,
     pub clocks: Option<Clocks>,
     pub counter_leases: Option<discus::counter::CounterLeases>,
+    /// More settings that `extra` can override, after [`DEFAULTS`].
+    pub defaults: &'static [(&'static str, &'static str)],
 }
 
 impl Net {
@@ -123,15 +125,13 @@ impl Net {
         let cluster_addr = socket.local_addr().unwrap();
         let peers = seeds.iter().map(|s| s.to_string());
         let extra: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
-        let argv = argv(&self.dir, cluster_addr, peers, DEFAULTS, &extra);
+        let defaults: Vec<(&str, &str)> = DEFAULTS.iter().chain(opts.defaults).copied().collect();
+        let argv = argv(&self.dir, cluster_addr, peers, &defaults, &extra);
         let config = Config::parse_from(argv).expect("valid gossip arguments");
         let lease = opts
             .lease
             .unwrap_or_else(|| Arc::new(self.lease.clone()) as Arc<dyn LeaseProvider>);
-        let (hlc_clock, wall) = match opts.clocks {
-            Some((h, w)) => (Some(h), Some(w)),
-            None => (None, None),
-        };
+        let (hlc_clock, wall) = opts.clocks.unzip();
         let server = Server::bind_with(
             config,
             BindOptions {
@@ -154,20 +154,31 @@ impl Net {
 
     /// Start `n` nodes at once, each seeded with all the others.
     pub async fn start_all(&self, n: usize, extra: &[&str]) -> Vec<GossipNode> {
-        let sockets: Vec<(UdpSocket, SocketAddr)> = (0..n).map(|_| socket()).collect();
-        let addrs: Vec<SocketAddr> = sockets.iter().map(|(_, a)| *a).collect();
-        let mut nodes = Vec::new();
-        for (i, (s, _)) in sockets.into_iter().enumerate() {
-            let seeds: Vec<SocketAddr> = addrs
-                .iter()
-                .enumerate()
-                .filter(|(j, _)| *j != i)
-                .map(|(_, a)| *a)
-                .collect();
-            nodes.push(self.start_on(s, &seeds, extra, Opts::default()).await);
-        }
-        nodes
+        start_each(n, async |s, seeds| {
+            self.start_on(s, seeds, extra, Opts::default()).await
+        })
+        .await
     }
+}
+
+/// Bind `n` sockets and call `start` with each socket and the addresses of all the others.
+pub async fn start_each<T>(
+    n: usize,
+    mut start: impl AsyncFnMut(UdpSocket, &[SocketAddr]) -> T,
+) -> Vec<T> {
+    let sockets: Vec<(UdpSocket, SocketAddr)> = (0..n).map(|_| socket()).collect();
+    let addrs: Vec<SocketAddr> = sockets.iter().map(|(_, a)| *a).collect();
+    let mut out = Vec::new();
+    for (i, (s, _)) in sockets.into_iter().enumerate() {
+        let seeds: Vec<SocketAddr> = addrs
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, a)| *a)
+            .collect();
+        out.push(start(s, &seeds).await);
+    }
+    out
 }
 
 /// A test CA, and its CA, certificate, and key files in a new temporary directory.
@@ -255,6 +266,34 @@ pub async fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bo
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+pub fn refs(nodes: &[GossipNode]) -> Vec<&GossipNode> {
+    nodes.iter().collect()
+}
+
+/// Drop every message between `a` and each of `others`, in both directions.
+pub fn partition(a: &GossipNode, others: &[&GossipNode]) {
+    for n in others {
+        n.node.faults.blocked.lock().insert(a.id);
+        a.node.faults.blocked.lock().insert(n.id);
+    }
+}
+
+/// Undo [`partition`].
+pub fn heal(a: &GossipNode, others: &[&GossipNode]) {
+    for n in others {
+        n.node.faults.blocked.lock().remove(&a.id);
+        a.node.faults.blocked.lock().remove(&n.id);
+    }
+}
+
+/// Wait until `nodes` are [`agreed`], or fail the test.
+pub async fn wait_agreed(nodes: &[&GossipNode], timeout: Duration) {
+    assert!(
+        wait_until(timeout, || agreed(nodes)).await,
+        "the nodes did not agree on one epoch"
+    );
 }
 
 /// Every node in `nodes` is NORMAL, in one cluster, with one epoch that lists exactly them.

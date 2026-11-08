@@ -1,49 +1,33 @@
 //! Helpers for counter tests: shared group leases, a lease that one node can lose, and waits on
 //! the role of each group.
+//!
+//! The multi-node tests of one binary run one at a time (`#[serial]`). Many clusters at once
+//! starve the Raft timers on a busy machine, and an election in the middle of a test makes a
+//! write `-TRYAGAIN`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use discus::counter::{CounterLeases, GroupStatus};
-use discus_membership::{LeaseError, LeaseHolder, LeaseProvider, LeaseState, MemoryLease};
-use futures::future::BoxFuture;
+use discus::counter::route::{IN_DOUBT, NO_LEADER};
+use discus::counter::{group_key, CounterLeases, GroupStatus};
+use discus_membership::{LeaseProvider, MemoryLease};
+use discus_placement::NodeId;
 use redis::aio::MultiplexedConnection;
+use redis::{FromRedisValue, RedisError, RedisResult};
 
-use super::gossip::{agreed, socket, wait_until, GossipNode, Net, Opts};
+use super::gossip::{refs, socket, start_each, wait_agreed, wait_until, GossipNode, Net, Opts};
 
 pub const GROUPS: u16 = 4;
 
-/// The multi-node counter tests of one binary take turns. Many clusters at once starve the Raft
-/// timers on a busy machine, and an election in the middle of a test makes a write `-TRYAGAIN`.
-pub static HEAVY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// Take the turn of a heavy test. The log lines show which test held the turn.
-pub async fn turn(name: &'static str) -> Turn {
-    let guard = HEAVY.lock().await;
-    eprintln!("TURN START {name}");
-    Turn(guard, name)
-}
-
-pub struct Turn(tokio::sync::MutexGuard<'static, ()>, &'static str);
-
-impl Drop for Turn {
-    fn drop(&mut self) {
-        eprintln!("TURN END {}", self.1);
-    }
-}
 pub const LEASE_MS: u64 = 2_000;
 
 /// Flags for fast counter leases: duration 2000 ms, renew every 300 ms, margin 500 ms.
-pub const FAST: &[&str] = &[
-    "--counter-groups",
-    "4",
-    "--counter-lease-duration-ms",
-    "2000",
-    "--counter-lease-renew-ms",
-    "300",
-    "--counter-lease-margin-ms",
-    "500",
+pub const FAST: &[(&str, &str)] = &[
+    ("--counter-groups", "4"),
+    ("--counter-lease-duration-ms", "2000"),
+    ("--counter-lease-renew-ms", "300"),
+    ("--counter-lease-margin-ms", "500"),
 ];
 
 /// One in-memory lease per group, shared by every node of a test.
@@ -59,33 +43,8 @@ impl Leases {
     pub fn for_node(&self, gate: Arc<AtomicBool>) -> CounterLeases {
         let leases = self.0.clone();
         Arc::new(move |g: u16| {
-            Arc::new(Gated {
-                inner: leases[usize::from(g)].clone(),
-                open: gate.clone(),
-            }) as Arc<dyn LeaseProvider>
+            Arc::new(leases[usize::from(g)].gated(gate.clone())) as Arc<dyn LeaseProvider>
         })
-    }
-}
-
-/// A lease whose calls fail while the gate is closed, as if this node lost the API server.
-struct Gated {
-    inner: MemoryLease,
-    open: Arc<AtomicBool>,
-}
-
-impl LeaseProvider for Gated {
-    fn acquire_or_renew<'a>(
-        &'a self,
-        me: &'a LeaseHolder,
-    ) -> BoxFuture<'a, Result<LeaseState, LeaseError>> {
-        if !self.open.load(Ordering::Relaxed) {
-            return Box::pin(async { Err(LeaseError("the gate is closed".into())) });
-        }
-        self.inner.acquire_or_renew(me)
-    }
-
-    fn name(&self) -> &'static str {
-        "gated"
     }
 }
 
@@ -110,6 +69,14 @@ pub fn held(n: &GossipNode, key: &str) -> Option<String> {
         .map(|e| String::from_utf8_lossy(&e.value).into_owned())
 }
 
+/// Wait until every node of `nodes` holds `want` for `key`.
+pub async fn all_hold(nodes: &[&GossipNode], key: &str, want: &str, timeout: Duration) -> bool {
+    wait_until(timeout, || {
+        nodes.iter().all(|n| held(n, key).as_deref() == Some(want))
+    })
+    .await
+}
+
 /// The node that leads group `g`, if exactly one of `nodes` does.
 pub fn leader_of<'a>(nodes: &[&'a GossipNode], g: u16) -> Option<&'a GossipNode> {
     let leaders: Vec<&GossipNode> = nodes
@@ -120,61 +87,83 @@ pub fn leader_of<'a>(nodes: &[&'a GossipNode], g: u16) -> Option<&'a GossipNode>
     (leaders.len() == 1).then(|| leaders[0])
 }
 
-/// Send `INCR key` until it succeeds. It retries only refusals that applied nothing, so the
-/// count stays exact.
-pub async fn incr_once(c: &mut MultiplexedConnection, key: &str) -> i64 {
-    let deadline = Instant::now() + Duration::from_secs(10);
+/// What a counter write did, by its reply: see [`NO_LEADER`] and [`IN_DOUBT`].
+#[derive(Debug)]
+pub enum Outcome {
+    Ok(i64),
+    Refused,
+    Ambiguous,
+    Other(RedisError),
+}
+
+/// True when `e` is the server error `text`, given as `CODE detail`.
+fn says(e: &RedisError, text: &str) -> bool {
+    e.code()
+        .zip(e.detail())
+        .is_some_and(|(code, detail)| format!("{code} {detail}") == text)
+}
+
+pub fn is_try_again(e: &RedisError) -> bool {
+    e.code() == Some("TRYAGAIN")
+}
+
+pub fn outcome(r: RedisResult<i64>) -> Outcome {
+    match r {
+        Ok(n) => Outcome::Ok(n),
+        Err(e) if says(&e, NO_LEADER) => Outcome::Refused,
+        Err(e) if says(&e, IN_DOUBT) => Outcome::Ambiguous,
+        Err(e) => Outcome::Other(e),
+    }
+}
+
+/// Send `cmd` until it succeeds or `timeout` passes. An error that `retry` accepts is sent
+/// again after 50 ms; any other error is returned at once.
+pub async fn query_until<T: FromRedisValue>(
+    c: &mut MultiplexedConnection,
+    cmd: &redis::Cmd,
+    timeout: Duration,
+    retry: fn(&RedisError) -> bool,
+) -> RedisResult<T> {
+    let deadline = Instant::now() + timeout;
     loop {
-        let r: redis::RedisResult<i64> = redis::cmd("INCR").arg(key).query_async(c).await;
-        match r {
-            Ok(n) => return n,
-            Err(e) if e.to_string().contains("has no leader") && Instant::now() < deadline => {
+        match cmd.query_async(c).await {
+            Err(e) if retry(&e) && Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            Err(e) => panic!("INCR {key} failed: {e}"),
+            r => return r,
         }
     }
 }
 
-/// Send `INCR key` until it succeeds or `timeout` passes.
+/// Send `INCR key` until it succeeds. It retries only refusals that applied nothing, so the
+/// count stays exact.
+pub async fn incr_once(c: &mut MultiplexedConnection, key: &str) -> i64 {
+    let refused = |e: &RedisError| says(e, NO_LEADER);
+    query_until(
+        c,
+        redis::cmd("INCR").arg(key),
+        Duration::from_secs(10),
+        refused,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("INCR {key} failed: {e}"))
+}
+
+/// Send `INCR key` through any `-TRYAGAIN` until it succeeds or `timeout` passes.
 pub async fn incr_until(c: &mut MultiplexedConnection, key: &str, timeout: Duration) -> i64 {
     incr_or_show(c, key, timeout, &[]).await
 }
 
-/// Like [`incr_until`]. On a timeout it prints the group of `key` on every node of `nodes`.
+/// Like [`incr_until`]. On a timeout it prints the groups of every node of `nodes`.
 pub async fn incr_or_show(
     c: &mut MultiplexedConnection,
     key: &str,
     timeout: Duration,
     nodes: &[&GossipNode],
 ) -> i64 {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let r: redis::RedisResult<i64> = redis::cmd("INCR").arg(key).query_async(c).await;
-        match r {
-            Ok(n) => return n,
-            Err(e) if Instant::now() < deadline => {
-                assert!(e.to_string().to_uppercase().contains("TRYAGAIN"), "{e}");
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(e) => {
-                for n in nodes {
-                    let g = group_of(n, key);
-                    let epoch = n.node.epochs().current().clone();
-                    eprintln!("{} normal={} {:?}", n.id, n.is_normal(), status(n, g));
-                    eprintln!(
-                        "  epoch {:?}",
-                        epoch
-                            .members()
-                            .iter()
-                            .map(|m| (m.id, m.state))
-                            .collect::<Vec<_>>()
-                    );
-                }
-                panic!("INCR {key} kept failing: {e}");
-            }
-        }
-    }
+    query_until(c, redis::cmd("INCR").arg(key), timeout, is_try_again)
+        .await
+        .unwrap_or_else(|e| panic!("INCR {key} kept failing: {e}\n{}", dump(nodes)))
 }
 
 /// Start `n` nodes on shared counter leases, each seeded with all the others. Every node gets
@@ -185,21 +174,21 @@ pub async fn start(
     n: usize,
     extra: &[&str],
 ) -> (Vec<GossipNode>, Vec<Arc<AtomicBool>>) {
-    let sockets: Vec<_> = (0..n).map(|_| socket()).collect();
-    let addrs: Vec<_> = sockets.iter().map(|(_, a)| *a).collect();
-    let (mut nodes, mut gates) = (Vec::new(), Vec::new());
-    for (i, (s, _)) in sockets.into_iter().enumerate() {
-        let seeds: Vec<_> = addrs
-            .iter()
-            .enumerate()
-            .filter(|(j, _)| *j != i)
-            .map(|(_, a)| *a)
-            .collect();
-        let (node, gate) = join(net, leases, s, &seeds, extra).await;
-        nodes.push(node);
-        gates.push(gate);
-    }
-    (nodes, gates)
+    start_each(n, async |s, seeds| join(net, leases, s, seeds, extra).await)
+        .await
+        .into_iter()
+        .unzip()
+}
+
+/// Start one node on a new socket, seeded with `seeds`, like [`join`].
+pub async fn join_to(
+    net: &Net,
+    leases: &Leases,
+    seeds: &[&GossipNode],
+    flags: &[&str],
+) -> (GossipNode, Arc<AtomicBool>) {
+    let addrs: Vec<_> = seeds.iter().map(|n| n.cluster_addr).collect();
+    join(net, leases, socket().0, &addrs, flags).await
 }
 
 /// Start one node on `socket` with the shared leases, `flags`, and the [`FAST`] lease flags that
@@ -214,16 +203,10 @@ pub async fn join(
     let gate = Arc::new(AtomicBool::new(true));
     let opts = Opts {
         counter_leases: Some(leases.for_node(gate.clone())),
+        defaults: FAST,
         ..Opts::default()
     };
-    let mut all: Vec<&str> = FAST
-        .chunks(2)
-        .filter(|pair| !flags.contains(&pair[0]))
-        .flatten()
-        .copied()
-        .collect();
-    all.extend_from_slice(flags);
-    (net.start_on(socket, seeds, &all, opts).await, gate)
+    (net.start_on(socket, seeds, flags, opts).await, gate)
 }
 
 /// A key of group `g`, by trying `cnt:<prefix><i>`.
@@ -234,21 +217,57 @@ pub fn key_in(n: &GossipNode, g: u16, prefix: &str) -> String {
         .unwrap()
 }
 
+/// The target voters of group `g` in the epoch of `n`.
+pub fn targets(n: &GossipNode, g: u16) -> Vec<NodeId> {
+    n.node.epochs().current().owners(&group_key(g), 3)
+}
+
+/// The groups whose targets include `n`.
+pub fn targeted(n: &GossipNode) -> Vec<u16> {
+    (0..GROUPS)
+        .filter(|g| targets(n, *g).contains(&n.id))
+        .collect()
+}
+
+/// The targets, and the role, leader, voters, and learners on every node, of every group, for
+/// a failure message.
+pub fn dump(nodes: &[&GossipNode]) -> String {
+    let short = |id: &NodeId| id.to_string()[..12].to_string();
+    let mut out = String::new();
+    let Some(first) = nodes.first() else {
+        return out;
+    };
+    for g in 0..GROUPS {
+        out += &format!(
+            "group {g}, targets {:?}\n",
+            targets(first, g).iter().map(short).collect::<Vec<_>>()
+        );
+        for n in nodes {
+            let s = status(n, g);
+            out += &format!(
+                "  {} {:>8} leader {:?} voters {:?} learners {:?}\n",
+                short(&n.id),
+                s.role,
+                s.leader.as_ref().map(short),
+                s.voters.iter().map(short).collect::<Vec<_>>(),
+                s.learners.iter().map(short).collect::<Vec<_>>(),
+            );
+        }
+    }
+    out
+}
+
 /// Every group runs Raft with its three target voters, no learner, and one leader among
 /// `nodes`. The voter moves are then done.
 pub fn all_raft(nodes: &[&GossipNode]) -> bool {
     (0..GROUPS).all(|g| {
         leader_of(nodes, g).is_some_and(|l| {
             let s = status(l, g);
-            let mut targets = l
-                .node
-                .epochs()
-                .current()
-                .owners(&discus::counter::group_key(g), 3);
-            targets.sort();
+            let mut want = targets(l, g);
+            want.sort();
             let mut voters = s.voters.clone();
             voters.sort();
-            voters == targets
+            voters == want
                 && s.learners.is_empty()
                 && s.voters.iter().all(|v| {
                     nodes
@@ -304,37 +323,21 @@ pub async fn raft_cluster(
     extra: &[&'static str],
 ) -> Vec<GossipNode> {
     let (nodes, _) = start(net, leases, n, &flags(extra)).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
+    wait_agreed(&refs, Duration::from_secs(15)).await;
     assert!(
-        wait_until(Duration::from_secs(15), || agreed(&refs)).await,
-        "no agreement"
+        wait_until(Duration::from_secs(20), || all_raft(&refs)).await,
+        "the groups did not reach Raft mode\n{}",
+        dump(&refs)
     );
-    if !wait_until(Duration::from_secs(20), || all_raft(&refs)).await {
-        for n in &nodes {
-            for g in 0..GROUPS {
-                eprintln!("{} g{g}: {:?}", n.id, status(n, g));
-            }
-        }
-        panic!("the groups did not reach Raft mode");
-    }
     // Every entry node finds every leader before the test starts.
     for n in &nodes {
         let mut c = n.redis().await;
         for g in 0..GROUPS {
-            let key = key_in(n, g, "warm");
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            while redis::cmd("GET")
-                .arg(&key)
-                .query_async::<Option<i64>>(&mut c)
+            let get = redis::cmd("GET").arg(key_in(n, g, "warm")).clone();
+            query_until::<Option<i64>>(&mut c, &get, Duration::from_secs(10), |_| true)
                 .await
-                .is_err()
-            {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "group {g} has no leader"
-                );
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
+                .unwrap_or_else(|e| panic!("group {g} has no leader: {e}"));
         }
     }
     nodes

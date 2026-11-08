@@ -8,39 +8,35 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::counters::{
-    flags, group_of, held, incr_until, join, leader_of, raft_cluster, status, Leases, GROUPS,
+    all_hold, flags, group_of, incr_until, join_to, leader_of, query_until, raft_cluster, status,
+    targeted, Leases, GROUPS,
 };
-use common::gossip::{agreed, socket, wait_until, GossipNode, Net};
+use common::gossip::{heal, partition, refs, wait_agreed, wait_until, GossipNode, Net};
 use common::status as http_status;
-use discus::counter::group_key;
 use redis::AsyncCommands;
-
-fn targets_of(n: &GossipNode, g: u16) -> Vec<discus_placement::NodeId> {
-    n.node.epochs().current().owners(&group_key(g), 3)
-}
+use serial_test::serial;
 
 /// Every group whose targets include `n` has `n` as a voter or the leader.
 fn promoted(n: &GossipNode) -> bool {
-    (0..GROUPS)
-        .filter(|g| targets_of(n, *g).contains(&n.id))
-        .all(|g| matches!(status(n, g).role, "voter" | "leader"))
+    targeted(n)
+        .iter()
+        .all(|g| matches!(status(n, *g).role, "voter" | "leader"))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn startupz_waits_for_counter_promotion() {
-    let _turn = common::counters::turn("startupz_waits_for_counter_promotion").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 3, &[]).await;
-    let seeds: Vec<_> = nodes.iter().map(|n| n.cluster_addr).collect();
-    let (fourth, _) = join(&net, &leases, socket().0, &seeds, &flags(&[])).await;
+    let (fourth, _) = join_to(&net, &leases, &refs(&nodes), &flags(&[])).await;
     fourth
         .node
         .faults
         .stall_counter_ms
         .store(400, Ordering::Relaxed);
-    let mut all: Vec<&GossipNode> = nodes.iter().collect();
+    let mut all = refs(&nodes);
     all.push(&fourth);
-    assert!(wait_until(Duration::from_secs(15), || agreed(&all)).await);
+    wait_agreed(&all, Duration::from_secs(15)).await;
     let mut waited = false;
     let unstall = tokio::time::Instant::now() + Duration::from_secs(3);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -71,11 +67,11 @@ async fn startupz_waits_for_counter_promotion() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn drain_moves_raft_roles_away() {
-    let _turn = common::counters::turn("drain_moves_raft_roles_away").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 4, &["--shutdown-timeout-secs", "15"]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let refs = refs(&nodes);
     let leaving = nodes
         .iter()
         .find(|n| (0..GROUPS).any(|g| status(n, g).role == "leader"))
@@ -110,8 +106,8 @@ async fn drain_moves_raft_roles_away() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn a_rejoined_node_discards_its_counters() {
-    let _turn = common::counters::turn("a_rejoined_node_discards_its_counters").await;
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 4, &[]).await;
     let replicas = |n: &GossipNode| -> HashSet<u64> {
@@ -139,10 +135,7 @@ async fn a_rejoined_node_discards_its_counters() {
         })
         .collect();
     let x = &nodes[3];
-    for n in &nodes[..3] {
-        n.node.faults.blocked.lock().insert(x.id);
-        x.node.faults.blocked.lock().insert(n.id);
-    }
+    partition(x, &refs(&nodes[..3]));
     let x_alone = || x.node.epochs().current().members().len() == 1;
     let rest_alone = || {
         nodes[..3]
@@ -153,15 +146,9 @@ async fn a_rejoined_node_discards_its_counters() {
         wait_until(Duration::from_secs(20), || x_alone() && rest_alone()).await,
         "the partition did not split the epochs"
     );
-    for n in &nodes[..3] {
-        n.node.faults.blocked.lock().remove(&x.id);
-        x.node.faults.blocked.lock().remove(&n.id);
-    }
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
-    assert!(
-        wait_until(Duration::from_secs(30), || agreed(&refs)).await,
-        "the partition did not heal"
-    );
+    heal(x, &refs(&nodes[..3]));
+    let refs = refs(&nodes);
+    wait_agreed(&refs, Duration::from_secs(30)).await;
     let losers: Vec<usize> = (0..nodes.len())
         .filter(|i| rejoined[*i].load(Ordering::Relaxed))
         .collect();
@@ -177,22 +164,19 @@ async fn a_rejoined_node_discards_its_counters() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn a_false_dead_heals_to_one_value() {
-    let _turn = common::counters::turn("a_false_dead_heals_to_one_value").await;
     let net = Net::new();
     let nodes = net.start_all(3, &["--counter-groups", "4"]).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
-    assert!(wait_until(Duration::from_secs(10), || agreed(&refs)).await);
+    let refs = refs(&nodes);
+    wait_agreed(&refs, Duration::from_secs(10)).await;
     let mut c = nodes[0].redis().await;
     assert_eq!(
         incr_until(&mut c, "cnt:fd", Duration::from_secs(10)).await,
         1
     );
     let x = &nodes[2];
-    for n in &nodes[..2] {
-        n.node.faults.blocked.lock().insert(x.id);
-        x.node.faults.blocked.lock().insert(n.id);
-    }
+    partition(x, &refs[..2]);
     assert!(
         wait_until(Duration::from_secs(20), || x
             .node
@@ -210,24 +194,15 @@ async fn a_false_dead_heals_to_one_value() {
     for _ in 0..3 {
         on_rest = incr_until(&mut c, "cnt:fd", Duration::from_secs(10)).await;
     }
-    for n in &nodes[..2] {
-        n.node.faults.blocked.lock().remove(&x.id);
-        x.node.faults.blocked.lock().remove(&n.id);
-    }
-    assert!(wait_until(Duration::from_secs(30), || agreed(&refs)).await);
+    heal(x, &refs[..2]);
+    wait_agreed(&refs, Duration::from_secs(30)).await;
     let mut values = Vec::new();
     for n in &nodes {
         let mut client = n.redis().await;
-        let mut v: Option<i64> = None;
-        for _ in 0..100 {
-            match client.get::<_, Option<i64>>("cnt:fd").await {
-                Ok(got) => {
-                    v = got;
-                    break;
-                }
-                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
-            }
-        }
+        let get = redis::cmd("GET").arg("cnt:fd").clone();
+        let v: Option<i64> = query_until(&mut client, &get, Duration::from_secs(10), |_| true)
+            .await
+            .unwrap();
         values.push(v);
     }
     assert!(values.iter().all(|v| *v == values[0]), "{values:?}");
@@ -239,12 +214,12 @@ async fn a_false_dead_heals_to_one_value() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[serial]
 async fn growth_from_one_to_three_and_back() {
-    let _turn = common::counters::turn("growth_from_one_to_three_and_back").await;
     let (net, leases) = (Net::new(), Leases::new());
     let extra: Vec<&'static str> =
         flags(&["--replication-factor", "3", "--shutdown-timeout-secs", "15"]);
-    let (first, _) = join(&net, &leases, socket().0, &[], &extra).await;
+    let (first, _) = join_to(&net, &leases, &[], &extra).await;
     let mut c = first.redis().await;
     for i in 1..=50 {
         assert_eq!(
@@ -260,15 +235,12 @@ async fn growth_from_one_to_three_and_back() {
             .count()
     };
 
-    let (second, _) = join(&net, &leases, socket().0, &[first.cluster_addr], &extra).await;
+    let (second, _) = join_to(&net, &leases, &[&first], &extra).await;
     let two = [&first, &second];
-    assert!(wait_until(Duration::from_secs(10), || agreed(&two)).await);
+    wait_agreed(&two, Duration::from_secs(10)).await;
     let g = group_of(&first, "cnt:grow");
     assert!(
-        wait_until(Duration::from_secs(10), || [&first, &second]
-            .iter()
-            .all(|n| held(n, "cnt:grow").as_deref() == Some("50")))
-        .await,
+        all_hold(&two, "cnt:grow", "50", Duration::from_secs(10)).await,
         "the second node got no snapshot"
     );
     assert!(
@@ -281,16 +253,9 @@ async fn growth_from_one_to_three_and_back() {
         51
     );
 
-    let (third, _) = join(
-        &net,
-        &leases,
-        socket().0,
-        &[first.cluster_addr, second.cluster_addr],
-        &extra,
-    )
-    .await;
+    let (third, _) = join_to(&net, &leases, &[&first, &second], &extra).await;
     let three = [&first, &second, &third];
-    assert!(wait_until(Duration::from_secs(10), || agreed(&three)).await);
+    wait_agreed(&three, Duration::from_secs(10)).await;
     assert!(
         wait_until(Duration::from_secs(20), || common::counters::all_raft(
             &three
@@ -308,7 +273,7 @@ async fn growth_from_one_to_three_and_back() {
     );
 
     third.node.drain_token().cancel();
-    assert!(wait_until(Duration::from_secs(20), || agreed(&two)).await);
+    wait_agreed(&two, Duration::from_secs(20)).await;
     assert!(
         wait_until(Duration::from_secs(10), || leader_of(&two, g)
             .is_some_and(|l| status(l, g).voters.is_empty()))
@@ -321,7 +286,7 @@ async fn growth_from_one_to_three_and_back() {
     );
 
     second.node.drain_token().cancel();
-    assert!(wait_until(Duration::from_secs(20), || agreed(&[&first])).await);
+    wait_agreed(&[&first], Duration::from_secs(20)).await;
     assert_eq!(
         incr_until(&mut c, "cnt:grow", Duration::from_secs(10)).await,
         54
