@@ -665,13 +665,7 @@ impl Counters {
         timeout: Duration,
     ) -> Result<Message, String> {
         let node = self.node().ok_or("the node is gone")?;
-        let link = node.link().ok_or("this node has no transport")?;
-        let addr = node
-            .epochs()
-            .current()
-            .member(to)
-            .map(|m| m.addr)
-            .ok_or_else(|| format!("node {to} is not a member"))?;
+        let (link, addr) = node.peer(to)?;
         let frame = link
             .transport
             .request_on(
