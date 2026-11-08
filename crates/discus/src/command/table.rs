@@ -142,15 +142,6 @@ pub fn is_unsupported(upper: &str) -> bool {
     UNSUPPORTED.contains(&upper) || upper.starts_with('X') || upper.starts_with("GEO")
 }
 
-/// Run one command and return its reply: the entry checks, then the handler. One node with no
-/// router runs every command this way.
-pub fn dispatch(node: &Node, conn: &mut ConnState, cmd: &Command) -> Value {
-    match check(lookup(&cmd[0]), cmd).and_then(|spec| authorize(node, conn, spec).map(|()| spec)) {
-        Ok(spec) => (spec.handler)(node, conn, cmd).unwrap_or_else(|e| e.to_value()),
-        Err(e) => e.to_value(),
-    }
-}
-
 /// Run a checked data command on this node with no authorization check. The entry node checked
 /// it, or the command arrived over mTLS from another node.
 pub fn execute_local(node: &Node, spec: &CommandSpec, cmd: &Command) -> Value {
@@ -182,14 +173,4 @@ pub fn check(
         return Err(CommandError::WrongArity(spec.name.into()));
     }
     Ok(spec)
-}
-
-/// Check the authentication and the scopes of the connection for a command. Only the entry node
-/// calls it (spec §14).
-pub fn authorize(
-    node: &Node,
-    conn: &mut ConnState,
-    spec: &CommandSpec,
-) -> Result<(), CommandError> {
-    node.security.authorize(conn, spec)
 }

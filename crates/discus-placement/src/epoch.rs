@@ -1,6 +1,5 @@
 //! Epochs: numbered snapshots of the member list, spec §5.1.
 
-use std::cmp::Ordering;
 use std::fmt;
 
 use crate::{hrw, ClusterId, Member, NodeId};
@@ -113,16 +112,5 @@ impl Epoch {
     /// The primary of `key` in this epoch, if any member is `NORMAL`.
     pub fn primary(&self, key: &[u8]) -> Option<NodeId> {
         hrw::owners(key, &self.members, 1).first().copied()
-    }
-
-    /// Order two epochs of the same cluster. Epochs of different clusters are never compared.
-    pub fn compare(&self, other: &Epoch) -> Result<Ordering, EpochError> {
-        if self.cluster_id != other.cluster_id {
-            return Err(EpochError::ForeignCluster {
-                ours: self.cluster_id,
-                theirs: other.cluster_id,
-            });
-        }
-        Ok(self.id.cmp(&other.id))
     }
 }

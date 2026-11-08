@@ -33,7 +33,7 @@ fn every_auth_attempt_is_counted() {
         &["HELLO", "3", "AUTH", "default", "t"],
         &["GET", "k"],
     ] {
-        discus::command::dispatch(&node, &mut conn, &cmd(c));
+        discus::telemetry::dispatch_with(discus_telemetry::global(), &node, &mut conn, &cmd(c));
     }
     let points = h.points();
     let count = |status: &str| -> f64 {

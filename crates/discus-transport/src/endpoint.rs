@@ -417,18 +417,6 @@ impl Transport {
             .map(|(_, info)| info)
     }
 
-    /// Live pooled connections to `node` over both lanes.
-    pub fn pooled(&self, node: NodeId) -> usize {
-        [&self.0.pool, &self.0.bulk_pool]
-            .iter()
-            .filter_map(|pool| pool.lock().get(&node).cloned())
-            .filter(|slot| {
-                slot.try_lock()
-                    .is_ok_and(|c| c.as_ref().is_some_and(|c| c.conn.close_reason().is_none()))
-            })
-            .count()
-    }
-
     /// Send one request on the command lane. See [`Transport::request_on`].
     pub async fn request(
         &self,
@@ -469,7 +457,12 @@ impl Transport {
         let bytes = match tokio::time::timeout(timeout, exchange(&conn, &info, &frame)).await {
             Err(_) => {
                 if lane == Lane::Command {
-                    self.emit(Some(node), addr, PeerEventKind::ForwardTimeout { write });
+                    emit(
+                        &self.0,
+                        Some(node),
+                        addr,
+                        PeerEventKind::ForwardTimeout { write },
+                    );
                 }
                 return Err(TransportError::Timeout);
             }
@@ -478,8 +471,13 @@ impl Transport {
                 let unsent = matches!(e, ExchangeError::NotSent(_));
                 let reason = e.reason();
                 if lost || conn.close_reason().is_some() {
-                    self.forget(lane, node, &conn);
-                    self.emit(Some(node), addr, PeerEventKind::Reset(reason.clone()));
+                    forget(self.pool(lane), node, &conn);
+                    emit(
+                        &self.0,
+                        Some(node),
+                        addr,
+                        PeerEventKind::Reset(reason.clone()),
+                    );
                     return Err(if unsent {
                         TransportError::NotSent(reason)
                     } else {
@@ -507,10 +505,6 @@ impl Transport {
         }
     }
 
-    fn emit(&self, peer: Option<NodeId>, addr: SocketAddr, kind: PeerEventKind) {
-        emit(&self.0, peer, addr, kind);
-    }
-
     fn pool(&self, lane: Lane) -> &Mutex<HashMap<NodeId, Slot>> {
         match lane {
             Lane::Command => &self.0.pool,
@@ -520,10 +514,6 @@ impl Transport {
 
     fn slot(&self, lane: Lane, node: NodeId) -> Slot {
         self.pool(lane).lock().entry(node).or_default().clone()
-    }
-
-    fn forget(&self, lane: Lane, node: NodeId, conn: &quinn::Connection) {
-        forget(self.pool(lane), node, conn);
     }
 
     async fn connection(
@@ -558,7 +548,8 @@ impl Transport {
             }
             Err(e) => {
                 TransportStats::bump(&self.0.stats.handshake_failures);
-                self.emit(
+                emit(
+                    &self.0,
                     Some(node),
                     addr,
                     PeerEventKind::HandshakeFailed(e.to_string()),

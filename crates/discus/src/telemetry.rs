@@ -100,12 +100,6 @@ pub fn node_label(id: NodeId) -> Option<NodeLabel> {
     NodeLabel::new(&node_id(id)).ok()
 }
 
-/// The generation of the current epoch of `node`. The `discus.ring.epoch` gauge reports it, and
-/// `Node::adopt_epoch` updates the gauge.
-pub fn ring_epoch(node: &Node) -> u64 {
-    node.epoch_id().generation
-}
-
 /// The resource attributes of the node that `config` starts. Call `Config::resolve_identity`
 /// first, so the node ID is the one the node uses. The epoch is the first one, because a
 /// resource cannot change. The live value is the gauge.
@@ -323,11 +317,6 @@ pub fn command_label(
     } else {
         CommandLabel::UNKNOWN
     }
-}
-
-/// Run one command on this node with its span and metrics, through the global metrics handle.
-pub fn dispatch(node: &Node, conn: &mut ConnState, cmd: &Command) -> Value {
-    dispatch_with(discus_telemetry::global(), node, conn, cmd)
 }
 
 /// Run one command on this node with its span and metrics: the entry checks, then local

@@ -270,7 +270,6 @@ impl Node {
                 keys: c.write_set_keys.max(1),
                 bytes: c.write_set_bytes,
                 max_age: std::time::Duration::from_millis(c.write_set_ttl_ms),
-                counter_prefix: Bytes::copy_from_slice(c.counter_prefix.as_bytes()),
             },
             self.write_budget.clone(),
         )

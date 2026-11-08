@@ -119,11 +119,6 @@ impl EpochHistory {
         self.prune();
     }
 
-    /// The oldest pinned epoch, where a handoff scan starts.
-    pub fn oldest_pinned(&self) -> Option<EpochId> {
-        self.pins.keys().min().copied()
-    }
-
     /// Drop the oldest unpinned epochs until at most `MIN_HISTORY` unpinned ones remain. The
     /// current epoch is the newest, so it is never dropped.
     fn prune(&mut self) {

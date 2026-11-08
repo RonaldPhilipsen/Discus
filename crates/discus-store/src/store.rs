@@ -164,10 +164,6 @@ impl Store {
         (xxh3_64_with_seed(key, self.config.seed) as usize) % self.shards.len()
     }
 
-    pub fn shard_count(&self) -> usize {
-        self.shards.len()
-    }
-
     /// Read an entry. An expired entry or a tombstone reads as absent but is not deleted here.
     pub fn read<R>(&self, key: &[u8], f: impl FnOnce(Option<&Entry>) -> R) -> R {
         let shard = &self.shards[self.shard_index(key)];

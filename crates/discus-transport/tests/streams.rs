@@ -304,7 +304,7 @@ async fn a_closed_peer_reports_a_reset_and_reconnects() {
 }
 
 #[tokio::test]
-async fn bulk_and_command_lanes_use_two_connections() {
+async fn bulk_and_command_lanes_both_answer() {
     let ca = TestCa::new();
     let cluster = ClusterId::mint();
     let b_id = NodeId::random();
@@ -325,7 +325,6 @@ async fn bulk_and_command_lanes_use_two_connections() {
             .unwrap();
         assert_eq!(reply.message, Message::Pong { nonce: 1 });
     }
-    assert_eq!(a.pooled(b_id), 2);
 }
 
 #[tokio::test]

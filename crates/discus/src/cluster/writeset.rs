@@ -22,8 +22,6 @@ pub struct WriteSetLimits {
     pub keys: usize,
     pub bytes: usize,
     pub max_age: Duration,
-    /// Keys with this prefix take the strong path and never enter a write set.
-    pub counter_prefix: Bytes,
 }
 
 /// The node-wide share of the memory budget for write sets. Write sets are bounded at
@@ -132,9 +130,6 @@ impl WriteSet {
     /// Record a write of `key` that the primary acknowledged at `version`. A key that does not
     /// fit the node budget even after this set gave up its own oldest keys is not recorded.
     pub fn record(&mut self, key: &Bytes, version: Version, now: Instant) {
-        if key.starts_with(&self.limits.counter_prefix) {
-            return;
-        }
         self.remove(key);
         let size = key.len() + KEY_OVERHEAD;
         while self.map.len() >= self.limits.keys || self.bytes + size > self.limits.bytes {
@@ -210,7 +205,6 @@ mod tests {
             keys,
             bytes,
             max_age: Duration::from_secs(5),
-            counter_prefix: Bytes::from_static(b"cnt:"),
         }
     }
 
@@ -284,13 +278,6 @@ mod tests {
         w.observed(b"a", Some(v(9)), false);
         assert_eq!(w.len(), 1);
         w.observed(b"a", Some(v(5)), true);
-        assert!(w.is_empty());
-    }
-
-    #[test]
-    fn counter_keys_are_never_recorded() {
-        let (mut w, _) = set(10, 1 << 20, u64::MAX);
-        w.record(&k("cnt:hits"), v(1), Instant::now());
         assert!(w.is_empty());
     }
 
