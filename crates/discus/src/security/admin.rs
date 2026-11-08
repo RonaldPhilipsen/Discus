@@ -93,10 +93,61 @@ async fn drain(State(node): State<Arc<Node>>) -> (StatusCode, &'static str) {
     (StatusCode::ACCEPTED, "draining\n")
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct GroupQuery {
+    group: Option<u16>,
+}
+
+/// `RAFT_FORCE_RECONFIGURE` (spec sections 10.2 and 14.2): every Raft group in which this node is
+/// a voter, or only `?group=<g>`, gets this node as its only voter, with its state.
+async fn force_reconfigure(
+    State(node): State<Arc<Node>>,
+    axum::extract::Query(q): axum::extract::Query<GroupQuery>,
+) -> (StatusCode, Json<Vec<u16>>) {
+    let Some(counters) = node.counters().cloned() else {
+        return (StatusCode::OK, Json(Vec::new()));
+    };
+    tracing::warn!(group = ?q.group, "RAFT_FORCE_RECONFIGURE requested on the admin port");
+    (
+        StatusCode::OK,
+        Json(counters.force_reconfigure(q.group).await),
+    )
+}
+
+/// One counter group on the status page.
+#[derive(Debug, Serialize)]
+pub struct GroupView {
+    pub group: u16,
+    pub role: &'static str,
+    pub regime: Option<String>,
+    pub leader: Option<String>,
+    pub voters: Vec<String>,
+    pub learners: Vec<String>,
+}
+
+async fn counters_status(State(node): State<Arc<Node>>) -> Json<Vec<GroupView>> {
+    let status = node.counters().map(|c| c.status()).unwrap_or_default();
+    Json(
+        status
+            .into_iter()
+            .map(|s| GroupView {
+                group: s.group,
+                role: s.role,
+                regime: s.regime.map(|r| r.to_string()),
+                leader: s.leader.map(|n| n.to_string()),
+                voters: s.voters.iter().map(|n| n.to_string()).collect(),
+                learners: s.learners.iter().map(|n| n.to_string()).collect(),
+            })
+            .collect(),
+    )
+}
+
 /// The protected admin routes.
 pub fn routes(node: Arc<Node>) -> Router<Arc<Node>> {
     Router::new()
         .route("/admin/security", get(security_status))
         .route("/admin/drain", post(drain))
+        .route("/admin/counters", get(counters_status))
+        .route("/admin/raft/force-reconfigure", post(force_reconfigure))
         .route_layer(middleware::from_fn_with_state(node, require_admin))
 }

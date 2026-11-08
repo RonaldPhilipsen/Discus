@@ -262,6 +262,25 @@ pub struct Config {
     /// milliseconds. Then it replies anyway and marks the follower lagging.
     #[arg(long, default_value_t = 50)]
     pub counter_follower_timeout_ms: u64,
+    /// Time with three `NORMAL` members before the counter groups switch to Raft, in
+    /// milliseconds.
+    #[arg(long, default_value_t = 30_000)]
+    pub counter_dwell_ms: u64,
+    /// The Raft heartbeat interval of the counter groups, in milliseconds.
+    #[arg(long, default_value_t = 100)]
+    pub raft_heartbeat_ms: u64,
+    /// The shortest Raft election timeout, in milliseconds. The longest is twice that.
+    #[arg(long, default_value_t = 1_000)]
+    pub raft_election_timeout_ms: u64,
+    /// Log entries between two Raft snapshots of a counter group.
+    #[arg(long, default_value_t = 10_000)]
+    pub raft_snapshot_entries: u64,
+    /// A learner within this many log entries of the leader becomes a voter.
+    #[arg(long, default_value_t = 100)]
+    pub raft_catchup_entries: u64,
+    /// The leader removes a voter that has not answered for this long, in milliseconds.
+    #[arg(long, default_value_t = 10_000)]
+    pub raft_voter_timeout_ms: u64,
     /// Bytes per second that one handoff scan sends at most.
     #[arg(long, default_value_t = 33_554_432)]
     pub handoff_rate_bytes: u64,

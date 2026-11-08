@@ -7,41 +7,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use common::counters::{group_of, held, incr_until, leader_of, role, status, Leases, FAST, GROUPS};
+use common::counters::{
+    group_of, held, incr_until, leader_of, role, start, status, Leases, FAST, GROUPS,
+};
 use common::gossip::{agreed, socket, wait_until, GossipNode, Net, Opts};
 use discus::counter::Refusal;
 use discus_placement::mock::MockClock;
 use redis::AsyncCommands;
-
-/// Start `n` nodes on shared counter leases, each seeded with all the others.
-async fn start(
-    net: &Net,
-    leases: &Leases,
-    n: usize,
-    extra: &[&str],
-) -> (Vec<GossipNode>, Vec<Arc<AtomicBool>>) {
-    let sockets: Vec<_> = (0..n).map(|_| socket()).collect();
-    let addrs: Vec<_> = sockets.iter().map(|(_, a)| *a).collect();
-    let mut flags: Vec<&str> = FAST.to_vec();
-    flags.extend_from_slice(extra);
-    let (mut nodes, mut gates) = (Vec::new(), Vec::new());
-    for (i, (s, _)) in sockets.into_iter().enumerate() {
-        let seeds: Vec<_> = addrs
-            .iter()
-            .enumerate()
-            .filter(|(j, _)| *j != i)
-            .map(|(_, a)| *a)
-            .collect();
-        let gate = Arc::new(AtomicBool::new(true));
-        let opts = Opts {
-            counter_leases: Some(leases.for_node(gate.clone())),
-            ..Opts::default()
-        };
-        nodes.push(net.start_on(s, &seeds, &flags, opts).await);
-        gates.push(gate);
-    }
-    (nodes, gates)
-}
 
 /// Every group has one leader and a synced follower among `nodes`.
 fn settled(nodes: &[&GossipNode]) -> bool {

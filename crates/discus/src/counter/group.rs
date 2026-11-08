@@ -15,6 +15,7 @@ use parking_lot::Mutex;
 use tokio::sync::Notify;
 
 use super::lf::{Follower, LfLeader};
+use super::raft_group::RaftRole;
 use super::state::CounterState;
 use super::{Counters, View};
 
@@ -24,6 +25,7 @@ pub enum Role {
     Idle,
     Follower(Arc<Follower>),
     Leader(Arc<LfLeader>),
+    Raft(Arc<RaftRole>),
 }
 
 impl Role {
@@ -32,23 +34,26 @@ impl Role {
             Role::Idle => "idle",
             Role::Follower(_) => "follower",
             Role::Leader(_) => "leader",
+            Role::Raft(r) => r.role_name(),
         }
     }
 
-    fn regime(&self) -> Option<Regime> {
+    pub(super) fn regime(&self) -> Option<Regime> {
         match self {
             Role::Idle => None,
             Role::Follower(f) => Some(f.regime),
             Role::Leader(l) => Some(l.regime),
+            Role::Raft(r) => Some(r.regime()),
         }
     }
 
     /// The state that this role holds, if any. A new leader starts from it.
-    fn state(&self) -> Option<CounterState> {
+    pub(super) fn state(&self) -> Option<CounterState> {
         match self {
             Role::Idle => None,
             Role::Follower(f) => Some(f.state()),
             Role::Leader(l) => Some(l.state()),
+            Role::Raft(r) => Some(r.replica.state()),
         }
     }
 }
@@ -120,12 +125,12 @@ impl Group {
         self.inner.lock().role.clone()
     }
 
-    fn version(&self) -> u64 {
+    pub(super) fn version(&self) -> u64 {
         self.inner.lock().version
     }
 
     /// Install `role` unless the role changed after `seen`.
-    fn set_role_if(&self, seen: u64, role: Role) -> bool {
+    pub(super) fn set_role_if(&self, seen: u64, role: Role) -> bool {
         let mut inner = self.inner.lock();
         if inner.version != seen {
             drop(inner);
@@ -160,7 +165,7 @@ impl Group {
         inner.first_role = None;
     }
 
-    fn next_regime(&self, me: NodeId) -> Regime {
+    pub(super) fn next_regime(&self, me: NodeId) -> Regime {
         let mut inner = self.inner.lock();
         inner.max_generation += 1;
         Regime {
@@ -181,10 +186,22 @@ impl Group {
             .filter(|(_, at)| at.elapsed() < DISTRUST)
             .map(|(n, _)| n);
         let usable = |l: &NodeId| *l != view.me && view.normal(*l) && Some(*l) != distrusted;
-        if let Role::Follower(f) = &inner.role {
-            if let Some(l) = f.leader.filter(usable) {
-                return Some(l);
+        let stale = |r: Regime| inner.known.as_ref().is_some_and(|k| k.regime > r);
+        match &inner.role {
+            Role::Follower(f) if !stale(f.regime) => {
+                if let Some(l) = f.leader.filter(usable) {
+                    return Some(l);
+                }
             }
+            Role::Raft(r) => {
+                if r.leads() {
+                    return Some(view.me);
+                }
+                if let Some(l) = r.replica.leader_node().filter(usable) {
+                    return Some(l);
+                }
+            }
+            _ => {}
         }
         inner.known.as_ref().map(|k| k.leader).filter(usable)
     }
@@ -203,39 +220,73 @@ impl Group {
         true
     }
 
-    /// Take the best hint of a fresh round of answers. It replaces what this node knew, also
-    /// when it is older, because the answers describe the cluster now.
-    pub fn learn(&self, best: Option<GroupHint>) {
+    /// Take the best hint of a round of answers. It replaces the known hint when it is newer, or
+    /// when the leader of the known hint answered without claiming the group (`denied`). An older
+    /// answer never replaces a hint that nobody denied, because a replica can answer from an old
+    /// view.
+    pub fn learn(&self, best: Option<GroupHint>, denied: &[NodeId]) {
         let Some(best) = best else {
+            // Nobody claims the group. A known leader that denied it leads no more, but its
+            // voters stay known for a rebuild.
+            let mut inner = self.inner.lock();
+            if let Some(k) = inner.known.as_mut() {
+                if denied.contains(&k.leader) {
+                    k.leader = NodeId::NIL;
+                }
+            }
             return;
         };
         let mut inner = self.inner.lock();
         inner.max_generation = inner.max_generation.max(best.regime.generation);
-        inner.distrusted = None;
-        inner.known = Some(best);
+        let take = match &inner.known {
+            None => true,
+            Some(k) => newer(&best, k) || denied.contains(&k.leader),
+        };
+        if take {
+            inner.distrusted = None;
+            inner.known = Some(best);
+        }
         drop(inner);
-        self.changed.notify_waiters();
+        if take {
+            self.changed.notify_waiters();
+        }
     }
 
-    /// Merge the current hints of the `NORMAL` members. The best one replaces the known hint
-    /// when it is newer, or when no current hint backs the known one any more.
-    pub fn observe(&self, hints: &[GroupHint]) {
-        let best =
-            hints
-                .iter()
-                .filter(|h| h.group == self.g)
-                .reduce(|a, b| if newer(b, a) { b } else { a });
-        let Some(best) = best else {
-            return;
-        };
+    /// Merge the current hints of the `NORMAL` members. A newer hint replaces the known one. So
+    /// does the current hint of the known leader, when it changed. A known leader that is
+    /// `NORMAL` but claims nothing leads no more: the best hint replaces it. Without one, a Raft
+    /// hint loses its leader and keeps its voters. Only gossip shows what a member claims, so a
+    /// node without gossip skips that rule. A dead leader leaves its hint in place, so the next
+    /// leader can follow the epoch rule and see a total voter loss.
+    pub fn observe(&self, view: &View, hints: &[GroupHint], gossip: bool) {
+        let ours: Vec<&GroupHint> = hints.iter().filter(|h| h.group == self.g).collect();
+        let best = ours
+            .iter()
+            .copied()
+            .reduce(|a, b| if newer(b, a) { b } else { a });
         let mut inner = self.inner.lock();
-        inner.max_generation = inner.max_generation.max(best.regime.generation);
-        let replace = match &inner.known {
-            None => true,
-            Some(k) => newer(best, k) || !hints.iter().any(|h| h.group == self.g && h == k),
+        if let Some(best) = best {
+            inner.max_generation = inner.max_generation.max(best.regime.generation);
+        }
+        let next = match (&inner.known, best) {
+            (None, Some(best)) => Some(best.clone()),
+            (None, None) => None,
+            (Some(k), Some(best)) if newer(best, k) => Some(best.clone()),
+            (Some(k), best) => match ours.iter().copied().find(|h| h.leader == k.leader) {
+                Some(h) if h != k => Some(h.clone()),
+                None if k.leader != NodeId::NIL && view.normal(k.leader) => {
+                    best.cloned().or_else(|| {
+                        (gossip && k.mode == CounterMode::Raft).then(|| GroupHint {
+                            leader: NodeId::NIL,
+                            ..k.clone()
+                        })
+                    })
+                }
+                _ => None,
+            },
         };
-        if replace && inner.known.as_ref() != Some(best) {
-            inner.known = Some(best.clone());
+        if let Some(next) = next.filter(|n| inner.known.as_ref() != Some(n)) {
+            inner.known = Some(next);
             drop(inner);
             self.changed.notify_waiters();
         }
@@ -245,6 +296,8 @@ impl Group {
     pub fn own_hint(&self, me: NodeId) -> Option<GroupHint> {
         let inner = self.inner.lock();
         match &inner.role {
+            // A leader that removed itself is no voter, and it must not claim the group.
+            Role::Raft(r) if r.leads() => r.hint(self.g),
             Role::Leader(l) if l.serving() => Some(GroupHint {
                 group: self.g,
                 mode: CounterMode::LeaderFollower,
@@ -274,17 +327,55 @@ impl Group {
         view.ranked(self.g).first().copied()
     }
 
+    /// What this node answers to `RAFT_LEADER`: its own hint, or the Raft leader it follows.
+    pub fn answer_hint(&self, me: NodeId) -> Option<GroupHint> {
+        if let Some(h) = self.own_hint(me) {
+            return Some(h);
+        }
+        match self.role() {
+            // A replica that knows no leader still says that it holds the group, so a rebuild
+            // never skips a live voter. The nil leader keeps the answer out of routing.
+            Role::Raft(r) => r.hint(self.g).or_else(|| {
+                Some(GroupHint {
+                    group: self.g,
+                    mode: CounterMode::Raft,
+                    regime: r.regime(),
+                    leader: NodeId::NIL,
+                    term: 0,
+                    follower: None,
+                    voters: Vec::new(),
+                    learners: Vec::new(),
+                })
+            }),
+            _ => None,
+        }
+    }
+
+    /// The group runs in Raft mode as far as this node knows.
+    fn raft_known(&self) -> bool {
+        self.inner
+            .lock()
+            .known
+            .as_ref()
+            .is_some_and(|k| k.mode == CounterMode::Raft)
+    }
+
     /// One controller step.
     pub async fn step(&self, counters: &Arc<Counters>, view: &View) {
+        let seen = self.version();
+        let role = self.role();
         if !view.me_normal {
-            if !matches!(self.role(), Role::Idle) {
-                self.set_role(Role::Idle);
+            // A `LEAVING` voter stays until the leader moves its slot away (spec section 15.3).
+            match role {
+                Role::Raft(r) if view.leaving => self.raft_step(counters, view, seen, &r).await,
+                Role::Idle => {}
+                _ => self.set_role(Role::Idle),
             }
             return;
         }
-        let seen = self.version();
-        match self.role() {
+        match role {
             Role::Leader(l) => self.lead(counters, view, seen, &l).await,
+            Role::Raft(r) => self.raft_step(counters, view, seen, &r).await,
             role => self.wait_or_take(counters, view, seen, role).await,
         }
     }
@@ -317,6 +408,20 @@ impl Group {
             self.step_down(counters, seen, l);
             return;
         }
+        if counters.raft_ready(view) {
+            // The up switch: the lease holder becomes the only voter of a new Raft group with its
+            // state, and lets the lease expire (spec section 10.3).
+            l.stop();
+            let state = l.state();
+            if !self
+                .create_instance(counters, view, seen, state.clone(), "the up switch")
+                .await
+            {
+                let follower = Follower::new(l.regime, None, state, counters.budget());
+                self.set_role_if(seen, Role::Follower(Arc::new(follower)));
+            }
+            return;
+        }
         let current = l.follower().filter(|f| view.normal(*f));
         let follower = current.or_else(|| view.ranked(self.g).into_iter().find(|n| *n != view.me));
         l.set_follower(follower);
@@ -337,6 +442,18 @@ impl Group {
 
     async fn wait_or_take(&self, counters: &Arc<Counters>, view: &View, seen: u64, role: Role) {
         let settings = &counters.settings;
+        // A follower of an older regime holds nothing that a newer leader needs.
+        if let Role::Follower(f) = &role {
+            let newer = self.inner.lock().known.as_ref().map(|k| k.regime);
+            if newer.is_some_and(|r| r > f.regime) {
+                self.set_role_if(seen, Role::Idle);
+                return;
+            }
+        }
+        if view.normal_count() >= 3 && self.raft_known() {
+            self.rebuild_if_lost(counters, view, seen).await;
+            return;
+        }
         let live = self.leader(view);
         let leaderless = {
             let mut inner = self.inner.lock();
@@ -369,7 +486,8 @@ impl Group {
         if !candidate {
             return;
         }
-        // Ask first, so a node never claims a group that a member it has no hint from leads.
+        // Ask first, so a node never claims a group that a member it has no hint from leads,
+        // for example a Raft leader right after the up switch.
         if let Some(best) = counters.ask_now(self.g).await {
             if role.regime().is_none_or(|r| best.regime > r) {
                 return;
@@ -394,19 +512,33 @@ impl Group {
         );
         if self.set_role_if(seen, Role::Leader(leader.clone())) {
             tracing::info!(group = self.g, %regime, "leads a counter group");
-            tokio::spawn(
-                leader
-                    .clone()
-                    .sender(counters.clone(), self.g, settings.lease_renew),
-            );
-            self.lead(counters, view, self.version(), &leader).await;
+            self.start_leader(counters, view, leader).await;
         }
+    }
+
+    /// Start the sender of a new leader-follower leader and run its first step.
+    pub(super) async fn start_leader(
+        &self,
+        counters: &Arc<Counters>,
+        view: &View,
+        leader: Arc<LfLeader>,
+    ) {
+        tokio::spawn(leader.clone().sender(
+            counters.clone(),
+            self.g,
+            counters.settings.lease_renew,
+        ));
+        self.lead(counters, view, self.version(), &leader).await;
+    }
+
+    pub(super) fn lease_kind(&self) -> bool {
+        self.lease.is_some()
     }
 
     /// One lease call: `Some(Ok(until))` when this node holds the lease, `Some(Err(()))` when
     /// another node holds it, and `None` when the call failed. Calls are at most one per renew
     /// interval.
-    async fn acquire(&self, counters: &Arc<Counters>) -> Option<Result<Instant, ()>> {
+    pub(super) async fn acquire(&self, counters: &Arc<Counters>) -> Option<Result<Instant, ()>> {
         let lease = self.lease.as_ref()?;
         {
             let mut inner = self.inner.lock();
@@ -454,6 +586,7 @@ impl Group {
         let follower = match &role {
             Role::Follower(f) if f.regime == s.regime => f.clone(),
             Role::Leader(l) if l.regime >= s.regime => return refuse(l.regime),
+            Role::Raft(r) if r.regime() >= s.regime => return refuse(r.regime()),
             Role::Follower(f) if f.regime > s.regime => return refuse(f.regime),
             other => {
                 let state = other.state().unwrap_or_default();
@@ -492,6 +625,10 @@ impl Group {
 }
 
 fn stop(role: &Role) {
+    if let Role::Raft(r) = role {
+        let replica = r.replica.clone();
+        tokio::spawn(async move { replica.shutdown().await });
+    }
     if let Role::Leader(l) = role {
         l.stop();
     }

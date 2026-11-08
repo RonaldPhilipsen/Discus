@@ -10,9 +10,28 @@ use discus_membership::{LeaseError, LeaseHolder, LeaseProvider, LeaseState, Memo
 use futures::future::BoxFuture;
 use redis::aio::MultiplexedConnection;
 
-use super::gossip::GossipNode;
+use super::gossip::{socket, GossipNode, Net, Opts};
 
 pub const GROUPS: u16 = 4;
+
+/// The multi-node counter tests of one binary take turns. Many clusters at once starve the Raft
+/// timers on a busy machine, and an election in the middle of a test makes a write `-TRYAGAIN`.
+pub static HEAVY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Take the turn of a heavy test. The log lines show which test held the turn.
+pub async fn turn(name: &'static str) -> Turn {
+    let guard = HEAVY.lock().await;
+    eprintln!("TURN START {name}");
+    Turn(guard, name)
+}
+
+pub struct Turn(tokio::sync::MutexGuard<'static, ()>, &'static str);
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        eprintln!("TURN END {}", self.1);
+    }
+}
 pub const LEASE_MS: u64 = 2_000;
 
 /// Flags for fast counter leases: duration 2000 ms, renew every 300 ms, margin 500 ms.
@@ -103,6 +122,16 @@ pub fn leader_of<'a>(nodes: &[&'a GossipNode], g: u16) -> Option<&'a GossipNode>
 
 /// Send `INCR key` until it succeeds or `timeout` passes.
 pub async fn incr_until(c: &mut MultiplexedConnection, key: &str, timeout: Duration) -> i64 {
+    incr_or_show(c, key, timeout, &[]).await
+}
+
+/// Like [`incr_until`]. On a timeout it prints the group of `key` on every node of `nodes`.
+pub async fn incr_or_show(
+    c: &mut MultiplexedConnection,
+    key: &str,
+    timeout: Duration,
+    nodes: &[&GossipNode],
+) -> i64 {
     let deadline = Instant::now() + timeout;
     loop {
         let r: redis::RedisResult<i64> = redis::cmd("INCR").arg(key).query_async(c).await;
@@ -112,7 +141,117 @@ pub async fn incr_until(c: &mut MultiplexedConnection, key: &str, timeout: Durat
                 assert!(e.to_string().to_uppercase().contains("TRYAGAIN"), "{e}");
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            Err(e) => panic!("INCR {key} kept failing: {e}"),
+            Err(e) => {
+                for n in nodes {
+                    let g = group_of(n, key);
+                    let epoch = n.node.epochs().current().clone();
+                    eprintln!("{} normal={} {:?}", n.id, n.is_normal(), status(n, g));
+                    eprintln!(
+                        "  epoch {:?}",
+                        epoch
+                            .members()
+                            .iter()
+                            .map(|m| (m.id, m.state))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                panic!("INCR {key} kept failing: {e}");
+            }
         }
     }
+}
+
+/// Start `n` nodes on shared counter leases, each seeded with all the others. Every node gets
+/// `extra` and the [`FAST`] lease flags that `extra` does not set.
+pub async fn start(
+    net: &Net,
+    leases: &Leases,
+    n: usize,
+    extra: &[&str],
+) -> (Vec<GossipNode>, Vec<Arc<AtomicBool>>) {
+    let sockets: Vec<_> = (0..n).map(|_| socket()).collect();
+    let addrs: Vec<_> = sockets.iter().map(|(_, a)| *a).collect();
+    let (mut nodes, mut gates) = (Vec::new(), Vec::new());
+    for (i, (s, _)) in sockets.into_iter().enumerate() {
+        let seeds: Vec<_> = addrs
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, a)| *a)
+            .collect();
+        let (node, gate) = join(net, leases, s, &seeds, extra).await;
+        nodes.push(node);
+        gates.push(gate);
+    }
+    (nodes, gates)
+}
+
+/// Start one node on `socket` with the shared leases, `flags`, and the [`FAST`] lease flags that
+/// `flags` does not set.
+pub async fn join(
+    net: &Net,
+    leases: &Leases,
+    socket: std::net::UdpSocket,
+    seeds: &[std::net::SocketAddr],
+    flags: &[&str],
+) -> (GossipNode, Arc<AtomicBool>) {
+    let gate = Arc::new(AtomicBool::new(true));
+    let opts = Opts {
+        counter_leases: Some(leases.for_node(gate.clone())),
+        ..Opts::default()
+    };
+    let mut all: Vec<&str> = FAST
+        .chunks(2)
+        .filter(|pair| !flags.contains(&pair[0]))
+        .flatten()
+        .copied()
+        .collect();
+    all.extend_from_slice(flags);
+    (net.start_on(socket, seeds, &all, opts).await, gate)
+}
+
+/// A key of group `g`, by trying `cnt:<prefix><i>`.
+pub fn key_in(n: &GossipNode, g: u16, prefix: &str) -> String {
+    (0..)
+        .map(|i| format!("cnt:{prefix}{i}"))
+        .find(|k| group_of(n, k) == g)
+        .unwrap()
+}
+
+/// Every group runs Raft with its three target voters, no learner, and one leader among
+/// `nodes`. The voter moves are then done.
+pub fn all_raft(nodes: &[&GossipNode]) -> bool {
+    (0..GROUPS).all(|g| {
+        leader_of(nodes, g).is_some_and(|l| {
+            let s = status(l, g);
+            let mut targets = l
+                .node
+                .epochs()
+                .current()
+                .owners(&discus::counter::group_key(g), 3);
+            targets.sort();
+            let mut voters = s.voters.clone();
+            voters.sort();
+            voters == targets
+                && s.learners.is_empty()
+                && s.voters.iter().all(|v| {
+                    nodes
+                        .iter()
+                        .any(|n| n.id == *v && matches!(role(n, g), "leader" | "voter"))
+                })
+        })
+    })
+}
+
+/// The voters of group `g` by the leader among `nodes`.
+pub fn voters_of<'a>(nodes: &[&'a GossipNode], g: u16) -> Vec<&'a GossipNode> {
+    let Some(l) = leader_of(nodes, g) else {
+        return Vec::new();
+    };
+    let voters = status(l, g).voters;
+    nodes
+        .iter()
+        .copied()
+        .filter(|n| voters.contains(&n.id))
+        .collect()
 }

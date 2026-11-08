@@ -204,7 +204,11 @@ pub async fn run(
                     Ok(reply) if is_no_leader(&reply.value) => counters.distrust(g, leader),
                     Ok(reply) => return reply,
                     Err(e) if e.is_unsent() || read => counters.distrust(g, leader),
-                    Err(_) => return error(IN_DOUBT),
+                    // The next command of the group looks for another leader first.
+                    Err(_) => {
+                        counters.distrust(g, leader);
+                        return error(IN_DOUBT);
+                    }
                 }
             }
             _ => counters.ask_leader(g),
