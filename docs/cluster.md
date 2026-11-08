@@ -54,8 +54,10 @@ suspects the member shortens the timeout.
 A forward timeout, a reset connection, or a failed handshake toward a member weighs more than a
 missed probe. So a node that the clients reach through several entry nodes becomes `DEAD` faster.
 
-A `DEAD` member leaves the epoch. A node that sees the death waits a random 0 to 50 ms, then
-creates the next epoch. The other nodes adopt the highest epoch.
+A `DEAD` member leaves the epoch. One node builds the next epoch: the live `NORMAL` member with the
+lowest node ID. It waits a random 0 to 50 ms, then creates the next epoch. The other nodes wait
+longer: three gossip periods, plus one period for each doubling of the cluster size. They build
+only if no new epoch arrived by then. Every node adopts the highest epoch.
 
 ## Partitions and merges
 

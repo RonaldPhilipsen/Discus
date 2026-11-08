@@ -31,6 +31,11 @@ const JOIN_FANOUT: usize = 3;
 
 const MAX_LEARNED: usize = 16;
 
+/// Gossip periods that a node other than the builder waits for the builder's epoch before it
+/// builds one itself, on top of `ceil(log2(cluster size))`: an epoch spreads by gossip, so a fixed
+/// wait is too short in a large cluster.
+const EPOCH_FALLBACK_PERIODS: Millis = 3;
+
 /// Members that receive the final `LEAVE`.
 const LEAVE_FANOUT: usize = 3;
 
@@ -495,11 +500,37 @@ impl Swim {
         }
     }
 
+    /// The node expected to build the next epoch: the lowest `NORMAL` member of the current
+    /// epoch that this node sees alive. The member list is sorted by ID, so every node with the
+    /// same liveness view picks the same builder. Two builds then compete only when the views
+    /// differ, which is the partition case where a rejoin is the right outcome.
+    fn builder(&self) -> Option<NodeId> {
+        let alive = |id: NodeId| {
+            id == self.me.id
+                || self
+                    .members
+                    .get(&id)
+                    .is_some_and(|r| r.liveness == Liveness::Alive)
+        };
+        self.last_epoch
+            .as_ref()?
+            .normal()
+            .map(|m| m.id)
+            .find(|id| alive(*id))
+    }
+
+    /// Arm the epoch timer: the builder waits only the jitter, every other node also waits the
+    /// fallback for the builder's epoch. A pending later deadline moves forward.
     fn arm(&mut self, now: Millis) {
-        if self.epoch_timer.is_none() {
-            let jitter = self.rng.u64(0..=self.cfg.epoch_jitter_ms);
-            self.epoch_timer = Some(now + jitter);
-        }
+        let jitter = self.rng.u64(0..=self.cfg.epoch_jitter_ms);
+        let fallback = if self.builder() == Some(self.me.id) {
+            0
+        } else {
+            let spread = (self.alive_count() + 1).next_power_of_two().ilog2();
+            (EPOCH_FALLBACK_PERIODS + Millis::from(spread)) * self.cfg.period_ms
+        };
+        let due = now + jitter + fallback;
+        self.epoch_timer = Some(self.epoch_timer.map_or(due, |t| t.min(due)));
     }
 
     fn drop_shown_deltas(&mut self, epoch: &Epoch) {
@@ -580,7 +611,10 @@ impl Swim {
             }
         }
         self.drop_shown_deltas(&current);
-        if !self.deltas.is_empty() {
+        if self.deltas.is_empty() {
+            // A deadline left from a finished change must not cut short the wait for the next.
+            self.epoch_timer = None;
+        } else {
             self.arm(now);
         }
     }
