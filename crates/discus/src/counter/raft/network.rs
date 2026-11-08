@@ -1,6 +1,6 @@
 //! The Raft network: openraft RPCs as `RAFT_*` messages on the bulk lane (spec section 13.2).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -30,24 +30,38 @@ pub trait RaftLink: Send + Sync + 'static {
     ) -> BoxFuture<'static, Result<Message, String>>;
 }
 
-/// The last successful Raft reply of each replica. The leader removes a voter that stays silent
-/// for the voter timeout (spec section 10.2).
+/// What the leader knows about each replica: its last successful Raft reply, and whether a live
+/// peer refused it. Silence counts against the voter timeout. A refusal is final (spec section
+/// 10.2): a replica ID is never used twice, and a node answers `RAFT_CONFIG` with an ID only
+/// after it installed that replica, so "not started yet" is impossible. A reply that succeeded
+/// before the refusal can arrive after it, so a contact does not clear the mark.
 #[derive(Debug, Default)]
-pub struct Contacts(Mutex<HashMap<u64, Instant>>);
+pub struct Contacts {
+    seen: Mutex<HashMap<u64, Instant>>,
+    refused: Mutex<HashSet<u64>>,
+}
 
 impl Contacts {
     pub fn saw(&self, replica: u64) {
-        self.0.lock().insert(replica, Instant::now());
+        self.seen.lock().insert(replica, Instant::now());
     }
 
     /// The time since the last reply. A replica without a reply counts from `since`.
     pub fn silent_for(&self, replica: u64, since: Instant) -> Duration {
-        self.0
+        self.seen
             .lock()
             .get(&replica)
             .copied()
             .unwrap_or(since)
             .elapsed()
+    }
+
+    pub fn refuse(&self, replica: u64) {
+        self.refused.lock().insert(replica);
+    }
+
+    pub fn refused(&self, replica: u64) -> bool {
+        self.refused.lock().contains(&replica)
     }
 }
 
@@ -96,8 +110,19 @@ impl NetClient {
         option: &RPCOption,
         of: fn(RaftReply) -> Option<R>,
     ) -> Result<R, RPCError<u64, Peer, E>> {
+        // A live replica also refuses a snapshot chunk that does not fit, so only the other
+        // RPCs prove that the replica is gone.
+        let definite = !matches!(message, Message::RaftSnapshot(_));
         let reply = match self.link.send(self.to, message, option.hard_ttl()).await {
-            Ok(Message::RaftReply(r)) => of(r).ok_or_else(|| unreachable("refused"))?,
+            Ok(Message::RaftReply(r)) => match of(r) {
+                Some(reply) => reply,
+                None => {
+                    if definite {
+                        self.contacts.refuse(self.header.target);
+                    }
+                    return Err(unreachable("refused"));
+                }
+            },
             Ok(other) => {
                 return Err(unreachable(format!(
                     "expected RAFT_REPLY, got message type {}",
@@ -140,5 +165,21 @@ impl RaftNetwork<TypeConfig> for NetClient {
     ) -> Result<VoteResponse<u64>, RPCError<u64, Peer, RaftError<u64>>> {
         let message = Message::RaftVote(convert::vote_req_to(self.header, &rpc));
         self.rpc(message, &option, convert::vote_reply_of).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refusal_stays_after_a_later_contact() {
+        let contacts = Contacts::default();
+        assert!(!contacts.refused(1));
+        contacts.saw(1);
+        contacts.refuse(1);
+        contacts.saw(1);
+        assert!(contacts.refused(1));
+        assert!(!contacts.refused(2));
     }
 }

@@ -103,6 +103,23 @@ fn check_sizes(node: &Node, name: &str, cmd: &Command) -> Result<(), CommandErro
     values.into_iter().try_for_each(|v| check_value(node, v))
 }
 
+/// The reply of a fan-out with a failed part, or `None` when every part succeeded. A client
+/// retries a command after `NO_LEADER`, so one part that can have applied makes the whole reply
+/// `IN_DOUBT`.
+fn failed(parts: &[Reply]) -> Option<Reply> {
+    let is = |v: &Value, text: &str| matches!(v, Value::Error(e) if e[..] == *text.as_bytes());
+    if !parts.iter().any(|r| matches!(r.value, Value::Error(_))) {
+        return None;
+    }
+    if parts.iter().any(|r| is(&r.value, IN_DOUBT)) {
+        return Some(error(IN_DOUBT));
+    }
+    if parts.iter().all(|r| is_no_leader(&r.value)) {
+        return Some(error(NO_LEADER));
+    }
+    Some(Reply::try_again())
+}
+
 /// Split by group and merge like a normal multi-key command (spec section 7.3).
 async fn fan_out(
     node: &Arc<Node>,
@@ -124,8 +141,8 @@ async fn fan_out(
             .map(|g| run(node, counters, g.target, mem::take(&mut g.cmd), hop.clone())),
     )
     .await;
-    if parts.iter().any(|r| matches!(r.value, Value::Error(_))) {
-        return Reply::try_again();
+    if let Some(reply) = failed(&parts) {
+        return reply;
     }
     let total = (cmd.len() - 1) / width;
     match merge.apply(total, &groups, parts.into_iter().map(|r| r.value)) {
@@ -212,4 +229,36 @@ pub fn broadcast(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> 
             "TRYAGAIN FLUSHALL cleared the cache and {cleared} of {groups} counter groups"
         ))
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ok() -> Reply {
+        Reply::value(Value::Integer(1))
+    }
+
+    #[test]
+    fn a_part_in_doubt_makes_the_whole_reply_in_doubt() {
+        let parts = [error(NO_LEADER), ok(), error(IN_DOUBT)];
+        assert_eq!(failed(&parts), Some(error(IN_DOUBT)));
+    }
+
+    #[test]
+    fn only_all_no_leader_parts_stay_no_leader() {
+        let parts = [error(NO_LEADER), error(NO_LEADER)];
+        assert_eq!(failed(&parts), Some(error(NO_LEADER)));
+        let mixed = [error(NO_LEADER), ok()];
+        assert_eq!(failed(&mixed), Some(Reply::try_again()));
+        assert_eq!(
+            failed(&[error("ERR other"), ok()]),
+            Some(Reply::try_again())
+        );
+    }
+
+    #[test]
+    fn parts_without_an_error_are_not_failed() {
+        assert_eq!(failed(&[ok(), ok()]), None);
+    }
 }
