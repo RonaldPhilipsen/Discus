@@ -84,28 +84,23 @@ pub fn accepts(name: &str) -> bool {
     COMMANDS.contains(&name)
 }
 
+/// True when the command is one of the space-separated `names`, in any case.
+fn named(cmd: &Command, names: &str) -> bool {
+    names
+        .split(' ')
+        .any(|n| cmd[0].eq_ignore_ascii_case(n.as_bytes()))
+}
+
 /// True for the commands that only read. The leader serves them without a log entry.
 pub fn is_read(cmd: &Command) -> bool {
-    matches!(
-        upper(&cmd[0]).as_str(),
-        "GET" | "EXISTS" | "TTL" | "PTTL" | "TYPE" | "MGET" | "STRLEN"
-    )
+    named(cmd, "GET EXISTS TTL PTTL TYPE MGET STRLEN")
 }
 
 /// True for the writes that never grow the state. A full reserve still accepts them.
 pub fn is_shrinking(cmd: &Command) -> bool {
-    matches!(
-        upper(&cmd[0]).as_str(),
-        "DEL"
-            | "GETDEL"
-            | "PERSIST"
-            | "EXPIRE"
-            | "PEXPIRE"
-            | "EXPIREAT"
-            | "PEXPIREAT"
-            | "FLUSHALL"
-            | "FLUSHDB"
-            | "PURGE"
+    named(
+        cmd,
+        "DEL GETDEL PERSIST EXPIRE PEXPIRE EXPIREAT PEXPIREAT FLUSHALL FLUSHDB PURGE",
     )
 }
 
