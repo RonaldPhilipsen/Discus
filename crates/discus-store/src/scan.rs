@@ -105,10 +105,20 @@ impl Store {
         (next, out)
     }
 
-    /// Walk the entries with a cursor, tombstones included, for handoff and reconciliation.
-    pub fn scan_entries(&self, cursor: u64, count: usize) -> (u64, Vec<(Bytes, Entry)>) {
+    /// Walk the entries with a cursor, tombstones included, for handoff and reconciliation. Only
+    /// the entries that `keep` accepts are cloned. It runs under the shard lock.
+    pub fn scan_entries(
+        &self,
+        cursor: u64,
+        count: usize,
+        mut keep: impl FnMut(&Bytes, &Entry) -> bool,
+    ) -> (u64, Vec<(Bytes, Entry)>) {
         let mut out = Vec::new();
-        let next = self.walk(cursor, count, |k, e| out.push((k.clone(), e.clone())));
+        let next = self.walk(cursor, count, |k, e| {
+            if keep(k, e) {
+                out.push((k.clone(), e.clone()));
+            }
+        });
         (next, out)
     }
 

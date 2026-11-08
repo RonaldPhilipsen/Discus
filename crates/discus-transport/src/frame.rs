@@ -3,8 +3,8 @@
 use std::io;
 
 use bytes::Bytes;
-use futures::{SinkExt, StreamExt};
-use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+use futures::StreamExt;
+use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
 
 fn codec(max: usize) -> LengthDelimitedCodec {
     LengthDelimitedCodec::builder()
@@ -16,8 +16,11 @@ fn codec(max: usize) -> LengthDelimitedCodec {
 
 /// Write one frame. The caller finishes the stream.
 pub async fn write_frame(send: &mut quinn::SendStream, bytes: &[u8]) -> io::Result<()> {
-    let mut framed = FramedWrite::new(send, codec(usize::MAX));
-    framed.send(Bytes::copy_from_slice(bytes)).await
+    let len = u32::try_from(bytes.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "frame size too big"))?;
+    send.write_all(&len.to_be_bytes()).await?;
+    send.write_all(bytes).await?;
+    Ok(())
 }
 
 /// Read one frame of at most `max` bytes. `None` means the stream ended before a frame began. A

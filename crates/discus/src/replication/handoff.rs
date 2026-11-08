@@ -161,11 +161,10 @@ pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits
     tracing::info!(from = %from.id(), to = %to.id(), targets = targets.len(), "handoff scan");
     let mut cursor = 0;
     loop {
-        let (next, entries) = node.store.scan_entries(cursor, STEP);
+        let (next, entries) = node
+            .store
+            .scan_entries(cursor, STEP, |_, e| e.version.time() <= watermark);
         for (k, e) in entries {
-            if e.version.time() > watermark {
-                continue;
-            }
             let old_owners = from.owners(&k, rf);
             let survivors: Vec<NodeId> = old_owners
                 .iter()

@@ -42,7 +42,8 @@ fn group(
             Some(w) if !write => w.lock().required(&item[0], now),
             _ => None,
         };
-        let target = *candidates(node, &item[0], write, rr, need).first()?;
+        let owners = node.owners(&item[0]);
+        let target = *candidates(node, &item[0], &owners, write, rr, need).first()?;
         let g = match groups.iter().position(|g| g.target == target) {
             Some(i) => &mut groups[i],
             None => {

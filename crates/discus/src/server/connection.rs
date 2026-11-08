@@ -31,7 +31,7 @@ use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::order::KeyOrder;
+use super::order::{KeyOrder, WaitFor};
 use crate::cluster::{self, Dispatch, Prepared};
 use crate::node::{ConnState, Node};
 use crate::security::ConnAuth;
@@ -39,7 +39,6 @@ use crate::telemetry::CommandTrace;
 
 /// Flush when this many reply bytes are pending.
 const FLUSH_BYTES: usize = 1 << 20;
-const READ_CHUNK: usize = 64 * 1024;
 
 /// One reply in request order.
 struct Slot {
@@ -47,6 +46,16 @@ struct Slot {
     value: Value,
     /// Close the connection after this reply.
     closes: bool,
+}
+
+impl Slot {
+    fn reply(protocol: Protocol, value: Value) -> Slot {
+        Slot {
+            protocol,
+            value,
+            closes: false,
+        }
+    }
 }
 
 /// Write `out` to the client, giving up when the node force-closes connections. A client that
@@ -136,31 +145,33 @@ impl Pipeline {
             Prepared::Data(job) => job,
         };
         let protocol = self.conn.protocol;
-        let (wait, done) = self.order.admit(&job.keys());
+        // With nothing in flight, the command waits for nothing. It registers its keys only when
+        // it does not finish at once, so the single-node path skips the key order.
+        let (wait, done, keys) = if self.pending.is_empty() {
+            (WaitFor::default(), None, Some(job.keys()))
+        } else {
+            let (wait, done) = self.order.admit(&job.keys());
+            (wait, Some(done), None)
+        };
         if wait.is_ready() {
             match cluster::run(&self.node, job, route) {
                 Dispatch::Ready(reply) => {
                     drop(done);
                     trace.finish(&reply.value);
-                    self.ready(Slot {
-                        protocol,
-                        value: reply.value,
-                        closes: false,
-                    });
+                    self.ready(Slot::reply(protocol, reply.value));
                 }
-                Dispatch::Pending(future) => self.pending.push_back(Box::pin(
-                    async move {
-                        let reply = future.await;
-                        drop(done);
-                        trace.finish(&reply.value);
-                        Slot {
-                            protocol,
-                            value: reply.value,
-                            closes: false,
+                Dispatch::Pending(future) => {
+                    let done = done.or_else(|| keys.map(|k| self.order.admit(&k).1));
+                    self.pending.push_back(Box::pin(
+                        async move {
+                            let reply = future.await;
+                            drop(done);
+                            trace.finish(&reply.value);
+                            Slot::reply(protocol, reply.value)
                         }
-                    }
-                    .instrument(span.clone()),
-                )),
+                        .instrument(span.clone()),
+                    ))
+                }
             }
             return;
         }
@@ -172,11 +183,7 @@ impl Pipeline {
                 let reply = cluster::run(&node, job, trace.route_span()).finish().await;
                 drop(done);
                 trace.finish(&reply.value);
-                Slot {
-                    protocol,
-                    value: reply.value,
-                    closes: false,
-                }
+                Slot::reply(protocol, reply.value)
             }
             .instrument(span.clone()),
         ));
@@ -235,7 +242,6 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         closing: false,
         finished: false,
     };
-    let mut chunk = vec![0u8; READ_CHUNK];
 
     loop {
         // Parse what is buffered, up to the pipeline limit.
@@ -281,14 +287,13 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
             if !flush(&mut stream, &mut p.out, &hard_stop).await || p.closing {
                 return;
             }
-            let n = tokio::select! {
+            tokio::select! {
                 _ = hard_stop.cancelled() => return,
-                read = stream.read(&mut chunk) => match read {
+                read = stream.read_buf(parser.buffer()) => match read {
                     Ok(0) | Err(_) => return,
-                    Ok(n) => n,
+                    Ok(_) => {}
                 },
             };
-            parser.feed(&chunk[..n]);
             continue;
         }
         let can_read = starved && !p.closing && p.pending.len() < max_pipeline;
@@ -309,11 +314,11 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
                     return;
                 }
             }
-            read = stream.read(&mut chunk), if can_read => match read {
+            read = stream.read_buf(parser.buffer()), if can_read => match read {
                 // The client stopped writing: finish the pending replies, then end.
                 Ok(0) => p.closing = true,
                 Err(_) => return,
-                Ok(n) => parser.feed(&chunk[..n]),
+                Ok(_) => {}
             },
         }
     }

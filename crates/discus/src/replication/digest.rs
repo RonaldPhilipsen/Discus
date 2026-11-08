@@ -56,12 +56,9 @@ fn walk_moved(
     let gone = removed(old, new);
     let mut cursor = 0;
     loop {
-        let (next, entries) = store.scan_entries(cursor, SCAN_STEP);
+        let moved = |k: &Bytes, _: &Entry| old.primary(k).is_some_and(|p| gone.contains(&p));
+        let (next, entries) = store.scan_entries(cursor, SCAN_STEP, moved);
         for (k, e) in &entries {
-            let was = old.primary(k);
-            if !was.is_some_and(|p| gone.contains(&p)) {
-                continue;
-            }
             let owners = new.owners(k, rf);
             if owners.first() == Some(&primary) {
                 f(k, e, &owners[1..]);

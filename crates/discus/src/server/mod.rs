@@ -178,7 +178,7 @@ impl Server {
                 None => Transport::bind(tc, service).await?,
             };
             if let Some(lease) = lease {
-                let advertise = discovery::advertise(&node.config);
+                let advertise = discovery::advertise(&node.config).await;
                 let membership = Membership::new(&node, transport.clone(), lease, advertise);
                 node.set_membership(membership);
             }

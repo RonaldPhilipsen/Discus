@@ -1,5 +1,7 @@
 //! RESP values on the wire: commands as RESP multibulk bytes, replies as `RespValue` tables.
 
+use std::fmt::Write;
+
 use bytes::{BufMut, Bytes, BytesMut};
 use discus_resp::Value;
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
@@ -11,9 +13,10 @@ use crate::fb;
 pub fn encode_command(cmd: &[Bytes]) -> Bytes {
     let size: usize = cmd.iter().map(|a| a.len() + 16).sum::<usize>() + 16;
     let mut out = BytesMut::with_capacity(size);
-    out.put_slice(format!("*{}\r\n", cmd.len()).as_bytes());
+    // Writing to a `BytesMut` cannot fail.
+    let _ = write!(out, "*{}\r\n", cmd.len());
     for arg in cmd {
-        out.put_slice(format!("${}\r\n", arg.len()).as_bytes());
+        let _ = write!(out, "${}\r\n", arg.len());
         out.put_slice(arg);
         out.put_slice(b"\r\n");
     }

@@ -25,7 +25,7 @@ pub enum Value {
 
 impl Value {
     pub fn ok() -> Value {
-        Value::simple("OK")
+        Value::Simple(Bytes::from_static(b"OK"))
     }
     pub fn simple(s: &str) -> Value {
         Value::Simple(Bytes::copy_from_slice(s.as_bytes()))

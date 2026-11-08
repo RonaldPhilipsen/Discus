@@ -86,7 +86,7 @@ fn scan_and_random_key_skip_tombstones() {
     put(&s, "live", v(3));
     let (_, keys) = s.scan(0, 100, None);
     assert_eq!(keys, vec![bytes::Bytes::from_static(b"live")]);
-    let (_, entries) = s.scan_entries(0, 100);
+    let (_, entries) = s.scan_entries(0, 100, |_, _| true);
     assert_eq!(entries.len(), 2);
 }
 

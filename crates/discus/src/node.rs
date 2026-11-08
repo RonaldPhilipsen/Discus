@@ -360,6 +360,9 @@ impl Node {
         if let Some(r) = self.replicator() {
             r.on_epoch(&old, &new);
         }
+        if let Some(link) = self.link() {
+            link.forget_non_members(&new);
+        }
         self.epoch_tx.send_replace(id);
         result
     }

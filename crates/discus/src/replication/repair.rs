@@ -18,21 +18,19 @@ use crate::Node;
 /// While a handoff toward this node is incomplete, the previous owners come first, for reads
 /// and writes. A write then applies to the handed-off value, so an `INCR` on a moved key does
 /// not restart from zero (spec section 5.2).
-pub fn sources(node: &Node, key: &[u8], write: bool) -> Vec<NodeId> {
+pub fn sources(node: &Node, key: &[u8], write: bool, owners: &[NodeId]) -> Vec<NodeId> {
     let Some(replicator) = node.replicator() else {
         return Vec::new();
     };
     if node.store.version(key).is_some() {
         return Vec::new();
     }
-    let epoch = node.epochs().current().clone();
-    let mut out = replicator.fallback_sources(key, &epoch);
+    let mut out = replicator.fallback_sources(node, key, owners);
     if write {
         return out;
     }
-    let owners = epoch.owners(key, node.config.replication_factor);
     if owners.first() != Some(&node.id) && owners.contains(&node.id) {
-        for o in owners {
+        for &o in owners {
             if o != node.id && !out.contains(&o) {
                 out.push(o);
             }

@@ -1,6 +1,6 @@
 //! An incremental parser for client commands (arrays of bulk strings).
 
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 
 /// A parsed command: the command name followed by its arguments.
 pub type Command = Vec<Bytes>;
@@ -35,6 +35,9 @@ pub enum ParseError {
 /// Longest header line (`*N` or `$N`) that the parser waits for.
 const MAX_HEADER_LINE: usize = 32;
 
+/// The free room that [`Parser::buffer`] makes for one read.
+const READ_MIN: usize = 64 * 1024;
+
 /// Feed bytes in, pull complete commands out.
 pub struct Parser {
     buf: BytesMut,
@@ -68,6 +71,12 @@ impl Parser {
         self.buf.extend_from_slice(data);
     }
 
+    /// The buffer that new bytes go into, with room for at least `READ_MIN` of them.
+    pub fn buffer(&mut self) -> &mut BytesMut {
+        self.buf.reserve(READ_MIN);
+        &mut self.buf
+    }
+
     /// Bytes that are buffered and not yet parsed.
     pub fn buffered(&self) -> usize {
         self.buf.len()
@@ -80,13 +89,17 @@ impl Parser {
             match self.try_parse()? {
                 Attempt::Incomplete => return Ok(None),
                 Attempt::Empty(consumed) => {
-                    let _ = self.buf.split_to(consumed);
+                    self.buf.advance(consumed);
                 }
+                // Each argument gets its own allocation. A slice of the read buffer would keep
+                // the whole buffer alive while a stored value lives, outside the memory budget.
                 Attempt::Done { consumed, ranges } => {
-                    let frame = self.buf.split_to(consumed).freeze();
-                    return Ok(Some(
-                        ranges.into_iter().map(|(s, e)| frame.slice(s..e)).collect(),
-                    ));
+                    let cmd = ranges
+                        .into_iter()
+                        .map(|(s, e)| Bytes::copy_from_slice(&self.buf[s..e]))
+                        .collect();
+                    self.buf.advance(consumed);
+                    return Ok(Some(cmd));
                 }
             }
         }
@@ -227,6 +240,16 @@ mod tests {
         assert_eq!(cmd, vec!["SET", "k", "value"]);
         p.feed(b"*1\r\n$4\r\nPING\r\n");
         assert_eq!(p.next().unwrap().unwrap(), vec!["PING"]);
+    }
+
+    /// A parsed value owns its bytes, so it does not keep the read buffer alive.
+    #[test]
+    fn an_argument_does_not_share_the_read_buffer() {
+        let mut p = Parser::new(Limits::default());
+        p.feed(b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n*1\r\n$4\r\nPI");
+        let cmd = p.next().unwrap().unwrap();
+        assert!(cmd.iter().all(Bytes::is_unique));
+        assert!(p.next().unwrap().is_none());
     }
 
     /// A command of many arguments that arrives one argument per read reads each header once.

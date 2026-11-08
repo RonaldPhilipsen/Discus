@@ -10,8 +10,12 @@ fn line(out: &mut BytesMut, prefix: u8, body: &[u8]) {
     out.put_slice(b"\r\n");
 }
 
+fn header(out: &mut BytesMut, prefix: u8, n: impl itoa::Integer) {
+    line(out, prefix, itoa::Buffer::new().format(n).as_bytes());
+}
+
 fn bulk(out: &mut BytesMut, body: &[u8]) {
-    line(out, b'$', body.len().to_string().as_bytes());
+    header(out, b'$', body.len());
     out.put_slice(body);
     out.put_slice(b"\r\n");
 }
@@ -22,12 +26,12 @@ pub fn encode(value: &Value, protocol: Protocol, out: &mut BytesMut) {
     match value {
         Value::Simple(s) => line(out, b'+', s),
         Value::Error(s) => line(out, b'-', s),
-        Value::Integer(i) => line(out, b':', i.to_string().as_bytes()),
+        Value::Integer(i) => header(out, b':', *i),
         Value::Bulk(b) => bulk(out, b),
         Value::Null if resp3 => out.put_slice(b"_\r\n"),
         Value::Null => out.put_slice(b"$-1\r\n"),
         Value::Array(items) => {
-            line(out, b'*', items.len().to_string().as_bytes());
+            header(out, b'*', items.len());
             for item in items {
                 encode(item, protocol, out);
             }
@@ -38,7 +42,7 @@ pub fn encode(value: &Value, protocol: Protocol, out: &mut BytesMut) {
             } else {
                 (b'*', pairs.len() * 2)
             };
-            line(out, prefix, n.to_string().as_bytes());
+            header(out, prefix, n);
             for (k, v) in pairs {
                 encode(k, protocol, out);
                 encode(v, protocol, out);

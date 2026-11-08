@@ -835,6 +835,7 @@ name = "discus-resp"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "itoa",
  "thiserror 2.0.21",
 ]
 

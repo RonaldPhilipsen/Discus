@@ -53,6 +53,13 @@ impl ClusterLink {
         self.peer_epochs.lock().get(&peer).copied()
     }
 
+    /// Forget the peers that `epoch` does not list, so departed nodes leave no record.
+    pub fn forget_non_members(&self, epoch: &discus_placement::Epoch) {
+        self.peer_epochs
+            .lock()
+            .retain(|p, _| epoch.member(*p).is_some());
+    }
+
     /// Record the epoch a peer reported. Only a newer one replaces the record.
     pub fn saw_peer_epoch(&self, peer: NodeId, epoch: EpochId) {
         let mut map = self.peer_epochs.lock();
@@ -225,15 +232,16 @@ fn track_here(node: &Node, key: &[u8], reply: &mut Reply) {
 }
 
 /// Serve a single-key command on this node. A replica without an entry for the key first asks
-/// the other owners (read repair).
+/// the other owners (read repair). `owners` are the current owners of the key.
 pub fn serve_here(
     node: &Arc<Node>,
     spec: &'static CommandSpec,
     cmd: Command,
     write: bool,
+    owners: &[NodeId],
 ) -> Dispatch {
     let key = cmd[1].clone();
-    let sources = crate::replication::repair::sources(node, &key, write);
+    let sources = crate::replication::repair::sources(node, &key, write, owners);
     if sources.is_empty() {
         return Dispatch::Ready(local(node, spec, &cmd));
     }
@@ -303,25 +311,25 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
 pub fn candidates(
     node: &Node,
     key: &[u8],
+    owners: &[NodeId],
     write: bool,
     rr: u64,
     need: Option<Version>,
 ) -> Vec<NodeId> {
-    let owners = node.owners(key);
     if let Some(need) = need.filter(|_| !write) {
         if owners.contains(&node.id) && node.store.version(key).is_some_and(|v| v >= need) {
             return vec![node.id];
         }
-        return owners.into_iter().take(1).collect();
+        return owners.iter().take(1).copied().collect();
     }
     let replicas = !write && node.link().is_some_and(|l| l.read_from_replicas);
     if !replicas {
-        return owners.into_iter().take(1).collect();
+        return owners.iter().take(1).copied().collect();
     }
     if owners.contains(&node.id) {
         return vec![node.id];
     }
-    let mut owners = owners;
+    let mut owners = owners.to_vec();
     if !owners.is_empty() {
         let n = owners.len();
         owners.rotate_left((rr % n as u64) as usize);
@@ -411,13 +419,15 @@ fn single_planned(
     route: Span,
 ) -> Dispatch {
     let key = cmd[1].clone();
-    let plan = route.in_scope(|| {
-        let targets = candidates(node, &key, write, rr, need);
-        match targets.first() {
+    let (plan, owners) = route.in_scope(|| {
+        let owners = node.owners(&key);
+        let targets = candidates(node, &key, &owners, write, rr, need);
+        let plan = match targets.first() {
             None => Plan::Retry,
             Some(first) if *first == node.id => Plan::Local,
             Some(_) => Plan::Forward(allowed(node, &hop, targets)),
-        }
+        };
+        (plan, owners)
     });
     drop(route);
     let targets = match plan {
@@ -427,7 +437,7 @@ fn single_planned(
             track_here(node, &key, &mut reply);
             return Dispatch::Ready(reply);
         }
-        Plan::Local => return serve_here(node, spec, cmd, write),
+        Plan::Local => return serve_here(node, spec, cmd, write, &owners),
         Plan::Forward(targets) => targets,
     };
     if targets.is_empty() {
