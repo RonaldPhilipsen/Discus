@@ -134,23 +134,32 @@ async fn a_restarted_node_enters_as_a_learner() {
     }
 }
 
+/// `incrs` increments of `key` through `nodes[0]`, then the group of `key` and its voters, once
+/// every voter holds the value.
+async fn voters_holding<'a>(
+    nodes: &'a [GossipNode],
+    key: &str,
+    incrs: i64,
+) -> (u16, Vec<&'a GossipNode>) {
+    let g = group_of(&nodes[0], key);
+    let mut c = nodes[0].redis().await;
+    for _ in 0..incrs {
+        incr_once(&mut c, key).await;
+    }
+    let voters = voters_of(&refs(nodes), g);
+    assert!(all_hold(&voters, key, &incrs.to_string(), Duration::from_secs(5)).await);
+    (g, voters)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[serial]
 async fn two_of_three_voters_lost() {
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 6, &[]).await;
-    let refs = refs(&nodes);
-    let g = group_of(&nodes[0], "cnt:two");
-    let mut c = nodes[0].redis().await;
-    for _ in 0..10 {
-        let _: i64 = incr_once(&mut c, "cnt:two").await;
-    }
-    let voters = voters_of(&refs, g);
-    assert!(all_hold(&voters, "cnt:two", "10", Duration::from_secs(5)).await);
+    let (_, voters) = voters_holding(&nodes, "cnt:two", 10).await;
     voters[0].kill();
     voters[1].kill();
-    let survivor = voters[2];
-    let mut sc = survivor.redis().await;
+    let mut sc = voters[2].redis().await;
     assert_eq!(
         incr_until(&mut sc, "cnt:two", Duration::from_secs(20)).await,
         11
@@ -162,25 +171,15 @@ async fn two_of_three_voters_lost() {
 async fn every_voter_lost() {
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 6, &[]).await;
-    let refs = refs(&nodes);
-    let g = group_of(&nodes[0], "cnt:all");
-    let mut c = nodes[0].redis().await;
-    for _ in 0..10 {
-        let _: i64 = incr_once(&mut c, "cnt:all").await;
-    }
-    let voters = voters_of(&refs, g);
+    let (_, voters) = voters_holding(&nodes, "cnt:all", 10).await;
     for v in &voters {
         v.kill();
     }
-    let other = nodes
-        .iter()
-        .find(|n| !voters.iter().any(|v| v.id == n.id))
-        .unwrap();
-    let mut oc = other.redis().await;
     let rest: Vec<&GossipNode> = nodes
         .iter()
         .filter(|n| !voters.iter().any(|v| v.id == n.id))
         .collect();
+    let mut oc = rest[0].redis().await;
     assert_eq!(
         incr_or_show(&mut oc, "cnt:all", Duration::from_secs(25), &rest).await,
         1
@@ -192,14 +191,7 @@ async fn every_voter_lost() {
 async fn force_reconfigure_acts_before_dead() {
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 5, SLOW_DEATH).await;
-    let refs = refs(&nodes);
-    let g = group_of(&nodes[0], "cnt:force");
-    let mut c = nodes[0].redis().await;
-    for _ in 0..5 {
-        let _: i64 = incr_once(&mut c, "cnt:force").await;
-    }
-    let voters = voters_of(&refs, g);
-    assert!(all_hold(&voters, "cnt:force", "5", Duration::from_secs(5)).await);
+    let (g, voters) = voters_holding(&nodes, "cnt:force", 5).await;
     voters[0].kill();
     voters[1].kill();
     let survivor = voters[2];
