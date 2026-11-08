@@ -5,7 +5,7 @@
 //! maximum age, and memory pressure. An evicted hint is lost, so its refill bucket is marked for
 //! the target, and the first replay batch tells the target to discard those buckets.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -34,7 +34,24 @@ pub struct Hint {
 struct Target {
     hints: LruCache<Bytes, Hint>,
     bytes: u64,
-    lost: BTreeSet<u8>,
+    /// The refill buckets of lost hints, each with the mark of its latest loss.
+    lost: BTreeMap<u8, u64>,
+    /// Raised on every loss.
+    marks: u64,
+}
+
+impl Target {
+    fn mark_lost(&mut self, key: &[u8]) {
+        self.marks += 1;
+        self.lost.insert(refill_bucket(key), self.marks);
+    }
+}
+
+/// The lost buckets of a target at one moment, for the first batch of a replay.
+#[derive(Debug, Clone, Default)]
+pub struct Lost {
+    pub buckets: Vec<u8>,
+    mark: u64,
 }
 
 impl Target {
@@ -42,7 +59,8 @@ impl Target {
         Target {
             hints: LruCache::unbounded(),
             bytes: 0,
-            lost: BTreeSet::new(),
+            lost: BTreeMap::new(),
+            marks: 0,
         }
     }
 }
@@ -108,7 +126,7 @@ impl HintStore {
             };
             t.bytes -= h.size;
             self.bytes -= h.size;
-            t.lost.insert(refill_bucket(&k));
+            t.mark_lost(&k);
             evicted += 1;
         }
         let mut out = Vec::new();
@@ -136,7 +154,7 @@ impl HintStore {
         let (k, h) = t.hints.pop_lru()?;
         t.bytes -= h.size;
         self.bytes -= h.size;
-        t.lost.insert(refill_bucket(&k));
+        t.mark_lost(&k);
         Some(target)
     }
 
@@ -154,7 +172,7 @@ impl HintStore {
                 };
                 t.bytes -= h.size;
                 self.bytes -= h.size;
-                t.lost.insert(refill_bucket(&k));
+                t.mark_lost(&k);
                 bump(&mut out, *id);
             }
         }
@@ -204,16 +222,25 @@ impl HintStore {
     }
 
     /// The refill buckets of `target` whose hints were lost.
-    pub fn lost(&self, target: NodeId) -> Vec<u8> {
+    pub fn lost(&self, target: NodeId) -> Lost {
         self.targets
             .get(&target)
-            .map(|t| t.lost.iter().copied().collect())
+            .map(|t| Lost {
+                buckets: t.lost.keys().copied().collect(),
+                mark: t.marks,
+            })
             .unwrap_or_default()
     }
 
-    pub fn clear_lost(&mut self, target: NodeId) {
+    /// The target discarded the buckets of `sent`. A bucket lost again since `sent` was read
+    /// stays, because the target may have discarded it before that loss.
+    pub fn clear_lost(&mut self, target: NodeId, sent: &Lost) {
         if let Some(t) = self.targets.get_mut(&target) {
-            t.lost.clear();
+            for b in &sent.buckets {
+                if t.lost.get(b).is_some_and(|m| *m <= sent.mark) {
+                    t.lost.remove(b);
+                }
+            }
         }
     }
 
@@ -311,7 +338,7 @@ mod tests {
         let evicted = h.record(T, k("c"), entry(3), now);
         assert_eq!(evicted, vec![(T, 1)]);
         assert_eq!(h.count(T), 2);
-        assert_eq!(h.lost(T), vec![refill_bucket(b"a")]);
+        assert_eq!(h.lost(T).buckets, vec![refill_bucket(b"a")]);
     }
 
     #[test]
@@ -339,7 +366,7 @@ mod tests {
         let evicted = h.expire(now + Duration::from_secs(61));
         assert_eq!(evicted, vec![(T, 1)]);
         assert_eq!(h.count(T), 1);
-        assert_eq!(h.lost(T), vec![refill_bucket(b"a")]);
+        assert_eq!(h.lost(T).buckets, vec![refill_bucket(b"a")]);
     }
 
     #[test]
@@ -369,9 +396,47 @@ mod tests {
         h.record(T, k("gone"), entry(2), now);
         h.retain(|_, key| key.as_ref() == b"keep");
         assert_eq!(h.count(T), 1);
-        assert!(h.lost(T).is_empty());
+        assert!(h.lost(T).buckets.is_empty());
         h.drop_target(T);
         assert_eq!(h.bytes(), 0);
+    }
+
+    /// A replay names the lost buckets in its first batch and clears them once the target
+    /// acknowledged it. A bucket lost while that batch was on the wire was not named, so it
+    /// stays for the next replay.
+    #[test]
+    fn a_bucket_lost_during_a_replay_stays_lost() {
+        assert_ne!(refill_bucket(b"a"), refill_bucket(b"b"));
+        let mut h = HintStore::new(limits(1));
+        let now = Instant::now();
+        h.record(T, k("a"), entry(1), now);
+        h.record(T, k("b"), entry(2), now);
+        let sent = h.lost(T);
+        assert_eq!(sent.buckets, vec![refill_bucket(b"a")]);
+        h.record(T, k("c"), entry(3), now);
+        h.clear_lost(T, &sent);
+        assert_eq!(h.lost(T).buckets, vec![refill_bucket(b"b")]);
+    }
+
+    /// A bucket that was named and then lost again before the acknowledgement stays too: the
+    /// target may have discarded it before that loss.
+    #[test]
+    fn a_bucket_lost_again_during_a_replay_stays_lost() {
+        let mut h = HintStore::new(limits(1));
+        let now = Instant::now();
+        h.record(T, k("a"), entry(1), now);
+        h.record(T, k("b"), entry(2), now);
+        let sent = h.lost(T);
+        h.record(T, k("a"), entry(3), now);
+        h.record(T, k("c"), entry(4), now);
+        h.clear_lost(T, &sent);
+        let mut want = vec![refill_bucket(b"a"), refill_bucket(b"b")];
+        want.sort();
+        want.dedup();
+        assert_eq!(h.lost(T).buckets, want);
+        let again = h.lost(T);
+        h.clear_lost(T, &again);
+        assert!(h.lost(T).buckets.is_empty());
     }
 
     #[test]

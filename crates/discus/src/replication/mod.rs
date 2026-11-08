@@ -653,7 +653,7 @@ impl Replicator {
                 let h = self.hints.lock();
                 (h.batch(peer, REPLAY_BATCH), h.lost(peer))
             };
-            if entries.is_empty() && (lost.is_empty() || !first) {
+            if entries.is_empty() && (lost.buckets.is_empty() || !first) {
                 return true;
             }
             let sent: Vec<(Bytes, Version)> = entries
@@ -663,7 +663,7 @@ impl Replicator {
             let mut batch = Batch::new(node.epoch_id());
             batch.entries = entries;
             if first {
-                batch.discard = lost;
+                batch.discard = lost.buckets.clone();
             }
             match self.send(node, peer, Message::HintReplay(batch)).await {
                 Ok(_) => {
@@ -671,7 +671,7 @@ impl Replicator {
                         let mut h = self.hints.lock();
                         h.confirm(peer, &sent);
                         if first {
-                            h.clear_lost(peer);
+                            h.clear_lost(peer, &lost);
                         }
                     }
                     self.sync_charge();
