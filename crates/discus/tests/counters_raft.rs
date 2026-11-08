@@ -81,7 +81,7 @@ async fn a_learner_catches_up_by_snapshot() {
 #[serial]
 async fn a_minority_returns_tryagain() {
     let (net, leases) = (Net::new(), Leases::new());
-    let nodes = raft_cluster(&net, &leases, 5, SLOW_DEATH).await;
+    let nodes = raft_cluster(&net, &leases, 4, SLOW_DEATH).await;
     let refs = refs(&nodes);
     let g = group_of(&nodes[0], "cnt:min");
     let mut c = nodes[0].redis().await;
@@ -155,7 +155,7 @@ async fn voters_holding<'a>(
 #[serial]
 async fn two_of_three_voters_lost() {
     let (net, leases) = (Net::new(), Leases::new());
-    let nodes = raft_cluster(&net, &leases, 6, &[]).await;
+    let nodes = raft_cluster(&net, &leases, 5, &[]).await;
     let (_, voters) = voters_holding(&nodes, "cnt:two", 10).await;
     voters[0].kill();
     voters[1].kill();
@@ -190,7 +190,7 @@ async fn every_voter_lost() {
 #[serial]
 async fn force_reconfigure_acts_before_dead() {
     let (net, leases) = (Net::new(), Leases::new());
-    let nodes = raft_cluster(&net, &leases, 5, SLOW_DEATH).await;
+    let nodes = raft_cluster(&net, &leases, 3, SLOW_DEATH).await;
     let (g, voters) = voters_holding(&nodes, "cnt:force", 5).await;
     voters[0].kill();
     voters[1].kill();
