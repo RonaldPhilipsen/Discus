@@ -64,7 +64,6 @@ pub struct Settings {
     pub groups: u16,
     pub timeout: Duration,
     pub limits: Limits,
-    pub max_key_bytes: usize,
     pub reserve: u64,
     pub lease_duration: Duration,
     pub lease_renew: Duration,
@@ -84,7 +83,6 @@ impl Settings {
             limits: Limits {
                 max_value_bytes: c.max_value_bytes,
             },
-            max_key_bytes: c.max_key_bytes,
             reserve: c.max_memory / 100 * c.counter_memory_percent,
             lease_duration: Duration::from_millis(c.counter_lease_duration_ms.max(1)),
             lease_renew: Duration::from_millis(c.counter_lease_renew_ms.max(1)),
@@ -112,7 +110,6 @@ pub enum Refusal {
 }
 
 /// What a node sees of the cluster when it decides a counter role.
-#[derive(Clone)]
 pub struct View {
     pub epoch: Arc<Epoch>,
     pub me: NodeId,
@@ -247,19 +244,17 @@ impl Counters {
             *since = None;
             return false;
         }
-        let start = *since.get_or_insert_with(|| match self.node() {
-            Some(node) => match node.membership() {
-                Some(m) => {
-                    let (count, at) = m.normal_members();
-                    if count >= 3 {
-                        at
-                    } else {
-                        Instant::now()
-                    }
-                }
-                None => node.started_at,
-            },
-            None => Instant::now(),
+        let start = *since.get_or_insert_with(|| {
+            let Some(node) = self.node() else {
+                return Instant::now();
+            };
+            let Some(m) = node.membership() else {
+                return node.started_at;
+            };
+            match m.normal_members() {
+                (count, at) if count >= 3 => at,
+                _ => Instant::now(),
+            }
         });
         start.elapsed() >= self.settings.dwell
     }
@@ -478,35 +473,24 @@ impl Counters {
     fn record_metrics(&self) {
         use discus_telemetry::attrs::CounterRole;
         let metrics = discus_telemetry::global();
-        let mut counts = [0u64; 5];
-        let mut single = 0;
-        for g in &self.groups {
-            let role = g.role();
-            let i = match role.name() {
-                "leader" => 0,
-                "follower" => 1,
-                "voter" => 2,
-                "learner" => 3,
-                _ => 4,
-            };
-            counts[i] += 1;
-            if let Role::Raft(r) = &role {
-                if r.leads() && r.replica.voters().len() == 1 {
-                    single += 1;
-                }
-            }
+        let roles: Vec<Role> = self.groups.iter().map(|g| g.role()).collect();
+        let names: Vec<&str> = roles.iter().map(Role::name).collect();
+        for role in CounterRole::ALL {
+            let count = names.iter().filter(|n| **n == role.as_str()).count();
+            metrics.counter_roles(role, count as u64);
         }
-        for (role, count) in CounterRole::ALL.iter().zip(counts) {
-            metrics.counter_roles(*role, count);
-        }
+        let single = roles
+            .iter()
+            .filter(|r| matches!(r, Role::Raft(r) if r.leads() && r.replica.voters().len() == 1))
+            .count();
         metrics.counter_memory(self.bytes());
-        metrics.raft_single_voter_groups(single);
+        metrics.raft_single_voter_groups(single as u64);
     }
 
     /// The counter tier is settled (spec section 15.2): in every group this node is the leader,
     /// a synced follower, a voter of a Raft group that targets it, or not needed. Once true, it
     /// stays true, so a later change of targets never fails the startup probe.
-    pub fn settled(&self) -> bool {
+    pub fn settled(self: &Arc<Self>) -> bool {
         if self.settled.load(Ordering::Acquire) {
             return true;
         }
@@ -519,9 +503,7 @@ impl Counters {
                     && self.groups.iter().all(|g| {
                         let settled = g.settled_for(&view);
                         if settled.is_none() {
-                            if let Some(me) = self.me.upgrade() {
-                                me.ask_leader(g.g);
-                            }
+                            self.ask_leader(g.g);
                         }
                         settled == Some(true)
                     })
@@ -590,7 +572,7 @@ impl Counters {
                 "OOM command not allowed when the counter reserve is full",
             ));
         }
-        let now_ms = self.node().map_or(0, |n| n.store.now_ms());
+        let now_ms = self.now_ms();
         match self.group(g).role() {
             Role::Leader(l) => {
                 l.execute(
