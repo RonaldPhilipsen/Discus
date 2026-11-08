@@ -14,7 +14,7 @@ use discus_wire::ForwardMode;
 use futures::future::join_all;
 
 use super::{state, Counters, Refusal};
-use crate::cluster::multi::Merge;
+use crate::cluster::multi::{split, Merge};
 use crate::cluster::route::{keys_of, Keys, Route};
 use crate::cluster::{forward, Dispatch, Hop, Job, Reply, MAX_HOPS};
 use crate::command::util::{check_key, check_value};
@@ -111,60 +111,26 @@ async fn fan_out(
     merge: Merge,
     width: usize,
 ) -> Reply {
-    if width == 2 && cmd.len().is_multiple_of(2) {
-        return Reply::error(CommandError::WrongArity("MSET".into()));
-    }
-    let mut groups: Vec<(u16, Command, Vec<usize>)> = Vec::new();
-    for (pos, item) in cmd[1..].chunks(width).enumerate() {
-        let g = counters.group_of(&item[0]);
-        let i = match groups.iter().position(|(x, _, _)| *x == g) {
-            Some(i) => i,
-            None => {
-                groups.push((g, vec![cmd[0].clone()], Vec::new()));
-                groups.len() - 1
-            }
-        };
-        groups[i].1.extend(item.iter().cloned());
-        groups[i].2.push(pos);
-    }
+    let Some(groups) = split(&cmd, width, |key| Some(counters.group_of(key))) else {
+        return Reply::try_again();
+    };
     if groups.len() == 1 {
-        return run(node, counters, groups[0].0, cmd, hop).await;
+        return run(node, counters, groups[0].target, cmd, hop).await;
     }
     let parts = join_all(
         groups
             .iter()
-            .map(|(g, sub, _)| run(node, counters, *g, sub.clone(), hop.clone())),
+            .map(|g| run(node, counters, g.target, g.cmd.clone(), hop.clone())),
     )
     .await;
     if parts.iter().any(|r| matches!(r.value, Value::Error(_))) {
         return Reply::try_again();
     }
     let total = (cmd.len() - 1) / width;
-    let value = match merge {
-        Merge::InOrder => {
-            let mut out = vec![Value::Null; total];
-            for ((_, _, positions), r) in groups.iter().zip(parts) {
-                let Value::Array(values) = r.value else {
-                    return Reply::try_again();
-                };
-                for (pos, v) in positions.iter().zip(values) {
-                    out[*pos] = v;
-                }
-            }
-            Value::Array(out)
-        }
-        Merge::Sum => Value::Integer(
-            parts
-                .iter()
-                .map(|r| match r.value {
-                    Value::Integer(n) => n,
-                    _ => 0,
-                })
-                .sum(),
-        ),
-        Merge::AllOk => Value::ok(),
-    };
-    Reply::value(value)
+    match merge.apply(total, &groups, parts.into_iter().map(|r| r.value)) {
+        Some(value) => Reply::value(value),
+        None => Reply::try_again(),
+    }
 }
 
 /// Run one command of group `g` on its leader. The entry node waits up to the counter timeout

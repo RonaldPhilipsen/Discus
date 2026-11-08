@@ -8,9 +8,7 @@ use discus_wire::ForwardMode;
 use futures::future::join_all;
 
 use super::route::{keys_of, Keys};
-use super::{
-    allowed, candidates, forward, hold, local, spent, Dispatch, Failure, Hop, Job, Reply, Writes,
-};
+use super::{allowed, candidates, forward, hold, local, spent, Dispatch, Failure, Hop, Job, Reply};
 use std::time::Instant;
 
 use crate::command::util::{check_key, check_value};
@@ -19,31 +17,22 @@ use crate::node::Node;
 use bytes::Bytes;
 
 /// The keys of one target: the subcommand and the positions of its keys in the request.
-struct Group {
-    target: NodeId,
-    cmd: Command,
-    positions: Vec<usize>,
+pub(crate) struct Group<T> {
+    pub target: T,
+    pub cmd: Command,
+    pub positions: Vec<usize>,
 }
 
 /// Split `cmd` by the target of each key, in first-seen order. `width` is 1 for keys and 2 for
-/// key-value pairs.
-fn group(
-    node: &Node,
+/// key-value pairs. `None` when a key has no target.
+pub(crate) fn split<T: PartialEq>(
     cmd: &Command,
     width: usize,
-    write: bool,
-    rr: u64,
-    writes: Option<&Writes>,
-) -> Option<Vec<Group>> {
-    let mut groups: Vec<Group> = Vec::new();
-    let now = Instant::now();
+    mut target: impl FnMut(&Bytes) -> Option<T>,
+) -> Option<Vec<Group<T>>> {
+    let mut groups: Vec<Group<T>> = Vec::new();
     for (pos, item) in cmd[1..].chunks(width).enumerate() {
-        let need = match writes {
-            Some(w) if !write => w.lock().required(&item[0], now),
-            _ => None,
-        };
-        let owners = node.owners(&item[0]);
-        let target = *candidates(node, &item[0], &owners, write, rr, need).first()?;
+        let target = target(&item[0])?;
         let g = match groups.iter().position(|g| g.target == target) {
             Some(i) => &mut groups[i],
             None => {
@@ -66,7 +55,7 @@ fn group(
 async fn run_group(
     node: &Arc<Node>,
     spec: &'static CommandSpec,
-    g: &Group,
+    g: &Group<NodeId>,
     hop: &Hop,
     write: bool,
 ) -> Option<Reply> {
@@ -99,6 +88,43 @@ pub enum Merge {
     AllOk,
 }
 
+impl Merge {
+    /// Merge the non-error replies of `groups`, one per group in order. `None` when a part has
+    /// the wrong shape.
+    pub(crate) fn apply<T>(
+        self,
+        total: usize,
+        groups: &[Group<T>],
+        parts: impl IntoIterator<Item = Value>,
+    ) -> Option<Value> {
+        Some(match self {
+            Merge::InOrder => {
+                let mut out = vec![Value::Null; total];
+                for (g, part) in groups.iter().zip(parts) {
+                    let Value::Array(values) = part else {
+                        return None;
+                    };
+                    for (pos, v) in g.positions.iter().zip(values) {
+                        out[*pos] = v;
+                    }
+                }
+                Value::Array(out)
+            }
+            Merge::Sum => {
+                let mut sum = 0i64;
+                for part in parts {
+                    let Value::Integer(n) = part else {
+                        return None;
+                    };
+                    sum += n;
+                }
+                Value::Integer(sum)
+            }
+            Merge::AllOk => Value::ok(),
+        })
+    }
+}
+
 /// Plan and run a multi-key command. With every key local, the original command runs inline.
 /// The grouping by owner runs in the `route` span.
 pub fn multi(
@@ -127,7 +153,19 @@ pub fn multi(
             }
         }
     }
-    let groups = route.in_scope(|| group(node, &cmd, width, write, rr, writes.as_ref()));
+    let now = Instant::now();
+    let groups = route.in_scope(|| {
+        split(&cmd, width, |key| {
+            let need = match &writes {
+                Some(w) if !write => w.lock().required(key, now),
+                _ => None,
+            };
+            let owners = node.owners(key);
+            candidates(node, key, &owners, write, rr, need)
+                .first()
+                .copied()
+        })
+    });
     drop(route);
     let Some(groups) = groups else {
         return Dispatch::Ready(Reply::try_again());
@@ -177,30 +215,8 @@ pub fn multi(
             }
         }
         let applied = newest(&replies);
-        let value = match merge {
-            Merge::InOrder => {
-                let mut out = vec![Value::Null; total];
-                for (g, r) in groups.iter().zip(replies) {
-                    let Value::Array(values) = r.value else {
-                        return Reply::try_again();
-                    };
-                    for (pos, v) in g.positions.iter().zip(values) {
-                        out[*pos] = v;
-                    }
-                }
-                Value::Array(out)
-            }
-            Merge::Sum => {
-                let mut sum = 0i64;
-                for r in replies {
-                    let Value::Integer(n) = r.value else {
-                        return Reply::try_again();
-                    };
-                    sum += n;
-                }
-                Value::Integer(sum)
-            }
-            Merge::AllOk => Value::ok(),
+        let Some(value) = merge.apply(total, &groups, replies.into_iter().map(|r| r.value)) else {
+            return Reply::try_again();
         };
         Reply {
             value,
