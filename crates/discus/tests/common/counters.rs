@@ -20,15 +20,11 @@ pub const GROUPS: u16 = 4;
 pub const LEASE_MS: u64 = 2_000;
 
 /// Flags for fast counter leases: duration 2000 ms, renew every 300 ms, margin 500 ms.
-pub const FAST: &[&str] = &[
-    "--counter-groups",
-    "4",
-    "--counter-lease-duration-ms",
-    "2000",
-    "--counter-lease-renew-ms",
-    "300",
-    "--counter-lease-margin-ms",
-    "500",
+pub const FAST: &[(&str, &str)] = &[
+    ("--counter-groups", "4"),
+    ("--counter-lease-duration-ms", "2000"),
+    ("--counter-lease-renew-ms", "300"),
+    ("--counter-lease-margin-ms", "500"),
 ];
 
 /// One in-memory lease per group, shared by every node of a test.
@@ -174,16 +170,10 @@ pub async fn join(
     let gate = Arc::new(AtomicBool::new(true));
     let opts = Opts {
         counter_leases: Some(leases.for_node(gate.clone())),
+        defaults: FAST,
         ..Opts::default()
     };
-    let mut all: Vec<&str> = FAST
-        .chunks(2)
-        .filter(|pair| !flags.contains(&pair[0]))
-        .flatten()
-        .copied()
-        .collect();
-    all.extend_from_slice(flags);
-    (net.start_on(socket, seeds, &all, opts).await, gate)
+    (net.start_on(socket, seeds, flags, opts).await, gate)
 }
 
 /// A key of group `g`, by trying `cnt:<prefix><i>`.

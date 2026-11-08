@@ -95,6 +95,8 @@ pub struct Opts {
     pub lease: Option<Arc<dyn LeaseProvider>>,
     pub clocks: Option<Clocks>,
     pub counter_leases: Option<discus::counter::CounterLeases>,
+    /// More settings that `extra` can override, after [`DEFAULTS`].
+    pub defaults: &'static [(&'static str, &'static str)],
 }
 
 impl Net {
@@ -123,15 +125,13 @@ impl Net {
         let cluster_addr = socket.local_addr().unwrap();
         let peers = seeds.iter().map(|s| s.to_string());
         let extra: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
-        let argv = argv(&self.dir, cluster_addr, peers, DEFAULTS, &extra);
+        let defaults: Vec<(&str, &str)> = DEFAULTS.iter().chain(opts.defaults).copied().collect();
+        let argv = argv(&self.dir, cluster_addr, peers, &defaults, &extra);
         let config = Config::parse_from(argv).expect("valid gossip arguments");
         let lease = opts
             .lease
             .unwrap_or_else(|| Arc::new(self.lease.clone()) as Arc<dyn LeaseProvider>);
-        let (hlc_clock, wall) = match opts.clocks {
-            Some((h, w)) => (Some(h), Some(w)),
-            None => (None, None),
-        };
+        let (hlc_clock, wall) = opts.clocks.unzip();
         let server = Server::bind_with(
             config,
             BindOptions {

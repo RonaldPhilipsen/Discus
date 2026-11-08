@@ -4,7 +4,7 @@ mod common;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use common::counters::{
@@ -13,16 +13,17 @@ use common::counters::{
 use common::gossip::{agreed, socket, wait_until, GossipNode, Net, Opts};
 use discus::counter::Refusal;
 use discus_placement::mock::MockClock;
+use discus_placement::{Clock, SystemClock};
 use redis::AsyncCommands;
 
 /// Every group has one leader and a synced follower among `nodes`.
 fn settled(nodes: &[&GossipNode]) -> bool {
     (0..GROUPS).all(|g| {
         leader_of(nodes, g).is_some_and(|l| {
-            nodes
-                .iter()
-                .filter(|n| n.id != l.id)
-                .all(|n| status(n, g).role == "follower" && status(n, g).synced)
+            nodes.iter().filter(|n| n.id != l.id).all(|n| {
+                let s = status(n, g);
+                s.role == "follower" && s.synced
+            })
         })
     })
 }
@@ -233,17 +234,11 @@ async fn the_epoch_names_the_leader_without_a_lease() {
     );
 }
 
-fn real_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn expiry_is_identical_under_clock_skew() {
     const SKEW: u64 = 400;
     let (a, b) = (MockClock::<20>, MockClock::<21>);
+    let real_ms = || SystemClock.now_ms();
     a.set(real_ms());
     b.set(real_ms() + SKEW);
     let ticking = tokio::spawn(async move {
@@ -256,16 +251,16 @@ async fn expiry_is_identical_under_clock_skew() {
     let (net, leases) = (Net::new(), Leases::new());
     let (sa, aa) = socket();
     let (sb, ab) = socket();
-    let flags: Vec<&str> = FAST.to_vec();
     let gate = Arc::new(AtomicBool::new(true));
     let na = net
         .start_on(
             sa,
             &[ab],
-            &flags,
+            &[],
             Opts {
                 clocks: Some((a.hlc_clock(), Arc::new(a))),
                 counter_leases: Some(leases.for_node(gate.clone())),
+                defaults: FAST,
                 ..Opts::default()
             },
         )
@@ -274,10 +269,11 @@ async fn expiry_is_identical_under_clock_skew() {
         .start_on(
             sb,
             &[aa],
-            &flags,
+            &[],
             Opts {
                 clocks: Some((b.hlc_clock(), Arc::new(b))),
                 counter_leases: Some(leases.for_node(gate)),
+                defaults: FAST,
                 ..Opts::default()
             },
         )
