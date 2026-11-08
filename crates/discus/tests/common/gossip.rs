@@ -33,7 +33,6 @@ impl GossipNode {
         self.shutdown.cancel();
     }
 
-    /// Delay counter messages by `ms`.
     pub fn stall_counters(&self, ms: u64) {
         self.node
             .faults
