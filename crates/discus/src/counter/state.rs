@@ -13,7 +13,7 @@ use bytes::Bytes;
 use discus_resp::{Command, Value};
 
 use crate::command::float::{incr_by_float, parse_float_delta, FloatDelta};
-use crate::command::string::deadline;
+use crate::command::string::{deadline, set_options, Expiry};
 use crate::command::util::{parse_i64, upper};
 use crate::command::CommandError;
 
@@ -317,53 +317,27 @@ impl CounterState {
     }
 
     fn set(&mut self, now: u64, cmd: &Command) -> Reply {
-        #[derive(Clone, Copy)]
-        enum Ttl {
-            At(u64),
-            Keep,
-        }
-        let (mut nx, mut xx, mut get_old) = (false, false, false);
-        let mut ttl: Option<Ttl> = None;
-        let mut i = 3;
-        while i < cmd.len() {
-            let opt = upper(&cmd[i]);
-            match opt.as_str() {
-                "NX" => nx = true,
-                "XX" => xx = true,
-                "GET" => get_old = true,
-                "KEEPTTL" if ttl.is_none() => ttl = Some(Ttl::Keep),
-                "EX" | "PX" | "EXAT" | "PXAT" if ttl.is_none() => {
-                    let arg = cmd.get(i + 1).ok_or(CommandError::Syntax)?;
-                    ttl = Some(Ttl::At(deadline(&opt, arg, now, "set")?));
-                    i += 1;
-                }
-                _ => return Err(CommandError::Syntax),
-            }
-            i += 1;
-        }
-        if nx && xx {
-            return Err(CommandError::Syntax);
-        }
+        let o = set_options(cmd, now)?;
         let key = &cmd[1];
         let old = self.live(key, now).cloned();
         let reply = |old: Option<&CounterEntry>| {
-            if get_old {
+            if o.get {
                 old.map_or(Value::Null, |e| Value::Bulk(e.value.clone()))
             } else {
                 Value::ok()
             }
         };
-        if (nx && old.is_some()) || (xx && old.is_none()) {
-            return Ok(if get_old {
+        if (o.nx && old.is_some()) || (o.xx && old.is_none()) {
+            return Ok(if o.get {
                 reply(old.as_ref())
             } else {
                 Value::Null
             });
         }
-        let expires_at_ms = match ttl {
-            Some(Ttl::At(t)) => Some(t),
-            Some(Ttl::Keep) => old.as_ref().and_then(|e| e.expires_at_ms),
-            None => None,
+        let expires_at_ms = match o.expiry {
+            Some(Expiry::At(t)) => Some(t),
+            Some(Expiry::Keep) => old.as_ref().and_then(|e| e.expires_at_ms),
+            _ => None,
         };
         self.put(
             key,
