@@ -152,19 +152,20 @@ impl LfLeader {
         if !self.serving() {
             return Err(Refusal::NotLeader);
         }
+        if state::is_read(cmd) {
+            return Ok(self.core.lock().state.get().read(now_ms, cmd));
+        }
         let follower = self.follower().is_some();
+        let raw = follower.then(|| encode_command(cmd));
         let (reply, seq) = {
             let mut core = self.core.lock();
-            if state::is_read(cmd) {
-                return Ok(core.state.get().read(now_ms, cmd));
-            }
             let stamp = now_ms.max(core.last_stamp);
             core.last_stamp = stamp;
             core.seq += 1;
             let seq = core.seq;
             let reply = core.state.apply(stamp, cmd, limits);
-            if follower {
-                core.pending.push_back((seq, stamp, encode_command(cmd)));
+            if let Some(raw) = raw {
+                core.pending.push_back((seq, stamp, raw));
             }
             (reply, seq)
         };
@@ -248,9 +249,9 @@ impl LfLeader {
                 }
                 _ => {
                     self.lagging.store(true, Ordering::Release);
-                    tokio::select! {
-                        _ = self.stop.cancelled() => return,
-                        _ = tokio::time::sleep(SYNC_RETRY) => {}
+                    let retry = tokio::time::sleep(SYNC_RETRY);
+                    if self.stop.run_until_cancelled(retry).await.is_none() {
+                        return;
                     }
                 }
             }

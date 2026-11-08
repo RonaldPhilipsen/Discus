@@ -117,7 +117,6 @@ impl Drop for Tracked {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
 
     #[test]
     fn a_tracked_state_charges_and_releases() {
@@ -125,10 +124,7 @@ mod tests {
         let limits = Limits {
             max_value_bytes: 1 << 20,
         };
-        let cmd: Command = ["SET", "k", "v"]
-            .iter()
-            .map(|s| Bytes::from_static(s.as_bytes()))
-            .collect();
+        let cmd = crate::counter::cmd(&["SET", "k", "v"]);
         let mut t = Tracked::new(CounterState::new(), budget.clone());
         t.apply(1, &cmd, &limits);
         assert_eq!(budget.used(), t.get().bytes());

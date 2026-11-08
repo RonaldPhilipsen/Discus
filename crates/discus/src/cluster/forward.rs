@@ -59,14 +59,8 @@ async fn send_in_span(
     write: bool,
     timeout: Option<std::time::Duration>,
 ) -> Result<Reply, TransportError> {
-    let link = node
-        .link()
-        .ok_or_else(|| TransportError::Connect("this node has no transport".into()))?;
+    let (link, addr) = node.peer(target).map_err(TransportError::Connect)?;
     let epoch = node.epochs().current().clone();
-    let addr = epoch
-        .member(target)
-        .map(|m| m.addr)
-        .ok_or_else(|| TransportError::Connect(format!("node {target} is not a member")))?;
     // The full epoch rides along when the peer can take it and is behind (spec section 7.2).
     let mut peer_caps = 0;
     let build = |info: &PeerInfo| {

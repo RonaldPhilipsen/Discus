@@ -191,16 +191,16 @@ pub fn vote_reply_of(r: RaftReply) -> Option<VoteResponse<u64>> {
     })
 }
 
-pub fn snapshot_to(header: RaftHeader, r: &InstallSnapshotRequest<TypeConfig>) -> RaftSnapshot {
+pub fn snapshot_to(header: RaftHeader, r: InstallSnapshotRequest<TypeConfig>) -> RaftSnapshot {
     RaftSnapshot {
         header,
         vote: vote_to(&r.vote),
         last: r.meta.last_log_id.as_ref().map(log_to),
         membership_log: r.meta.last_membership.log_id().as_ref().map(log_to),
         membership: membership_to(r.meta.last_membership.membership()),
-        snapshot_id: r.meta.snapshot_id.clone(),
+        snapshot_id: r.meta.snapshot_id,
         offset: r.offset,
-        data: Bytes::copy_from_slice(&r.data),
+        data: Bytes::from(r.data),
         done: r.done,
     }
 }
@@ -217,7 +217,7 @@ pub fn snapshot_of(s: RaftSnapshot) -> InstallSnapshotRequest<TypeConfig> {
             snapshot_id: s.snapshot_id,
         },
         offset: s.offset,
-        data: s.data.to_vec(),
+        data: Vec::from(s.data),
         done: s.done,
     }
 }
@@ -243,6 +243,7 @@ pub fn snapshot_reply_of(r: RaftReply) -> Option<InstallSnapshotResponse<u64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::counter::cmd;
     use discus_placement::NodeId;
     use discus_wire::Regime;
 
@@ -273,13 +274,6 @@ mod tests {
             vec![BTreeSet::from([1, 2]), BTreeSet::from([1, 2, 5])],
             nodes,
         )
-    }
-
-    fn cmd(parts: &[&str]) -> Command {
-        parts
-            .iter()
-            .map(|p| Bytes::copy_from_slice(p.as_bytes()))
-            .collect()
     }
 
     #[test]
@@ -346,7 +340,7 @@ mod tests {
             data: vec![1, 2, 3],
             done: true,
         };
-        let back = snapshot_of(snapshot_to(header(), &snap));
+        let back = snapshot_of(snapshot_to(header(), snap.clone()));
         assert_eq!(back, snap);
         let reply = InstallSnapshotResponse {
             vote: Vote::new(6, 1),

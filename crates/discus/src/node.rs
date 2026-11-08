@@ -1,6 +1,7 @@
 //! State shared by every connection on a node.
 
 use std::cell::Cell;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -326,6 +327,18 @@ impl Node {
     /// The node-to-node link, when the transport runs.
     pub fn link(&self) -> Option<&ClusterLink> {
         self.link.get()
+    }
+
+    /// The link and the address for a request to member `to`.
+    pub(crate) fn peer(&self, to: NodeId) -> Result<(&ClusterLink, SocketAddr), String> {
+        let link = self.link().ok_or("this node has no transport")?;
+        let addr = self
+            .epochs()
+            .current()
+            .member(to)
+            .map(|m| m.addr)
+            .ok_or_else(|| format!("node {to} is not a member"))?;
+        Ok((link, addr))
     }
 
     /// Attach the node-to-node link. Only the first call has an effect.

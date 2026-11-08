@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use discus_placement::NodeId;
 use discus_resp::{Command, Value};
@@ -15,11 +15,10 @@ use parking_lot::Mutex;
 use tracing::Instrument;
 
 use super::group::{Group, Role};
-use super::lf::LfLeader;
 use super::raft::network::RaftLink;
-use super::raft::{new_replica_id, Op, Peer, Replica};
+use super::raft::{Op, Peer, Replica};
 use super::state::{self, CounterState};
-use super::{Counters, Refusal, View};
+use super::{Counters, Refusal, Settings, View};
 
 /// How long a membership change may take.
 const CHANGE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -34,7 +33,7 @@ pub struct RaftRole {
     last_stamp: Mutex<u64>,
     /// Since when this replica leads. A new leader has heard from nobody yet, so it measures the
     /// silence of a voter from here, never from the start of the replica.
-    leading_since: Mutex<Option<std::time::Instant>>,
+    leading_since: Mutex<Option<Instant>>,
 }
 
 impl RaftRole {
@@ -106,10 +105,7 @@ impl RaftRole {
     }
 
     pub fn is_voter(&self) -> bool {
-        self.replica
-            .voters()
-            .iter()
-            .any(|(id, _)| *id == self.replica.replica)
+        self.replica.is_voter()
     }
 
     /// The hint of the Raft leader that this replica knows.
@@ -122,14 +118,9 @@ impl RaftRole {
             regime: self.regime(),
             leader,
             term: m.current_term,
-            follower: None,
-            voters: self.replica.voters().into_iter().map(|(_, n)| n).collect(),
-            learners: self
-                .replica
-                .learners()
-                .into_iter()
-                .map(|(_, n)| n)
-                .collect(),
+            voters: self.replica.voter_nodes(),
+            learners: self.replica.learner_nodes(),
+            ..GroupHint::default()
         })
     }
 }
@@ -155,6 +146,14 @@ fn promotion(voters: usize, ready: &[(u64, NodeId)]) -> Option<BTreeSet<u64>> {
 /// others.
 fn normal_quorum(voters: &[NodeId], normal: impl Fn(NodeId) -> bool) -> bool {
     2 * voters.iter().filter(|n| normal(**n)).count() > voters.len()
+}
+
+/// One membership change of a leader toward the target voters.
+enum Move {
+    RemoveVoter((u64, NodeId), &'static str),
+    RemoveNode((u64, NodeId), &'static str),
+    AddLearner(NodeId),
+    Promote(BTreeSet<u64>, Vec<NodeId>),
 }
 
 /// The Raft network of a node: every Raft message goes on the bulk lane.
@@ -187,16 +186,7 @@ impl Group {
         why: &str,
     ) -> bool {
         let regime = self.next_regime(view.me);
-        let replica = match Replica::start(
-            &counters.settings.raft,
-            self.g,
-            regime,
-            new_replica_id(),
-            counters.raft_link(),
-            counters.budget().clone(),
-        )
-        .await
-        {
+        let replica = match counters.start_replica(self.g, regime).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(group = self.g, error = %e, "cannot start a Raft replica");
@@ -231,9 +221,9 @@ impl Group {
     ) {
         let replica = &r.replica;
         let voters = replica.voters();
-        let me_voter = voters.iter().any(|(id, _)| *id == replica.replica);
+        let me_voter = replica.is_voter();
         if view.normal_count() < 3 {
-            self.down_switch(counters, view, seen, r, me_voter).await;
+            self.down_switch(counters, view, seen, r).await;
             return;
         }
         // Two of three voters are gone: the survivor reconfigures to itself (spec section 10.2).
@@ -274,11 +264,7 @@ impl Group {
             .known
             .as_ref()
             .is_some_and(|k| k.regime > r.regime());
-        let listed = me_voter
-            || replica
-                .learners()
-                .iter()
-                .any(|(id, _)| *id == replica.replica);
+        let listed = me_voter || replica.is_learner();
         let orphan = !listed && replica.started.elapsed() > ORPHAN_AFTER;
         if known_newer || orphan {
             self.set_role_if(seen, Role::Idle);
@@ -293,7 +279,6 @@ impl Group {
         view: &View,
         seen: u64,
         r: &Arc<RaftRole>,
-        me_voter: bool,
     ) {
         if !view.me_normal {
             // A `LEAVING` replica cannot take the lease, and the survivors switch without it.
@@ -302,13 +287,14 @@ impl Group {
         }
         let replica = &r.replica;
         let leader = replica.leader_node().filter(|l| view.normal(*l));
-        let voters: Vec<NodeId> = replica.voters().into_iter().map(|(_, n)| n).collect();
+        let voters = replica.voter_nodes();
+        let leads = r.leads();
         // A voter that does not lead holds only the entries that it applied. While the `NORMAL`
         // voters can still elect a leader, an old leader that is `LEAVING` or about to be
         // `DEAD` can still commit with them, so the voter waits for the next leader to switch.
-        let takes = if r.leads() {
+        let takes = if leads {
             true
-        } else if me_voter && leader.is_none() && !normal_quorum(&voters, |n| view.normal(n)) {
+        } else if r.is_voter() && leader.is_none() && !normal_quorum(&voters, |n| view.normal(n)) {
             self.lease_kind()
                 || view.ranked(self.g).into_iter().find(|n| voters.contains(n)) == Some(view.me)
         } else {
@@ -325,7 +311,7 @@ impl Group {
         } else {
             None
         };
-        if r.leads() {
+        if leads {
             // The read index waits until this leader applied every entry that a quorum
             // committed, also those of earlier leaders.
             let linearizable = tokio::time::timeout(
@@ -341,98 +327,50 @@ impl Group {
         // commits through this replica. So the state read after the shutdown holds every write
         // that this leader acknowledged.
         replica.shutdown().await;
-        let state = replica.state();
-        let regime = self.next_regime(view.me);
-        let leader = LfLeader::new(
-            regime,
-            state,
-            counters.budget(),
-            lease_until,
-            counters.settings.lease_margin,
-        );
-        if self.set_role_if(seen, Role::Leader(leader.clone())) {
-            tracing::info!(group = self.g, %regime, "switched down to leader-follower mode");
-            discus_telemetry::global()
-                .counter_mode_switch(discus_telemetry::attrs::CounterMode::LeaderFollower);
-            self.start_leader(counters, view, leader).await;
-        }
+        let why = "switched down to leader-follower mode";
+        let Some(leader) = self.become_leader(counters, seen, replica.state(), lease_until, why)
+        else {
+            return;
+        };
+        discus_telemetry::global()
+            .counter_mode_switch(discus_telemetry::attrs::CounterMode::LeaderFollower);
+        self.start_leader(counters, view, leader).await;
     }
 
-    /// Move the membership one change toward the target voters (spec section 10.2).
-    async fn reconcile(&self, counters: &Arc<Counters>, view: &View, r: &Arc<RaftRole>) {
-        let replica = &r.replica;
-        let leading_since = *r
-            .leading_since
-            .lock()
-            .get_or_insert_with(std::time::Instant::now);
-        if replica.in_joint_change() {
-            return;
-        }
-        let settings = &counters.settings;
+    /// The next membership change toward the target voters, in priority order: lost voters and
+    /// learners go first, then a missing target joins, caught-up learners become voters, and
+    /// last the voters and learners that are no target leave.
+    fn next_move(
+        &self,
+        settings: &Settings,
+        view: &View,
+        replica: &Replica,
+        leading_since: Instant,
+    ) -> Option<Move> {
         let targets: Vec<NodeId> = view.ranked(self.g).into_iter().take(3).collect();
         let voters = replica.voters();
         let learners = replica.learners();
-        let raft = &replica.raft;
+        let silent =
+            |id: &u64| replica.contacts.silent_for(*id, leading_since) > settings.voter_timeout;
         let gone = voters.iter().find(|(id, n)| {
             *id != replica.replica
                 && (!view.epoch.member(*n).is_some_and(|m| {
                     m.state == discus_placement::MemberState::Normal
                         || m.state == discus_placement::MemberState::Leaving
-                }) || replica.contacts.silent_for(*id, leading_since) > settings.voter_timeout)
+                }) || silent(id))
         });
-        // Each move takes the rate limit only when it acts. A group with nothing to move must
-        // not take the slot, or it can starve the groups that have a move for many seconds.
-        if let Some((id, n)) = gone {
-            if !counters.may_change() {
-                return;
-            }
-            tracing::info!(group = self.g, voter = %n, "removing a lost voter");
-            let change = ChangeMembers::RemoveVoters(BTreeSet::from([*id]));
-            let _ =
-                tokio::time::timeout(CHANGE_TIMEOUT, raft.change_membership(change, false)).await;
-            return;
+        if let Some(v) = gone {
+            return Some(Move::RemoveVoter(*v, "removing a lost voter"));
         }
         // A node that joins again discards its replica, and the replica ID never comes back. The
         // node stays listed under that ID, so it gets no new replica until the learner goes.
-        let lost_learner = learners.iter().find(|(id, _)| {
-            replica.contacts.silent_for(*id, leading_since) > settings.voter_timeout
-        });
-        if let Some((id, n)) = lost_learner {
-            if !counters.may_change() {
-                return;
-            }
-            tracing::info!(group = self.g, learner = %n, "removing a lost learner");
-            let change = ChangeMembers::RemoveNodes(BTreeSet::from([*id]));
-            let _ =
-                tokio::time::timeout(CHANGE_TIMEOUT, raft.change_membership(change, false)).await;
-            return;
+        if let Some(l) = learners.iter().find(|(id, _)| silent(id)) {
+            return Some(Move::RemoveNode(*l, "removing a lost learner"));
         }
         let listed =
             |n: &NodeId| voters.iter().any(|(_, v)| v == n) || learners.iter().any(|(_, l)| l == n);
         if let Some(t) = targets.iter().find(|t| !listed(t)) {
-            if !counters.may_change() {
-                return;
-            }
-            let ask = Message::RaftConfig(RaftConfig {
-                group: self.g,
-                regime: r.regime(),
-                replica: 0,
-                leader: view.me,
-            });
-            if let Ok(Message::RaftConfig(reply)) = counters.send(*t, ask, CHANGE_TIMEOUT).await {
-                if reply.replica != 0 {
-                    tracing::info!(group = self.g, learner = %t, "adding a learner");
-                    // A new learner has not replied yet. Its silence counts from here.
-                    replica.contacts.saw(reply.replica);
-                    let peer = Peer { node: *t };
-                    let _ = tokio::time::timeout(
-                        CHANGE_TIMEOUT,
-                        raft.add_learner(reply.replica, peer, false),
-                    )
-                    .await;
-                }
-            }
-            return;
+            return Some(Move::AddLearner(*t));
         }
         let metrics = replica.metrics();
         let last = metrics.last_log_index.unwrap_or(0);
@@ -449,19 +387,12 @@ impl Group {
             .copied()
             .collect();
         if let Some(promote) = promotion(voters.len(), &ready) {
-            if !counters.may_change() {
-                return;
-            }
-            let nodes: Vec<NodeId> = ready
+            let nodes = ready
                 .iter()
                 .filter(|(id, _)| promote.contains(id))
                 .map(|(_, n)| *n)
                 .collect();
-            tracing::info!(group = self.g, voters = ?nodes, "promoting learners");
-            let change = ChangeMembers::AddVoterIds(promote);
-            let _ =
-                tokio::time::timeout(CHANGE_TIMEOUT, raft.change_membership(change, false)).await;
-            return;
+            return Some(Move::Promote(promote, nodes));
         }
         let complete = targets.iter().all(|t| voters.iter().any(|(_, v)| v == t));
         if complete {
@@ -470,25 +401,71 @@ impl Group {
                 .iter()
                 .filter(|(_, n)| !targets.contains(n))
                 .min_by_key(|(_, n)| *n == view.me);
-            if let Some((id, n)) = extra {
-                if !counters.may_change() {
+            if let Some(v) = extra {
+                return Some(Move::RemoveVoter(
+                    *v,
+                    "removing a voter that is not a target",
+                ));
+            }
+        }
+        learners
+            .iter()
+            .find(|(_, n)| !targets.contains(n))
+            .map(|l| Move::RemoveNode(*l, "removing a learner that is not a target"))
+    }
+
+    /// Move the membership one change toward the target voters (spec section 10.2).
+    async fn reconcile(&self, counters: &Arc<Counters>, view: &View, r: &Arc<RaftRole>) {
+        let replica = &r.replica;
+        let leading_since = *r.leading_since.lock().get_or_insert_with(Instant::now);
+        if replica.in_joint_change() {
+            return;
+        }
+        let Some(next) = self.next_move(&counters.settings, view, replica, leading_since) else {
+            return;
+        };
+        // Each move takes the rate limit only when it acts. A group with nothing to move must
+        // not take the slot, or it can starve the groups that have a move for many seconds.
+        if !counters.may_change() {
+            return;
+        }
+        let raft = &replica.raft;
+        let change = match next {
+            Move::RemoveVoter((id, n), why) => {
+                tracing::info!(group = self.g, voter = %n, "{why}");
+                ChangeMembers::RemoveVoters(BTreeSet::from([id]))
+            }
+            Move::RemoveNode((id, n), why) => {
+                tracing::info!(group = self.g, learner = %n, "{why}");
+                ChangeMembers::RemoveNodes(BTreeSet::from([id]))
+            }
+            Move::Promote(ids, nodes) => {
+                tracing::info!(group = self.g, voters = ?nodes, "promoting learners");
+                ChangeMembers::AddVoterIds(ids)
+            }
+            Move::AddLearner(t) => {
+                let ask = Message::RaftConfig(RaftConfig {
+                    group: self.g,
+                    regime: r.regime(),
+                    replica: 0,
+                    leader: view.me,
+                });
+                let Ok(Message::RaftConfig(reply)) = counters.send(t, ask, CHANGE_TIMEOUT).await
+                else {
+                    return;
+                };
+                if reply.replica == 0 {
                     return;
                 }
-                tracing::info!(group = self.g, voter = %n, "removing a voter that is not a target");
-                let change = ChangeMembers::RemoveVoters(BTreeSet::from([*id]));
-                let _ = tokio::time::timeout(CHANGE_TIMEOUT, raft.change_membership(change, false))
-                    .await;
+                tracing::info!(group = self.g, learner = %t, "adding a learner");
+                // A new learner has not replied yet. Its silence counts from here.
+                replica.contacts.saw(reply.replica);
+                let add = raft.add_learner(reply.replica, Peer { node: t }, false);
+                let _ = tokio::time::timeout(CHANGE_TIMEOUT, add).await;
                 return;
             }
-        }
-        if let Some((id, _)) = learners.iter().find(|(_, n)| !targets.contains(n)) {
-            if !counters.may_change() {
-                return;
-            }
-            let change = ChangeMembers::RemoveNodes(BTreeSet::from([*id]));
-            let _ =
-                tokio::time::timeout(CHANGE_TIMEOUT, raft.change_membership(change, false)).await;
-        }
+        };
+        let _ = tokio::time::timeout(CHANGE_TIMEOUT, raft.change_membership(change, false)).await;
     }
 
     /// Every voter of the best known Raft regime is gone: the top target creates the group
@@ -497,7 +474,7 @@ impl Group {
         let Some(known) = self.inner().known.clone() else {
             return;
         };
-        if self.leader(view).is_some() {
+        if self.leader(view.me, &view.epoch).is_some() {
             self.inner().leaderless = None;
             return;
         }
@@ -515,7 +492,7 @@ impl Group {
             // a `NORMAL` member that answers without a replica of the group is no voter.
             let leaderless = {
                 let mut inner = self.inner();
-                *inner.leaderless.get_or_insert_with(std::time::Instant::now)
+                *inner.leaderless.get_or_insert_with(Instant::now)
             };
             if leaderless.elapsed() < 2 * counters.settings.lease_duration || !self.may_ask() {
                 return;
@@ -576,18 +553,8 @@ impl Group {
             other if other.regime().is_some_and(|reg| reg > c.regime) => return refuse,
             _ => {}
         }
-        let replica = match Replica::start(
-            &counters.settings.raft,
-            self.g,
-            c.regime,
-            new_replica_id(),
-            counters.raft_link(),
-            counters.budget().clone(),
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(_) => return refuse,
+        let Ok(replica) = counters.start_replica(self.g, c.regime).await else {
+            return refuse;
         };
         let id = replica.replica;
         let role = RaftRole::new(replica);

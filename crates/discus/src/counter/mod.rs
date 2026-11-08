@@ -28,10 +28,19 @@ use tokio_util::sync::CancellationToken;
 use crate::{Config, Node};
 use budget::Budget;
 use group::{Group, Role};
+use raft::Replica;
 use state::Limits;
 
 /// The seed of the group hash. A change is a re-shard (spec section 10.4).
 pub const COUNTER_SEED: u64 = 0x4449_5343_5553_0005;
+
+#[cfg(test)]
+pub(crate) fn cmd(parts: &[&str]) -> Command {
+    parts
+        .iter()
+        .map(|p| bytes::Bytes::copy_from_slice(p.as_bytes()))
+        .collect()
+}
 
 /// How often each group controller runs.
 pub const TICK: Duration = Duration::from_millis(100);
@@ -55,7 +64,6 @@ pub struct Settings {
     pub groups: u16,
     pub timeout: Duration,
     pub limits: Limits,
-    pub max_key_bytes: usize,
     pub reserve: u64,
     pub lease_duration: Duration,
     pub lease_renew: Duration,
@@ -75,7 +83,6 @@ impl Settings {
             limits: Limits {
                 max_value_bytes: c.max_value_bytes,
             },
-            max_key_bytes: c.max_key_bytes,
             reserve: c.max_memory / 100 * c.counter_memory_percent,
             lease_duration: Duration::from_millis(c.counter_lease_duration_ms.max(1)),
             lease_renew: Duration::from_millis(c.counter_lease_renew_ms.max(1)),
@@ -86,9 +93,6 @@ impl Settings {
                 heartbeat_ms: c.raft_heartbeat_ms,
                 election_ms: c.raft_election_timeout_ms,
                 snapshot_entries: c.raft_snapshot_entries,
-                limits: Limits {
-                    max_value_bytes: c.max_value_bytes,
-                },
             },
             catchup_entries: c.raft_catchup_entries,
             voter_timeout: Duration::from_millis(c.raft_voter_timeout_ms),
@@ -106,7 +110,6 @@ pub enum Refusal {
 }
 
 /// What a node sees of the cluster when it decides a counter role.
-#[derive(Clone)]
 pub struct View {
     pub epoch: Arc<Epoch>,
     pub me: NodeId,
@@ -116,11 +119,16 @@ pub struct View {
     pub leaving: bool,
 }
 
+/// `id` is a `NORMAL` member of `epoch`.
+pub fn normal(epoch: &Epoch, id: NodeId) -> bool {
+    epoch
+        .member(id)
+        .is_some_and(|m| m.state == MemberState::Normal)
+}
+
 impl View {
     pub fn normal(&self, id: NodeId) -> bool {
-        self.epoch
-            .member(id)
-            .is_some_and(|m| m.state == MemberState::Normal)
+        normal(&self.epoch, id)
     }
 
     pub fn normal_count(&self) -> usize {
@@ -140,7 +148,7 @@ pub type CounterLeases = Arc<dyn Fn(u16) -> Arc<dyn LeaseProvider> + Send + Sync
 const HINTS_FRESH: Duration = Duration::from_millis(50);
 
 /// The state of one group on this node, for tests and `GET /admin/counters`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GroupStatus {
     pub group: u16,
     pub role: &'static str,
@@ -159,8 +167,6 @@ pub struct GroupStatus {
     pub replica: Option<u64>,
     /// The first role this node had in the current regime.
     pub first_role: Option<&'static str>,
-    /// The best hint that this node knows.
-    pub known: Option<GroupHint>,
 }
 
 pub struct Counters {
@@ -205,8 +211,18 @@ impl Counters {
         })
     }
 
-    pub fn raft_link(&self) -> Arc<dyn raft::network::RaftLink> {
-        Arc::new(raft_group::Link(self.me.clone()))
+    /// A new replica of group `g` for `regime`, on the transport of this node.
+    pub(super) async fn start_replica(&self, g: u16, regime: Regime) -> Result<Replica, String> {
+        Replica::start(
+            &self.settings.raft,
+            self.settings.limits,
+            g,
+            regime,
+            raft::new_replica_id(),
+            Arc::new(raft_group::Link(self.me.clone())),
+            self.budget.clone(),
+        )
+        .await
     }
 
     /// The wall clock of the node in Unix milliseconds. The leader stamps commands with it.
@@ -233,19 +249,17 @@ impl Counters {
             *since = None;
             return false;
         }
-        let start = *since.get_or_insert_with(|| match self.node() {
-            Some(node) => match node.membership() {
-                Some(m) => {
-                    let (count, at) = m.normal_members();
-                    if count >= 3 {
-                        at
-                    } else {
-                        Instant::now()
-                    }
-                }
-                None => node.started_at,
-            },
-            None => Instant::now(),
+        let start = *since.get_or_insert_with(|| {
+            let Some(node) = self.node() else {
+                return Instant::now();
+            };
+            let Some(m) = node.membership() else {
+                return node.started_at;
+            };
+            match m.normal_members() {
+                (count, at) if count >= 3 => at,
+                _ => Instant::now(),
+            }
         });
         start.elapsed() >= self.settings.dwell
     }
@@ -310,62 +324,49 @@ impl Counters {
     }
 
     pub fn status(&self) -> Vec<GroupStatus> {
-        let view = self.view();
-        self.groups
-            .iter()
-            .map(|g| {
-                let leader = view.as_ref().and_then(|v| g.leader(v));
-                let inner = g.inner();
-                let (regime, follower, synced, lease_until, since) = match &inner.role {
-                    Role::Idle => (None, None, false, None, None),
-                    Role::Follower(f) => (Some(f.regime), None, f.synced(), None, Some(f.since)),
-                    Role::Leader(l) => (
-                        Some(l.regime),
-                        l.follower(),
-                        true,
-                        l.lease_until(),
-                        Some(l.since),
-                    ),
-                    Role::Raft(r) => (
-                        Some(r.regime()),
-                        None,
-                        r.is_voter(),
-                        None,
-                        Some(r.replica.started),
-                    ),
-                };
-                let (voters, learners, installed) = match &inner.role {
-                    Role::Raft(r) => (
-                        r.replica.voters().into_iter().map(|(_, n)| n).collect(),
-                        r.replica.learners().into_iter().map(|(_, n)| n).collect(),
-                        r.replica.sm.lock().installed,
-                    ),
-                    _ => (Vec::new(), Vec::new(), 0),
-                };
-                GroupStatus {
-                    group: g.g,
-                    role: inner.role.name(),
-                    regime,
-                    leader,
-                    follower,
-                    synced,
-                    lease_until,
-                    since,
-                    voters,
-                    learners,
-                    installed,
-                    replica: match &inner.role {
-                        Role::Raft(r) => Some(r.replica.replica),
-                        _ => None,
-                    },
-                    first_role: inner
-                        .first_role
-                        .filter(|(r, _)| Some(*r) == regime)
-                        .map(|(_, name)| name),
-                    known: inner.known.clone(),
-                }
-            })
+        (0..self.settings.groups)
+            .map(|g| self.status_of(g))
             .collect()
+    }
+
+    pub fn status_of(&self, g: u16) -> GroupStatus {
+        let group = self.group(g);
+        let leader = self.leader(g);
+        let inner = group.inner();
+        let regime = inner.role.regime();
+        let mut s = GroupStatus {
+            group: group.g,
+            role: inner.role.name(),
+            regime,
+            leader,
+            first_role: inner
+                .first_role
+                .filter(|(r, _)| Some(*r) == regime)
+                .map(|(_, name)| name),
+            ..GroupStatus::default()
+        };
+        match &inner.role {
+            Role::Idle => {}
+            Role::Follower(f) => {
+                s.synced = f.synced();
+                s.since = Some(f.since);
+            }
+            Role::Leader(l) => {
+                s.follower = l.follower();
+                s.synced = true;
+                s.lease_until = l.lease_until();
+                s.since = Some(l.since);
+            }
+            Role::Raft(r) => {
+                s.synced = r.is_voter();
+                s.since = Some(r.replica.started);
+                s.voters = r.replica.voter_nodes();
+                s.learners = r.replica.learner_nodes();
+                s.installed = r.replica.sm.lock().installed;
+                s.replica = Some(r.replica.replica);
+            }
+        }
+        s
     }
 
     /// Reconfigure every Raft group in which this node is a voter, or only `group`, to this node
@@ -386,14 +387,9 @@ impl Counters {
         done
     }
 
-    /// The counter state that this node holds for group `g`, as leader or follower.
+    /// The counter state that this node holds for group `g`, in any role.
     pub fn held_state(&self, g: u16) -> Option<state::CounterState> {
-        match self.group(g).role() {
-            Role::Idle => None,
-            Role::Follower(f) => Some(f.state()),
-            Role::Leader(l) => Some(l.state()),
-            Role::Raft(r) => Some(r.replica.state()),
-        }
+        self.group(g).role().state()
     }
 
     pub fn node(&self) -> Option<Arc<Node>> {
@@ -435,11 +431,8 @@ impl Counters {
         let s = stop.clone();
         tokio::spawn(async move {
             let mut every = tokio::time::interval(METRICS_EVERY);
-            loop {
-                tokio::select! {
-                    _ = s.cancelled() => return,
-                    _ = every.tick() => me.record_metrics(),
-                }
+            while s.run_until_cancelled(every.tick()).await.is_some() {
+                me.record_metrics();
             }
         });
         let Some(membership) = self.node().and_then(|n| n.membership().cloned()) else {
@@ -451,9 +444,8 @@ impl Counters {
             use crate::membership::Event;
             use tokio::sync::broadcast::error::RecvError;
             loop {
-                let event = tokio::select! {
-                    _ = stop.cancelled() => return,
-                    e = events.recv() => e,
+                let Some(event) = stop.run_until_cancelled(events.recv()).await else {
+                    return;
                 };
                 match event {
                     // A rejoining node and a node of a lost cluster discard their counters
@@ -482,35 +474,24 @@ impl Counters {
     fn record_metrics(&self) {
         use discus_telemetry::attrs::CounterRole;
         let metrics = discus_telemetry::global();
-        let mut counts = [0u64; 5];
-        let mut single = 0;
-        for g in &self.groups {
-            let role = g.role();
-            let i = match role.name() {
-                "leader" => 0,
-                "follower" => 1,
-                "voter" => 2,
-                "learner" => 3,
-                _ => 4,
-            };
-            counts[i] += 1;
-            if let Role::Raft(r) = &role {
-                if r.leads() && r.replica.voters().len() == 1 {
-                    single += 1;
-                }
-            }
+        let roles: Vec<Role> = self.groups.iter().map(|g| g.role()).collect();
+        let names: Vec<&str> = roles.iter().map(Role::name).collect();
+        for role in CounterRole::ALL {
+            let count = names.iter().filter(|n| **n == role.as_str()).count();
+            metrics.counter_roles(role, count as u64);
         }
-        for (role, count) in CounterRole::ALL.iter().zip(counts) {
-            metrics.counter_roles(*role, count);
-        }
+        let single = roles
+            .iter()
+            .filter(|r| matches!(r, Role::Raft(r) if r.leads() && r.replica.voters().len() == 1))
+            .count();
         metrics.counter_memory(self.bytes());
-        metrics.raft_single_voter_groups(single);
+        metrics.raft_single_voter_groups(single as u64);
     }
 
     /// The counter tier is settled (spec section 15.2): in every group this node is the leader,
     /// a synced follower, a voter of a Raft group that targets it, or not needed. Once true, it
     /// stays true, so a later change of targets never fails the startup probe.
-    pub fn settled(&self) -> bool {
+    pub fn settled(self: &Arc<Self>) -> bool {
         if self.settled.load(Ordering::Acquire) {
             return true;
         }
@@ -523,9 +504,7 @@ impl Counters {
                     && self.groups.iter().all(|g| {
                         let settled = g.settled_for(&view);
                         if settled.is_none() {
-                            if let Some(me) = self.me.upgrade() {
-                                me.ask_leader(g.g);
-                            }
+                            self.ask_leader(g.g);
                         }
                         settled == Some(true)
                     })
@@ -582,8 +561,9 @@ impl Counters {
     /// The node that leads group `g`, as far as this node knows. `None` when it knows no
     /// `NORMAL` leader.
     pub fn leader(&self, g: u16) -> Option<NodeId> {
-        let view = self.view()?;
-        self.group(g).leader(&view)
+        let node = self.node()?;
+        let epoch = node.epochs().current().clone();
+        self.group(g).leader(node.id, &epoch)
     }
 
     /// Execute a counter command on this node, which believes it leads group `g`.
@@ -594,7 +574,7 @@ impl Counters {
                 "OOM command not allowed when the counter reserve is full",
             ));
         }
-        let now_ms = self.node().map_or(0, |n| n.store.now_ms());
+        let now_ms = self.now_ms();
         match self.group(g).role() {
             Role::Leader(l) => {
                 l.execute(
@@ -622,50 +602,41 @@ impl Counters {
         }
         let me = self.clone();
         tokio::spawn(async move {
-            me.ask_round(g).await;
+            me.ask_now(g).await;
         });
     }
 
     /// Ask now and wait for the answers. Returns the best hint with a `NORMAL` leader.
-    pub async fn ask_now(self: &Arc<Self>, g: u16) -> Option<GroupHint> {
-        self.ask_round(g).await
+    pub async fn ask_now(&self, g: u16) -> Option<GroupHint> {
+        let view = self.view()?;
+        let answers = self.ask_all(&view, g).await;
+        let (best, denied) = group::pick(g, &view, answers);
+        self.group(g).learn(best.clone(), &denied);
+        best
     }
 
     /// Ask every other `NORMAL` member about group `g`. Returns the members that answered, and
     /// the ones among them that hold a Raft replica of the group.
-    pub async fn holders(self: &Arc<Self>, g: u16) -> (Vec<NodeId>, Vec<NodeId>) {
+    pub async fn holders(&self, g: u16) -> (Vec<NodeId>, Vec<NodeId>) {
         let Some(view) = self.view() else {
             return (Vec::new(), Vec::new());
         };
-        let peers: Vec<NodeId> = view
-            .ranked(g)
-            .into_iter()
-            .filter(|p| *p != view.me)
-            .collect();
-        let answers = futures::future::join_all(
-            peers
-                .iter()
-                .map(|p| self.send(*p, Message::RaftLeader(Vec::new()), ASK_TIMEOUT)),
-        )
-        .await;
         let (mut answered, mut holders) = (Vec::new(), Vec::new());
-        for (peer, answer) in peers.iter().zip(answers) {
-            let Ok(Message::RaftLeader(hints)) = answer else {
-                continue;
-            };
-            answered.push(*peer);
+        for (peer, hints) in self.ask_all(&view, g).await {
+            answered.push(peer);
             if hints
                 .iter()
                 .any(|h| h.group == g && h.mode == discus_wire::CounterMode::Raft)
             {
-                holders.push(*peer);
+                holders.push(peer);
             }
         }
         (answered, holders)
     }
 
-    async fn ask_round(self: &Arc<Self>, g: u16) -> Option<GroupHint> {
-        let view = self.view()?;
+    /// `RAFT_LEADER` to every other `NORMAL` member, best first for group `g`: the members that
+    /// answered, with their hints.
+    async fn ask_all(&self, view: &View, g: u16) -> Vec<(NodeId, Vec<GroupHint>)> {
         let peers: Vec<NodeId> = view
             .ranked(g)
             .into_iter()
@@ -677,17 +648,14 @@ impl Counters {
                 .map(|p| self.send(*p, Message::RaftLeader(Vec::new()), ASK_TIMEOUT)),
         )
         .await;
-        let answers = peers
-            .iter()
+        peers
+            .into_iter()
             .zip(answers)
             .filter_map(|(peer, answer)| match answer {
-                Ok(Message::RaftLeader(hints)) => Some((*peer, hints)),
+                Ok(Message::RaftLeader(hints)) => Some((peer, hints)),
                 _ => None,
             })
-            .collect();
-        let (best, denied) = group::pick(g, &view, answers);
-        self.group(g).learn(best.clone(), &denied);
-        best
+            .collect()
     }
 
     /// Send one counter message on the bulk lane. A bulk timeout is not data-path evidence, so a
@@ -699,13 +667,7 @@ impl Counters {
         timeout: Duration,
     ) -> Result<Message, String> {
         let node = self.node().ok_or("the node is gone")?;
-        let link = node.link().ok_or("this node has no transport")?;
-        let addr = node
-            .epochs()
-            .current()
-            .member(to)
-            .map(|m| m.addr)
-            .ok_or_else(|| format!("node {to} is not a member"))?;
+        let (link, addr) = node.peer(to)?;
         let frame = link
             .transport
             .request_on(
