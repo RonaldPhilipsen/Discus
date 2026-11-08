@@ -426,11 +426,8 @@ impl Counters {
         let s = stop.clone();
         tokio::spawn(async move {
             let mut every = tokio::time::interval(METRICS_EVERY);
-            loop {
-                tokio::select! {
-                    _ = s.cancelled() => return,
-                    _ = every.tick() => me.record_metrics(),
-                }
+            while s.run_until_cancelled(every.tick()).await.is_some() {
+                me.record_metrics();
             }
         });
         let Some(membership) = self.node().and_then(|n| n.membership().cloned()) else {
@@ -442,9 +439,8 @@ impl Counters {
             use crate::membership::Event;
             use tokio::sync::broadcast::error::RecvError;
             loop {
-                let event = tokio::select! {
-                    _ = stop.cancelled() => return,
-                    e = events.recv() => e,
+                let Some(event) = stop.run_until_cancelled(events.recv()).await else {
+                    return;
                 };
                 match event {
                     // A rejoining node and a node of a lost cluster discard their counters
