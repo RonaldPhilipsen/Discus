@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 use discus_resp::{Command, Value};
 
-use crate::command::float::{incr_by_float, parse_long_double, LongDouble};
+use crate::command::float::{incr_by_float, parse_float_delta, FloatDelta};
 use crate::command::string::deadline;
 use crate::command::util::{parse_i64, upper};
 use crate::command::CommandError;
@@ -265,7 +265,7 @@ impl CounterState {
                 let expiry = increment_expiry(&cmd[3..], now, &name)?;
                 self.add(now, &cmd[1], delta, expiry)
             }
-            "INCRBYFLOAT" => self.add_float(now, &cmd[1], parse_long_double(&cmd[2])?),
+            "INCRBYFLOAT" => self.add_float(now, &cmd[1], parse_float_delta(&cmd[2])?),
             "APPEND" => self.append(now, &cmd[1], &cmd[2], limits),
             "DEL" => {
                 let removed = cmd[1..]
@@ -432,7 +432,7 @@ impl CounterState {
         Ok(Value::Integer(next))
     }
 
-    fn add_float(&mut self, now: u64, key: &Bytes, delta: LongDouble) -> Reply {
+    fn add_float(&mut self, now: u64, key: &Bytes, delta: FloatDelta) -> Reply {
         let old = self.live(key, now).cloned();
         let text = incr_by_float(old.as_ref().map(|e| &e.value[..]), delta)?;
         self.put(

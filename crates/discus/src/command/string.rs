@@ -5,7 +5,7 @@ use discus_resp::{Command, Value};
 use discus_store::{Entry, Value as Stored};
 
 use super::error::CommandError;
-use super::float::{incr_by_float, parse_long_double};
+use super::float::{incr_by_float, parse_float_delta};
 use super::table::CommandSpec;
 use super::util::{admit, check_key, check_value, parse_i64, upper};
 use crate::node::{ConnState, Node};
@@ -359,7 +359,7 @@ fn decrby(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 fn incrbyfloat(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     check_key(node, &cmd[1])?;
     admit(node, cmd[1].len() + 32)?;
-    let delta = parse_long_double(&cmd[2])?;
+    let delta = parse_float_delta(&cmd[2])?;
     node.write(&cmd[1], node.stamp()?, |slot| {
         let current = match slot.as_ref() {
             None => None,

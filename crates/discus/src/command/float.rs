@@ -8,6 +8,15 @@
 //! `0.1 + 0.2` where Redis gives `0.3`. So the sum here runs on a software x87 float
 //! (`rustc_apfloat`), which rounds like the FPU, and the text is the exact decimal expansion of
 //! the sum rounded to 17 places, as glibc `printf` does it.
+//!
+//! The exact Redis text is a deliberate choice (2026-11-08) over native `f64`, which would drop
+//! `rustc_apfloat` and `num-bigint` but return `0.30000000000000004` for the sum above.
+//!
+//! Only `LongDouble`, `parse`, and `parts` know the float type. `human` takes a significand of up
+//! to 128 bits, so a move to `f128` (stable Rust tracks it in rust-lang/rust#116909) replaces only
+//! those three. `f128` gives the digits of Redis on 64-bit ARM Linux, not x86-64. Every counter
+//! replica computes the text from the Raft log itself, so the replicas of one group must all use
+//! one float type: switch it only with a capability bit or a full restart.
 
 use bytes::Bytes;
 use num_bigint::BigUint;
@@ -16,8 +25,11 @@ use rustc_apfloat::{Float, Round, Status, StatusAnd};
 
 use super::error::CommandError;
 
-/// An x87 `long double`.
-pub type LongDouble = X87DoubleExtended;
+type LongDouble = X87DoubleExtended;
+
+/// A parsed `INCRBYFLOAT` increment. Callers never see the float type behind it.
+#[derive(Clone, Copy, Debug)]
+pub struct FloatDelta(LongDouble);
 
 /// Redis refuses a number text of this length or more (`MAX_LONG_DOUBLE_CHARS`).
 const MAX_CHARS: usize = 5 * 1024;
@@ -26,7 +38,11 @@ const PLACES: usize = 17;
 
 /// Parse a number as Redis `string2ld` does: `strtold` must take the whole text, there is no
 /// leading space, and NaN, an overflow, and an underflow to zero are refused. `inf` parses.
-pub fn parse_long_double(b: &[u8]) -> Result<LongDouble, CommandError> {
+pub fn parse_float_delta(b: &[u8]) -> Result<FloatDelta, CommandError> {
+    parse_text(b).map(FloatDelta)
+}
+
+fn parse_text(b: &[u8]) -> Result<LongDouble, CommandError> {
     let s = std::str::from_utf8(b).map_err(|_| CommandError::NotFloat)?;
     parse(s).ok_or(CommandError::NotFloat)
 }
@@ -98,30 +114,47 @@ fn finite(parsed: StatusAnd<LongDouble>, mantissa: &str) -> Option<LongDouble> {
 }
 
 /// Add `delta` to the number `current` (zero when absent) and give the text that Redis stores.
-pub fn incr_by_float(current: Option<&[u8]>, delta: LongDouble) -> Result<Bytes, CommandError> {
+pub fn incr_by_float(current: Option<&[u8]>, delta: FloatDelta) -> Result<Bytes, CommandError> {
     let current = match current {
-        Some(b) => parse_long_double(b)?,
+        Some(b) => parse_text(b)?,
         None => LongDouble::ZERO,
     };
-    let sum = (current + delta).value;
+    let sum = (current + delta.0).value;
     if !sum.is_finite() {
         return Err(CommandError::Custom(
             "ERR increment would produce NaN or Infinity".into(),
         ));
     }
-    Ok(Bytes::from(human(sum)))
+    Ok(Bytes::from(human(parts(sum))))
+}
+
+/// A finite value as `(-1)^negative * significand * 2^exp2`.
+struct Parts {
+    negative: bool,
+    significand: u128,
+    exp2: i64,
+}
+
+fn parts(v: LongDouble) -> Parts {
+    let bits = v.to_bits();
+    let biased = ((bits >> 64) & 0x7fff) as i64;
+    // The x87 format keeps the integer bit, so a value is `significand * 2^(e - 16383 - 63)`,
+    // and a denormal has the exponent of the smallest normal.
+    Parts {
+        negative: (bits >> 79) & 1 == 1,
+        significand: u128::from(bits as u64),
+        exp2: biased.max(1) - 16383 - 63,
+    }
 }
 
 /// `ld2string(..., LD_STR_HUMAN)` for a finite value: `%.17Lf` with ties to even, then no
 /// trailing zeros and no trailing point, and `-0` as `0`.
-fn human(v: LongDouble) -> String {
-    let bits = v.to_bits();
-    let negative = (bits >> 79) & 1 == 1;
-    let biased = ((bits >> 64) & 0x7fff) as i64;
-    let significand = bits as u64;
-    // The x87 format keeps the integer bit, so a value is `significand * 2^(e - 16383 - 63)`,
-    // and a denormal has the exponent of the smallest normal.
-    let exp2 = biased.max(1) - 16383 - 63;
+fn human(p: Parts) -> String {
+    let Parts {
+        negative,
+        significand,
+        exp2,
+    } = p;
     let scaled = BigUint::from(significand) * BigUint::from(10u32).pow(PLACES as u32);
     let units = if exp2 >= 0 {
         scaled << exp2.unsigned_abs()
@@ -158,7 +191,7 @@ mod tests {
     use super::*;
 
     fn incr(current: &str, delta: &str) -> Result<String, String> {
-        let delta = parse_long_double(delta.as_bytes()).map_err(|e| e.text())?;
+        let delta = parse_float_delta(delta.as_bytes()).map_err(|e| e.text())?;
         incr_by_float(Some(current.as_bytes()), delta)
             .map(|b| String::from_utf8(b.to_vec()).unwrap())
             .map_err(|e| e.text())
@@ -215,5 +248,20 @@ mod tests {
         assert_eq!(incr("0", "inf"), Err(infinite.to_string()));
         assert_eq!(incr("0", "INF"), Err(infinite.to_string()));
         assert_eq!(incr("1e4932", "1e4932"), Err(infinite.to_string()));
+    }
+
+    /// An `f128` significand has 113 bits. The text must not depend on the x87 width.
+    #[test]
+    fn the_text_takes_a_significand_wider_than_64_bits() {
+        let text = |negative, significand, exp2| {
+            human(Parts {
+                negative,
+                significand,
+                exp2,
+            })
+        };
+        assert_eq!(text(false, 1 << 100, 0), "1267650600228229401496703205376");
+        assert_eq!(text(true, (1 << 112) | 1, -112), "-1");
+        assert_eq!(text(false, 3 << 110, -111), "1.5");
     }
 }
