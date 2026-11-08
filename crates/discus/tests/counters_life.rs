@@ -8,23 +8,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::counters::{
-    all_hold, flags, group_of, incr_until, join_to, leader_of, raft_cluster, status, Leases, GROUPS,
+    all_hold, flags, group_of, incr_until, join_to, leader_of, raft_cluster, status, targeted,
+    Leases, GROUPS,
 };
 use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
 use common::status as http_status;
-use discus::counter::group_key;
 use redis::AsyncCommands;
 use serial_test::serial;
 
-fn targets_of(n: &GossipNode, g: u16) -> Vec<discus_placement::NodeId> {
-    n.node.epochs().current().owners(&group_key(g), 3)
-}
-
 /// Every group whose targets include `n` has `n` as a voter or the leader.
 fn promoted(n: &GossipNode) -> bool {
-    (0..GROUPS)
-        .filter(|g| targets_of(n, *g).contains(&n.id))
-        .all(|g| matches!(status(n, g).role, "voter" | "leader"))
+    targeted(n)
+        .iter()
+        .all(|g| matches!(status(n, *g).role, "voter" | "leader"))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

@@ -9,8 +9,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use discus::counter::{CounterLeases, GroupStatus};
+use discus::counter::{group_key, CounterLeases, GroupStatus};
 use discus_membership::{LeaseProvider, MemoryLease};
+use discus_placement::NodeId;
 use redis::aio::MultiplexedConnection;
 
 use super::gossip::{refs, socket, start_each, wait_agreed, wait_until, GossipNode, Net, Opts};
@@ -192,21 +193,29 @@ pub fn key_in(n: &GossipNode, g: u16, prefix: &str) -> String {
         .unwrap()
 }
 
+/// The target voters of group `g` in the epoch of `n`.
+pub fn targets(n: &GossipNode, g: u16) -> Vec<NodeId> {
+    n.node.epochs().current().owners(&group_key(g), 3)
+}
+
+/// The groups whose targets include `n`.
+pub fn targeted(n: &GossipNode) -> Vec<u16> {
+    (0..GROUPS)
+        .filter(|g| targets(n, *g).contains(&n.id))
+        .collect()
+}
+
 /// Every group runs Raft with its three target voters, no learner, and one leader among
 /// `nodes`. The voter moves are then done.
 pub fn all_raft(nodes: &[&GossipNode]) -> bool {
     (0..GROUPS).all(|g| {
         leader_of(nodes, g).is_some_and(|l| {
             let s = status(l, g);
-            let mut targets = l
-                .node
-                .epochs()
-                .current()
-                .owners(&discus::counter::group_key(g), 3);
-            targets.sort();
+            let mut want = targets(l, g);
+            want.sort();
             let mut voters = s.voters.clone();
             voters.sort();
-            voters == targets
+            voters == want
                 && s.learners.is_empty()
                 && s.voters.iter().all(|v| {
                     nodes

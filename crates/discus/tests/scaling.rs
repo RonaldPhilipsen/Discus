@@ -10,9 +10,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::counters::{all_raft, flags, join_to, status, Leases, GROUPS};
+use common::counters::{all_raft, flags, join_to, status, targets, Leases, GROUPS};
 use common::gossip::{agreed, refs, wait_until, GossipNode, Net};
-use discus::counter::group_key;
 use redis::AsyncCommands;
 use serial_test::serial;
 
@@ -53,7 +52,7 @@ fn groups(nodes: &[&GossipNode]) -> String {
         |id: &discus_placement::NodeId| format!("{id:?}").chars().take(12).collect::<String>();
     let mut out = String::new();
     for g in 0..GROUPS {
-        let targets = nodes[0].node.epochs().current().owners(&group_key(g), 3);
+        let targets = targets(nodes[0], g);
         out += &format!(
             "group {g}, targets {:?}\n",
             targets.iter().map(short).collect::<Vec<_>>()

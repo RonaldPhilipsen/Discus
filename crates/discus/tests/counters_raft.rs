@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use common::counters::{
     all_hold, all_raft, flags, group_of, incr_once, incr_or_show, incr_until, join_to, key_in,
-    leader_of, raft_cluster, role, start, status, voters_of, Leases, GROUPS, RAFT, SLOW_DEATH,
+    leader_of, raft_cluster, role, start, status, targeted, voters_of, Leases, GROUPS, RAFT,
+    SLOW_DEATH,
 };
 use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
@@ -55,14 +56,7 @@ async fn a_learner_catches_up_by_snapshot() {
     let mut all = refs(&nodes);
     all.push(&fourth);
     wait_agreed(&all, Duration::from_secs(15)).await;
-    let epoch = fourth.node.epochs().current().clone();
-    let targeted: Vec<u16> = (0..GROUPS)
-        .filter(|g| {
-            epoch
-                .owners(&discus::counter::group_key(*g), 3)
-                .contains(&fourth.id)
-        })
-        .collect();
+    let targeted = targeted(&fourth);
     assert!(
         !targeted.is_empty(),
         "the fourth node is a target of no group"
@@ -124,16 +118,7 @@ async fn a_restarted_node_enters_as_a_learner() {
     let mut all = rest.clone();
     all.push(&fresh);
     wait_agreed(&all, Duration::from_secs(15)).await;
-    let targeted: Vec<u16> = (0..GROUPS)
-        .filter(|g| {
-            fresh
-                .node
-                .epochs()
-                .current()
-                .owners(&discus::counter::group_key(*g), 3)
-                .contains(&fresh.id)
-        })
-        .collect();
+    let targeted = targeted(&fresh);
     let promoted = || {
         targeted
             .iter()
