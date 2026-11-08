@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::counters::{
-    all_raft, flags, group_of, held, incr_once, incr_or_show, incr_until, join_to, key_in,
+    all_hold, all_raft, flags, group_of, incr_once, incr_or_show, incr_until, join_to, key_in,
     leader_of, raft_cluster, role, start, status, voters_of, Leases, GROUPS, RAFT, SLOW_DEATH,
 };
 use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
@@ -35,14 +35,7 @@ async fn entries_reach_every_voter() {
         let n: i64 = incr_once(&mut c, "cnt:a").await;
         assert_eq!(n, i);
     }
-    assert!(
-        wait_until(Duration::from_secs(5), || nodes.iter().all(|n| held(
-            n, "cnt:a"
-        )
-        .as_deref()
-            == Some("100")))
-        .await
-    );
+    assert!(all_hold(&refs(&nodes), "cnt:a", "100", Duration::from_secs(5)).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -82,11 +75,7 @@ async fn a_learner_catches_up_by_snapshot() {
             .await,
             "the fourth node never became a voter of group {g}"
         );
-        assert!(
-            wait_until(Duration::from_secs(5), || held(&fourth, key).as_deref()
-                == Some("300"))
-            .await
-        );
+        assert!(all_hold(&[&fourth], key, "300", Duration::from_secs(5)).await);
         assert!(
             status(&fourth, g).installed >= 1,
             "group {g} sent no snapshot"
@@ -178,14 +167,7 @@ async fn two_of_three_voters_lost() {
         let _: i64 = incr_once(&mut c, "cnt:two").await;
     }
     let voters = voters_of(&refs, g);
-    assert!(
-        wait_until(Duration::from_secs(5), || voters.iter().all(|v| held(
-            v, "cnt:two"
-        )
-        .as_deref()
-            == Some("10")))
-        .await
-    );
+    assert!(all_hold(&voters, "cnt:two", "10", Duration::from_secs(5)).await);
     voters[0].kill();
     voters[1].kill();
     let survivor = voters[2];
@@ -238,15 +220,7 @@ async fn force_reconfigure_acts_before_dead() {
         let _: i64 = incr_once(&mut c, "cnt:force").await;
     }
     let voters = voters_of(&refs, g);
-    assert!(
-        wait_until(Duration::from_secs(5), || voters.iter().all(|v| held(
-            v,
-            "cnt:force"
-        )
-        .as_deref()
-            == Some("5")))
-        .await
-    );
+    assert!(all_hold(&voters, "cnt:force", "5", Duration::from_secs(5)).await);
     voters[0].kill();
     voters[1].kill();
     let survivor = voters[2];
@@ -315,14 +289,7 @@ async fn the_down_switch_is_at_once() {
     for _ in 0..7 {
         let _: i64 = incr_once(&mut c, "cnt:down").await;
     }
-    assert!(
-        wait_until(Duration::from_secs(5), || nodes.iter().all(|n| held(
-            n, "cnt:down"
-        )
-        .as_deref()
-            == Some("7")))
-        .await
-    );
+    assert!(all_hold(&refs(&nodes), "cnt:down", "7", Duration::from_secs(5)).await);
     nodes[2].kill();
     let rest = [&nodes[0], &nodes[1]];
     wait_agreed(&rest, Duration::from_secs(10)).await;

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use common::counters::{
-    group_of, held, incr_until, leader_of, role, start, status, Leases, FAST, GROUPS,
+    all_hold, group_of, incr_until, leader_of, role, start, status, Leases, FAST, GROUPS,
 };
 use common::gossip::{refs, socket, wait_agreed, wait_until, GossipNode, Net, Opts};
 use discus::counter::Refusal;
@@ -66,14 +66,7 @@ async fn the_follower_holds_every_increment() {
     for _ in 0..100 {
         let _: i64 = c.incr("cnt:a", 1).await.unwrap();
     }
-    assert!(
-        wait_until(Duration::from_secs(3), || nodes.iter().all(|n| held(
-            n, "cnt:a"
-        )
-        .as_deref()
-            == Some("100")))
-        .await
-    );
+    assert!(all_hold(&refs(&nodes), "cnt:a", "100", Duration::from_secs(3)).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -88,12 +81,7 @@ async fn failover_keeps_the_value() {
     }
     let leader = leader_of(&refs, g).unwrap();
     let survivor = nodes.iter().find(|n| n.id != leader.id).unwrap();
-    assert!(
-        wait_until(Duration::from_secs(3), || held(survivor, "cnt:a")
-            .as_deref()
-            == Some("100"))
-        .await
-    );
+    assert!(all_hold(&[survivor], "cnt:a", "100", Duration::from_secs(3)).await);
     leader.kill();
     let mut c = survivor.redis().await;
     let n = incr_until(&mut c, "cnt:a", Duration::from_secs(8)).await;
@@ -128,12 +116,7 @@ async fn a_lagging_follower_gets_a_snapshot() {
         .faults
         .stall_counter_ms
         .store(0, Ordering::Relaxed);
-    assert!(
-        wait_until(Duration::from_secs(3), || held(follower, "cnt:lag")
-            .as_deref()
-            == Some("20"))
-        .await
-    );
+    assert!(all_hold(&[follower], "cnt:lag", "20", Duration::from_secs(3)).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -220,12 +203,7 @@ async fn the_epoch_names_the_leader_without_a_lease() {
     }
     let leader = leader_of(&refs, g).unwrap();
     let survivor = nodes.iter().find(|n| n.id != leader.id).unwrap();
-    assert!(
-        wait_until(Duration::from_secs(3), || held(survivor, "cnt:e")
-            .as_deref()
-            == Some("10"))
-        .await
-    );
+    assert!(all_hold(&[survivor], "cnt:e", "10", Duration::from_secs(3)).await);
     leader.kill();
     let mut c = survivor.redis().await;
     assert_eq!(

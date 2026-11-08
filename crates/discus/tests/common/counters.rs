@@ -66,6 +66,14 @@ pub fn held(n: &GossipNode, key: &str) -> Option<String> {
         .map(|e| String::from_utf8_lossy(&e.value).into_owned())
 }
 
+/// Wait until every node of `nodes` holds `want` for `key`.
+pub async fn all_hold(nodes: &[&GossipNode], key: &str, want: &str, timeout: Duration) -> bool {
+    wait_until(timeout, || {
+        nodes.iter().all(|n| held(n, key).as_deref() == Some(want))
+    })
+    .await
+}
+
 /// The node that leads group `g`, if exactly one of `nodes` does.
 pub fn leader_of<'a>(nodes: &[&'a GossipNode], g: u16) -> Option<&'a GossipNode> {
     let leaders: Vec<&GossipNode> = nodes

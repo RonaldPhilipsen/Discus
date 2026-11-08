@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::counters::{
-    flags, group_of, held, incr_until, join_to, leader_of, raft_cluster, status, Leases, GROUPS,
+    all_hold, flags, group_of, incr_until, join_to, leader_of, raft_cluster, status, Leases, GROUPS,
 };
 use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
 use common::status as http_status;
@@ -262,10 +262,7 @@ async fn growth_from_one_to_three_and_back() {
     wait_agreed(&two, Duration::from_secs(10)).await;
     let g = group_of(&first, "cnt:grow");
     assert!(
-        wait_until(Duration::from_secs(10), || [&first, &second]
-            .iter()
-            .all(|n| held(n, "cnt:grow").as_deref() == Some("50")))
-        .await,
+        all_hold(&two, "cnt:grow", "50", Duration::from_secs(10)).await,
         "the second node got no snapshot"
     );
     assert!(
