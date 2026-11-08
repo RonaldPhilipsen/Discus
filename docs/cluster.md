@@ -569,11 +569,15 @@ snapshots, and the votes live in memory.
 
 - A restarted pod has a new node ID, so it enters a group only as a learner. A node that discards
   its counters also enters as a new learner.
-- The leader moves the voters toward the targets one change at a time. It adds a learner, waits
-  until it is within `--raft-catchup-entries` (default 100) entries of the log end, promotes it,
-  and then removes a voter that is not a target. A node starts at most one change every 200 ms.
-- The leader removes a voter that the epoch marks `DEAD`, or that does not answer for
-  `--raft-voter-timeout-ms` (default 10 s).
+- The leader adds each missing target as a learner. It waits until the learner is within
+  `--raft-catchup-entries` (default 100) entries of the log end. When all three targets are ready,
+  one change replaces the voters with the targets. A node starts at most one change every 200 ms.
+- The leader never makes a group of two voters, because one lost replica stops such a group.
+- A voter is dead when the epoch marks it `DEAD`, or when it does not answer for
+  `--raft-voter-timeout-ms` (default 10 s). The leader replaces a dead voter when the replacement
+  is ready, and it removes a dead learner at once.
+- A group that lost a majority of its voters starts a new instance on the leader or on the top
+  live voter. This also frees a joint change that can no longer commit.
 - A minority side of a partition returns `-TRYAGAIN`.
 - A snapshot follows every `--raft-snapshot-entries` (default 10000) entries. A learner that is
   far behind receives the snapshot.

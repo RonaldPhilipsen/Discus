@@ -8,7 +8,7 @@ pub mod convert;
 pub mod network;
 pub mod store;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -240,8 +240,14 @@ impl Replica {
         self.with_membership(|m| m.learner_ids().any(|id| id == self.replica))
     }
 
-    pub fn in_joint_change(&self) -> bool {
-        self.with_membership(|m| m.get_joint_config().len() > 1)
+    /// The voter configs of the current membership. A joint change has two.
+    pub fn voter_configs(&self) -> Vec<BTreeSet<u64>> {
+        self.with_membership(|m| m.get_joint_config().clone())
+    }
+
+    /// The newest membership entry has not been applied here yet.
+    pub fn change_pending(&self) -> bool {
+        self.with_metrics(|m| m.membership_config.log_id().as_ref() > m.last_applied.as_ref())
     }
 
     /// The state that this replica applied.
@@ -262,7 +268,7 @@ pub fn new_replica_id() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::HashMap;
 
     use futures::future::BoxFuture;
 

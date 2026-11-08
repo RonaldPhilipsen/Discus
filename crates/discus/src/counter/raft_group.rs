@@ -125,21 +125,28 @@ impl RaftRole {
     }
 }
 
-/// The learners to promote in one change, from the caught-up target learners in `ready`.
+/// The next voter set of a leader, or `None` when the voters stay. `last` is the newest config
+/// of the membership, and `joint` says that an older config still counts too.
 ///
-/// A single voter takes at least two new voters at once. One voter plus one learner would make a
-/// group of two, whose quorum needs both. A node that joins again discards its replica (spec
-/// section 6.3), and its replica ID never answers again. If that happens to the one new voter,
-/// neither the joint change nor any later change can commit, and only a new instance could free
-/// the group. Two new voters let the change commit with either of them.
-fn promotion(voters: usize, ready: &[(u64, NodeId)]) -> Option<BTreeSet<u64>> {
-    let take = match voters {
-        0 | 1 if ready.len() < 2 => return None,
-        0 | 1 => ready.len(),
-        _ => 1,
-    };
-    let promote: BTreeSet<u64> = ready.iter().take(take).map(|(id, _)| *id).collect();
-    (!promote.is_empty()).then_some(promote)
+/// The goal is the whole target set or nothing. A group of two needs both voters, and a node that
+/// joins again discards its replica for good. Until `want` targets are ready, a dead voter stays
+/// listed, which costs no more fault tolerance than removing it. A joint config ends in `desired`
+/// when that is whole, and else in `last`. A change needs a live majority of `last`, or its first
+/// step never commits and blocks every later change.
+fn voter_goal(
+    desired: BTreeSet<u64>,
+    last: &BTreeSet<u64>,
+    joint: bool,
+    want: usize,
+    live: impl Fn(&u64) -> bool,
+) -> Option<BTreeSet<u64>> {
+    if 2 * last.iter().filter(|id| live(id)).count() <= last.len() {
+        return None;
+    }
+    if !desired.is_empty() && desired.len() == want && (joint || desired != *last) {
+        return Some(desired);
+    }
+    joint.then(|| last.clone())
 }
 
 /// The `NORMAL` voters form a majority of `voters`, so they can elect a leader without the
@@ -150,10 +157,9 @@ fn normal_quorum(voters: &[NodeId], normal: impl Fn(NodeId) -> bool) -> bool {
 
 /// One membership change of a leader toward the target voters.
 enum Move {
-    RemoveVoter((u64, NodeId), &'static str),
     RemoveNode((u64, NodeId), &'static str),
     AddLearner(NodeId),
-    Promote(BTreeSet<u64>, Vec<NodeId>),
+    Voters(BTreeSet<u64>),
 }
 
 /// The Raft network of a node: every Raft message goes on the bulk lane.
@@ -226,17 +232,29 @@ impl Group {
             self.down_switch(counters, view, seen, r).await;
             return;
         }
-        // Two of three voters are gone: the survivor reconfigures to itself (spec section 10.2).
-        // This comes before the leader branch, because a leader without a quorum cannot remove
-        // the lost voters.
-        let others_alive = voters
-            .iter()
-            .any(|(id, n)| *id != replica.replica && view.normal(*n));
-        if me_voter && voters.len() > 1 && !others_alive && view.me_normal {
-            let state = replica.state();
-            self.create_instance(counters, view, seen, state, "the other voters are gone")
-                .await;
-            return;
+        // A voter set without a live majority can commit nothing, so no membership change can
+        // repair it (spec section 10.2). This comes before the leader branch, and it covers a
+        // joint change whose new voters went away. The leader acts, or else the top live voter.
+        let live = |(id, n): &(u64, NodeId)| *id == replica.replica || view.normal(*n);
+        let quorum = replica.voter_configs().iter().all(|c| {
+            2 * voters
+                .iter()
+                .filter(|v| c.contains(&v.0) && live(v))
+                .count()
+                > c.len()
+        });
+        if me_voter && !quorum && view.me_normal {
+            let top = view
+                .ranked(self.g)
+                .into_iter()
+                .find(|n| voters.iter().any(|v| v.1 == *n && live(v)));
+            let leader_up = replica.leader_node().is_some_and(|l| view.normal(l));
+            if r.leads() || (top == Some(view.me) && !leader_up) {
+                let state = replica.state();
+                self.create_instance(counters, view, seen, state, "the other voters are gone")
+                    .await;
+                return;
+            }
         }
         if r.leads() {
             self.reconcile(counters, view, r).await;
@@ -336,9 +354,9 @@ impl Group {
         self.start_leader(counters, view, leader).await;
     }
 
-    /// The next membership change toward the target voters, in priority order: lost voters and
-    /// learners go first, then a missing target joins, caught-up learners become voters, and
-    /// last the voters and learners that are no target leave.
+    /// The next membership change toward the target voters, in priority order: a lost learner
+    /// goes, a joint change ends, a missing target joins, the voters become the targets in one
+    /// change, and last the learners that are no target leave.
     fn next_move(
         &self,
         settings: &Settings,
@@ -349,75 +367,72 @@ impl Group {
         let targets: Vec<NodeId> = view.ranked(self.g).into_iter().take(3).collect();
         let voters = replica.voters();
         let learners = replica.learners();
-        let silent =
+        let lost =
             |id: &u64| replica.contacts.silent_for(*id, leading_since) > settings.voter_timeout;
-        let gone = voters.iter().find(|(id, n)| {
-            *id != replica.replica
-                && (!view.epoch.member(*n).is_some_and(|m| {
+        let alive = |(id, n): &(u64, NodeId)| {
+            *id == replica.replica
+                || (view.epoch.member(*n).is_some_and(|m| {
                     m.state == discus_placement::MemberState::Normal
                         || m.state == discus_placement::MemberState::Leaving
-                }) || silent(id))
-        });
-        if let Some(v) = gone {
-            return Some(Move::RemoveVoter(*v, "removing a lost voter"));
-        }
+                }) && !lost(id))
+        };
         // A node that joins again discards its replica, and the replica ID never comes back. The
         // node stays listed under that ID, so it gets no new replica until the learner goes.
-        if let Some(l) = learners.iter().find(|(id, _)| silent(id)) {
+        if let Some(l) = learners.iter().find(|(id, _)| lost(id)) {
             return Some(Move::RemoveNode(*l, "removing a lost learner"));
         }
-        let listed =
-            |n: &NodeId| voters.iter().any(|(_, v)| v == n) || learners.iter().any(|(_, l)| l == n);
-        if let Some(t) = targets.iter().find(|t| !listed(t)) {
-            return Some(Move::AddLearner(*t));
-        }
         let metrics = replica.metrics();
-        let last = metrics.last_log_index.unwrap_or(0);
+        let last_index = metrics.last_log_index.unwrap_or(0);
         let caught_up = |id: &u64| {
             metrics
                 .replication
                 .as_ref()
                 .and_then(|m| m.get(id).cloned().flatten())
-                .is_some_and(|l| l.index + settings.catchup_entries >= last)
+                .is_some_and(|l| l.index + settings.catchup_entries >= last_index)
         };
-        let ready: Vec<(u64, NodeId)> = learners
+        // One replica per target: its live voter, else a learner that caught up.
+        let desired: BTreeSet<u64> = targets
             .iter()
-            .filter(|(id, n)| targets.contains(n) && caught_up(id))
-            .copied()
+            .filter_map(|t| {
+                voters
+                    .iter()
+                    .find(|v| v.1 == *t && alive(v))
+                    .or_else(|| learners.iter().find(|l| l.1 == *t && caught_up(&l.0)))
+                    .map(|v| v.0)
+            })
             .collect();
-        if let Some(promote) = promotion(voters.len(), &ready) {
-            let nodes = ready
-                .iter()
-                .filter(|(id, _)| promote.contains(id))
-                .map(|(_, n)| *n)
-                .collect();
-            return Some(Move::Promote(promote, nodes));
+        let configs = replica.voter_configs();
+        let joint = configs.len() > 1;
+        let last = configs.last().cloned().unwrap_or_default();
+        let live = |id: &u64| voters.iter().any(|v| v.0 == *id && alive(v));
+        let goal = voter_goal(desired, &last, joint, targets.len(), live).map(Move::Voters);
+        if joint && goal.is_some() {
+            return goal;
         }
-        let complete = targets.iter().all(|t| voters.iter().any(|(_, v)| v == t));
-        if complete {
-            // Others first, so the leader steps down only when nothing else is left to move.
-            let extra = voters
-                .iter()
-                .filter(|(_, n)| !targets.contains(n))
-                .min_by_key(|(_, n)| *n == view.me);
-            if let Some(v) = extra {
-                return Some(Move::RemoveVoter(
-                    *v,
-                    "removing a voter that is not a target",
-                ));
-            }
+        // A dead replica does not list its node. A target whose replica went away gets a new one
+        // under a new ID, and the voter change then drops the old ID.
+        let listed = |t: &NodeId| {
+            voters.iter().any(|v| v.1 == *t && alive(v))
+                || learners.iter().any(|l| l.1 == *t && !lost(&l.0))
+        };
+        if let Some(t) = targets.iter().find(|t| !listed(t)) {
+            return Some(Move::AddLearner(*t));
         }
-        learners
-            .iter()
-            .find(|(_, n)| !targets.contains(n))
-            .map(|l| Move::RemoveNode(*l, "removing a learner that is not a target"))
+        goal.or_else(|| {
+            learners
+                .iter()
+                .find(|(_, n)| !targets.contains(n))
+                .map(|l| Move::RemoveNode(*l, "removing a learner that is not a target"))
+        })
     }
 
     /// Move the membership one change toward the target voters (spec section 10.2).
     async fn reconcile(&self, counters: &Arc<Counters>, view: &View, r: &Arc<RaftRole>) {
         let replica = &r.replica;
         let leading_since = *r.leading_since.lock().get_or_insert_with(Instant::now);
-        if replica.in_joint_change() {
+        // openraft refuses a change until the last one commits. A proposal now only burns the
+        // rate limit, and an uncommittable one is the case of the quorum check in `raft_step`.
+        if replica.change_pending() {
             return;
         }
         let Some(next) = self.next_move(&counters.settings, view, replica, leading_since) else {
@@ -430,17 +445,14 @@ impl Group {
         }
         let raft = &replica.raft;
         let change = match next {
-            Move::RemoveVoter((id, n), why) => {
-                tracing::info!(group = self.g, voter = %n, "{why}");
-                ChangeMembers::RemoveVoters(BTreeSet::from([id]))
-            }
             Move::RemoveNode((id, n), why) => {
                 tracing::info!(group = self.g, learner = %n, "{why}");
                 ChangeMembers::RemoveNodes(BTreeSet::from([id]))
             }
-            Move::Promote(ids, nodes) => {
-                tracing::info!(group = self.g, voters = ?nodes, "promoting learners");
-                ChangeMembers::AddVoterIds(ids)
+            // The leader can be absent from the new set. It commits the change and steps down.
+            Move::Voters(ids) => {
+                tracing::info!(group = self.g, voters = ?ids, "changing the voters");
+                ChangeMembers::ReplaceAllVoters(ids)
             }
             Move::AddLearner(t) => {
                 let ask = Message::RaftConfig(RaftConfig {
@@ -583,16 +595,79 @@ impl Group {
 mod tests {
     use super::*;
 
-    fn ready(n: u64) -> Vec<(u64, NodeId)> {
-        (1..=n).map(|i| (i, NodeId::from_u128(i.into()))).collect()
+    fn set(ids: &[u64]) -> BTreeSet<u64> {
+        ids.iter().copied().collect()
+    }
+
+    const ALL: fn(&u64) -> bool = |_| true;
+
+    #[test]
+    fn a_single_voter_waits_for_every_target() {
+        assert_eq!(voter_goal(set(&[1, 2]), &set(&[1]), false, 3, ALL), None);
+        assert_eq!(
+            voter_goal(set(&[1, 2, 3]), &set(&[1]), false, 3, ALL),
+            Some(set(&[1, 2, 3]))
+        );
     }
 
     #[test]
-    fn a_single_voter_never_takes_one_new_voter() {
-        assert_eq!(promotion(1, &ready(1)), None);
-        assert_eq!(promotion(1, &ready(0)), None);
-        assert_eq!(promotion(1, &ready(2)), Some(BTreeSet::from([1, 2])));
-        assert_eq!(promotion(1, &ready(3)), Some(BTreeSet::from([1, 2, 3])));
+    fn the_voters_change_in_one_step_and_the_leader_can_leave() {
+        assert_eq!(
+            voter_goal(set(&[2, 3, 4]), &set(&[1, 2, 3]), false, 3, ALL),
+            Some(set(&[2, 3, 4]))
+        );
+    }
+
+    #[test]
+    fn a_dead_voter_stays_until_its_replacement_is_ready() {
+        let live = |id: &u64| *id != 3;
+        assert_eq!(
+            voter_goal(set(&[1, 2]), &set(&[1, 2, 3]), false, 3, live),
+            None
+        );
+        assert_eq!(
+            voter_goal(set(&[1, 2, 4]), &set(&[1, 2, 3]), false, 3, live),
+            Some(set(&[1, 2, 4]))
+        );
+    }
+
+    #[test]
+    fn no_change_starts_without_a_live_majority_of_the_voters() {
+        let live = |id: &u64| *id == 1;
+        assert_eq!(
+            voter_goal(set(&[1, 2, 4]), &set(&[1, 2, 3]), false, 3, live),
+            None
+        );
+        assert_eq!(
+            voter_goal(set(&[1, 2, 3]), &set(&[1, 2, 3]), true, 3, live),
+            None
+        );
+    }
+
+    #[test]
+    fn a_joint_change_ends_even_when_a_target_is_lost() {
+        assert_eq!(
+            voter_goal(set(&[1, 2, 3]), &set(&[1, 2, 3]), true, 3, ALL),
+            Some(set(&[1, 2, 3])),
+            "the left-behind joint config ends in the set it aimed for"
+        );
+        let live = |id: &u64| *id != 2;
+        assert_eq!(
+            voter_goal(set(&[1, 3]), &set(&[1, 2, 3]), true, 3, live),
+            Some(set(&[1, 2, 3])),
+            "without a whole target set it still leaves the joint config"
+        );
+        assert_eq!(
+            voter_goal(set(&[1, 3, 4]), &set(&[1, 2, 3]), true, 3, live),
+            Some(set(&[1, 3, 4])),
+            "a replacement that is ready wins"
+        );
+    }
+
+    #[test]
+    fn no_change_when_the_voters_are_the_targets() {
+        let v = set(&[1, 2, 3]);
+        assert_eq!(voter_goal(v.clone(), &v, false, 3, ALL), None);
     }
 
     #[test]
@@ -605,12 +680,5 @@ mod tests {
         assert!(!normal_quorum(&ids, normal(&[1])));
         assert!(normal_quorum(&ids[..2], normal(&[1, 2])));
         assert!(!normal_quorum(&ids[..2], normal(&[1])));
-    }
-
-    #[test]
-    fn a_group_of_two_or_more_takes_one_voter_at_a_time() {
-        assert_eq!(promotion(2, &ready(0)), None);
-        assert_eq!(promotion(2, &ready(2)), Some(BTreeSet::from([1])));
-        assert_eq!(promotion(3, &ready(1)), Some(BTreeSet::from([1])));
     }
 }
