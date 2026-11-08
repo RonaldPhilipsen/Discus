@@ -9,6 +9,7 @@ workspace = true
 [dependencies]
 bytes = "1"
 lru = "0.19"
+openraft = { version = "0.9.25", default-features = false, features = ["storage-v2"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 discus-membership = { path = "../discus-membership" }
 discus-placement = { path = "../discus-placement" }
