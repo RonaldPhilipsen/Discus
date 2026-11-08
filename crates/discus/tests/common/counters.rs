@@ -205,6 +205,34 @@ pub fn targeted(n: &GossipNode) -> Vec<u16> {
         .collect()
 }
 
+/// The targets, and the role, leader, voters, and learners on every node, of every group, for
+/// a failure message.
+pub fn dump(nodes: &[&GossipNode]) -> String {
+    let short = |id: &NodeId| id.to_string()[..12].to_string();
+    let mut out = String::new();
+    let Some(first) = nodes.first() else {
+        return out;
+    };
+    for g in 0..GROUPS {
+        out += &format!(
+            "group {g}, targets {:?}\n",
+            targets(first, g).iter().map(short).collect::<Vec<_>>()
+        );
+        for n in nodes {
+            let s = status(n, g);
+            out += &format!(
+                "  {} {:>8} leader {:?} voters {:?} learners {:?}\n",
+                short(&n.id),
+                s.role,
+                s.leader.as_ref().map(short),
+                s.voters.iter().map(short).collect::<Vec<_>>(),
+                s.learners.iter().map(short).collect::<Vec<_>>(),
+            );
+        }
+    }
+    out
+}
+
 /// Every group runs Raft with its three target voters, no learner, and one leader among
 /// `nodes`. The voter moves are then done.
 pub fn all_raft(nodes: &[&GossipNode]) -> bool {
@@ -273,14 +301,11 @@ pub async fn raft_cluster(
     let (nodes, _) = start(net, leases, n, &flags(extra)).await;
     let refs = refs(&nodes);
     wait_agreed(&refs, Duration::from_secs(15)).await;
-    if !wait_until(Duration::from_secs(20), || all_raft(&refs)).await {
-        for n in &nodes {
-            for g in 0..GROUPS {
-                eprintln!("{} g{g}: {:?}", n.id, status(n, g));
-            }
-        }
-        panic!("the groups did not reach Raft mode");
-    }
+    assert!(
+        wait_until(Duration::from_secs(20), || all_raft(&refs)).await,
+        "the groups did not reach Raft mode\n{}",
+        dump(&refs)
+    );
     // Every entry node finds every leader before the test starts.
     for n in &nodes {
         let mut c = n.redis().await;

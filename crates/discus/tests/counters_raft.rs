@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::counters::{
-    all_hold, all_raft, flags, group_of, incr_once, incr_or_show, incr_until, join_to, key_in,
-    leader_of, raft_cluster, role, start, status, targeted, voters_of, Leases, GROUPS, RAFT,
-    SLOW_DEATH,
+    all_hold, all_raft, dump, flags, group_of, incr_once, incr_or_show, incr_until, join_to,
+    key_in, leader_of, raft_cluster, role, start, status, targeted, voters_of, Leases, GROUPS,
+    RAFT, SLOW_DEATH,
 };
 use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
@@ -124,14 +124,11 @@ async fn a_restarted_node_enters_as_a_learner() {
             .iter()
             .all(|g| matches!(role(&fresh, *g), "voter" | "leader"))
     };
-    if !wait_until(Duration::from_secs(30), promoted).await {
-        for n in &all {
-            for g in 0..GROUPS {
-                eprintln!("{} g{g}: {:?}", n.id, status(n, g));
-            }
-        }
-        panic!("the new node did not become a voter of {targeted:?}");
-    }
+    assert!(
+        wait_until(Duration::from_secs(30), promoted).await,
+        "the new node did not become a voter of {targeted:?}\n{}",
+        dump(&all)
+    );
     for g in 0..GROUPS {
         let s = status(&fresh, g);
         if s.regime.is_some() && matches!(s.role, "voter" | "learner") {

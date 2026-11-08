@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::counters::{all_raft, flags, join_to, status, targets, Leases, GROUPS};
+use common::counters::{all_raft, dump, flags, join_to, Leases};
 use common::gossip::{agreed, refs, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
 use serial_test::serial;
@@ -46,32 +46,6 @@ fn missing(nodes: &[&GossipNode], key: &[u8]) -> Vec<String> {
         .collect()
 }
 
-/// The role, leader, and voters of every group on every node, for a failure message.
-fn groups(nodes: &[&GossipNode]) -> String {
-    let short =
-        |id: &discus_placement::NodeId| format!("{id:?}").chars().take(12).collect::<String>();
-    let mut out = String::new();
-    for g in 0..GROUPS {
-        let targets = targets(nodes[0], g);
-        out += &format!(
-            "group {g}, targets {:?}\n",
-            targets.iter().map(short).collect::<Vec<_>>()
-        );
-        for n in nodes {
-            let s = status(n, g);
-            out += &format!(
-                "  {} {:>8} leader {:?} voters {:?} learners {:?}\n",
-                short(&n.id),
-                s.role,
-                s.leader.as_ref().map(short),
-                s.voters.iter().map(short).collect::<Vec<_>>(),
-                s.learners.iter().map(short).collect::<Vec<_>>(),
-            );
-        }
-    }
-    out
-}
-
 /// The cluster of `nodes` agrees on one epoch, every owner of the probe key holds it, and, from
 /// three nodes, every counter group runs in Raft mode with its target voters.
 async fn settled(nodes: &[&GossipNode], phase: &str) {
@@ -88,7 +62,7 @@ async fn settled(nodes: &[&GossipNode], phase: &str) {
         assert!(
             wait_until(STEP, || all_raft(nodes)).await,
             "{phase}: the counter groups did not reach Raft mode\n{}",
-            groups(nodes)
+            dump(nodes)
         );
     }
 }
