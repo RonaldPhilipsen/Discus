@@ -243,6 +243,7 @@ pub fn snapshot_reply_of(r: RaftReply) -> Option<InstallSnapshotResponse<u64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::counter::cmd;
     use discus_placement::NodeId;
     use discus_wire::Regime;
 
@@ -273,13 +274,6 @@ mod tests {
             vec![BTreeSet::from([1, 2]), BTreeSet::from([1, 2, 5])],
             nodes,
         )
-    }
-
-    fn cmd(parts: &[&str]) -> Command {
-        parts
-            .iter()
-            .map(|p| Bytes::copy_from_slice(p.as_bytes()))
-            .collect()
     }
 
     #[test]

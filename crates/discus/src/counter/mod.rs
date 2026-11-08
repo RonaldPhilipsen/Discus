@@ -33,6 +33,14 @@ use state::Limits;
 /// The seed of the group hash. A change is a re-shard (spec section 10.4).
 pub const COUNTER_SEED: u64 = 0x4449_5343_5553_0005;
 
+#[cfg(test)]
+pub(crate) fn cmd(parts: &[&str]) -> Command {
+    parts
+        .iter()
+        .map(|p| bytes::Bytes::copy_from_slice(p.as_bytes()))
+        .collect()
+}
+
 /// How often each group controller runs.
 pub const TICK: Duration = Duration::from_millis(100);
 

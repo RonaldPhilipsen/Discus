@@ -305,12 +305,7 @@ mod tests {
         }
     }
 
-    fn cmd(parts: &[&str]) -> Command {
-        parts
-            .iter()
-            .map(|p| Bytes::copy_from_slice(p.as_bytes()))
-            .collect()
-    }
+    use crate::counter::cmd;
 
     fn regime() -> Regime {
         Regime {

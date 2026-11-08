@@ -520,12 +520,7 @@ mod tests {
         max_value_bytes: 1 << 20,
     };
 
-    fn cmd(parts: &[&str]) -> Command {
-        parts
-            .iter()
-            .map(|p| Bytes::copy_from_slice(p.as_bytes()))
-            .collect()
-    }
+    use crate::counter::cmd;
 
     fn run(s: &mut CounterState, at: u64, parts: &[&str]) -> Value {
         s.apply(at, &cmd(parts), &LIMITS)
