@@ -11,7 +11,7 @@ use discus_placement::{
     MemberState, NodeId, Version, Weight, NTP64,
 };
 use discus_resp::Protocol;
-use discus_store::{Store, StoreConfig, SystemClock, HASH_SEED};
+use discus_store::{Slot, Store, StoreConfig, SystemClock, HASH_SEED};
 use parking_lot::{RwLock, RwLockReadGuard};
 
 use crate::cluster::writeset::{WriteSet, WriteSetBudget, WriteSetLimits};
@@ -395,11 +395,20 @@ impl Node {
     }
 
     /// A fresh HLC version for one write command. A clock pinned at its drift bound refuses, and
-    /// the command returns `-TRYAGAIN`.
+    /// the command returns `-TRYAGAIN`, also when the write would change nothing.
     pub fn stamp(&self) -> Result<Version, CommandError> {
-        let stamp = self.hlc.tick().map_err(|_| CommandError::TryAgain)?;
-        APPLIED.with(|a| a.set(Some(stamp)));
-        Ok(stamp)
+        self.hlc.tick().map_err(|_| CommandError::TryAgain)
+    }
+
+    /// Run a store write with `stamp`. A write that changed its key records `stamp` as the
+    /// applied stamp of the command, so the key replicates. A write that changed nothing leaves
+    /// no trace.
+    pub fn write<R>(&self, key: &[u8], stamp: Version, f: impl FnOnce(&mut Slot) -> R) -> R {
+        let (result, changed) = self.store.write_changed(key, stamp, f);
+        if changed {
+            APPLIED.with(|a| a.set(Some(stamp)));
+        }
+        result
     }
 
     pub fn next_conn_id(&self) -> u64 {

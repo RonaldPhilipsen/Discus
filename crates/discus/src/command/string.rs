@@ -179,7 +179,7 @@ fn set(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     }
     admit(node, cmd[1].len() + cmd[2].len())?;
     let value = cmd[2].clone();
-    node.store.write(&cmd[1], node.stamp()?, |slot| {
+    node.write(&cmd[1], node.stamp()?, |slot| {
         let old = match slot.as_ref() {
             None => None,
             Some(Entry {
@@ -204,24 +204,29 @@ fn set(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
             Some(Expiry::Keep) => slot.as_ref().and_then(|e| e.expires_at_ms),
             _ => None,
         };
-        *slot = Some(new_entry(value, expires));
+        slot.set(Some(new_entry(value, expires)));
         Ok(reply(old))
     })
 }
 
 fn getdel(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    node.store
-        .write(&cmd[1], node.stamp()?, |slot| match slot.take() {
-            None => Ok(Value::Null),
+    node.write(&cmd[1], node.stamp()?, |slot| {
+        match slot.as_ref() {
+            None => return Ok(Value::Null),
+            Some(Entry {
+                value: Stored::Str(_),
+                ..
+            }) => {}
+            Some(_) => return Err(CommandError::WrongType),
+        }
+        Ok(match slot.take() {
             Some(Entry {
                 value: Stored::Str(b),
                 ..
-            }) => Ok(Value::Bulk(b)),
-            Some(other) => {
-                *slot = Some(other);
-                Err(CommandError::WrongType)
-            }
+            }) => Value::Bulk(b),
+            _ => Value::Null,
         })
+    })
 }
 
 fn getex(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
@@ -238,20 +243,28 @@ fn getex(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         }
         _ => return Err(CommandError::Syntax),
     };
-    node.store.write(&cmd[1], node.stamp()?, |slot| match slot {
-        None => Ok(Value::Null),
-        Some(e) => {
-            let Stored::Str(b) = &e.value else {
-                return Err(CommandError::WrongType);
-            };
-            let reply = Value::Bulk(b.clone());
-            match expiry {
-                Some(Expiry::At(t)) => e.expires_at_ms = Some(t),
-                Some(Expiry::Persist) => e.expires_at_ms = None,
-                _ => {}
+    let deadline = match expiry {
+        Some(Expiry::At(t)) => Some(Some(t)),
+        Some(Expiry::Persist) => Some(None),
+        _ => None,
+    };
+    node.write(&cmd[1], node.stamp()?, |slot| {
+        let reply = match slot.as_ref() {
+            None => return Ok(Value::Null),
+            Some(Entry {
+                value: Stored::Str(b),
+                ..
+            }) => Value::Bulk(b.clone()),
+            Some(_) => return Err(CommandError::WrongType),
+        };
+        if let Some(d) = deadline {
+            if slot.as_ref().is_some_and(|e| e.expires_at_ms != d) {
+                if let Some(e) = slot.as_mut() {
+                    e.expires_at_ms = d;
+                }
             }
-            Ok(reply)
         }
+        Ok(reply)
     })
 }
 
@@ -283,8 +296,8 @@ fn mset(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     let stamp = node.stamp()?;
     for pair in cmd[1..].chunks(2) {
         admit(node, pair[0].len() + pair[1].len())?;
-        node.store.write(&pair[0], stamp, |slot| {
-            *slot = Some(new_entry(pair[1].clone(), None))
+        node.write(&pair[0], stamp, |slot| {
+            slot.set(Some(new_entry(pair[1].clone(), None)))
         });
     }
     Ok(Value::ok())
@@ -294,7 +307,7 @@ fn mset(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 fn add_integer(node: &Node, key: &Bytes, delta: i64) -> Reply {
     check_key(node, key)?;
     admit(node, key.len() + 20)?;
-    node.store.write(key, node.stamp()?, |slot| {
+    node.write(key, node.stamp()?, |slot| {
         let current = match slot.as_ref() {
             None => 0,
             Some(Entry {
@@ -305,7 +318,7 @@ fn add_integer(node: &Node, key: &Bytes, delta: i64) -> Reply {
         };
         let next = current.checked_add(delta).ok_or(CommandError::Overflow)?;
         let expires = slot.as_ref().and_then(|e| e.expires_at_ms);
-        *slot = Some(new_entry(Bytes::from(next.to_string()), expires));
+        slot.set(Some(new_entry(Bytes::from(next.to_string()), expires)));
         Ok(Value::Integer(next))
     })
 }
@@ -346,7 +359,7 @@ fn incrbyfloat(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     check_key(node, &cmd[1])?;
     admit(node, cmd[1].len() + 32)?;
     let delta = parse_f64(&cmd[2])?;
-    node.store.write(&cmd[1], node.stamp()?, |slot| {
+    node.write(&cmd[1], node.stamp()?, |slot| {
         let current = match slot.as_ref() {
             None => 0.0,
             Some(Entry {
@@ -363,7 +376,7 @@ fn incrbyfloat(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         }
         let text = Bytes::from(format!("{next}"));
         let expires = slot.as_ref().and_then(|e| e.expires_at_ms);
-        *slot = Some(new_entry(text.clone(), expires));
+        slot.set(Some(new_entry(text.clone(), expires)));
         Ok(Value::Bulk(text))
     })
 }
@@ -371,7 +384,7 @@ fn incrbyfloat(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 fn append(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     check_key(node, &cmd[1])?;
     admit(node, cmd[2].len())?;
-    node.store.write(&cmd[1], node.stamp()?, |slot| {
+    node.write(&cmd[1], node.stamp()?, |slot| {
         let (mut bytes, expires) = match slot.as_ref() {
             None => (Vec::new(), None),
             Some(Entry {
@@ -384,7 +397,7 @@ fn append(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         bytes.extend_from_slice(&cmd[2]);
         check_value(node, &bytes)?;
         let len = bytes.len() as i64;
-        *slot = Some(new_entry(Bytes::from(bytes), expires));
+        slot.set(Some(new_entry(Bytes::from(bytes), expires)));
         Ok(Value::Integer(len))
     })
 }
@@ -405,7 +418,7 @@ fn del(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     let stamp = node.stamp()?;
     let removed = cmd[1..]
         .iter()
-        .filter(|k| node.store.write(k, stamp, |slot| slot.take().is_some()))
+        .filter(|k| node.write(k, stamp, |slot| slot.take().is_some()))
         .count();
     Ok(Value::Integer(removed as i64))
 }

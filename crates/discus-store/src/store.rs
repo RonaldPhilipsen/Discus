@@ -1,6 +1,7 @@
 //! The sharded in-memory map.
 
 use std::collections::{BTreeSet, HashMap};
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -66,6 +67,46 @@ pub(crate) struct Shard {
     misses: AtomicU64,
     /// A tombstone of this shard was dropped before its TTL, so a rejoin discards the shard.
     pub(crate) needs_refill: AtomicBool,
+}
+
+/// The slot of one key during [`Store::write`]. Reading goes through `Deref`. [`Slot::set`] and
+/// every mutable access through `DerefMut`, such as `take` or `as_mut`, count as a change. So a
+/// write decides with `as_ref` first and changes the slot only when it must.
+pub struct Slot {
+    entry: Option<Entry>,
+    touched: bool,
+}
+
+impl Deref for Slot {
+    type Target = Option<Entry>;
+
+    fn deref(&self) -> &Option<Entry> {
+        &self.entry
+    }
+}
+
+impl DerefMut for Slot {
+    fn deref_mut(&mut self) -> &mut Option<Entry> {
+        self.touched = true;
+        &mut self.entry
+    }
+}
+
+impl Slot {
+    /// Replace the entry. This counts as a change.
+    pub fn set(&mut self, entry: Option<Entry>) {
+        **self = entry;
+    }
+
+    /// Mutable access that does not count as a change. The caller reports a change with
+    /// [`Slot::touch`].
+    pub fn untracked(&mut self) -> &mut Option<Entry> {
+        &mut self.entry
+    }
+
+    pub fn touch(&mut self) {
+        self.touched = true;
+    }
 }
 
 /// Frees memory held outside the store (hints) when the store runs out of normal entries.
@@ -153,37 +194,52 @@ impl Store {
     }
 
     /// Modify an entry in place. An expired entry is deleted before `f` runs, and a tombstone
-    /// gives `f` an empty slot too. Setting the slot to `None` deletes the key. Every entry left
-    /// in the slot gets `stamp` as its version, also when `f` did not change it.
+    /// gives `f` an empty slot too. Setting the slot to `None` deletes the key. A changed entry
+    /// gets `stamp` as its version. An entry that `f` did not change keeps its version, so a
+    /// read-only outcome (`SET NX` on an existing key, a type error) never makes an old value
+    /// newer than a write elsewhere.
     ///
     /// A delete of a live entry leaves a tombstone with `stamp`, so the delete replicates and
     /// wins over older copies (spec section 8.1). `Version::zero()` is an internal stamp and
     /// leaves no tombstone.
-    pub fn write<R>(
+    pub fn write<R>(&self, key: &[u8], stamp: Version, f: impl FnOnce(&mut Slot) -> R) -> R {
+        self.write_changed(key, stamp, f).0
+    }
+
+    /// [`Store::write`], and whether `f` changed the slot. An empty slot that stays empty is no
+    /// change.
+    pub fn write_changed<R>(
         &self,
         key: &[u8],
         stamp: Version,
-        f: impl FnOnce(&mut Option<Entry>) -> R,
-    ) -> R {
+        f: impl FnOnce(&mut Slot) -> R,
+    ) -> (R, bool) {
         let shard = &self.shards[self.shard_index(key)];
         let now = self.clock.now_ms();
         let mut added_tomb = false;
-        let result = {
+        let (result, changed) = {
             let mut guard = shard.inner.write();
-            let (key_bytes, mut slot, old_tomb) = match self.take(&mut guard, key) {
+            let (key_bytes, entry, old_tomb) = match self.take(&mut guard, key) {
                 Some((k, e)) if e.tombstone && !e.is_expired(now) => (Some(k), None, Some(e)),
                 Some((k, e)) if e.tombstone || e.is_expired(now) => (Some(k), None, None),
                 Some((k, e)) => (Some(k), Some(e), None),
                 None => (None, None, None),
             };
-            let had_live = slot.is_some();
+            let had_live = entry.is_some();
+            let mut slot = Slot {
+                entry,
+                touched: false,
+            };
             let result = f(&mut slot);
+            let changed = slot.touched && (had_live || slot.entry.is_some());
             let k = key_bytes.unwrap_or_else(|| Bytes::copy_from_slice(key));
-            match slot {
+            match slot.entry {
                 Some(mut e) => {
                     e.last_access_ms = now;
-                    e.version = stamp;
-                    e.tombstone = false;
+                    if changed {
+                        e.version = stamp;
+                        e.tombstone = false;
+                    }
                     self.insert(&mut guard, k, e);
                 }
                 None if had_live && stamp != Version::zero() => {
@@ -196,12 +252,12 @@ impl Store {
                     }
                 }
             }
-            result
+            (result, changed)
         };
         if added_tomb {
             self.enforce_reserve();
         }
-        result
+        (result, changed)
     }
 
     fn tombstone(&self, stamp: Version, now: u64) -> Entry {

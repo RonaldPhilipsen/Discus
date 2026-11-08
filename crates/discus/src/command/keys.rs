@@ -91,16 +91,16 @@ fn invalid(who: &str) -> CommandError {
 /// Set an absolute deadline. A deadline that is not in the future deletes the key.
 fn set_deadline(node: &Node, key: &[u8], deadline_ms: i128) -> Reply {
     let now = node.store.now_ms() as i128;
-    node.store.write(key, node.stamp()?, |slot| match slot {
-        None => Ok(Value::Integer(0)),
-        Some(_) if deadline_ms <= now => {
-            *slot = None;
-            Ok(Value::Integer(1))
+    node.write(key, node.stamp()?, |slot| {
+        if slot.is_none() {
+            return Ok(Value::Integer(0));
         }
-        Some(e) => {
+        if deadline_ms <= now {
+            slot.set(None);
+        } else if let Some(e) = slot.as_mut() {
             e.expires_at_ms = Some(deadline_ms as u64);
-            Ok(Value::Integer(1))
         }
+        Ok(Value::Integer(1))
     })
 }
 
@@ -153,12 +153,14 @@ fn pttl(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 }
 
 fn persist(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    node.store.write(&cmd[1], node.stamp()?, |slot| match slot {
-        Some(e) if e.expires_at_ms.is_some() => {
-            e.expires_at_ms = None;
-            Ok(Value::Integer(1))
+    node.write(&cmd[1], node.stamp()?, |slot| {
+        if !slot.as_ref().is_some_and(|e| e.expires_at_ms.is_some()) {
+            return Ok(Value::Integer(0));
         }
-        _ => Ok(Value::Integer(0)),
+        if let Some(e) = slot.as_mut() {
+            e.expires_at_ms = None;
+        }
+        Ok(Value::Integer(1))
     })
 }
 

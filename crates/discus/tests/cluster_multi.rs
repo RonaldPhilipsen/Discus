@@ -220,7 +220,7 @@ async fn read_from_replicas_falls_over_to_the_next_owner() {
     let (down, live) = (c.by_id(owners[0]), c.by_id(owners[1]));
     let stamp = live.node.stamp().unwrap();
     live.node.store.write(key.as_bytes(), stamp, |slot| {
-        *slot = Some(Entry::new(Stored::Str("from-replica".into()), None))
+        slot.set(Some(Entry::new(Stored::Str("from-replica".into()), None)))
     });
     down.stop();
     tokio::time::sleep(Duration::from_millis(100)).await;

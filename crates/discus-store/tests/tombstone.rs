@@ -25,7 +25,7 @@ fn v(t: u64) -> Version {
 
 fn put(s: &Store, key: &str, stamp: Version) {
     s.write(key.as_bytes(), stamp, |slot| {
-        *slot = Some(Entry::new(Value::Str("x".into()), None))
+        slot.set(Some(Entry::new(Value::Str("x".into()), None)))
     });
 }
 

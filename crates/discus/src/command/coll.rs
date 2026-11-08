@@ -89,6 +89,9 @@ impl Collection for ZSet {
 /// Mutate the collection at `key`. A missing key gives `f` an empty collection, and a collection
 /// that ends up empty is deleted. A key of another type gives `WrongType`.
 ///
+/// `f` must not change the collection when it returns an error: the key then counts as
+/// unchanged, keeps its version, and does not replicate.
+///
 /// `grow_bytes` is the payload that the call can add. It is admitted against `maxmemory` first.
 pub fn mutate<C: Collection, R>(
     node: &Node,
@@ -98,17 +101,22 @@ pub fn mutate<C: Collection, R>(
 ) -> Result<R, CommandError> {
     admit(node, key.len() + grow_bytes)?;
     let stamp = node.stamp()?;
-    node.store.write(key, stamp, |slot| {
+    node.write(key, stamp, |slot| {
         let mut entry = slot
+            .untracked()
             .take()
             .unwrap_or_else(|| Entry::new(C::default().into_stored(), None));
         let Some(coll) = C::from_mut(&mut entry.value) else {
-            *slot = Some(entry);
+            *slot.untracked() = Some(entry);
             return Err(CommandError::WrongType);
         };
         let result = f(coll);
-        if coll.count() > 0 {
-            *slot = Some(entry);
+        let keep = coll.count() > 0;
+        if keep {
+            *slot.untracked() = Some(entry);
+        }
+        if result.is_ok() {
+            slot.touch();
         }
         result
     })

@@ -882,7 +882,7 @@ mod tests {
         let keys: Vec<Bytes> = (0..64).map(|i| Bytes::from(format!("k{i}"))).collect();
         for k in &keys {
             store.write(k, Version::zero(), |slot| {
-                *slot = Some(Entry::new(Value::Str(big.clone()), None));
+                slot.set(Some(Entry::new(Value::Str(big.clone()), None)));
             });
             q.push(k);
         }

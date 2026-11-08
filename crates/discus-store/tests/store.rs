@@ -27,7 +27,7 @@ fn write_then_read_round_trips_and_expired_reads_as_absent() {
     let clock = Arc::new(ManualClock::new(1_000));
     let s = store(&clock);
     s.write(b"k", Version::zero(), |slot| {
-        *slot = Some(Entry::new(Value::Str("v".into()), Some(2_000)));
+        slot.set(Some(Entry::new(Value::Str("v".into()), Some(2_000))));
     });
     assert!(s.read(b"k", |e| e.is_some()));
     clock.advance(1_000);
@@ -43,7 +43,7 @@ fn used_memory_tracks_inserts_and_removes() {
     let s = store(&clock);
     let before = s.used_memory();
     s.write(b"big", Version::zero(), |slot| {
-        *slot = Some(Entry::new(Value::Str(vec![0u8; 4096].into()), None));
+        slot.set(Some(Entry::new(Value::Str(vec![0u8; 4096].into()), None)));
     });
     assert!(s.used_memory() >= before + 4096);
     assert!(s.remove(b"big"));
@@ -59,11 +59,11 @@ fn write_stamps_the_entry() {
     let v1 = Version::new(NTP64(10), origin);
     let v2 = Version::new(NTP64(11), origin);
     s.write(b"k", v1, |slot| {
-        *slot = Some(Entry::new(Value::Str("a".into()), None));
+        slot.set(Some(Entry::new(Value::Str("a".into()), None)));
     });
     assert_eq!(s.read(b"k", |e| e.map(|e| e.version)), Some(v1));
     s.write(b"k", v2, |slot| {
-        if let Some(e) = slot {
+        if let Some(e) = slot.as_mut() {
             e.value = Value::Str("b".into());
         }
     });
@@ -75,7 +75,7 @@ fn reads_count_hits_and_misses() {
     let clock = Arc::new(ManualClock::new(1_000));
     let s = store(&clock);
     s.write(b"k", Version::zero(), |slot| {
-        *slot = Some(Entry::new(Value::Str("v".into()), Some(2_000)));
+        slot.set(Some(Entry::new(Value::Str("v".into()), Some(2_000))));
     });
     s.read(b"k", |_| ());
     s.read(b"k", |_| ());
@@ -101,7 +101,7 @@ fn a_walk_sees_every_key_that_stays_despite_deletes_and_growth() {
     );
     let put = |k: &str| {
         s.write(k.as_bytes(), Version::zero(), |slot| {
-            *slot = Some(Entry::new(Value::Str("v".into()), None));
+            slot.set(Some(Entry::new(Value::Str("v".into()), None)));
         })
     };
     let stays: Vec<String> = (0..500).map(|i| format!("stay{i}")).collect();
@@ -134,4 +134,28 @@ fn a_walk_sees_every_key_that_stays_despite_deletes_and_growth() {
         "missed {} keys: {missed:?}",
         missed.len()
     );
+}
+
+#[test]
+fn a_write_that_changes_nothing_keeps_the_version() {
+    let clock = Arc::new(ManualClock::new(0));
+    let s = store(&clock);
+    let v1 = Version::new(discus_store::NTP64(1), discus_store::NodeId::from_u128(1));
+    let v2 = Version::new(discus_store::NTP64(2), discus_store::NodeId::from_u128(1));
+    s.write(b"k", v1, |slot| {
+        slot.set(Some(Entry::new(Value::Str("a".into()), None)));
+    });
+    let (seen, changed) = s.write_changed(b"k", v2, |slot| slot.is_some());
+    assert!(seen && !changed);
+    assert_eq!(s.version(b"k"), Some(v1));
+    let (_, changed) = s.write_changed(b"gone", v2, |slot| slot.take());
+    assert!(!changed);
+    assert_eq!(s.version(b"gone"), None);
+    let (_, changed) = s.write_changed(b"k", v2, |slot| {
+        if let Some(e) = slot.as_mut() {
+            e.expires_at_ms = Some(10);
+        }
+    });
+    assert!(changed);
+    assert_eq!(s.version(b"k"), Some(v2));
 }

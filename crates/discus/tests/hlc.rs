@@ -99,3 +99,35 @@ fn a_pinned_clock_refuses_writes_but_serves_reads() {
     assert_eq!(run(&node, &["SET", "k", "w"]), Value::Simple("OK".into()));
     assert_eq!(run(&node, &["GET", "k"]), Value::Bulk(Bytes::from("w")));
 }
+
+/// A write that changes nothing keeps the version and takes no applied stamp, so the key does not
+/// replicate. A stale value then never wins over a newer write on another node by a new stamp.
+#[test]
+fn a_write_that_changes_nothing_keeps_the_version() {
+    let node = node::<3>();
+    run(&node, &["SET", "k", "1"]);
+    run(&node, &["HSET", "h", "f", "1"]);
+    let cases: &[(&str, &[&str])] = &[
+        ("k", &["SET", "k", "2", "NX"]),
+        ("k", &["PERSIST", "k"]),
+        ("k", &["GETEX", "k"]),
+        ("k", &["INCRBY", "k", "9223372036854775807"]),
+        ("h", &["GETEX", "h", "PERSIST"]),
+        ("h", &["GETDEL", "h"]),
+        ("h", &["INCR", "h"]),
+        ("h", &["APPEND", "h", "x"]),
+        ("h", &["SADD", "h", "m"]),
+        ("h", &["SET", "h", "v", "GET"]),
+    ];
+    for (key, cmd) in cases {
+        let before = version(&node, key);
+        Node::take_applied();
+        run(&node, cmd);
+        assert_eq!(version(&node, key), before, "{cmd:?}");
+        assert_eq!(Node::take_applied(), None, "{cmd:?}");
+    }
+    run(&node, &["SET", "k", "2", "XX"]);
+    let applied = Node::take_applied();
+    assert!(applied.is_some());
+    assert_eq!(Some(version(&node, "k")), applied);
+}
