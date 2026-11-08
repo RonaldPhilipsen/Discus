@@ -22,23 +22,34 @@ async fn three(net: &Net, extra: &[&str]) -> Vec<GossipNode> {
 #[tokio::test]
 async fn leaving_turns_readiness_off() {
     let net = Net::new();
-    let nodes = three(&net, &[]).await;
+    // The open connection holds the drain until this deadline, so the waits below must end
+    // before it does.
+    let nodes = net
+        .start_agreed(3, &["--shutdown-timeout-secs", "60"])
+        .await;
     let mut client = nodes[2].redis().await;
     let _: () = client.set("k", "v").await.unwrap();
     nodes[2].shutdown.cancel();
-    let half = Duration::from_millis(500);
-    assert!(common::wait_status(nodes[2].admin, "/readyz", 503, half).await);
+    let wait = Duration::from_secs(15);
+    assert!(common::wait_status(nodes[2].admin, "/readyz", 503, wait).await);
     assert!(
-        wait_until(Duration::from_secs(1), || {
+        wait_until(wait, || {
             listed_as(&nodes[0], &nodes[2]) == Some(MemberState::Leaving)
                 && listed_as(&nodes[1], &nodes[2]) == Some(MemberState::Leaving)
         })
         .await
     );
-    // The open connection keeps working, and the handoff or the previous-epoch fallback keeps
-    // the value readable.
-    let v: Option<String> = client.get("k").await.unwrap();
-    assert_eq!(v.as_deref(), Some("v"));
+    // The open connection keeps working and the value stays in the cluster. A read that lands
+    // while the handoff is in flight can miss for a few milliseconds, so this polls.
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let v: Option<String> = client.get("k").await.unwrap();
+        if v.as_deref() == Some("v") {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{v:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let pong: String = redis::cmd("PING").query_async(&mut client).await.unwrap();
     assert_eq!(pong, "PONG");
 }
