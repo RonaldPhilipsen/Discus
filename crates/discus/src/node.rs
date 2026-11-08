@@ -329,16 +329,18 @@ impl Node {
         self.link.get()
     }
 
-    /// The link and the address for a request to member `to`.
-    pub(crate) fn peer(&self, to: NodeId) -> Result<(&ClusterLink, SocketAddr), String> {
+    /// The link, the address, and the current epoch for a request to member `to`.
+    pub(crate) fn peer(
+        &self,
+        to: NodeId,
+    ) -> Result<(&ClusterLink, SocketAddr, Arc<Epoch>), String> {
         let link = self.link().ok_or("this node has no transport")?;
-        let addr = self
-            .epochs()
-            .current()
+        let epoch = self.epochs().current().clone();
+        let addr = epoch
             .member(to)
             .map(|m| m.addr)
             .ok_or_else(|| format!("node {to} is not a member"))?;
-        Ok((link, addr))
+        Ok((link, addr, epoch))
     }
 
     /// Attach the node-to-node link. Only the first call has an effect.
