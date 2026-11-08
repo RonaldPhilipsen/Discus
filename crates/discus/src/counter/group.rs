@@ -337,20 +337,13 @@ impl Group {
             return Some(h);
         }
         match self.role() {
-            // A replica that knows no leader still says that it holds the group, so a rebuild
-            // never skips a live voter. The nil leader keeps the answer out of routing.
-            Role::Raft(r) => r.hint(self.g).or_else(|| {
-                Some(GroupHint {
-                    group: self.g,
-                    mode: CounterMode::Raft,
-                    regime: r.regime(),
-                    leader: NodeId::NIL,
-                    term: 0,
-                    follower: None,
-                    voters: Vec::new(),
-                    learners: Vec::new(),
-                })
-            }),
+            Role::Raft(r) => Some(raft_answer(
+                self.g,
+                r.regime(),
+                r.hint(self.g),
+                me,
+                r.is_voter(),
+            )),
             _ => None,
         }
     }
@@ -652,6 +645,65 @@ impl Group {
     }
 }
 
+/// The answer to `RAFT_LEADER` of a Raft replica that does not lead, from `known`, the hint of
+/// the leader that its replica knows. A replica that knows no leader still says that it holds the
+/// group, so a rebuild never skips a live voter. The nil leader keeps the answer out of routing.
+///
+/// The answer names a leader only when this replica is a voter and its voters include that
+/// leader. A leader that removed itself keeps its openraft leader state and term for a short
+/// time. Its own replica and a voter that has not applied the removal yet still name it, and a
+/// named hint of a term beats the nil hint of that term (see [`newer`]). Routing would then flip
+/// between the old leader and nil until the next election. Only [`Group::own_hint`] claims.
+pub(super) fn raft_answer(
+    g: u16,
+    regime: Regime,
+    known: Option<GroupHint>,
+    me: NodeId,
+    voter: bool,
+) -> GroupHint {
+    match known {
+        Some(h) if h.leader != me && voter && h.voters.contains(&h.leader) => h,
+        Some(h) => GroupHint {
+            leader: NodeId::NIL,
+            ..h
+        },
+        None => GroupHint {
+            group: g,
+            mode: CounterMode::Raft,
+            regime,
+            leader: NodeId::NIL,
+            term: 0,
+            follower: None,
+            voters: Vec::new(),
+            learners: Vec::new(),
+        },
+    }
+}
+
+/// The best hint of a round of `RAFT_LEADER` answers for group `g`, and the peers that answered
+/// without claiming the group. A hint whose leader answered in the same round without a claim is
+/// dropped: that leader knows best, and a replica that names it can lag behind.
+pub(super) fn pick(
+    g: u16,
+    view: &View,
+    answers: Vec<(NodeId, Vec<GroupHint>)>,
+) -> (Option<GroupHint>, Vec<NodeId>) {
+    let mut hints = Vec::new();
+    let mut denied = Vec::new();
+    for (peer, answer) in answers {
+        let answer: Vec<GroupHint> = answer.into_iter().filter(|h| h.group == g).collect();
+        if !answer.iter().any(|h| h.leader == peer) {
+            denied.push(peer);
+        }
+        hints.extend(answer.into_iter().filter(|h| view.normal(h.leader)));
+    }
+    let best = hints
+        .into_iter()
+        .filter(|h| !denied.contains(&h.leader))
+        .reduce(|a, b| if newer(&b, &a) { b } else { a });
+    (best, denied)
+}
+
 fn stop(role: &Role) {
     if let Role::Raft(r) = role {
         let replica = r.replica.clone();
@@ -726,5 +778,64 @@ mod tests {
         group.observe(&v, &[], true);
         group.learn(Some(elected), &[ids[2]]);
         assert_eq!(group.leader(&v), Some(ids[1]), "the answer");
+    }
+
+    /// A Raft leader that removed itself from the voters stays leader of its term for a short
+    /// time, but claims nothing. Once a merge dropped it, neither its own answer nor the answer
+    /// of a voter that has not seen the removal yet may name it again.
+    #[test]
+    fn a_leader_that_removed_itself_stays_dropped() {
+        let ids: Vec<NodeId> = (1..=4).map(NodeId::from_u128).collect();
+        let v = view(&ids);
+        let group = Group::new(0, None);
+        let leader = ids[1];
+        let before = raft_hint(leader, 2, &ids[1..]);
+        let after = raft_hint(leader, 2, &ids[2..]);
+        group.learn(Some(before.clone()), &[]);
+        group.observe(&v, &[], true);
+        assert_eq!(group.leader(&v), None);
+
+        let regime = before.regime;
+        let answers = vec![
+            (
+                leader,
+                vec![raft_answer(0, regime, Some(after.clone()), leader, false)],
+            ),
+            (
+                ids[2],
+                vec![raft_answer(0, regime, Some(before), ids[2], true)],
+            ),
+            (
+                ids[3],
+                vec![raft_answer(0, regime, Some(after), ids[3], true)],
+            ),
+        ];
+        let (best, denied) = pick(0, &v, answers);
+        group.learn(best, &denied);
+        assert_eq!(group.leader(&v), None);
+    }
+
+    /// The answer of a new leader still names it before its gossip claim arrives.
+    #[test]
+    fn an_answer_from_the_leader_replaces_a_leaderless_hint() {
+        let ids: Vec<NodeId> = (1..=4).map(NodeId::from_u128).collect();
+        let v = view(&ids);
+        let group = Group::new(0, None);
+        let elected = raft_hint(ids[1], 2, &ids[1..]);
+        group.learn(Some(elected.clone()), &[]);
+        group.observe(&v, &[], true);
+        assert_eq!(group.leader(&v), None);
+
+        let regime = elected.regime;
+        let answers = vec![
+            (ids[1], vec![elected.clone()]),
+            (
+                ids[2],
+                vec![raft_answer(0, regime, Some(elected), ids[2], true)],
+            ),
+        ];
+        let (best, denied) = pick(0, &v, answers);
+        group.learn(best, &denied);
+        assert_eq!(group.leader(&v), Some(ids[1]));
     }
 }

@@ -677,21 +677,15 @@ impl Counters {
                 .map(|p| self.send(*p, Message::RaftLeader(Vec::new()), ASK_TIMEOUT)),
         )
         .await;
-        let mut hints = Vec::new();
-        let mut denied = Vec::new();
-        for (peer, answer) in peers.iter().zip(answers) {
-            let Ok(Message::RaftLeader(answer)) = answer else {
-                continue;
-            };
-            let answer: Vec<GroupHint> = answer.into_iter().filter(|h| h.group == g).collect();
-            if !answer.iter().any(|h| h.leader == *peer) {
-                denied.push(*peer);
-            }
-            hints.extend(answer.into_iter().filter(|h| view.normal(h.leader)));
-        }
-        let best = hints
-            .into_iter()
-            .reduce(|a, b| if group::newer(&b, &a) { b } else { a });
+        let answers = peers
+            .iter()
+            .zip(answers)
+            .filter_map(|(peer, answer)| match answer {
+                Ok(Message::RaftLeader(hints)) => Some((*peer, hints)),
+                _ => None,
+            })
+            .collect();
+        let (best, denied) = group::pick(g, &view, answers);
         self.group(g).learn(best.clone(), &denied);
         best
     }
