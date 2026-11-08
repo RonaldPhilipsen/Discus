@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use discus_membership::{LeaseHolder, LeaseProvider, LeaseState};
-use discus_placement::NodeId;
+use discus_placement::{Epoch, NodeId};
 use discus_wire::{CounterAck, CounterMode, CounterSync, GroupHint, Regime};
 use parking_lot::Mutex;
 use tokio::sync::Notify;
@@ -17,7 +17,7 @@ use tokio::sync::Notify;
 use super::lf::{Follower, LfLeader};
 use super::raft_group::RaftRole;
 use super::state::CounterState;
-use super::{Counters, View};
+use super::{normal, Counters, View};
 
 /// The role of this node in one group.
 #[derive(Clone)]
@@ -179,17 +179,17 @@ impl Group {
     }
 
     /// The node that leads this group, as far as this node knows.
-    pub fn leader(&self, view: &View) -> Option<NodeId> {
+    pub fn leader(&self, me: NodeId, epoch: &Epoch) -> Option<NodeId> {
         let inner = self.inner.lock();
         let distrusted = inner
             .distrusted
             .filter(|(_, at)| at.elapsed() < DISTRUST)
             .map(|(n, _)| n);
-        let usable = |l: &NodeId| *l != view.me && view.normal(*l) && Some(*l) != distrusted;
+        let usable = |l: &NodeId| *l != me && normal(epoch, *l) && Some(*l) != distrusted;
         let stale = |r: Regime| inner.known.as_ref().is_some_and(|k| k.regime > r);
         let held = match &inner.role {
-            Role::Leader(l) if l.serving() => return Some(view.me),
-            Role::Raft(r) if r.leads() => return Some(view.me),
+            Role::Leader(l) if l.serving() => return Some(me),
+            Role::Raft(r) if r.leads() => return Some(me),
             Role::Follower(f) if !stale(f.regime) => f.leader.filter(usable),
             Role::Raft(r) => r.replica.leader_node().filter(usable),
             _ => None,
@@ -447,7 +447,7 @@ impl Group {
             self.rebuild_if_lost(counters, view, seen).await;
             return;
         }
-        let live = self.leader(view);
+        let live = self.leader(view.me, &view.epoch);
         let leaderless = {
             let mut inner = self.inner.lock();
             if live.is_some() {
@@ -705,7 +705,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use discus_placement::{ClusterId, Epoch, EpochId, Member, MemberState, Weight};
+    use discus_placement::{ClusterId, EpochId, Member, MemberState, Weight};
 
     fn view(ids: &[NodeId]) -> View {
         let members = ids
@@ -752,16 +752,20 @@ mod tests {
         let group = Group::new(0, None);
         let elected = raft_hint(ids[1], 2, &ids[1..]);
         group.learn(Some(elected.clone()), &[ids[2]]);
-        assert_eq!(group.leader(&v), Some(ids[1]));
+        assert_eq!(group.leader(v.me, &v.epoch), Some(ids[1]));
         group.observe(&v, &[], true);
-        assert_eq!(group.leader(&v), None);
+        assert_eq!(group.leader(v.me, &v.epoch), None);
 
         group.observe(&v, std::slice::from_ref(&elected), true);
-        assert_eq!(group.leader(&v), Some(ids[1]), "the gossip claim");
+        assert_eq!(
+            group.leader(v.me, &v.epoch),
+            Some(ids[1]),
+            "the gossip claim"
+        );
 
         group.observe(&v, &[], true);
         group.learn(Some(elected), &[ids[2]]);
-        assert_eq!(group.leader(&v), Some(ids[1]), "the answer");
+        assert_eq!(group.leader(v.me, &v.epoch), Some(ids[1]), "the answer");
     }
 
     /// A Raft leader that removed itself from the voters stays leader of its term for a short
@@ -777,7 +781,7 @@ mod tests {
         let after = raft_hint(leader, 2, &ids[2..]);
         group.learn(Some(before.clone()), &[]);
         group.observe(&v, &[], true);
-        assert_eq!(group.leader(&v), None);
+        assert_eq!(group.leader(v.me, &v.epoch), None);
 
         let regime = before.regime;
         let answers = vec![
@@ -796,7 +800,7 @@ mod tests {
         ];
         let (best, denied) = pick(0, &v, answers);
         group.learn(best, &denied);
-        assert_eq!(group.leader(&v), None);
+        assert_eq!(group.leader(v.me, &v.epoch), None);
     }
 
     /// The answer of a new leader still names it before its gossip claim arrives.
@@ -808,7 +812,7 @@ mod tests {
         let elected = raft_hint(ids[1], 2, &ids[1..]);
         group.learn(Some(elected.clone()), &[]);
         group.observe(&v, &[], true);
-        assert_eq!(group.leader(&v), None);
+        assert_eq!(group.leader(v.me, &v.epoch), None);
 
         let regime = elected.regime;
         let answers = vec![
@@ -820,6 +824,6 @@ mod tests {
         ];
         let (best, denied) = pick(0, &v, answers);
         group.learn(best, &denied);
-        assert_eq!(group.leader(&v), Some(ids[1]));
+        assert_eq!(group.leader(v.me, &v.epoch), Some(ids[1]));
     }
 }

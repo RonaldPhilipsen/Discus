@@ -474,7 +474,7 @@ impl Group {
         let Some(known) = self.inner().known.clone() else {
             return;
         };
-        if self.leader(view).is_some() {
+        if self.leader(view.me, &view.epoch).is_some() {
             self.inner().leaderless = None;
             return;
         }

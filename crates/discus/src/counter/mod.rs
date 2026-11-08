@@ -119,11 +119,16 @@ pub struct View {
     pub leaving: bool,
 }
 
+/// `id` is a `NORMAL` member of `epoch`.
+pub fn normal(epoch: &Epoch, id: NodeId) -> bool {
+    epoch
+        .member(id)
+        .is_some_and(|m| m.state == MemberState::Normal)
+}
+
 impl View {
     pub fn normal(&self, id: NodeId) -> bool {
-        self.epoch
-            .member(id)
-            .is_some_and(|m| m.state == MemberState::Normal)
+        normal(&self.epoch, id)
     }
 
     pub fn normal_count(&self) -> usize {
@@ -326,7 +331,7 @@ impl Counters {
 
     pub fn status_of(&self, g: u16) -> GroupStatus {
         let group = self.group(g);
-        let leader = self.view().and_then(|v| group.leader(&v));
+        let leader = self.leader(g);
         let inner = group.inner();
         let regime = inner.role.regime();
         let mut s = GroupStatus {
@@ -556,8 +561,9 @@ impl Counters {
     /// The node that leads group `g`, as far as this node knows. `None` when it knows no
     /// `NORMAL` leader.
     pub fn leader(&self, g: u16) -> Option<NodeId> {
-        let view = self.view()?;
-        self.group(g).leader(&view)
+        let node = self.node()?;
+        let epoch = node.epochs().current().clone();
+        self.group(g).leader(node.id, &epoch)
     }
 
     /// Execute a counter command on this node, which believes it leads group `g`.
