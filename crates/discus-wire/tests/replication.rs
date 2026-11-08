@@ -1,14 +1,17 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
+
 use std::collections::{HashMap, HashSet};
 
 use bytes::Bytes;
+use common::round_trip;
 use discus_placement::{EpochId, NodeId, Version, NTP64};
 use discus_resp::Value as Resp;
 use discus_store::{Entry, Value, ZSet};
 use discus_wire::{
-    decode_frame, encode_frame, fb, Batch, BatchAck, DecodeError, Forward, ForwardMode,
-    ForwardReply, Frame, Limits, Message, TraceContext,
+    decode_frame, fb, Batch, BatchAck, DecodeError, Forward, ForwardMode, ForwardReply, Limits,
+    Message, TraceContext,
 };
 
 fn epoch(g: u64) -> EpochId {
@@ -20,17 +23,6 @@ fn epoch(g: u64) -> EpochId {
 
 fn v(t: u64) -> Version {
     Version::new(NTP64(t), NodeId::from_u128(5))
-}
-
-fn round_trip(message: Message) -> Message {
-    let frame = Frame {
-        request_id: 9,
-        trace: TraceContext::default(),
-        message,
-    };
-    decode_frame(&encode_frame(&frame), &Limits::default())
-        .unwrap()
-        .message
 }
 
 fn entry(value: Value, version: Version, expires: Option<u64>) -> Entry {

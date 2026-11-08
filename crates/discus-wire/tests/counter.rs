@@ -1,25 +1,17 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
+
 use bytes::Bytes;
+use common::round_trip;
 use discus_placement::NodeId;
 use discus_wire::{
     caps, decode_counter_snapshot, decode_frame, decode_hints, encode_counter_snapshot,
-    encode_envelope, encode_frame, encode_hints, fb, CounterAck, CounterMode, CounterSync,
-    DecodeError, Frame, GroupHint, Limits, Message, RaftAppend, RaftConfig, RaftEntry, RaftHeader,
-    RaftLogId, RaftMembership, RaftOutcome, RaftPayload, RaftReply, RaftSnapshot, RaftVote,
-    RaftVoteReq, Regime, TraceContext,
+    encode_envelope, encode_hints, fb, CounterAck, CounterMode, CounterSync, DecodeError,
+    GroupHint, Limits, Message, RaftAppend, RaftConfig, RaftEntry, RaftHeader, RaftLogId,
+    RaftMembership, RaftOutcome, RaftPayload, RaftReply, RaftSnapshot, RaftVote, RaftVoteReq,
+    Regime, TraceContext,
 };
-
-fn round_trip(message: Message) -> Message {
-    let frame = Frame {
-        request_id: 4,
-        trace: TraceContext::default(),
-        message,
-    };
-    decode_frame(&encode_frame(&frame), &Limits::default())
-        .unwrap()
-        .message
-}
 
 fn n(x: u128) -> NodeId {
     NodeId::from_u128(x)
