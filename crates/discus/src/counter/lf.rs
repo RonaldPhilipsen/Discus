@@ -17,6 +17,7 @@ use discus_wire::{encode_command, CounterAck, CounterSync, Message, Regime};
 use parking_lot::Mutex;
 use tokio::sync::{watch, Notify};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use super::budget::{Budget, Tracked};
 use super::raft::convert::parse_command;
@@ -170,7 +171,9 @@ impl LfLeader {
         if follower {
             self.wake.notify_one();
             let mut acked = self.acked.subscribe();
-            let ok = tokio::time::timeout(wait, acked.wait_for(|a| *a >= seq)).await;
+            let ok = tokio::time::timeout(wait, acked.wait_for(|a| *a >= seq))
+                .instrument(crate::telemetry::counter_sync_span())
+                .await;
             if !matches!(ok, Ok(Ok(_))) {
                 self.lagging.store(true, Ordering::Release);
             }

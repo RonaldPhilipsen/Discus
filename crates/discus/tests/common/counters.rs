@@ -10,7 +10,7 @@ use discus_membership::{LeaseError, LeaseHolder, LeaseProvider, LeaseState, Memo
 use futures::future::BoxFuture;
 use redis::aio::MultiplexedConnection;
 
-use super::gossip::{socket, GossipNode, Net, Opts};
+use super::gossip::{agreed, socket, wait_until, GossipNode, Net, Opts};
 
 pub const GROUPS: u16 = 4;
 
@@ -118,6 +118,22 @@ pub fn leader_of<'a>(nodes: &[&'a GossipNode], g: u16) -> Option<&'a GossipNode>
         .filter(|n| role(n, g) == "leader")
         .collect();
     (leaders.len() == 1).then(|| leaders[0])
+}
+
+/// Send `INCR key` until it succeeds. It retries only refusals that applied nothing, so the
+/// count stays exact.
+pub async fn incr_once(c: &mut MultiplexedConnection, key: &str) -> i64 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let r: redis::RedisResult<i64> = redis::cmd("INCR").arg(key).query_async(c).await;
+        match r {
+            Ok(n) => return n,
+            Err(e) if e.to_string().contains("has no leader") && Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(e) => panic!("INCR {key} failed: {e}"),
+        }
+    }
 }
 
 /// Send `INCR key` until it succeeds or `timeout` passes.
@@ -254,4 +270,72 @@ pub fn voters_of<'a>(nodes: &[&'a GossipNode], g: u16) -> Vec<&'a GossipNode> {
         .copied()
         .filter(|n| voters.contains(&n.id))
         .collect()
+}
+
+/// Raft flags for tests: a dwell of one second, and a counter timeout that a busy test machine
+/// does not run out of. The dwell flag comes first, so a test can replace it.
+pub const RAFT: &[&str] = &[
+    "--counter-dwell-ms",
+    "1000",
+    "--counter-timeout-ms",
+    "3000",
+    "--raft-voter-timeout-ms",
+    "3000",
+];
+
+/// Death that takes longer than any test.
+pub const SLOW_DEATH: &[&str] = &[
+    "--suspicion-min-ms",
+    "60000",
+    "--suspicion-max-ms",
+    "120000",
+];
+
+pub fn flags(extra: &[&'static str]) -> Vec<&'static str> {
+    let mut f: Vec<&'static str> = RAFT.to_vec();
+    f.extend_from_slice(extra);
+    f
+}
+
+pub async fn raft_cluster(
+    net: &Net,
+    leases: &Leases,
+    n: usize,
+    extra: &[&'static str],
+) -> Vec<GossipNode> {
+    let (nodes, _) = start(net, leases, n, &flags(extra)).await;
+    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    assert!(
+        wait_until(Duration::from_secs(15), || agreed(&refs)).await,
+        "no agreement"
+    );
+    if !wait_until(Duration::from_secs(20), || all_raft(&refs)).await {
+        for n in &nodes {
+            for g in 0..GROUPS {
+                eprintln!("{} g{g}: {:?}", n.id, status(n, g));
+            }
+        }
+        panic!("the groups did not reach Raft mode");
+    }
+    // Every entry node finds every leader before the test starts.
+    for n in &nodes {
+        let mut c = n.redis().await;
+        for g in 0..GROUPS {
+            let key = key_in(n, g, "warm");
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while redis::cmd("GET")
+                .arg(&key)
+                .query_async::<Option<i64>>(&mut c)
+                .await
+                .is_err()
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "group {g} has no leader"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+    nodes
 }

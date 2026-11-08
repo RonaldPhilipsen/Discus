@@ -14,6 +14,7 @@ pub mod raft_group;
 pub mod route;
 pub mod state;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,9 @@ pub const COUNTER_SEED: u64 = 0x4449_5343_5553_0005;
 
 /// How often each group controller runs.
 pub const TICK: Duration = Duration::from_millis(100);
+
+/// How often the tier reports its gauges.
+const METRICS_EVERY: Duration = Duration::from_secs(1);
 
 /// How long a `RAFT_LEADER` question waits for each answer.
 const ASK_TIMEOUT: Duration = Duration::from_millis(500);
@@ -151,6 +155,8 @@ pub struct GroupStatus {
     pub learners: Vec<NodeId>,
     /// Raft mode: snapshots that this replica installed from a leader.
     pub installed: u64,
+    /// Raft mode: the replica ID of this node.
+    pub replica: Option<u64>,
     /// The first role this node had in the current regime.
     pub first_role: Option<&'static str>,
     /// The best hint that this node knows.
@@ -170,6 +176,7 @@ pub struct Counters {
     dwell_since: Mutex<Option<Instant>>,
     /// The last membership change that this node started, in any group.
     last_change: Mutex<Option<Instant>>,
+    settled: AtomicBool,
 }
 
 /// The shortest time between two membership changes of this node across all groups (spec
@@ -187,6 +194,7 @@ impl Counters {
             me: me.clone(),
             dwell_since: Mutex::new(None),
             last_change: Mutex::new(None),
+            settled: AtomicBool::new(false),
             node: Arc::downgrade(node),
             id: node.id,
             budget: Arc::new(Budget::new(settings.reserve, Some(node.store.clone()))),
@@ -346,6 +354,10 @@ impl Counters {
                     voters,
                     learners,
                     installed,
+                    replica: match &inner.role {
+                        Role::Raft(r) => Some(r.replica.replica),
+                        _ => None,
+                    },
                     first_role: inner
                         .first_role
                         .filter(|(r, _)| Some(*r) == regime)
@@ -418,6 +430,125 @@ impl Counters {
                 }
                 group.clear();
             });
+        }
+        let me = self.clone();
+        let s = stop.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(METRICS_EVERY);
+            loop {
+                tokio::select! {
+                    _ = s.cancelled() => return,
+                    _ = every.tick() => me.record_metrics(),
+                }
+            }
+        });
+        let Some(membership) = self.node().and_then(|n| n.membership().cloned()) else {
+            return;
+        };
+        let me = self.clone();
+        let mut events = membership.subscribe();
+        tokio::spawn(async move {
+            use crate::membership::Event;
+            use tokio::sync::broadcast::error::RecvError;
+            loop {
+                let event = tokio::select! {
+                    _ = stop.cancelled() => return,
+                    e = events.recv() => e,
+                };
+                match event {
+                    // A rejoining node and a node of a lost cluster discard their counters
+                    // (spec section 6.3).
+                    Ok(Event::Core(
+                        discus_membership::Event::Rejoining { .. }
+                        | discus_membership::Event::ClusterLost { .. },
+                    )) => me.discard(),
+                    Ok(_) | Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => return,
+                }
+            }
+        });
+    }
+
+    /// Drop every counter role and state of this node. A later role starts with new replica
+    /// IDs, so the node enters a Raft group again only as a learner.
+    pub fn discard(&self) {
+        tracing::warn!("discarding the counter state");
+        for g in &self.groups {
+            g.clear();
+        }
+        self.published.lock().clear();
+    }
+
+    fn record_metrics(&self) {
+        use discus_telemetry::attrs::CounterRole;
+        let metrics = discus_telemetry::global();
+        let mut counts = [0u64; 5];
+        let mut single = 0;
+        for g in &self.groups {
+            let role = g.role();
+            let i = match role.name() {
+                "leader" => 0,
+                "follower" => 1,
+                "voter" => 2,
+                "learner" => 3,
+                _ => 4,
+            };
+            counts[i] += 1;
+            if let Role::Raft(r) = &role {
+                if r.leads() && r.replica.voters().len() == 1 {
+                    single += 1;
+                }
+            }
+        }
+        for (role, count) in CounterRole::ALL.iter().zip(counts) {
+            metrics.counter_roles(*role, count);
+        }
+        metrics.counter_memory(self.bytes());
+        metrics.raft_single_voter_groups(single);
+    }
+
+    /// The counter tier is settled (spec section 15.2): in every group this node is the leader,
+    /// a synced follower, a voter of a Raft group that targets it, or not needed. Once true, it
+    /// stays true, so a later change of targets never fails the startup probe.
+    pub fn settled(&self) -> bool {
+        if self.settled.load(Ordering::Acquire) {
+            return true;
+        }
+        let Some(node) = self.node() else {
+            return true;
+        };
+        let done = node.link().is_none()
+            || self.view().is_some_and(|view| {
+                view.me_normal
+                    && self.groups.iter().all(|g| {
+                        let settled = g.settled_for(&view);
+                        if settled.is_none() {
+                            if let Some(me) = self.me.upgrade() {
+                                me.ask_leader(g.g);
+                            }
+                        }
+                        settled == Some(true)
+                    })
+            });
+        if done {
+            self.settled.store(true, Ordering::Release);
+        }
+        done
+    }
+
+    /// Wait until this node holds no leadership and no voter slot, so a drain leaves every
+    /// group served (spec section 15.3).
+    pub async fn drained(&self) {
+        loop {
+            let busy = self.groups.iter().any(|g| match g.role() {
+                Role::Leader(l) => l.serving(),
+                Role::Raft(r) => r.is_voter(),
+                _ => false,
+            });
+            if !busy {
+                return;
+            }
+            tokio::time::sleep(TICK).await;
         }
     }
 

@@ -351,6 +351,26 @@ impl Group {
         }
     }
 
+    /// Whether this node holds what group `g` needs from it (spec section 15.2). `None` while
+    /// it does not know the group yet.
+    pub fn settled_for(&self, view: &View) -> Option<bool> {
+        let inner = self.inner.lock();
+        let known = inner.known.as_ref()?;
+        let raft = view.normal_count() >= 3 && known.mode == CounterMode::Raft;
+        let target = view
+            .ranked(self.g)
+            .into_iter()
+            .take(3)
+            .any(|n| n == view.me);
+        Some(match &inner.role {
+            Role::Leader(_) => true,
+            Role::Raft(r) => !raft || !target || r.is_voter(),
+            Role::Follower(f) => (raft && !target) || f.synced(),
+            Role::Idle if raft => !target,
+            Role::Idle => known.follower != Some(view.me),
+        })
+    }
+
     /// The group runs in Raft mode as far as this node knows.
     fn raft_known(&self) -> bool {
         self.inner
@@ -510,8 +530,12 @@ impl Group {
             lease_until,
             settings.lease_margin,
         );
+        let previous = self.inner.lock().known.as_ref().map(|k| k.leader);
         if self.set_role_if(seen, Role::Leader(leader.clone())) {
             tracing::info!(group = self.g, %regime, "leads a counter group");
+            if previous.is_some_and(|p| p != view.me) {
+                discus_telemetry::global().counter_failover();
+            }
             self.start_leader(counters, view, leader).await;
         }
     }

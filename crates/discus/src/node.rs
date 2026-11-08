@@ -212,10 +212,10 @@ impl Node {
         self.replicator().is_none_or(|r| r.store_ready())
     }
 
-    /// The counter tier is settled (spec section 15.2). Plan 5 replaces this. Until then the tier
-    /// does not exist, so it is always settled.
+    /// The counter tier is settled (spec section 15.2). A node without a tier has nothing to
+    /// wait for.
     pub fn counters_settled(&self) -> bool {
-        true
+        self.counters().is_none_or(|c| c.settled())
     }
 
     /// Replace the history with `epoch`: after a join, or after a lost merge (spec section 6.3).

@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
-use discus_telemetry::attrs::{check, CommandLabel, MemberState, NodeLabel, Status, ALLOWED_KEYS};
+use discus_telemetry::attrs::{
+    check, CommandLabel, CounterMode, CounterRole, MemberState, NodeLabel, Status, ALLOWED_KEYS,
+};
 use discus_telemetry::metrics::{StoreStats, TransportCounts, LATENCY_BUCKETS_MS};
 use discus_telemetry::testing::{MetricHarness, Point};
 
@@ -173,4 +175,50 @@ fn telemetry_counters_are_exported() {
     ] {
         assert!(find(&points, name, None).is_some(), "{name}");
     }
+}
+
+#[test]
+fn counter_metrics_export() {
+    let h = MetricHarness::new();
+    let m = &h.metrics;
+    m.counter_roles(CounterRole::Leader, 3);
+    m.counter_roles(CounterRole::Voter, 2);
+    m.counter_memory(4096);
+    m.counter_mode_switch(CounterMode::Raft);
+    m.counter_failover();
+    m.raft_single_voter_groups(1);
+    let points = h.points();
+    for name in [
+        "discus.counter.roles",
+        "discus.counter.memory",
+        "discus.counter.mode.switches",
+        "discus.counter.failovers",
+        "discus.raft.single_voter_groups",
+    ] {
+        assert!(find(&points, name, None).is_some(), "{name}");
+    }
+    let leader = find(&points, "discus.counter.roles", Some(("state", "leader"))).unwrap();
+    assert_eq!(leader.value, 3.0);
+    assert_eq!(
+        find(&points, "discus.counter.memory", None).unwrap().value,
+        4096.0
+    );
+    assert!(find(
+        &points,
+        "discus.counter.mode.switches",
+        Some(("state", "raft"))
+    )
+    .is_some());
+    assert_bounded(&points);
+}
+
+#[test]
+fn counter_roles_use_bounded_states() {
+    for role in CounterRole::ALL {
+        assert!(check([("state", role.as_str())]).is_ok(), "{role:?}");
+    }
+    for mode in CounterMode::ALL {
+        assert!(check([("state", mode.as_str())]).is_ok(), "{mode:?}");
+    }
+    assert!(check([("state", "group-3")]).is_err());
 }

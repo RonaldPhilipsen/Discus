@@ -12,6 +12,7 @@ use futures::future::BoxFuture;
 use openraft::error::{ClientWriteError, RaftError};
 use openraft::ChangeMembers;
 use parking_lot::Mutex;
+use tracing::Instrument;
 
 use super::group::{Group, Role};
 use super::lf::LfLeader;
@@ -31,6 +32,9 @@ const ORPHAN_AFTER: Duration = Duration::from_secs(5);
 pub struct RaftRole {
     pub replica: Arc<Replica>,
     last_stamp: Mutex<u64>,
+    /// Since when this replica leads. A new leader has heard from nobody yet, so it measures the
+    /// silence of a voter from here, never from the start of the replica.
+    leading_since: Mutex<Option<std::time::Instant>>,
 }
 
 impl RaftRole {
@@ -38,6 +42,7 @@ impl RaftRole {
         Arc::new(RaftRole {
             replica: Arc::new(replica),
             last_stamp: Mutex::new(0),
+            leading_since: Mutex::new(None),
         })
     }
 
@@ -58,6 +63,11 @@ impl RaftRole {
         now_ms: u64,
         timeout: Duration,
     ) -> Result<Value, Refusal> {
+        let span = crate::telemetry::raft_span();
+        self.run(cmd, now_ms, timeout).instrument(span).await
+    }
+
+    async fn run(&self, cmd: &Command, now_ms: u64, timeout: Duration) -> Result<Value, Refusal> {
         let raft = &self.replica.raft;
         if state::is_read(cmd) {
             return match tokio::time::timeout(timeout, raft.ensure_linearizable()).await {
@@ -182,6 +192,8 @@ impl Group {
         let installed = self.set_role_if(seen, Role::Raft(RaftRole::new(replica)));
         if installed {
             tracing::info!(group = self.g, %regime, why, "created a Raft group");
+            discus_telemetry::global()
+                .counter_mode_switch(discus_telemetry::attrs::CounterMode::Raft);
         }
         installed
     }
@@ -217,6 +229,7 @@ impl Group {
             self.reconcile(counters, view, r).await;
             return;
         }
+        *r.leading_since.lock() = None;
         // A learner of a group whose voters are all gone: the top target rebuilds it empty.
         if !me_voter && !voters.is_empty() && !voters.iter().any(|(_, n)| view.normal(*n)) {
             if view.ranked(self.g).first() == Some(&view.me) {
@@ -260,6 +273,8 @@ impl Group {
         me_voter: bool,
     ) {
         if !view.me_normal {
+            // A `LEAVING` replica cannot take the lease, and the survivors switch without it.
+            self.set_role_if(seen, Role::Idle);
             return;
         }
         let replica = &r.replica;
@@ -299,6 +314,8 @@ impl Group {
         );
         if self.set_role_if(seen, Role::Leader(leader.clone())) {
             tracing::info!(group = self.g, %regime, "switched down to leader-follower mode");
+            discus_telemetry::global()
+                .counter_mode_switch(discus_telemetry::attrs::CounterMode::LeaderFollower);
             self.start_leader(counters, view, leader).await;
         }
     }
@@ -306,6 +323,10 @@ impl Group {
     /// Move the membership one change toward the target voters (spec section 10.2).
     async fn reconcile(&self, counters: &Arc<Counters>, view: &View, r: &Arc<RaftRole>) {
         let replica = &r.replica;
+        let leading_since = *r
+            .leading_since
+            .lock()
+            .get_or_insert_with(std::time::Instant::now);
         if replica.in_joint_change() || !counters.may_change() {
             return;
         }
@@ -319,8 +340,7 @@ impl Group {
                 && (!view.epoch.member(*n).is_some_and(|m| {
                     m.state == discus_placement::MemberState::Normal
                         || m.state == discus_placement::MemberState::Leaving
-                }) || replica.contacts.silent_for(*id, replica.started)
-                    > settings.voter_timeout)
+                }) || replica.contacts.silent_for(*id, leading_since) > settings.voter_timeout)
         });
         if let Some((id, n)) = gone {
             tracing::info!(group = self.g, voter = %n, "removing a lost voter");

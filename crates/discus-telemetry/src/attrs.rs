@@ -105,6 +105,25 @@ label_enum! {
     }
 }
 
+label_enum! {
+    /// The role of a node in one counter group (spec section 10).
+    CounterRole {
+        Leader => "leader",
+        Follower => "follower",
+        Voter => "voter",
+        Learner => "learner",
+        Idle => "idle",
+    }
+}
+
+label_enum! {
+    /// The mode of a counter group (spec section 10).
+    CounterMode {
+        LeaderFollower => "leader_follower",
+        Raft => "raft",
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Attribute {
     Command(CommandLabel),
@@ -112,6 +131,10 @@ pub enum Attribute {
     Node(NodeLabel),
     Peer(NodeLabel),
     State(MemberState),
+    /// A counter role under the key `state`.
+    Role(CounterRole),
+    /// A counter mode under the key `state`.
+    Mode(CounterMode),
 }
 
 impl Attribute {
@@ -121,7 +144,7 @@ impl Attribute {
             Attribute::Status(_) => "status",
             Attribute::Node(_) => "node",
             Attribute::Peer(_) => "peer",
-            Attribute::State(_) => "state",
+            Attribute::State(_) | Attribute::Role(_) | Attribute::Mode(_) => "state",
         }
     }
 
@@ -131,6 +154,8 @@ impl Attribute {
             Attribute::Status(s) => s.as_str(),
             Attribute::Node(n) | Attribute::Peer(n) => n.as_str(),
             Attribute::State(s) => s.as_str(),
+            Attribute::Role(r) => r.as_str(),
+            Attribute::Mode(m) => m.as_str(),
         }
     }
 }
@@ -182,7 +207,12 @@ pub fn check<'a>(attrs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Result<
             "status" => ("status", Status::parse(value).is_some()),
             "node" => ("node", valid_node(value)),
             "peer" => ("peer", valid_node(value)),
-            "state" => ("state", MemberState::parse(value).is_some()),
+            "state" => (
+                "state",
+                MemberState::parse(value).is_some()
+                    || CounterRole::parse(value).is_some()
+                    || CounterMode::parse(value).is_some(),
+            ),
             other => return Err(GuardError::DisallowedKey(other.to_owned())),
         };
         if !ok {

@@ -7,79 +7,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::counters::{
-    all_raft, group_of, held, incr_or_show, incr_until, join, key_in, leader_of, role, start,
-    status, voters_of, Leases, GROUPS,
+    all_raft, flags, group_of, held, incr_once, incr_or_show, incr_until, join, key_in, leader_of,
+    raft_cluster, role, start, status, voters_of, Leases, GROUPS, RAFT, SLOW_DEATH,
 };
 use common::gossip::{agreed, socket, wait_until, GossipNode, Net};
 use redis::AsyncCommands;
-
-/// Raft flags for tests: a dwell of one second, and a counter timeout that a busy test machine
-/// does not run out of. The dwell flag comes first, so a test can replace it.
-const RAFT: &[&str] = &[
-    "--counter-dwell-ms",
-    "1000",
-    "--counter-timeout-ms",
-    "3000",
-    "--raft-voter-timeout-ms",
-    "3000",
-];
-
-/// Death that takes longer than any test.
-const SLOW_DEATH: &[&str] = &[
-    "--suspicion-min-ms",
-    "60000",
-    "--suspicion-max-ms",
-    "120000",
-];
-
-fn flags(extra: &[&'static str]) -> Vec<&'static str> {
-    let mut f: Vec<&'static str> = RAFT.to_vec();
-    f.extend_from_slice(extra);
-    f
-}
-
-async fn raft_cluster(
-    net: &Net,
-    leases: &Leases,
-    n: usize,
-    extra: &[&'static str],
-) -> Vec<GossipNode> {
-    let (nodes, _) = start(net, leases, n, &flags(extra)).await;
-    let refs: Vec<&GossipNode> = nodes.iter().collect();
-    assert!(
-        wait_until(Duration::from_secs(15), || agreed(&refs)).await,
-        "no agreement"
-    );
-    if !wait_until(Duration::from_secs(20), || all_raft(&refs)).await {
-        for n in &nodes {
-            for g in 0..GROUPS {
-                eprintln!("{} g{g}: {:?}", n.id, status(n, g));
-            }
-        }
-        panic!("the groups did not reach Raft mode");
-    }
-    // Every entry node finds every leader before the test starts.
-    for n in &nodes {
-        let mut c = n.redis().await;
-        for g in 0..GROUPS {
-            let key = key_in(n, g, "warm");
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            while redis::cmd("GET")
-                .arg(&key)
-                .query_async::<Option<i64>>(&mut c)
-                .await
-                .is_err()
-            {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "group {g} has no leader"
-                );
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        }
-    }
-    nodes
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn three_nodes_elect_raft_leaders() {
@@ -99,7 +31,7 @@ async fn entries_reach_every_voter() {
     let nodes = raft_cluster(&net, &leases, 3, &[]).await;
     let mut c = nodes[0].redis().await;
     for i in 1..=100 {
-        let n: i64 = c.incr("cnt:a", 1).await.unwrap();
+        let n: i64 = incr_once(&mut c, "cnt:a").await;
         assert_eq!(n, i);
     }
     assert!(
@@ -122,7 +54,7 @@ async fn a_learner_catches_up_by_snapshot() {
     let keys: Vec<String> = (0..GROUPS).map(|g| key_in(&nodes[0], g, "s")).collect();
     for _ in 0..300 {
         for k in &keys {
-            let _: i64 = c.incr(k, 1).await.unwrap();
+            let _: i64 = incr_once(&mut c, k).await;
         }
     }
     let seeds: Vec<_> = nodes.iter().map(|n| n.cluster_addr).collect();
@@ -170,7 +102,7 @@ async fn a_minority_returns_tryagain() {
     let refs: Vec<&GossipNode> = nodes.iter().collect();
     let g = group_of(&nodes[0], "cnt:min");
     let mut c = nodes[0].redis().await;
-    let _: i64 = c.incr("cnt:min", 1).await.unwrap();
+    let _: i64 = incr_once(&mut c, "cnt:min").await;
     let leader = leader_of(&refs, g).unwrap();
     for n in nodes.iter().filter(|n| n.id != leader.id) {
         n.node.faults.blocked.lock().insert(leader.id);
@@ -204,12 +136,29 @@ async fn a_restarted_node_enters_as_a_learner() {
     let mut all = rest.clone();
     all.push(&fresh);
     assert!(wait_until(Duration::from_secs(15), || agreed(&all)).await);
-    assert!(
-        wait_until(Duration::from_secs(20), || (0..GROUPS)
-            .any(|g| role(&fresh, g) == "voter"))
-        .await,
-        "the new node never became a voter"
-    );
+    let targeted: Vec<u16> = (0..GROUPS)
+        .filter(|g| {
+            fresh
+                .node
+                .epochs()
+                .current()
+                .owners(&discus::counter::group_key(*g), 3)
+                .contains(&fresh.id)
+        })
+        .collect();
+    let promoted = || {
+        targeted
+            .iter()
+            .all(|g| matches!(role(&fresh, *g), "voter" | "leader"))
+    };
+    if !wait_until(Duration::from_secs(30), promoted).await {
+        for n in &all {
+            for g in 0..GROUPS {
+                eprintln!("{} g{g}: {:?}", n.id, status(n, g));
+            }
+        }
+        panic!("the new node did not become a voter of {targeted:?}");
+    }
     for g in 0..GROUPS {
         let s = status(&fresh, g);
         if s.regime.is_some() && matches!(s.role, "voter" | "learner") {
@@ -227,7 +176,7 @@ async fn two_of_three_voters_lost() {
     let g = group_of(&nodes[0], "cnt:two");
     let mut c = nodes[0].redis().await;
     for _ in 0..10 {
-        let _: i64 = c.incr("cnt:two", 1).await.unwrap();
+        let _: i64 = incr_once(&mut c, "cnt:two").await;
     }
     let voters = voters_of(&refs, g);
     assert!(
@@ -257,7 +206,7 @@ async fn every_voter_lost() {
     let g = group_of(&nodes[0], "cnt:all");
     let mut c = nodes[0].redis().await;
     for _ in 0..10 {
-        let _: i64 = c.incr("cnt:all", 1).await.unwrap();
+        let _: i64 = incr_once(&mut c, "cnt:all").await;
     }
     let voters = voters_of(&refs, g);
     for v in &voters {
@@ -287,7 +236,7 @@ async fn force_reconfigure_acts_before_dead() {
     let g = group_of(&nodes[0], "cnt:force");
     let mut c = nodes[0].redis().await;
     for _ in 0..5 {
-        let _: i64 = c.incr("cnt:force", 1).await.unwrap();
+        let _: i64 = incr_once(&mut c, "cnt:force").await;
     }
     let voters = voters_of(&refs, g);
     assert!(
@@ -366,7 +315,7 @@ async fn the_down_switch_is_at_once() {
     let nodes = raft_cluster(&net, &leases, 3, &[]).await;
     let mut c = nodes[0].redis().await;
     for _ in 0..7 {
-        let _: i64 = c.incr("cnt:down", 1).await.unwrap();
+        let _: i64 = incr_once(&mut c, "cnt:down").await;
     }
     assert!(
         wait_until(Duration::from_secs(5), || nodes.iter().all(|n| held(

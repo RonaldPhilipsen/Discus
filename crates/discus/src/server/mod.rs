@@ -298,11 +298,17 @@ impl Server {
         drop(listener);
         tracker.close();
         let timeout = Duration::from_secs(node.config.shutdown_timeout_secs);
-        // The node stays a handoff source and flushes its queues within the same deadline.
+        // The node stays a handoff source, flushes its queues, and hands its counter roles over
+        // within the same deadline.
         let drained = async {
             tracker.wait().await;
             if let Some(replicator) = node.replicator() {
                 replicator.idle().await;
+            }
+            // With gossip, the leaders move the counter roles of a LEAVING node away. A static
+            // node has no such epoch, so it does not wait.
+            if let (Some(counters), Some(_)) = (node.counters(), node.membership()) {
+                counters.drained().await;
             }
         };
         if tokio::time::timeout(timeout, drained).await.is_err() {

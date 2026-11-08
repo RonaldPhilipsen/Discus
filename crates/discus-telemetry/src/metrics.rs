@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use crate::attrs::{CommandLabel, MemberState, NodeLabel, Status};
+use crate::attrs::{CommandLabel, CounterMode, CounterRole, MemberState, NodeLabel, Status};
 
 /// Latency histogram bucket bounds in milliseconds.
 pub const LATENCY_BUCKETS_MS: [f64; 10] = [0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0];
@@ -113,6 +113,16 @@ mod imp {
         pub fn quic_failure(&self, peer: &NodeLabel, kind: Status) {}
         #[inline]
         pub fn tombstones(&self, count: u64) {}
+        #[inline]
+        pub fn counter_roles(&self, role: CounterRole, count: u64) {}
+        #[inline]
+        pub fn counter_memory(&self, bytes: u64) {}
+        #[inline]
+        pub fn counter_mode_switch(&self, mode: CounterMode) {}
+        #[inline]
+        pub fn counter_failover(&self) {}
+        #[inline]
+        pub fn raft_single_voter_groups(&self, count: u64) {}
     }
 }
 
@@ -161,6 +171,11 @@ mod imp {
         forward_hops: Histogram<u64>,
         quic_failures: Counter<u64>,
         tombstones: Gauge<u64>,
+        counter_roles: Gauge<u64>,
+        counter_memory: Gauge<u64>,
+        counter_mode_switches: Counter<u64>,
+        counter_failovers: Counter<u64>,
+        raft_single_voter_groups: Gauge<u64>,
         store: Arc<RwLock<Option<Source>>>,
         transport: Arc<RwLock<Option<TransportSource>>>,
         // The observable instruments stay registered while these handles live.
@@ -174,6 +189,8 @@ mod imp {
             Attribute::Command(c) => c.as_str().into(),
             Attribute::Status(s) => s.as_str().into(),
             Attribute::State(s) => s.as_str().into(),
+            Attribute::Role(r) => r.as_str().into(),
+            Attribute::Mode(m) => m.as_str().into(),
             Attribute::Node(n) | Attribute::Peer(n) => n.shared().into(),
         };
         KeyValue::new(key, Value::String(value))
@@ -380,6 +397,27 @@ mod imp {
                     .build(),
                 quic_failures: counter("discus.quic.failures", "QUIC connection failures"),
                 tombstones: gauge("discus.tombstones", "Stored tombstones"),
+                counter_roles: gauge(
+                    "discus.counter.roles",
+                    "Counter groups by the role of this node",
+                ),
+                counter_memory: meter
+                    .u64_gauge("discus.counter.memory")
+                    .with_description("Bytes of counter state that this node holds")
+                    .with_unit("By")
+                    .build(),
+                counter_mode_switches: counter(
+                    "discus.counter.mode.switches",
+                    "Counter group mode switches by the new mode",
+                ),
+                counter_failovers: counter(
+                    "discus.counter.failovers",
+                    "Leader-follower groups that this node took over from another leader",
+                ),
+                raft_single_voter_groups: gauge(
+                    "discus.raft.single_voter_groups",
+                    "Raft groups led by this node that have one voter",
+                ),
                 store,
                 transport,
                 _observers: observers,
@@ -519,6 +557,26 @@ mod imp {
 
         pub fn tombstones(&self, count: u64) {
             self.with(|i| i.tombstones.record(count, &[]));
+        }
+
+        pub fn counter_roles(&self, role: CounterRole, count: u64) {
+            self.with(|i| i.counter_roles.record(count, &[kv(Attribute::Role(role))]));
+        }
+
+        pub fn counter_memory(&self, bytes: u64) {
+            self.with(|i| i.counter_memory.record(bytes, &[]));
+        }
+
+        pub fn counter_mode_switch(&self, mode: CounterMode) {
+            self.with(|i| i.counter_mode_switches.add(1, &[kv(Attribute::Mode(mode))]));
+        }
+
+        pub fn counter_failover(&self) {
+            self.with(|i| i.counter_failovers.add(1, &[]));
+        }
+
+        pub fn raft_single_voter_groups(&self, count: u64) {
+            self.with(|i| i.raft_single_voter_groups.record(count, &[]));
         }
     }
 }

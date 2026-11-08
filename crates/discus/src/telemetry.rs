@@ -386,6 +386,24 @@ pub fn store_span() -> tracing::Span {
     tracing::info_span!("store")
 }
 
+/// The `raft` child span of the current span: a counter command on its Raft leader. It opens
+/// only under a command span.
+pub fn raft_span() -> tracing::Span {
+    if tracing::Span::current().is_none() {
+        return tracing::Span::none();
+    }
+    tracing::info_span!("raft")
+}
+
+/// The `counter.sync` child span of the current span: a leader-follower write that waits for its
+/// follower. It opens only under a command span.
+pub fn counter_sync_span() -> tracing::Span {
+    if tracing::Span::current().is_none() {
+        return tracing::Span::none();
+    }
+    tracing::info_span!("counter.sync")
+}
+
 /// The `route` child span of the current span. A node that receives a forward routes in it. It
 /// opens only under a command span.
 pub fn route_span() -> tracing::Span {
