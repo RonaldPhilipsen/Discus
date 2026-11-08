@@ -24,7 +24,21 @@ pub async fn send(
     mode: ForwardMode,
     write: bool,
 ) -> Result<Reply, TransportError> {
-    let result = send_in_span(node, target, cmd, hop, mode, write)
+    send_for(node, target, cmd, hop, mode, write, None).await
+}
+
+/// Like [`send`], with `timeout` instead of the forward timeout of the route. Counter commands
+/// wait for a quorum on the leader, so they need longer than a store write.
+pub async fn send_for(
+    node: &Arc<Node>,
+    target: NodeId,
+    cmd: &Command,
+    hop: &Hop,
+    mode: ForwardMode,
+    write: bool,
+    timeout: Option<std::time::Duration>,
+) -> Result<Reply, TransportError> {
+    let result = send_in_span(node, target, cmd, hop, mode, write, timeout)
         .instrument(telemetry::forward_span())
         .await;
     telemetry::record_forward(
@@ -43,6 +57,7 @@ async fn send_in_span(
     hop: &Hop,
     mode: ForwardMode,
     write: bool,
+    timeout: Option<std::time::Duration>,
 ) -> Result<Reply, TransportError> {
     let link = node
         .link()
@@ -69,11 +84,11 @@ async fn send_in_span(
         mode,
         track: hop.track,
     };
-    let timeout = if write {
+    let timeout = timeout.unwrap_or(if write {
         link.write_timeout
     } else {
         link.read_timeout
-    };
+    });
     let frame = link
         .transport
         .request(

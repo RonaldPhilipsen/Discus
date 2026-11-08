@@ -17,6 +17,7 @@ use parking_lot::{RwLock, RwLockReadGuard};
 use crate::cluster::writeset::{WriteSet, WriteSetBudget, WriteSetLimits};
 use crate::cluster::ClusterLink;
 use crate::command::CommandError;
+use crate::counter::Counters;
 use crate::membership::Membership;
 use crate::replication::Replicator;
 use crate::security::{ConnAuth, Security};
@@ -63,6 +64,7 @@ pub struct Node {
     link: OnceLock<ClusterLink>,
     membership: OnceLock<Arc<Membership>>,
     replicator: OnceLock<Arc<Replicator>>,
+    counters: OnceLock<Arc<Counters>>,
     epoch_tx: tokio::sync::watch::Sender<EpochId>,
     write_budget: Arc<WriteSetBudget>,
     drain: tokio_util::sync::CancellationToken,
@@ -168,6 +170,7 @@ impl Node {
             link: OnceLock::new(),
             membership: OnceLock::new(),
             replicator: OnceLock::new(),
+            counters: OnceLock::new(),
             epoch_tx,
             drain: tokio_util::sync::CancellationToken::new(),
             faults: Faults::default(),
@@ -242,6 +245,16 @@ impl Node {
     /// Attach the replicator. Only the first call has an effect.
     pub fn set_replicator(&self, replicator: Arc<Replicator>) {
         let _ = self.replicator.set(replicator);
+    }
+
+    /// The counter tier. Every node that `Server` binds has one, also without a transport.
+    pub fn counters(&self) -> Option<&Arc<Counters>> {
+        self.counters.get()
+    }
+
+    /// Attach the counter tier. Only the first call has an effect.
+    pub fn set_counters(&self, counters: Arc<Counters>) {
+        let _ = self.counters.set(counters);
     }
 
     /// A new write set for a client connection (spec section 7.4).

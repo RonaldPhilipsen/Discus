@@ -250,8 +250,17 @@ pub fn run(node: &Arc<Node>, job: Job, route: Span) -> Dispatch {
     run_hop(node, job, Hop::default(), route)
 }
 
-/// Run a data command at any hop. A command that needs no other node runs inline.
+/// Run a data command at any hop. A command that needs no other node runs inline. A command on
+/// counter keys goes to its group leader first, so it never takes the replicated path.
 pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
+    if let Some(dispatch) = crate::counter::route::intercept(node, &job, &hop) {
+        drop(route);
+        return dispatch;
+    }
+    if job.route == Route::Broadcast && hop.hops == 0 && node.counters().is_some() {
+        drop(route);
+        return crate::counter::route::broadcast(node, job.cmd);
+    }
     if node.link().is_none() {
         drop(route);
         return Dispatch::Ready(local(node, &job.cmd));
@@ -279,10 +288,6 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
         Route::Fanout if hop.hops == 0 => {
             drop(route);
             multi::dbsize(node, job.cmd)
-        }
-        Route::Broadcast if hop.hops == 0 => {
-            drop(route);
-            multi::flush(node, job.cmd)
         }
         Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => {
             drop(route);

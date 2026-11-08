@@ -126,6 +126,7 @@ impl Server {
             (Some(wall), Some(hlc_clock)) => Node::with_clocks(config, security, wall, hlc_clock),
             _ => Node::new(config, security),
         });
+        node.set_counters(crate::counter::Counters::new(&node));
         if let Some(tls) = tls {
             let cfg = &node.config;
             let mut tc = TransportConfig::new(cfg.cluster_listen, tls, node.id, node.cluster_id());
@@ -213,6 +214,9 @@ impl Server {
         }
         if let Some(replicator) = node.replicator() {
             replicator.spawn(stop_background.clone());
+        }
+        if let Some(counters) = node.counters() {
+            counters.spawn(stop_background.clone());
         }
         if let Some(link) = node.link() {
             tracing::info!(cluster = %link.transport.local_addr(), "node-to-node transport");

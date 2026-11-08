@@ -235,9 +235,20 @@ pub struct Config {
     /// Time that a written key stays in the write set, in milliseconds.
     #[arg(long, default_value_t = 5_000)]
     pub write_set_ttl_ms: u64,
-    /// Keys with this prefix are strong counter keys. They never enter a write set.
+    /// Keys with this prefix are strong counter keys. Counter groups serve them linearizably.
     #[arg(long, default_value = "cnt:")]
     pub counter_prefix: String,
+    /// Counter groups (spec section 10). A change is an offline re-shard.
+    #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=1024))]
+    pub counter_groups: u16,
+    /// The share of the memory budget for counter state, in percent. Past it, counter writes
+    /// return `-OOM`.
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=100))]
+    pub counter_memory_percent: u64,
+    /// Time that a counter command waits for a leader, a quorum, or a commit, in milliseconds.
+    /// Then it returns `-TRYAGAIN`.
+    #[arg(long, default_value_t = 1_000)]
+    pub counter_timeout_ms: u64,
     /// Bytes per second that one handoff scan sends at most.
     #[arg(long, default_value_t = 33_554_432)]
     pub handoff_rate_bytes: u64,

@@ -67,6 +67,22 @@ impl Service for NodeService {
                     }
                     replicator.handle(inbound.peer.node_id, m).await
                 }
+                m @ (Message::RaftLeader(_)
+                | Message::RaftConfig(_)
+                | Message::RaftVote(_)
+                | Message::RaftAppend(_)
+                | Message::RaftSnapshot(_)
+                | Message::CounterSync(_)
+                | Message::CounterAck(_))
+                    if inbound.peer.channel == Channel::Rpc =>
+                {
+                    let Some(counters) = node.counters().cloned() else {
+                        return Message::Unsupported {
+                            message_type: m.type_code(),
+                        };
+                    };
+                    counters.handle(inbound.peer.node_id, m).await
+                }
                 Message::Forward(_) if inbound.peer.channel == Channel::Gossip => {
                     Message::Unsupported {
                         message_type: discus_wire::fb::MessageType::FORWARD.0,
