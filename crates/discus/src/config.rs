@@ -249,6 +249,19 @@ pub struct Config {
     /// Then it returns `-TRYAGAIN`.
     #[arg(long, default_value_t = 1_000)]
     pub counter_timeout_ms: u64,
+    /// The duration of a counter group lease `discus-counter-<g>`, in milliseconds.
+    #[arg(long, default_value_t = 5_000)]
+    pub counter_lease_duration_ms: u64,
+    /// The renewal interval of a counter group lease, in milliseconds.
+    #[arg(long, default_value_t = 1_000)]
+    pub counter_lease_renew_ms: u64,
+    /// A leader stops serving this long before its lease ends by its own clock, in milliseconds.
+    #[arg(long, default_value_t = 1_000)]
+    pub counter_lease_margin_ms: u64,
+    /// Time that a leader-follower leader waits for the follower ack of a write, in
+    /// milliseconds. Then it replies anyway and marks the follower lagging.
+    #[arg(long, default_value_t = 50)]
+    pub counter_follower_timeout_ms: u64,
     /// Bytes per second that one handoff scan sends at most.
     #[arg(long, default_value_t = 33_554_432)]
     pub handoff_rate_bytes: u64,

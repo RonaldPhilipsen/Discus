@@ -433,13 +433,14 @@ impl Membership {
         self.inner.lock().swim.members()
     }
 
-    /// Publish counter leader hints (plan 5). They spread with a new incarnation.
+    /// Publish the counter leader hints of this node (spec section 6.1). They spread with a new
+    /// incarnation.
     pub fn set_leader_hints(&self, hints: Vec<u8>) {
         self.inner.lock().swim.set_leader_hints(Bytes::from(hints));
     }
 
-    /// The `NORMAL` count of the current epoch, and when it last changed. Plan 5 measures its
-    /// dwell time from it.
+    /// The `NORMAL` count of the current epoch, and when it last changed. The counter tier
+    /// measures the dwell time of the up switch from it (spec section 10.3).
     pub fn normal_members(&self) -> (usize, Instant) {
         *self.normal.lock()
     }

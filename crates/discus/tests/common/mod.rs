@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use tokio_util::sync::CancellationToken;
 
 pub mod cluster;
+pub mod counters;
 pub mod gossip;
 
 /// Start a node on free ports and return its client address.

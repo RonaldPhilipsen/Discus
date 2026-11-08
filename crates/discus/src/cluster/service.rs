@@ -37,6 +37,9 @@ impl Service for NodeService {
                     message_type: inbound.message.type_code(),
                 };
             };
+            if node.faults.blocked.lock().contains(&inbound.peer.node_id) {
+                return futures::future::pending::<Message>().await;
+            }
             if let Some(r) = node.replicator() {
                 r.touch(inbound.peer.node_id);
             }
@@ -81,6 +84,10 @@ impl Service for NodeService {
                             message_type: m.type_code(),
                         };
                     };
+                    let stall = node.faults.stall_counter_ms.load(Ordering::Relaxed);
+                    if stall > 0 {
+                        tokio::time::sleep(Duration::from_millis(stall)).await;
+                    }
                     counters.handle(inbound.peer.node_id, m).await
                 }
                 Message::Forward(_) if inbound.peer.channel == Channel::Gossip => {

@@ -14,11 +14,13 @@ pub mod route;
 pub mod state;
 
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use discus_membership::{LeaseHolder, LeaseProvider};
 use discus_placement::{Epoch, MemberState, NodeId};
 use discus_resp::{Command, Value};
-use discus_wire::Message;
+use discus_wire::{GroupHint, Message, Regime};
+use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::{Config, Node};
@@ -50,6 +52,10 @@ pub struct Settings {
     pub limits: Limits,
     pub max_key_bytes: usize,
     pub reserve: u64,
+    pub lease_duration: Duration,
+    pub lease_renew: Duration,
+    pub lease_margin: Duration,
+    pub follower_timeout: Duration,
 }
 
 impl Settings {
@@ -62,6 +68,10 @@ impl Settings {
             },
             max_key_bytes: c.max_key_bytes,
             reserve: c.max_memory / 100 * c.counter_memory_percent,
+            lease_duration: Duration::from_millis(c.counter_lease_duration_ms.max(1)),
+            lease_renew: Duration::from_millis(c.counter_lease_renew_ms.max(1)),
+            lease_margin: Duration::from_millis(c.counter_lease_margin_ms),
+            follower_timeout: Duration::from_millis(c.counter_follower_timeout_ms),
         }
     }
 }
@@ -101,19 +111,43 @@ impl View {
     }
 }
 
+/// The lease of each counter group, `discus-counter-<g>` (spec section 10.1).
+pub type CounterLeases = Arc<dyn Fn(u16) -> Arc<dyn LeaseProvider> + Send + Sync>;
+
+/// How long decoded member hints stay fresh.
+const HINTS_FRESH: Duration = Duration::from_millis(50);
+
+/// The state of one group on this node, for tests and `GET /admin/counters`.
+#[derive(Debug, Clone)]
+pub struct GroupStatus {
+    pub group: u16,
+    pub role: &'static str,
+    pub regime: Option<Regime>,
+    pub leader: Option<NodeId>,
+    pub follower: Option<NodeId>,
+    pub synced: bool,
+    pub lease_until: Option<Instant>,
+    pub since: Option<Instant>,
+    /// The first role this node had in the current regime.
+    pub first_role: Option<&'static str>,
+}
+
 pub struct Counters {
     node: Weak<Node>,
     pub id: NodeId,
     pub settings: Settings,
     budget: Arc<Budget>,
     groups: Vec<Arc<Group>>,
+    hints: Mutex<(Option<Instant>, Vec<GroupHint>)>,
+    published: Mutex<Vec<u8>>,
 }
 
 impl Counters {
-    pub fn new(node: &Arc<Node>) -> Arc<Counters> {
+    /// The tier of `node`. Without `leases`, the epoch names each leader (spec section 10.1).
+    pub fn new(node: &Arc<Node>, leases: Option<CounterLeases>) -> Arc<Counters> {
         let settings = Settings::from_config(&node.config);
         let groups = (0..settings.groups)
-            .map(|g| Arc::new(Group::new(g)))
+            .map(|g| Arc::new(Group::new(g, leases.as_ref().map(|f| f(g)))))
             .collect();
         Arc::new(Counters {
             node: Arc::downgrade(node),
@@ -121,7 +155,112 @@ impl Counters {
             budget: Arc::new(Budget::new(settings.reserve, Some(node.store.clone()))),
             settings,
             groups,
+            hints: Mutex::new((None, Vec::new())),
+            published: Mutex::new(Vec::new()),
         })
+    }
+
+    /// The holder of a counter lease: this node, its address, and its cluster.
+    pub fn lease_holder(&self) -> LeaseHolder {
+        let node = self.node();
+        LeaseHolder {
+            identity: self.id.to_string(),
+            address: node
+                .as_ref()
+                .and_then(|n| n.membership().map(|m| m.local().addr))
+                .or_else(|| node.as_ref().map(|n| n.config.cluster_listen))
+                .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 0))),
+            cluster_id: node.map_or(discus_placement::ClusterId::NIL, |n| n.cluster_id()),
+        }
+    }
+
+    /// The current hints of the `NORMAL` members, decoded at most every [`HINTS_FRESH`].
+    fn member_hints(&self, view: &View) -> Vec<GroupHint> {
+        let mut cache = self.hints.lock();
+        if cache.0.is_some_and(|t| t.elapsed() < HINTS_FRESH) {
+            return cache.1.clone();
+        }
+        let members = self
+            .node()
+            .and_then(|n| n.membership().map(|m| m.members()))
+            .unwrap_or_default();
+        let hints: Vec<GroupHint> = members
+            .into_iter()
+            .filter(|(info, live)| {
+                *live != discus_wire::Liveness::Dead && info.id != view.me && view.normal(info.id)
+            })
+            .flat_map(|(info, _)| discus_wire::decode_hints(&info.leader_hints).unwrap_or_default())
+            .filter(|h| h.leader != view.me && view.normal(h.leader))
+            .collect();
+        *cache = (Some(Instant::now()), hints.clone());
+        hints
+    }
+
+    /// Publish the hints of the groups this node leads, when they changed.
+    fn publish_hints(&self) {
+        let Some(membership) = self.node().and_then(|n| n.membership().cloned()) else {
+            return;
+        };
+        let bytes = discus_wire::encode_hints(&self.own_hints());
+        let mut published = self.published.lock();
+        if *published != bytes {
+            *published = bytes.clone();
+            membership.set_leader_hints(bytes);
+        }
+    }
+
+    /// One step of group `g`: merge the member hints, run the controller, publish the hints.
+    async fn step(self: &Arc<Self>, group: &Arc<Group>, view: &View) {
+        let mut hints = self.member_hints(view);
+        hints.extend(group.own_hint(view.me));
+        group.observe(&hints);
+        group.step(self, view).await;
+        self.publish_hints();
+    }
+
+    pub fn status(&self) -> Vec<GroupStatus> {
+        let view = self.view();
+        self.groups
+            .iter()
+            .map(|g| {
+                let leader = view.as_ref().and_then(|v| g.leader(v));
+                let inner = g.inner();
+                let (regime, follower, synced, lease_until, since) = match &inner.role {
+                    Role::Idle => (None, None, false, None, None),
+                    Role::Follower(f) => (Some(f.regime), None, f.synced(), None, Some(f.since)),
+                    Role::Leader(l) => (
+                        Some(l.regime),
+                        l.follower(),
+                        true,
+                        l.lease_until(),
+                        Some(l.since),
+                    ),
+                };
+                GroupStatus {
+                    group: g.g,
+                    role: inner.role.name(),
+                    regime,
+                    leader,
+                    follower,
+                    synced,
+                    lease_until,
+                    since,
+                    first_role: inner
+                        .first_role
+                        .filter(|(r, _)| Some(*r) == regime)
+                        .map(|(_, name)| name),
+                }
+            })
+            .collect()
+    }
+
+    /// The counter state that this node holds for group `g`, as leader or follower.
+    pub fn held_state(&self, g: u16) -> Option<state::CounterState> {
+        match self.group(g).role() {
+            Role::Idle => None,
+            Role::Follower(f) => Some(f.state()),
+            Role::Leader(l) => Some(l.state()),
+        }
     }
 
     pub fn node(&self) -> Option<Arc<Node>> {
@@ -153,7 +292,7 @@ impl Counters {
                         ok = changed => if !ok { epochs = None },
                     }
                     if let Some(view) = me.view() {
-                        group.step(&me, &view).await;
+                        me.step(&group, &view).await;
                     }
                 }
                 group.clear();
@@ -203,8 +342,16 @@ impl Counters {
         }
         let now_ms = self.node().map_or(0, |n| n.store.now_ms());
         match self.group(g).role() {
-            Role::Leader(l) => l.execute(cmd, now_ms, &self.settings.limits).await,
-            Role::Idle => Err(Refusal::NotLeader),
+            Role::Leader(l) => {
+                l.execute(
+                    cmd,
+                    now_ms,
+                    &self.settings.limits,
+                    self.settings.follower_timeout,
+                )
+                .await
+            }
+            Role::Idle | Role::Follower(_) => Err(Refusal::NotLeader),
         }
     }
 
@@ -215,37 +362,44 @@ impl Counters {
     /// Ask every other `NORMAL` member who leads group `g`, at most once per
     /// [`group::ASK_EVERY`]. The answers arrive in the background.
     pub fn ask_leader(self: &Arc<Self>, g: u16) {
-        let group = self.group(g).clone();
-        if !group.may_ask() {
+        if !self.group(g).may_ask() {
             return;
         }
-        let Some(view) = self.view() else {
-            return;
-        };
         let me = self.clone();
         tokio::spawn(async move {
-            let peers: Vec<NodeId> = view
-                .ranked(g)
-                .into_iter()
-                .filter(|p| *p != view.me)
-                .collect();
-            let answers = futures::future::join_all(
-                peers
-                    .iter()
-                    .map(|p| me.send(*p, Message::RaftLeader(Vec::new()), ASK_TIMEOUT)),
-            )
-            .await;
-            let best = answers
-                .into_iter()
-                .filter_map(|a| match a {
-                    Ok(Message::RaftLeader(hints)) => Some(hints),
-                    _ => None,
-                })
-                .flatten()
-                .filter(|h| h.group == g && view.normal(h.leader))
-                .reduce(|a, b| if group::newer(&b, &a) { b } else { a });
-            group.learn(best);
+            me.ask_round(g).await;
         });
+    }
+
+    /// Ask now and wait for the answers. Returns the best hint with a `NORMAL` leader.
+    pub async fn ask_now(self: &Arc<Self>, g: u16) -> Option<GroupHint> {
+        self.ask_round(g).await
+    }
+
+    async fn ask_round(self: &Arc<Self>, g: u16) -> Option<GroupHint> {
+        let view = self.view()?;
+        let peers: Vec<NodeId> = view
+            .ranked(g)
+            .into_iter()
+            .filter(|p| *p != view.me)
+            .collect();
+        let answers = futures::future::join_all(
+            peers
+                .iter()
+                .map(|p| self.send(*p, Message::RaftLeader(Vec::new()), ASK_TIMEOUT)),
+        )
+        .await;
+        let best = answers
+            .into_iter()
+            .filter_map(|a| match a {
+                Ok(Message::RaftLeader(hints)) => Some(hints),
+                _ => None,
+            })
+            .flatten()
+            .filter(|h| h.group == g && view.normal(h.leader))
+            .reduce(|a, b| if group::newer(&b, &a) { b } else { a });
+        self.group(g).learn(best.clone());
+        best
     }
 
     /// Send one counter message on the bulk lane. A bulk timeout is not data-path evidence, so a
@@ -289,9 +443,18 @@ impl Counters {
     }
 
     /// Answer an inbound counter message.
-    pub async fn handle(&self, _from: NodeId, message: Message) -> Message {
+    pub async fn handle(self: &Arc<Self>, from: NodeId, message: Message) -> Message {
         match message {
             Message::RaftLeader(_) => Message::RaftLeader(self.own_hints()),
+            Message::CounterSync(s) => {
+                let Some(view) = self.view() else {
+                    return Message::Unsupported {
+                        message_type: Message::CounterSync(s).type_code(),
+                    };
+                };
+                let ack = self.group(s.group).on_sync(self, &view, from, &s);
+                Message::CounterAck(ack)
+            }
             other => Message::Unsupported {
                 message_type: other.type_code(),
             },

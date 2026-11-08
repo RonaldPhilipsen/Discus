@@ -76,6 +76,7 @@ pub type Clocks = (fn() -> NTP64, Arc<dyn Clock>);
 pub struct Opts {
     pub lease: Option<Arc<dyn LeaseProvider>>,
     pub clocks: Option<Clocks>,
+    pub counter_leases: Option<discus::counter::CounterLeases>,
 }
 
 impl Net {
@@ -159,6 +160,7 @@ impl Net {
                 lease: Some(lease),
                 hlc_clock,
                 wall,
+                counter_leases: opts.counter_leases,
             },
         )
         .await

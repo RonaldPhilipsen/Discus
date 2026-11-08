@@ -31,6 +31,41 @@ pub struct BindOptions {
     /// The HLC clock and the wall clock, for example two halves of one mock clock slot.
     pub hlc_clock: Option<fn() -> NTP64>,
     pub wall: Option<Arc<dyn Clock>>,
+    /// The counter group leases instead of the ones `--lease-provider` names.
+    pub counter_leases: Option<crate::counter::CounterLeases>,
+}
+
+#[cfg(feature = "k8s")]
+fn lease_namespace(config: &Config) -> String {
+    const NAMESPACE_FILE: &str = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
+    config.lease_namespace.clone().unwrap_or_else(|| {
+        std::fs::read_to_string(NAMESPACE_FILE)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "default".into())
+    })
+}
+
+/// The counter group leases that `--lease-provider` names: one `discus-counter-<g>` per group
+/// with `k8s`, none with `none` or static membership (spec section 10.1).
+fn counter_leases(config: &Config) -> Result<Option<crate::counter::CounterLeases>, String> {
+    if !config.gossip_enabled() || config.lease_provider == LeaseKind::None {
+        return Ok(None);
+    }
+    #[cfg(feature = "k8s")]
+    {
+        let namespace = lease_namespace(config);
+        let duration = Duration::from_millis(config.counter_lease_duration_ms);
+        let mut leases: Vec<Arc<dyn LeaseProvider>> = Vec::new();
+        for g in 0..config.counter_groups {
+            let name = format!("discus-counter-{g}");
+            let lease = discus_membership::lease::K8sLease::in_cluster(&namespace, &name, duration)
+                .map_err(|e| format!("--lease-provider k8s: {e}"))?;
+            leases.push(Arc::new(lease));
+        }
+        Ok(Some(Arc::new(move |g: u16| leases[usize::from(g)].clone())))
+    }
+    #[cfg(not(feature = "k8s"))]
+    Err("--lease-provider k8s needs the k8s build feature".into())
 }
 
 /// The lease that `--lease-provider` names.
@@ -45,12 +80,7 @@ fn lease_provider(config: &Config) -> Result<Arc<dyn LeaseProvider>, String> {
         }
         #[cfg(feature = "k8s")]
         LeaseKind::K8s => {
-            const NAMESPACE_FILE: &str = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
-            let namespace = config.lease_namespace.clone().unwrap_or_else(|| {
-                std::fs::read_to_string(NAMESPACE_FILE)
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or_else(|_| "default".into())
-            });
+            let namespace = lease_namespace(config);
             let duration = Duration::from_millis(config.lease_duration_ms);
             discus_membership::lease::K8sLease::in_cluster(&namespace, &config.lease_name, duration)
                 .map(|l| Arc::new(l) as Arc<dyn LeaseProvider>)
@@ -126,7 +156,11 @@ impl Server {
             (Some(wall), Some(hlc_clock)) => Node::with_clocks(config, security, wall, hlc_clock),
             _ => Node::new(config, security),
         });
-        node.set_counters(crate::counter::Counters::new(&node));
+        let leases = match opts.counter_leases {
+            Some(leases) => Some(leases),
+            None => counter_leases(&node.config).map_err(invalid)?,
+        };
+        node.set_counters(crate::counter::Counters::new(&node, leases));
         if let Some(tls) = tls {
             let cfg = &node.config;
             let mut tc = TransportConfig::new(cfg.cluster_listen, tls, node.id, node.cluster_id());

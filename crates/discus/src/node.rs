@@ -81,6 +81,11 @@ pub struct Faults {
     pub stall_bulk_ms: AtomicU64,
     /// Never answer a forwarded command.
     pub stall_forwards: std::sync::atomic::AtomicBool,
+    /// Delay inbound counter messages by this many milliseconds.
+    pub stall_counter_ms: AtomicU64,
+    /// Never answer an inbound message of any kind from these peers. Blocking both sides makes
+    /// a partition.
+    pub blocked: parking_lot::Mutex<std::collections::HashSet<NodeId>>,
 }
 
 /// Keeps one epoch in the history until it is dropped (spec section 5.1). Handoff holds one for

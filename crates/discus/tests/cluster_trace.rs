@@ -19,7 +19,8 @@ use tokio_util::sync::CancellationToken;
 
 const TP: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
-/// A fake member that answers every forward with `OK` and keeps the trace context it got.
+/// A fake member that answers every request with a `FORWARD_REPLY` of `OK` and keeps the trace
+/// context of each forward.
 struct Capture {
     epoch: EpochId,
     seen: Mutex<Vec<TraceContext>>,
@@ -31,7 +32,10 @@ impl Service for Capture {
     }
 
     fn call(self: Arc<Self>, inbound: Inbound) -> BoxFuture<'static, Message> {
-        self.seen.lock().push(inbound.trace.clone());
+        // The counter tier of the real node also talks to this member. Only forwards count.
+        if matches!(inbound.message, Message::Forward(_)) {
+            self.seen.lock().push(inbound.trace.clone());
+        }
         let epoch = self.epoch;
         Box::pin(async move {
             Message::ForwardReply(ForwardReply {
