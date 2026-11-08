@@ -235,7 +235,9 @@ impl Group {
         // A voter set without a live majority can commit nothing, so no membership change can
         // repair it (spec section 10.2). This comes before the leader branch, and it covers a
         // joint change whose new voters went away. The leader acts, or else the top live voter.
-        let live = |(id, n): &(u64, NodeId)| *id == replica.replica || view.normal(*n);
+        let live = |(id, n): &(u64, NodeId)| {
+            *id == replica.replica || (view.normal(*n) && !replica.contacts.refused(*id))
+        };
         let quorum = replica.voter_configs().iter().all(|c| {
             2 * voters
                 .iter()
@@ -250,6 +252,15 @@ impl Group {
                 .find(|n| voters.iter().any(|v| v.1 == *n && live(v)));
             let leader_up = replica.leader_node().is_some_and(|l| view.normal(l));
             if r.leads() || (top == Some(view.me) && !leader_up) {
+                // The peers that refused can have moved on to a newer regime.
+                if counters
+                    .ask_now(self.g)
+                    .await
+                    .is_some_and(|best| best.regime > r.regime())
+                {
+                    self.set_role_if(seen, Role::Idle);
+                    return;
+                }
                 let state = replica.state();
                 self.create_instance(counters, view, seen, state, "the other voters are gone")
                     .await;
@@ -367,8 +378,10 @@ impl Group {
         let targets: Vec<NodeId> = view.ranked(self.g).into_iter().take(3).collect();
         let voters = replica.voters();
         let learners = replica.learners();
-        let lost =
-            |id: &u64| replica.contacts.silent_for(*id, leading_since) > settings.voter_timeout;
+        let lost = |id: &u64| {
+            replica.contacts.refused(*id)
+                || replica.contacts.silent_for(*id, leading_since) > settings.voter_timeout
+        };
         let alive = |(id, n): &(u64, NodeId)| {
             *id == replica.replica
                 || (view.epoch.member(*n).is_some_and(|m| {
@@ -376,8 +389,8 @@ impl Group {
                         || m.state == discus_placement::MemberState::Leaving
                 }) && !lost(id))
         };
-        // A node that joins again discards its replica, and the replica ID never comes back. The
-        // node stays listed under that ID, so it gets no new replica until the learner goes.
+        // A node that joins again discards its replica, and it refuses the old ID. The node
+        // stays listed under that ID, so it gets no new replica until the learner goes.
         if let Some(l) = learners.iter().find(|(id, _)| lost(id)) {
             return Some(Move::RemoveNode(*l, "removing a lost learner"));
         }
