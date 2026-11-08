@@ -3,7 +3,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use discus_store::{Entry, ManualClock, NodeId, Store, StoreConfig, Value, Version, NTP64};
+use discus_placement::ManualClock;
+use discus_store::{Entry, NodeId, Store, StoreConfig, Value, Version, NTP64};
 
 const TTL: u64 = 60_000;
 

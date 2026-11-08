@@ -1,5 +1,6 @@
+use discus_placement::ManualClock;
 use discus_store::Version;
-use discus_store::{Admit, Entry, ManualClock, Store, StoreConfig, Value, HASH_SEED};
+use discus_store::{Admit, Entry, Store, StoreConfig, Value, HASH_SEED};
 use std::sync::Arc;
 
 fn entry(size: usize) -> Entry {

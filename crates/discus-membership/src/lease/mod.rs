@@ -3,6 +3,7 @@
 
 #[cfg(feature = "k8s")]
 mod k8s;
+#[cfg(feature = "testing")]
 mod memory;
 
 use std::net::SocketAddr;
@@ -12,6 +13,7 @@ use futures::future::BoxFuture;
 
 #[cfg(feature = "k8s")]
 pub use k8s::K8sLease;
+#[cfg(feature = "testing")]
 pub use memory::MemoryLease;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

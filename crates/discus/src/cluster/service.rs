@@ -1,8 +1,6 @@
 //! The inbound side: execute commands that other nodes forward.
 
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
-use std::time::Duration;
 
 use discus_placement::EpochId;
 use discus_resp::{Limits, Parser, Value};
@@ -37,8 +35,9 @@ impl Service for NodeService {
                     message_type: inbound.message.type_code(),
                 };
             };
-            if node.faults.blocked.lock().contains(&inbound.peer.node_id) {
-                return futures::future::pending::<Message>().await;
+            #[cfg(feature = "testing")]
+            if let Some(d) = node.faults.delay(inbound.peer.node_id, &inbound.message) {
+                tokio::time::sleep(d).await;
             }
             if let Some(r) = node.replicator() {
                 r.touch(inbound.peer.node_id);
@@ -64,10 +63,6 @@ impl Service for NodeService {
                             message_type: m.type_code(),
                         };
                     };
-                    let stall = node.faults.stall_bulk_ms.load(Ordering::Relaxed);
-                    if stall > 0 && !matches!(m, Message::Fetch { .. } | Message::Digest { .. }) {
-                        tokio::time::sleep(Duration::from_millis(stall)).await;
-                    }
                     replicator.handle(inbound.peer.node_id, m).await
                 }
                 m @ (Message::RaftLeader(_)
@@ -84,10 +79,6 @@ impl Service for NodeService {
                             message_type: m.type_code(),
                         };
                     };
-                    let stall = node.faults.stall_counter_ms.load(Ordering::Relaxed);
-                    if stall > 0 {
-                        tokio::time::sleep(Duration::from_millis(stall)).await;
-                    }
                     counters.handle(inbound.peer.node_id, m).await
                 }
                 Message::Forward(_) if inbound.peer.channel == Channel::Gossip => {
@@ -95,9 +86,7 @@ impl Service for NodeService {
                         message_type: discus_wire::fb::MessageType::FORWARD.0,
                     }
                 }
-                Message::Forward(_) if node.faults.stall_forwards.load(Ordering::Relaxed) => {
-                    futures::future::pending::<Message>().await
-                }
+
                 Message::Forward(f) => {
                     let span =
                         telemetry::forwarded_span(discus_telemetry::global(), &inbound.trace);

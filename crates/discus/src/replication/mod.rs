@@ -72,7 +72,10 @@ impl Settings {
                 global_bytes: c.max_memory / 100 * c.hint_memory_percent,
                 max_age: Duration::from_millis(c.tombstone_ttl_ms),
             },
+            #[cfg(feature = "testing")]
             handoff: c.handoff,
+            #[cfg(not(feature = "testing"))]
+            handoff: true,
             handoff_rate: c.handoff_rate_bytes,
             handoff_timeout: Duration::from_millis(c.handoff_timeout_ms),
         }
@@ -872,7 +875,8 @@ fn ack(node: &Node, applied: u32, want: Vec<Bytes>) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use discus_store::{ManualClock, StoreConfig, Value};
+    use discus_placement::ManualClock;
+    use discus_store::{StoreConfig, Value};
 
     #[test]
     fn keys_past_the_batch_size_stay_queued() {
