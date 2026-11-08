@@ -151,6 +151,12 @@ fn promotion(voters: usize, ready: &[(u64, NodeId)]) -> Option<BTreeSet<u64>> {
     (!promote.is_empty()).then_some(promote)
 }
 
+/// The `NORMAL` voters form a majority of `voters`, so they can elect a leader without the
+/// others.
+fn normal_quorum(voters: &[NodeId], normal: impl Fn(NodeId) -> bool) -> bool {
+    2 * voters.iter().filter(|n| normal(**n)).count() > voters.len()
+}
+
 /// The Raft network of a node: every Raft message goes on the bulk lane.
 pub struct Link(pub std::sync::Weak<Counters>);
 
@@ -296,16 +302,15 @@ impl Group {
         }
         let replica = &r.replica;
         let leader = replica.leader_node().filter(|l| view.normal(*l));
+        let voters: Vec<NodeId> = replica.voters().into_iter().map(|(_, n)| n).collect();
+        // A voter that does not lead holds only the entries that it applied. While the `NORMAL`
+        // voters can still elect a leader, an old leader that is `LEAVING` or about to be
+        // `DEAD` can still commit with them, so the voter waits for the next leader to switch.
         let takes = if r.leads() {
             true
-        } else if me_voter && leader.is_none() {
-            if self.lease_kind() {
-                true
-            } else {
-                let voters: BTreeSet<NodeId> =
-                    replica.voters().into_iter().map(|(_, n)| n).collect();
-                view.ranked(self.g).into_iter().find(|n| voters.contains(n)) == Some(view.me)
-            }
+        } else if me_voter && leader.is_none() && !normal_quorum(&voters, |n| view.normal(n)) {
+            self.lease_kind()
+                || view.ranked(self.g).into_iter().find(|n| voters.contains(n)) == Some(view.me)
         } else {
             false
         };
@@ -320,6 +325,22 @@ impl Group {
         } else {
             None
         };
+        if r.leads() {
+            // The read index waits until this leader applied every entry that a quorum
+            // committed, also those of earlier leaders.
+            let linearizable = tokio::time::timeout(
+                counters.settings.timeout,
+                replica.raft.ensure_linearizable(),
+            )
+            .await;
+            if !matches!(linearizable, Ok(Ok(_))) {
+                return;
+            }
+        }
+        // A leader applies a write before its reply leaves, and after the shutdown no write
+        // commits through this replica. So the state read after the shutdown holds every write
+        // that this leader acknowledged.
+        replica.shutdown().await;
         let state = replica.state();
         let regime = self.next_regime(view.me);
         let leader = LfLeader::new(
@@ -606,6 +627,18 @@ mod tests {
         assert_eq!(promotion(1, &ready(0)), None);
         assert_eq!(promotion(1, &ready(2)), Some(BTreeSet::from([1, 2])));
         assert_eq!(promotion(1, &ready(3)), Some(BTreeSet::from([1, 2, 3])));
+    }
+
+    #[test]
+    fn the_normal_voters_can_elect_with_a_majority() {
+        let ids: Vec<NodeId> = (1..=3u128).map(NodeId::from_u128).collect();
+        let normal =
+            |up: &'static [u128]| move |n: NodeId| up.iter().any(|u| NodeId::from_u128(*u) == n);
+        assert!(normal_quorum(&ids, normal(&[1, 2, 3])));
+        assert!(normal_quorum(&ids, normal(&[1, 2])));
+        assert!(!normal_quorum(&ids, normal(&[1])));
+        assert!(normal_quorum(&ids[..2], normal(&[1, 2])));
+        assert!(!normal_quorum(&ids[..2], normal(&[1])));
     }
 
     #[test]

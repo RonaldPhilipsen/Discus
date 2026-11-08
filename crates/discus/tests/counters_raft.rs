@@ -399,3 +399,67 @@ async fn the_final_value_counts_every_success() {
         "{ok} successes and {failed} failures, but the value is {total}"
     );
 }
+
+/// The Raft leader drains while the other nodes write to its group. The group switches down,
+/// and the counter keeps every increment that a client saw succeed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_draining_raft_leader_keeps_every_increment() {
+    let _turn = common::counters::turn("a_draining_raft_leader_keeps_every_increment").await;
+    let (net, leases) = (Net::new(), Leases::new());
+    let nodes = raft_cluster(&net, &leases, 3, &[]).await;
+    let refs: Vec<&GossipNode> = nodes.iter().collect();
+    let key = "cnt:drain";
+    let g = group_of(&nodes[0], key);
+    let leader = leader_of(&refs, g).unwrap();
+    let rest: Vec<&GossipNode> = nodes.iter().filter(|n| n.id != leader.id).collect();
+
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (ok, ambiguous) = (Arc::new(AtomicI64::new(0)), Arc::new(AtomicI64::new(0)));
+    let mut load = Vec::new();
+    for i in 0..4 {
+        let (mut c, stop, ok, ambiguous) = (
+            rest[i % 2].redis().await,
+            stop.clone(),
+            ok.clone(),
+            ambiguous.clone(),
+        );
+        load.push(tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                let r: redis::RedisResult<i64> =
+                    redis::cmd("INCR").arg(key).query_async(&mut c).await;
+                match r {
+                    Ok(_) => ok.fetch_add(1, Ordering::Relaxed),
+                    Err(e) if e.to_string().contains("has no leader") => 0,
+                    Err(_) => ambiguous.fetch_add(1, Ordering::Relaxed),
+                };
+            }
+        }));
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    leader.node.drain_token().cancel();
+    assert!(wait_until(Duration::from_secs(20), || agreed(&rest)).await);
+    assert!(
+        wait_until(Duration::from_secs(15), || leader_of(&rest, g)
+            .is_some_and(|l| status(l, g).voters.is_empty()))
+        .await,
+        "the group did not switch down"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    stop.store(true, Ordering::Relaxed);
+    for task in load {
+        task.await.unwrap();
+    }
+
+    let (ok, ambiguous) = (
+        ok.load(Ordering::Relaxed),
+        ambiguous.load(Ordering::Relaxed),
+    );
+    let mut c = rest[0].redis().await;
+    let value: i64 = c.get(key).await.unwrap();
+    assert!(ok > 0, "the load did not run");
+    assert!(
+        ok <= value && value <= ok + ambiguous,
+        "the counter is {value}, with {ok} successes and {ambiguous} ambiguous increments"
+    );
+}

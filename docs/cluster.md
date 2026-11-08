@@ -582,8 +582,10 @@ snapshots, and the votes live in memory.
   each group creates a Raft group with itself as the only voter and its state as the start. It
   lets the lease expire. The other members join as learners.
 - Down: below three members, a group switches at once. The Raft leader takes the lease. If the
-  leader is gone, a surviving voter takes it. Other members wait one lease duration first. If the
-  quorum was already lost, the last committed writes can be lost.
+  leader is gone and the `NORMAL` voters are a majority, they elect a new leader first, and that
+  leader switches. Only when they are no majority does a surviving voter take the lease. Other
+  members wait one lease duration first. If the quorum was already lost, the last committed
+  writes can be lost.
 
 ### Quorum loss
 
