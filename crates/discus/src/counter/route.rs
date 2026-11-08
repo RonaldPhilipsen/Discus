@@ -17,7 +17,7 @@ use super::{state, Counters, Refusal};
 use crate::cluster::multi::Merge;
 use crate::cluster::route::{keys_of, Keys, Route};
 use crate::cluster::{forward, Dispatch, Hop, Job, Reply, MAX_HOPS};
-use crate::command::util::upper;
+use crate::command::util::{check_key, check_value};
 use crate::command::{CommandError, CommandSpec};
 use crate::Node;
 
@@ -55,10 +55,10 @@ pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
     if strong != keys.len() {
         return Some(Dispatch::Ready(error(MIXED)));
     }
-    if !state::accepts(&upper(&job.cmd[0])) {
+    if !state::accepts(job.spec.name) {
         return Some(Dispatch::Ready(error(ONLY_STRINGS)));
     }
-    if let Err(e) = check_sizes(node, &job.cmd) {
+    if let Err(e) = check_sizes(node, job.spec.name, &job.cmd) {
         return Some(Dispatch::Ready(Reply::error(e)));
     }
     let (node, cmd, hop, route) = (node.clone(), job.cmd.clone(), hop.clone(), job.spec.route);
@@ -84,9 +84,8 @@ pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
     })))
 }
 
-fn check_sizes(node: &Node, cmd: &Command) -> Result<(), CommandError> {
-    let name = upper(&cmd[0]);
-    let (keys, values): (Vec<&Bytes>, Vec<&Bytes>) = match name.as_str() {
+fn check_sizes(node: &Node, name: &str, cmd: &Command) -> Result<(), CommandError> {
+    let (keys, values): (Vec<&Bytes>, Vec<&Bytes>) = match name {
         "MSET" => {
             if cmd.len().is_multiple_of(2) {
                 return Err(CommandError::WrongArity("MSET".into()));
@@ -99,13 +98,8 @@ fn check_sizes(node: &Node, cmd: &Command) -> Result<(), CommandError> {
         "SET" | "APPEND" => (vec![&cmd[1]], vec![&cmd[2]]),
         _ => (vec![&cmd[1]], vec![]),
     };
-    if keys.iter().any(|k| k.len() > node.config.max_key_bytes) {
-        return Err(CommandError::KeyTooLarge);
-    }
-    if values.iter().any(|v| v.len() > node.config.max_value_bytes) {
-        return Err(CommandError::ValueTooLarge);
-    }
-    Ok(())
+    keys.into_iter().try_for_each(|k| check_key(node, k))?;
+    values.into_iter().try_for_each(|v| check_value(node, v))
 }
 
 /// Split by group and merge like a normal multi-key command (spec section 7.3).
