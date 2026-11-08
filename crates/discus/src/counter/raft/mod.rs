@@ -8,8 +8,7 @@ pub mod convert;
 pub mod network;
 pub mod store;
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
+use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,7 +17,7 @@ use bytes::Bytes;
 use discus_placement::NodeId;
 use discus_resp::{Command, Value};
 use discus_wire::{Message, RaftReply, Regime};
-use openraft::{Config, Raft, RaftMetrics, ServerState, SnapshotPolicy};
+use openraft::{Config, Membership, Raft, RaftMetrics, ServerState, SnapshotPolicy};
 use parking_lot::Mutex;
 
 use super::budget::Budget;
@@ -38,17 +37,6 @@ openraft::declare_raft_types!(
 pub struct Op {
     pub stamp_ms: u64,
     pub command: Command,
-}
-
-impl fmt::Display for Op {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}@{}",
-            String::from_utf8_lossy(&self.command[0]),
-            self.stamp_ms
-        )
-    }
 }
 
 /// The node behind a replica ID.
@@ -191,60 +179,69 @@ impl Replica {
         Message::RaftReply(reply)
     }
 
+    fn with_metrics<R>(&self, f: impl FnOnce(&RaftMetrics<u64, Peer>) -> R) -> R {
+        f(&self.raft.metrics().borrow())
+    }
+
+    fn with_membership<R>(&self, f: impl FnOnce(&Membership<u64, Peer>) -> R) -> R {
+        self.with_metrics(|m| f(m.membership_config.membership()))
+    }
+
     pub fn metrics(&self) -> RaftMetrics<u64, Peer> {
-        self.raft.metrics().borrow().clone()
+        self.with_metrics(Clone::clone)
     }
 
     pub fn is_leader(&self) -> bool {
-        let m = self.metrics();
-        m.state == ServerState::Leader && m.current_leader == Some(self.replica)
-    }
-
-    /// The node of a replica ID in the current membership.
-    pub fn node_of(&self, replica: u64) -> Option<NodeId> {
-        self.metrics()
-            .membership_config
-            .membership()
-            .get_node(&replica)
-            .map(|p| p.node)
+        self.with_metrics(|m| {
+            m.state == ServerState::Leader && m.current_leader == Some(self.replica)
+        })
     }
 
     pub fn leader_node(&self) -> Option<NodeId> {
-        let m = self.metrics();
-        let leader = m.current_leader?;
-        m.membership_config
-            .membership()
-            .get_node(&leader)
-            .map(|p| p.node)
+        self.with_metrics(|m| {
+            m.membership_config
+                .membership()
+                .get_node(&m.current_leader?)
+                .map(|p| p.node)
+        })
     }
 
     /// The voters of the current membership, by replica ID and node. During a joint change it is
     /// the union of both sets.
     pub fn voters(&self) -> Vec<(u64, NodeId)> {
-        let m = self.metrics();
-        let membership = m.membership_config.membership();
-        let ids: BTreeSet<u64> = membership.voter_ids().collect();
-        ids.into_iter()
-            .filter_map(|id| membership.get_node(&id).map(|p| (id, p.node)))
-            .collect()
+        self.with_membership(|m| {
+            m.voter_ids()
+                .filter_map(|id| m.get_node(&id).map(|p| (id, p.node)))
+                .collect()
+        })
     }
 
     pub fn learners(&self) -> Vec<(u64, NodeId)> {
-        let m = self.metrics();
-        let membership = m.membership_config.membership();
-        membership
-            .learner_ids()
-            .filter_map(|id| membership.get_node(&id).map(|p| (id, p.node)))
-            .collect()
+        self.with_membership(|m| {
+            m.learner_ids()
+                .filter_map(|id| m.get_node(&id).map(|p| (id, p.node)))
+                .collect()
+        })
+    }
+
+    pub fn voter_nodes(&self) -> Vec<NodeId> {
+        self.voters().into_iter().map(|(_, n)| n).collect()
+    }
+
+    pub fn learner_nodes(&self) -> Vec<NodeId> {
+        self.learners().into_iter().map(|(_, n)| n).collect()
+    }
+
+    pub fn is_voter(&self) -> bool {
+        self.with_membership(|m| m.voter_ids().any(|id| id == self.replica))
+    }
+
+    pub fn is_learner(&self) -> bool {
+        self.with_membership(|m| m.learner_ids().any(|id| id == self.replica))
     }
 
     pub fn in_joint_change(&self) -> bool {
-        self.metrics()
-            .membership_config
-            .membership()
-            .get_joint_config()
-            .len()
-            > 1
+        self.with_membership(|m| m.get_joint_config().len() > 1)
     }
 
     /// The state that this replica applied.
@@ -259,18 +256,13 @@ impl Replica {
 
 /// A random replica ID. Zero means "no replica" on the wire, so it is never used.
 pub fn new_replica_id() -> u64 {
-    loop {
-        let id = fastrand::u64(..);
-        if id != 0 {
-            return id;
-        }
-    }
+    fastrand::u64(1..)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
 
     use futures::future::BoxFuture;
 

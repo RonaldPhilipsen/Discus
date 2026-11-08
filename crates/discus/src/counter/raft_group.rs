@@ -106,10 +106,7 @@ impl RaftRole {
     }
 
     pub fn is_voter(&self) -> bool {
-        self.replica
-            .voters()
-            .iter()
-            .any(|(id, _)| *id == self.replica.replica)
+        self.replica.is_voter()
     }
 
     /// The hint of the Raft leader that this replica knows.
@@ -122,13 +119,8 @@ impl RaftRole {
             regime: self.regime(),
             leader,
             term: m.current_term,
-            voters: self.replica.voters().into_iter().map(|(_, n)| n).collect(),
-            learners: self
-                .replica
-                .learners()
-                .into_iter()
-                .map(|(_, n)| n)
-                .collect(),
+            voters: self.replica.voter_nodes(),
+            learners: self.replica.learner_nodes(),
             ..GroupHint::default()
         })
     }
@@ -231,9 +223,9 @@ impl Group {
     ) {
         let replica = &r.replica;
         let voters = replica.voters();
-        let me_voter = voters.iter().any(|(id, _)| *id == replica.replica);
+        let me_voter = replica.is_voter();
         if view.normal_count() < 3 {
-            self.down_switch(counters, view, seen, r, me_voter).await;
+            self.down_switch(counters, view, seen, r).await;
             return;
         }
         // Two of three voters are gone: the survivor reconfigures to itself (spec section 10.2).
@@ -274,11 +266,7 @@ impl Group {
             .known
             .as_ref()
             .is_some_and(|k| k.regime > r.regime());
-        let listed = me_voter
-            || replica
-                .learners()
-                .iter()
-                .any(|(id, _)| *id == replica.replica);
+        let listed = me_voter || replica.is_learner();
         let orphan = !listed && replica.started.elapsed() > ORPHAN_AFTER;
         if known_newer || orphan {
             self.set_role_if(seen, Role::Idle);
@@ -293,7 +281,6 @@ impl Group {
         view: &View,
         seen: u64,
         r: &Arc<RaftRole>,
-        me_voter: bool,
     ) {
         if !view.me_normal {
             // A `LEAVING` replica cannot take the lease, and the survivors switch without it.
@@ -302,13 +289,14 @@ impl Group {
         }
         let replica = &r.replica;
         let leader = replica.leader_node().filter(|l| view.normal(*l));
-        let voters: Vec<NodeId> = replica.voters().into_iter().map(|(_, n)| n).collect();
+        let voters = replica.voter_nodes();
+        let leads = r.leads();
         // A voter that does not lead holds only the entries that it applied. While the `NORMAL`
         // voters can still elect a leader, an old leader that is `LEAVING` or about to be
         // `DEAD` can still commit with them, so the voter waits for the next leader to switch.
-        let takes = if r.leads() {
+        let takes = if leads {
             true
-        } else if me_voter && leader.is_none() && !normal_quorum(&voters, |n| view.normal(n)) {
+        } else if r.is_voter() && leader.is_none() && !normal_quorum(&voters, |n| view.normal(n)) {
             self.lease_kind()
                 || view.ranked(self.g).into_iter().find(|n| voters.contains(n)) == Some(view.me)
         } else {
@@ -325,7 +313,7 @@ impl Group {
         } else {
             None
         };
-        if r.leads() {
+        if leads {
             // The read index waits until this leader applied every entry that a quorum
             // committed, also those of earlier leaders.
             let linearizable = tokio::time::timeout(

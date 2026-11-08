@@ -344,8 +344,8 @@ impl Counters {
                 };
                 let (voters, learners, installed) = match &inner.role {
                     Role::Raft(r) => (
-                        r.replica.voters().into_iter().map(|(_, n)| n).collect(),
-                        r.replica.learners().into_iter().map(|(_, n)| n).collect(),
+                        r.replica.voter_nodes(),
+                        r.replica.learner_nodes(),
                         r.replica.sm.lock().installed,
                     ),
                     _ => (Vec::new(), Vec::new(), 0),
