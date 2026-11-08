@@ -179,16 +179,12 @@ impl Replica {
         Message::RaftReply(reply)
     }
 
-    fn with_metrics<R>(&self, f: impl FnOnce(&RaftMetrics<u64, Peer>) -> R) -> R {
+    pub(super) fn with_metrics<R>(&self, f: impl FnOnce(&RaftMetrics<u64, Peer>) -> R) -> R {
         f(&self.raft.metrics().borrow())
     }
 
     fn with_membership<R>(&self, f: impl FnOnce(&Membership<u64, Peer>) -> R) -> R {
         self.with_metrics(|m| f(m.membership_config.membership()))
-    }
-
-    pub fn metrics(&self) -> RaftMetrics<u64, Peer> {
-        self.with_metrics(Clone::clone)
     }
 
     pub fn is_leader(&self) -> bool {

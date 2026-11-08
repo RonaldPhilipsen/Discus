@@ -110,14 +110,13 @@ impl RaftRole {
 
     /// The hint of the Raft leader that this replica knows.
     pub fn hint(&self, g: u16) -> Option<GroupHint> {
-        let m = self.replica.metrics();
         let leader = self.replica.leader_node()?;
         Some(GroupHint {
             group: g,
             mode: CounterMode::Raft,
             regime: self.regime(),
             leader,
-            term: m.current_term,
+            term: self.replica.with_metrics(|m| m.current_term),
             voters: self.replica.voter_nodes(),
             learners: self.replica.learner_nodes(),
             ..GroupHint::default()
@@ -143,7 +142,7 @@ fn voter_goal(
     if 2 * last.iter().filter(|id| live(id)).count() <= last.len() {
         return None;
     }
-    if !desired.is_empty() && desired.len() == want && (joint || desired != *last) {
+    if desired.len() == want && (joint || desired != *last) {
         return Some(desired);
     }
     joint.then(|| last.clone())
@@ -323,7 +322,7 @@ impl Group {
         let takes = if r.leads() {
             true
         } else if r.is_voter() && leader.is_none() && !normal_quorum(&voters, |n| view.normal(n)) {
-            self.lease_kind()
+            self.lease.is_some()
                 || view.ranked(self.g).into_iter().find(|n| voters.contains(n)) == Some(view.me)
         } else {
             false
@@ -331,7 +330,7 @@ impl Group {
         if !takes {
             return;
         }
-        let lease_until = if self.lease_kind() {
+        let lease_until = if self.lease.is_some() {
             match self.acquire(counters).await {
                 Some(Ok(until)) => Some(until),
                 _ => return,
@@ -394,14 +393,14 @@ impl Group {
         if let Some(l) = learners.iter().find(|(id, _)| lost(id)) {
             return Some(Move::RemoveNode(*l, "removing a lost learner"));
         }
-        let metrics = replica.metrics();
-        let last_index = metrics.last_log_index.unwrap_or(0);
         let caught_up = |id: &u64| {
-            metrics
-                .replication
-                .as_ref()
-                .and_then(|m| m.get(id).cloned().flatten())
-                .is_some_and(|l| l.index + settings.catchup_entries >= last_index)
+            replica.with_metrics(|m| {
+                let last_index = m.last_log_index.unwrap_or(0);
+                m.replication
+                    .as_ref()
+                    .and_then(|r| r.get(id).cloned().flatten())
+                    .is_some_and(|l| l.index + settings.catchup_entries >= last_index)
+            })
         };
         // One replica per target: its live voter, else a learner that caught up.
         let desired: BTreeSet<u64> = targets
@@ -414,29 +413,25 @@ impl Group {
                     .map(|v| v.0)
             })
             .collect();
-        let configs = replica.voter_configs();
+        let mut configs = replica.voter_configs();
         let joint = configs.len() > 1;
-        let last = configs.last().cloned().unwrap_or_default();
+        let last = configs.pop().unwrap_or_default();
         let live = |id: &u64| voters.iter().any(|v| v.0 == *id && alive(v));
-        let goal = voter_goal(desired, &last, joint, targets.len(), live).map(Move::Voters);
-        if joint && goal.is_some() {
-            return goal;
+        if let Some(ids) = voter_goal(desired, &last, joint, targets.len(), live) {
+            return Some(Move::Voters(ids));
         }
         // A dead replica does not list its node. A target whose replica went away gets a new one
         // under a new ID, and the voter change then drops the old ID.
         let listed = |t: &NodeId| {
-            voters.iter().any(|v| v.1 == *t && alive(v))
-                || learners.iter().any(|l| l.1 == *t && !lost(&l.0))
+            voters.iter().any(|v| v.1 == *t && alive(v)) || learners.iter().any(|l| l.1 == *t)
         };
         if let Some(t) = targets.iter().find(|t| !listed(t)) {
             return Some(Move::AddLearner(*t));
         }
-        goal.or_else(|| {
-            learners
-                .iter()
-                .find(|(_, n)| !targets.contains(n))
-                .map(|l| Move::RemoveNode(*l, "removing a learner that is not a target"))
-        })
+        learners
+            .iter()
+            .find(|(_, n)| !targets.contains(n))
+            .map(|l| Move::RemoveNode(*l, "removing a learner that is not a target"))
     }
 
     /// Move the membership one change toward the target voters (spec section 10.2).
@@ -495,13 +490,13 @@ impl Group {
     /// Every voter of the best known Raft regime is gone: the top target creates the group
     /// again, empty (spec section 10.2).
     pub(super) async fn rebuild_if_lost(&self, counters: &Arc<Counters>, view: &View, seen: u64) {
-        let Some(known) = self.inner().known.clone() else {
-            return;
-        };
         if self.leader(view.me, &view.epoch).is_some() {
             self.inner().leaderless = None;
             return;
         }
+        let Some(known) = self.inner().known.clone() else {
+            return;
+        };
         if known.mode != CounterMode::Raft || view.ranked(self.g).first() != Some(&view.me) {
             return;
         }
