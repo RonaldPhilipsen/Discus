@@ -235,14 +235,15 @@ impl RaftReply {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum CounterMode {
+    #[default]
     LeaderFollower,
     Raft,
 }
 
 /// What one node knows about the leader of one group.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GroupHint {
     pub group: u16,
     pub mode: CounterMode,

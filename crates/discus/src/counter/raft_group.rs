@@ -122,7 +122,6 @@ impl RaftRole {
             regime: self.regime(),
             leader,
             term: m.current_term,
-            follower: None,
             voters: self.replica.voters().into_iter().map(|(_, n)| n).collect(),
             learners: self
                 .replica
@@ -130,6 +129,7 @@ impl RaftRole {
                 .into_iter()
                 .map(|(_, n)| n)
                 .collect(),
+            ..GroupHint::default()
         })
     }
 }

@@ -307,10 +307,8 @@ impl Group {
                 mode: CounterMode::LeaderFollower,
                 regime: l.regime,
                 leader: me,
-                term: 0,
                 follower: l.follower(),
-                voters: Vec::new(),
-                learners: Vec::new(),
+                ..GroupHint::default()
             }),
             _ => None,
         }
@@ -628,10 +626,8 @@ impl Group {
             mode: CounterMode::LeaderFollower,
             regime: s.regime,
             leader: from,
-            term: 0,
             follower: Some(view.me),
-            voters: Vec::new(),
-            learners: Vec::new(),
+            ..GroupHint::default()
         };
         {
             let mut inner = self.inner.lock();
@@ -672,10 +668,7 @@ pub(super) fn raft_answer(
             mode: CounterMode::Raft,
             regime,
             leader: NodeId::NIL,
-            term: 0,
-            follower: None,
-            voters: Vec::new(),
-            learners: Vec::new(),
+            ..GroupHint::default()
         },
     }
 }
@@ -745,7 +738,6 @@ mod tests {
 
     fn raft_hint(leader: NodeId, term: u64, voters: &[NodeId]) -> GroupHint {
         GroupHint {
-            group: 0,
             mode: CounterMode::Raft,
             regime: Regime {
                 generation: 2,
@@ -753,9 +745,8 @@ mod tests {
             },
             leader,
             term,
-            follower: None,
             voters: voters.to_vec(),
-            learners: Vec::new(),
+            ..GroupHint::default()
         }
     }
 
