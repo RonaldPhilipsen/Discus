@@ -46,6 +46,15 @@ impl MemoryLease {
         self.available.store(available, Ordering::Relaxed);
     }
 
+    /// The same lease behind its own availability flag, as one node that loses the API server
+    /// while the others keep it.
+    pub fn gated(&self, available: Arc<AtomicBool>) -> MemoryLease {
+        MemoryLease {
+            available,
+            ..self.clone()
+        }
+    }
+
     /// The holder of a live lease.
     pub fn holder(&self) -> Option<LeaseHolder> {
         let now = (self.clock)();

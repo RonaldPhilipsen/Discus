@@ -5,13 +5,12 @@
 //! starve the Raft timers on a busy machine, and an election in the middle of a test makes a
 //! write `-TRYAGAIN`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use discus::counter::{CounterLeases, GroupStatus};
-use discus_membership::{LeaseError, LeaseHolder, LeaseProvider, LeaseState, MemoryLease};
-use futures::future::BoxFuture;
+use discus_membership::{LeaseProvider, MemoryLease};
 use redis::aio::MultiplexedConnection;
 
 use super::gossip::{agreed, socket, wait_until, GossipNode, Net, Opts};
@@ -45,33 +44,8 @@ impl Leases {
     pub fn for_node(&self, gate: Arc<AtomicBool>) -> CounterLeases {
         let leases = self.0.clone();
         Arc::new(move |g: u16| {
-            Arc::new(Gated {
-                inner: leases[usize::from(g)].clone(),
-                open: gate.clone(),
-            }) as Arc<dyn LeaseProvider>
+            Arc::new(leases[usize::from(g)].gated(gate.clone())) as Arc<dyn LeaseProvider>
         })
-    }
-}
-
-/// A lease whose calls fail while the gate is closed, as if this node lost the API server.
-struct Gated {
-    inner: MemoryLease,
-    open: Arc<AtomicBool>,
-}
-
-impl LeaseProvider for Gated {
-    fn acquire_or_renew<'a>(
-        &'a self,
-        me: &'a LeaseHolder,
-    ) -> BoxFuture<'a, Result<LeaseState, LeaseError>> {
-        if !self.open.load(Ordering::Relaxed) {
-            return Box::pin(async { Err(LeaseError("the gate is closed".into())) });
-        }
-        self.inner.acquire_or_renew(me)
-    }
-
-    fn name(&self) -> &'static str {
-        "gated"
     }
 }
 
