@@ -38,7 +38,7 @@ rustls-native-certs = { version = "0.8", optional = true }
 webpki-roots = { version = "1", optional = true }
 ipnet = "2"
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "0.9"
 x509-parser = "0.18"
 ppp = "2"
 jsonwebtoken = { version = "11", default-features = false, features = ["use_pem"], optional = true }
