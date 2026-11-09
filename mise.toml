@@ -41,6 +41,18 @@ run = "bash scripts/compat.sh"
 description = "Benchmark smoke with redis-benchmark against a release build"
 run = "bash scripts/bench.sh"
 
+[tasks.bench-unit]
+description = "Run the Criterion benchmarks for the parser and the store"
+run = "cargo bench -p discus-resp -p discus-store"
+
+[tasks.bench-compare]
+description = "Compare one node with Redis and Valkey under redis-benchmark"
+run = "bash scripts/bench-compare.sh"
+
+[tasks.bench-flamegraph]
+description = "Record CPU flamegraphs of one node under redis-benchmark"
+run = "bash scripts/bench-flamegraph.sh"
+
 [tasks.build-matrix]
 description = "Check every build feature combination and the rejected ones"
 run = "bash scripts/build-matrix.sh"

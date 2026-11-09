@@ -16,4 +16,9 @@ tokio-util = "0.7"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies]
+criterion = "0.7"
 discus-placement = { path = "../discus-placement", features = ["mock-clock"] }
+
+[[bench]]
+name = "store"
+harness = false
