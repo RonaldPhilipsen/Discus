@@ -1,0 +1,537 @@
+//! State shared by every connection on a node.
+
+use std::cell::Cell;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
+
+use bytes::Bytes;
+use discus_placement::{
+    hlc, Adopt, Clock, ClusterId, Epoch, EpochError, EpochHistory, EpochId, Hlc, Member,
+    MemberState, NodeId, Version, Weight, NTP64,
+};
+use discus_resp::Protocol;
+use discus_store::{Slot, Store, StoreConfig, SystemClock, HASH_SEED};
+use parking_lot::{RwLock, RwLockReadGuard};
+
+use crate::cluster::writeset::{WriteSet, WriteSetBudget, WriteSetLimits};
+use crate::cluster::ClusterLink;
+use crate::command::CommandError;
+use crate::counter::Counters;
+use crate::membership::Membership;
+use crate::replication::Replicator;
+use crate::security::{ConnAuth, Security};
+use crate::Config;
+
+thread_local! {
+    /// The last stamp that `Node::stamp` issued on this thread. Local execution reads it back to
+    /// report the applied HLC of a command.
+    static APPLIED: Cell<Option<Version>> = const { Cell::new(None) };
+}
+
+/// Where the node is in its life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Starting,
+    Serving,
+    Leaving,
+}
+
+impl Phase {
+    pub fn name(self) -> &'static str {
+        match self {
+            Phase::Starting => "starting",
+            Phase::Serving => "serving",
+            Phase::Leaving => "leaving",
+        }
+    }
+}
+
+/// The node. Shared as `Arc<Node>`.
+pub struct Node {
+    pub config: Config,
+    /// This process's identity. A restart is a new node.
+    pub id: NodeId,
+    /// The clock that stamps every write.
+    pub hlc: Hlc,
+    epochs: Arc<RwLock<EpochHistory>>,
+    pub started_at: Instant,
+    pub store: Arc<Store>,
+    pub security: Arc<Security>,
+    next_conn_id: AtomicU64,
+    connected: AtomicUsize,
+    phase: AtomicU8,
+    link: OnceLock<ClusterLink>,
+    membership: OnceLock<Arc<Membership>>,
+    replicator: OnceLock<Arc<Replicator>>,
+    counters: OnceLock<Arc<Counters>>,
+    epoch_tx: tokio::sync::watch::Sender<EpochId>,
+    write_budget: Arc<WriteSetBudget>,
+    drain: tokio_util::sync::CancellationToken,
+    /// Faults that tests inject.
+    #[cfg(feature = "testing")]
+    pub faults: Faults,
+}
+
+/// Faults that tests inject into one node.
+#[cfg(feature = "testing")]
+#[derive(Debug, Default)]
+pub struct Faults {
+    /// Delay inbound `REPLICATE`, `HINT_REPLAY`, and `HANDOFF` by this many milliseconds.
+    pub stall_bulk_ms: AtomicU64,
+    /// Never answer a forwarded command.
+    pub stall_forwards: std::sync::atomic::AtomicBool,
+    /// Delay inbound counter messages by this many milliseconds.
+    pub stall_counter_ms: AtomicU64,
+    /// Never answer an inbound message of any kind from these peers. Blocking both sides makes
+    /// a partition.
+    pub blocked: parking_lot::Mutex<std::collections::HashSet<NodeId>>,
+}
+
+#[cfg(feature = "testing")]
+impl Faults {
+    /// How long to hold an inbound message from `peer` before it runs. `Duration::MAX` means
+    /// that it never gets an answer.
+    pub fn delay(&self, peer: NodeId, m: &discus_wire::Message) -> Option<std::time::Duration> {
+        use discus_wire::Message as M;
+        let ms = |a: &AtomicU64| {
+            Some(a.load(Ordering::Relaxed))
+                .filter(|&n| n > 0)
+                .map(std::time::Duration::from_millis)
+        };
+        if self.blocked.lock().contains(&peer) {
+            return Some(std::time::Duration::MAX);
+        }
+        match m {
+            M::Replicate(_) | M::HintReplay(_) | M::Handoff(_) => ms(&self.stall_bulk_ms),
+            M::Forward(_) if self.stall_forwards.load(Ordering::Relaxed) => {
+                Some(std::time::Duration::MAX)
+            }
+            M::RaftLeader(_)
+            | M::RaftConfig(_)
+            | M::RaftVote(_)
+            | M::RaftAppend(_)
+            | M::RaftSnapshot(_)
+            | M::CounterSync(_)
+            | M::CounterAck(_) => ms(&self.stall_counter_ms),
+            _ => None,
+        }
+    }
+}
+
+/// Keeps one epoch in the history until it is dropped (spec section 5.1). Handoff holds one for
+/// the old epoch of each ownership change.
+pub struct EpochPin {
+    epochs: std::sync::Weak<RwLock<EpochHistory>>,
+    id: EpochId,
+}
+
+impl EpochPin {
+    pub fn id(&self) -> EpochId {
+        self.id
+    }
+}
+
+impl Drop for EpochPin {
+    fn drop(&mut self) {
+        if let Some(epochs) = self.epochs.upgrade() {
+            epochs.write().unpin(self.id);
+        }
+    }
+}
+
+impl std::fmt::Debug for EpochPin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "EpochPin({})", self.id)
+    }
+}
+
+impl Node {
+    pub fn new(config: Config, security: Arc<Security>) -> Node {
+        Node::with_clocks(config, security, Arc::new(SystemClock), hlc::system_clock)
+    }
+
+    /// A node on the given clocks: `wall` for TTL and eviction, `hlc_clock` for the HLC. Tests
+    /// pass both halves of one mock clock slot, so the two agree.
+    pub fn with_clocks(
+        config: Config,
+        security: Arc<Security>,
+        wall: Arc<dyn Clock>,
+        hlc_clock: fn() -> NTP64,
+    ) -> Node {
+        let store = Store::new(
+            StoreConfig {
+                shards: config.shards,
+                max_memory: config.max_memory,
+                seed: HASH_SEED,
+                tombstone_ttl_ms: config.tombstone_ttl_ms,
+                tombstone_reserve: config.max_memory / 100 * config.tombstone_reserve_percent,
+            },
+            wall,
+        );
+        let id = config.node_id.unwrap_or_else(NodeId::random);
+        let cluster_id = config.cluster_id.unwrap_or_else(ClusterId::mint);
+        let me = Member {
+            id,
+            addr: config.cluster_listen,
+            state: MemberState::Normal,
+            weight: Weight::new(config.weight).unwrap_or_default(),
+        };
+        // A gossip node starts outside any cluster and joins or forms one (spec section 6.2).
+        let first = if config.gossip_enabled() {
+            discus_membership::provisional_epoch(id)
+        } else {
+            static_epoch(me, &config, cluster_id)
+        };
+        let epochs = EpochHistory::new(first);
+        crate::telemetry::record_epoch(discus_telemetry::global(), epochs.current());
+        let (epoch_tx, _) = tokio::sync::watch::channel(epochs.current().id());
+        let store = Arc::new(store);
+        let write_budget = Arc::new(WriteSetBudget::new(
+            config.max_memory / 100 * config.write_set_memory_percent,
+            Some(store.clone()),
+        ));
+        Node {
+            config,
+            id,
+            hlc: Hlc::new(id, hlc_clock),
+            epochs: Arc::new(RwLock::new(epochs)),
+            started_at: Instant::now(),
+            store,
+            write_budget,
+            security,
+            next_conn_id: AtomicU64::new(1),
+            connected: AtomicUsize::new(0),
+            phase: AtomicU8::new(Phase::Starting as u8),
+            link: OnceLock::new(),
+            membership: OnceLock::new(),
+            replicator: OnceLock::new(),
+            counters: OnceLock::new(),
+            epoch_tx,
+            drain: tokio_util::sync::CancellationToken::new(),
+            #[cfg(feature = "testing")]
+            faults: Faults::default(),
+        }
+    }
+
+    /// Cancelled by `POST /admin/drain`. `Server::run` then drains as on SIGTERM (spec §15.3).
+    pub fn drain_token(&self) -> tokio_util::sync::CancellationToken {
+        self.drain.clone()
+    }
+
+    pub fn membership(&self) -> Option<&Arc<Membership>> {
+        self.membership.get()
+    }
+
+    /// Attach the gossip membership. Only the first call has an effect.
+    pub fn set_membership(&self, membership: Arc<Membership>) {
+        let _ = self.membership.set(membership);
+    }
+
+    /// True when the node is `NORMAL` in its current epoch. Without gossip, always.
+    pub fn is_normal(&self) -> bool {
+        self.membership().is_none_or(|m| m.is_normal())
+    }
+
+    /// The node was `NORMAL` at least once. The startup probe latches on it.
+    pub fn reached_normal(&self) -> bool {
+        self.membership().is_none_or(|m| m.reached_normal())
+    }
+
+    /// The store holds its handoff: the node reached `NORMAL` with no incoming handoff left.
+    /// A node without a transport needs no handoff.
+    pub fn store_ready(&self) -> bool {
+        self.replicator().is_none_or(|r| r.store_ready())
+    }
+
+    /// The counter tier is settled (spec section 15.2). A node without a tier has nothing to
+    /// wait for.
+    pub fn counters_settled(&self) -> bool {
+        self.counters().is_none_or(|c| c.settled())
+    }
+
+    /// Replace the history with `epoch`: after a join, or after a lost merge (spec section 6.3).
+    /// Pins of the old history are dropped with it.
+    pub fn reset_cluster(&self, epoch: Epoch) {
+        let id = epoch.id();
+        let mut epochs = self.epochs.write();
+        *epochs = EpochHistory::new(epoch);
+        tracing::info!(epoch = %id, cluster = %epochs.cluster_id(), "took a new cluster history");
+        crate::telemetry::record_epoch(discus_telemetry::global(), epochs.current());
+        drop(epochs);
+        if let Some(r) = self.replicator() {
+            r.reset_handoffs();
+        }
+        self.epoch_tx.send_replace(id);
+    }
+
+    /// Keep epoch `id` in the history until the pin is dropped.
+    pub fn pin_epoch(&self, id: EpochId) -> Result<EpochPin, EpochError> {
+        self.epochs.write().pin(id)?;
+        Ok(EpochPin {
+            epochs: Arc::downgrade(&self.epochs),
+            id,
+        })
+    }
+
+    /// The replicator, when the transport runs.
+    pub fn replicator(&self) -> Option<&Arc<Replicator>> {
+        self.replicator.get()
+    }
+
+    /// Attach the replicator. Only the first call has an effect.
+    pub fn set_replicator(&self, replicator: Arc<Replicator>) {
+        let _ = self.replicator.set(replicator);
+    }
+
+    /// The counter tier. Every node that `Server` binds has one, also without a transport.
+    pub fn counters(&self) -> Option<&Arc<Counters>> {
+        self.counters.get()
+    }
+
+    /// Attach the counter tier. Only the first call has an effect.
+    pub fn set_counters(&self, counters: Arc<Counters>) {
+        let _ = self.counters.set(counters);
+    }
+
+    /// A new write set for a client connection (spec section 7.4).
+    pub fn new_write_set(&self) -> WriteSet {
+        let c = &self.config;
+        WriteSet::new(
+            WriteSetLimits {
+                keys: c.write_set_keys.max(1),
+                bytes: c.write_set_bytes,
+                max_age: std::time::Duration::from_millis(c.write_set_ttl_ms),
+            },
+            self.write_budget.clone(),
+        )
+    }
+
+    /// Bytes that every write set of this node holds.
+    pub fn write_set_bytes(&self) -> u64 {
+        self.write_budget.used()
+    }
+
+    /// A strong counter key, by `--counter-prefix` (spec section 10). The prefix decides the
+    /// path before the value is read.
+    pub fn is_counter_key(&self, key: &[u8]) -> bool {
+        key.starts_with(self.config.counter_prefix.as_bytes())
+    }
+
+    /// Changes of the current epoch: every adoption and every reset of the history.
+    pub fn subscribe_epoch(&self) -> tokio::sync::watch::Receiver<EpochId> {
+        self.epoch_tx.subscribe()
+    }
+
+    /// The node-to-node link, when the transport runs.
+    pub fn link(&self) -> Option<&ClusterLink> {
+        self.link.get()
+    }
+
+    /// The link, the address, and the current epoch for a request to member `to`.
+    pub(crate) fn peer(
+        &self,
+        to: NodeId,
+    ) -> Result<(&ClusterLink, SocketAddr, Arc<Epoch>), String> {
+        let link = self.link().ok_or("this node has no transport")?;
+        let epoch = self.epochs().current().clone();
+        let addr = epoch
+            .member(to)
+            .map(|m| m.addr)
+            .ok_or_else(|| format!("node {to} is not a member"))?;
+        Ok((link, addr, epoch))
+    }
+
+    /// Attach the node-to-node link. Only the first call has an effect.
+    pub fn set_link(&self, link: ClusterLink) {
+        let _ = self.link.set(link);
+    }
+
+    /// Adopt a newer epoch of this cluster. A stale epoch changes nothing.
+    pub fn adopt_epoch(&self, epoch: Epoch) -> Result<Adopt, EpochError> {
+        let id = epoch.id();
+        let mut epochs = self.epochs.write();
+        let old = epochs.current().clone();
+        let result = epochs.adopt(epoch);
+        if !matches!(result, Ok(Adopt::Newer)) {
+            return result;
+        }
+        tracing::info!(epoch = %id, "adopted a newer epoch");
+        let new = epochs.current().clone();
+        crate::telemetry::record_epoch(discus_telemetry::global(), &new);
+        // The handoff registers under the lock, so no reader sees the new epoch without it.
+        if let Some(r) = self.replicator() {
+            let weak = Arc::downgrade(&self.epochs);
+            r.register(&old, &new, || {
+                epochs.pin(old.id()).ok()?;
+                Some(EpochPin {
+                    epochs: weak.clone(),
+                    id: old.id(),
+                })
+            });
+        }
+        drop(epochs);
+        if let Some(r) = self.replicator() {
+            r.on_epoch(&old, &new);
+        }
+        if let Some(link) = self.link() {
+            link.forget_non_members(&new);
+        }
+        self.epoch_tx.send_replace(id);
+        result
+    }
+
+    pub fn epoch_id(&self) -> EpochId {
+        self.epochs.read().current().id()
+    }
+
+    /// The owner set of `key` in the previous epoch, if the history holds one.
+    pub fn previous_owners(&self, key: &[u8]) -> Option<Vec<NodeId>> {
+        self.epochs
+            .read()
+            .previous()
+            .map(|e| e.owners(key, self.config.replication_factor))
+    }
+
+    /// The stamp that the last command on this thread took, and clear it.
+    pub fn take_applied() -> Option<Version> {
+        APPLIED.with(Cell::take)
+    }
+
+    /// Count a new client. The returned guard decrements the count when dropped.
+    pub fn track_connection(self: &Arc<Self>) -> ConnectionGuard {
+        self.connected.fetch_add(1, Ordering::Relaxed);
+        ConnectionGuard(self.clone())
+    }
+
+    pub fn connected_clients(&self) -> usize {
+        self.connected.load(Ordering::Relaxed)
+    }
+
+    /// Connections accepted since start.
+    pub fn total_connections(&self) -> u64 {
+        self.next_conn_id.load(Ordering::Relaxed) - 1
+    }
+
+    pub fn phase(&self) -> Phase {
+        match self.phase.load(Ordering::Acquire) {
+            0 => Phase::Starting,
+            1 => Phase::Serving,
+            _ => Phase::Leaving,
+        }
+    }
+
+    pub fn set_phase(&self, phase: Phase) {
+        self.phase.store(phase as u8, Ordering::Release);
+    }
+
+    /// The epoch history. The current epoch decides placement.
+    pub fn epochs(&self) -> RwLockReadGuard<'_, EpochHistory> {
+        self.epochs.read()
+    }
+
+    pub fn cluster_id(&self) -> ClusterId {
+        self.epochs.read().cluster_id()
+    }
+
+    /// The owner set of `key` in the current epoch with the configured replication factor.
+    pub fn owners(&self, key: &[u8]) -> Vec<NodeId> {
+        self.epochs
+            .read()
+            .current()
+            .owners(key, self.config.replication_factor)
+    }
+
+    /// A fresh HLC version for one write command. A clock pinned at its drift bound refuses, and
+    /// the command returns `-TRYAGAIN`, also when the write would change nothing.
+    pub fn stamp(&self) -> Result<Version, CommandError> {
+        self.hlc.tick().map_err(|_| CommandError::TryAgain)
+    }
+
+    /// Run a store write with `stamp`. A write that changed its key records `stamp` as the
+    /// applied stamp of the command and queues the key for the other owners (spec section 8.2).
+    /// A write that changed nothing leaves no trace.
+    pub fn write<R>(&self, key: &Bytes, stamp: Version, f: impl FnOnce(&mut Slot) -> R) -> R {
+        let (result, changed) = self.store.write_changed(key, stamp, f);
+        if changed {
+            APPLIED.with(|a| a.set(Some(stamp)));
+            if let Some(replicator) = self.replicator() {
+                replicator.written(self, key);
+            }
+        }
+        result
+    }
+
+    pub fn next_conn_id(&self) -> u64 {
+        self.next_conn_id.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+/// The first epoch. With static peers, every member is `NORMAL` with weight 1 and the epoch is
+/// `(1, lowest NodeId)`, so every node forms the same epoch. Alone, the node bootstraps `(1, self)`.
+fn static_epoch(me: Member, config: &Config, cluster_id: ClusterId) -> Epoch {
+    if config.peers.is_empty() {
+        return Epoch::bootstrap(me, cluster_id);
+    }
+    let my_id = me.id;
+    let mut members = vec![me];
+    members.extend(config.peers.iter().map(|p| Member {
+        // Config::validate requires the ID with static membership.
+        id: p.id.unwrap_or(NodeId::NIL),
+        addr: p.addr,
+        state: MemberState::Normal,
+        weight: Weight::default(),
+    }));
+    let origin = members.iter().map(|m| m.id).min().unwrap_or(my_id);
+    let id = EpochId {
+        generation: discus_placement::FIRST_GENERATION,
+        origin,
+    };
+    // Config::validate refuses duplicate IDs, so this only fails for a config that skipped it.
+    Epoch::new(id, cluster_id, members.clone())
+        .unwrap_or_else(|_| Epoch::bootstrap(members[0].clone(), cluster_id))
+}
+
+#[derive(Debug)]
+pub struct ConnState {
+    pub protocol: Protocol,
+    pub auth: ConnAuth,
+    pub name: Option<Bytes>,
+    pub id: u64,
+    /// Set by `QUIT`: close the connection after the reply is flushed.
+    pub closing: bool,
+    /// The round-robin position for reads over replicas.
+    rr: u64,
+    /// The recent writes of a client connection in a cluster. Internal execution has none.
+    pub writes: Option<Arc<parking_lot::Mutex<WriteSet>>>,
+}
+
+impl ConnState {
+    pub fn new(id: u64, auth: ConnAuth) -> ConnState {
+        ConnState {
+            protocol: Protocol::Resp2,
+            auth,
+            name: None,
+            id,
+            closing: false,
+            rr: id,
+            writes: None,
+        }
+    }
+
+    /// The next round-robin position. Each data command takes one.
+    pub fn next_rr(&mut self) -> u64 {
+        self.rr = self.rr.wrapping_add(1);
+        self.rr
+    }
+}
+
+/// Keeps the connected-clients count accurate for the life of one connection.
+pub struct ConnectionGuard(Arc<Node>);
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.0.connected.fetch_sub(1, Ordering::Relaxed);
+    }
+}

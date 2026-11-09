@@ -1,0 +1,41 @@
+[package]
+name = "discus-transport"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes = "1"
+discus-placement = { path = "../discus-placement" }
+discus-wire = { path = "../discus-wire" }
+futures = "0.3"
+parking_lot = "0.12"
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+rcgen = { version = "0.14", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "logging"] }
+rustls-openssl = { version = "0.4", optional = true }
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
+tracing = "0.1"
+x509-parser = "0.18"
+
+# The cryptography provider for QUIC (spec section 15.5). With several on, the first in this order
+# wins. The `discus` crate makes sure that exactly one is on. `tls-openssl` still enables the quinn
+# ring feature, because quinn uses it for stateless reset and retry token keys. The TLS handshake
+# and the packet protection use the OpenSSL provider.
+[features]
+default = ["tls-aws-lc"]
+tls-aws-lc = ["rustls/aws-lc-rs", "quinn/rustls-aws-lc-rs"]
+tls-ring = ["rustls/ring", "quinn/rustls-ring"]
+tls-openssl = ["dep:rustls-openssl", "quinn/rustls-ring"]
+# The rcgen test CA and raw QUIC client helpers. Tests only.
+testing = ["dep:rcgen"]
+
+[dev-dependencies]
+discus-transport = { path = ".", default-features = false, features = ["testing"] }
+parking_lot = "0.12"
+tokio = { version = "1", features = ["full"] }

@@ -1,0 +1,46 @@
+// The frame envelope. A stream carries 4-byte big-endian length-prefixed frames, and each frame
+// is one Envelope. The payload holds a nested FlatBuffers body whose root type the message type
+// names.
+
+namespace discus.wire;
+
+/// Append-only. GOSSIP carries every gossip body. REPLICATE to DIGEST carry the bulk traffic
+/// of replication and handoff. RAFT_LEADER to COUNTER_ACK carry the counter tier.
+enum MessageType: ushort {
+  NONE = 0,
+  HELLO = 1,
+  HANDSHAKE_FAILED = 2,
+  UNSUPPORTED = 3,
+  FORWARD = 4,
+  FORWARD_REPLY = 5,
+  PING = 6,
+  PONG = 7,
+  GOSSIP = 8,
+  REPLICATE = 9,
+  HINT_REPLAY = 10,
+  HANDOFF = 11,
+  BATCH_ACK = 12,
+  FETCH = 13,
+  ENTRIES = 14,
+  DIGEST = 15,
+  RAFT_LEADER = 16,
+  RAFT_CONFIG = 17,
+  RAFT_VOTE = 18,
+  RAFT_APPEND = 19,
+  RAFT_SNAPSHOT = 20,
+  RAFT_REPLY = 21,
+  COUNTER_SYNC = 22,
+  COUNTER_ACK = 23,
+}
+
+table Envelope {
+  type: MessageType (id: 0);
+  request_id: ulong (id: 1);
+  /// W3C Trace Context, copied unchanged across every hop.
+  traceparent: string (id: 2);
+  tracestate: string (id: 3);
+  /// The nested body. Its root type follows from `type`.
+  payload: [ubyte] (id: 4);
+}
+
+root_type Envelope;

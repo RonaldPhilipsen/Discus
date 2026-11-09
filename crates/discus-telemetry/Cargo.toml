@@ -1,0 +1,43 @@
+[package]
+name = "discus-telemetry"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Spec §15.4. Every OpenTelemetry crate is optional and only the `otel` feature turns it on.
+opentelemetry = { version = "0.33", default-features = false, features = ["trace", "metrics"], optional = true }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "metrics"], optional = true }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["grpc-tonic", "trace", "metrics", "tls-provider-agnostic"], optional = true }
+tracing-opentelemetry = { version = "0.34", default-features = false, optional = true }
+futures-executor = { version = "0.3", optional = true }
+thiserror = "2"
+governor = { version = "0.10", default-features = false, features = ["std", "dashmap", "quanta"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+serde_json = "1"
+
+# The node crate forwards its features here. The TLS and root features are weak, so they never
+# turn on `otel` by themselves.
+[features]
+default = []
+otel = [
+  "dep:opentelemetry",
+  "dep:opentelemetry_sdk",
+  "dep:opentelemetry-otlp",
+  "dep:tracing-opentelemetry",
+  "dep:futures-executor",
+]
+testing = ["opentelemetry_sdk?/testing"]
+tls-aws-lc = ["opentelemetry-otlp?/tls-aws-lc"]
+tls-ring = ["opentelemetry-otlp?/tls-ring"]
+tls-openssl = []
+roots-system = ["opentelemetry-otlp?/tls-roots"]
+roots-webpki = ["opentelemetry-otlp?/tls-webpki-roots"]

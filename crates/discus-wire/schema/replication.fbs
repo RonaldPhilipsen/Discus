@@ -1,0 +1,78 @@
+// Message bodies for replication, hinted handoff, handoff, read repair, and promotion
+// reconciliation (spec sections 5.2, 8.2, and 9). They travel on the bulk lane of discus-rpc and
+// need the REPLICATION capability.
+
+include "common.fbs";
+
+namespace discus.wire;
+
+/// Append-only.
+enum ValueKind: ubyte {
+  STRING = 0,
+  HASH = 1,
+  SET = 2,
+  ZSET = 3,
+}
+
+table Blob {
+  data: [ubyte] (id: 0);
+}
+
+/// One full entry with its key. A collection travels as one value.
+table StoredEntry {
+  key: [ubyte] (id: 0);
+  kind: ValueKind (id: 1);
+  /// STRING: the value.
+  bytes: [ubyte] (id: 2);
+  /// HASH: field and value pairs, flattened. SET and ZSET: the members.
+  items: [Blob] (id: 3);
+  /// ZSET: the score of each member in `items`, in the same order.
+  scores: [double] (id: 4);
+  /// The absolute deadline in Unix milliseconds. Zero means no expiry.
+  expires_at_ms: ulong (id: 5);
+  version: Version (id: 6);
+  tombstone: bool (id: 7);
+}
+
+/// A key and the version that a handoff source holds for it.
+table KeyVersion {
+  key: [ubyte] (id: 0);
+  version: Version (id: 1);
+}
+
+/// The body of REPLICATE, HINT_REPLAY, HANDOFF, and ENTRIES. A HANDOFF with no entries, no
+/// offers, and no done range asks the receiver whether it is idle.
+table EntryBatch {
+  /// The epoch of the sender.
+  epoch: EpochId (id: 0);
+  entries: [StoredEntry] (id: 1);
+  /// HANDOFF: keys that another source sends in full. The receiver asks for the ones it lacks.
+  offers: [KeyVersion] (id: 2);
+  /// HINT_REPLAY: refill buckets whose hints were lost. The receiver drops their keys first.
+  discard_buckets: [ubyte] (id: 3);
+  /// HANDOFF: the source finished its scan over this epoch range.
+  done_from: EpochId (id: 4);
+  done_to: EpochId (id: 5);
+}
+
+table BatchAck {
+  applied: uint (id: 0);
+  /// HANDOFF: offered keys that the receiver wants in full.
+  want: [Blob] (id: 1);
+  epoch: EpochId (id: 2);
+  /// The answer to an empty HANDOFF: the sender has no handoff scan running or waiting.
+  idle: bool (id: 3);
+}
+
+/// Read repair and previous-epoch fallback. The reply is ENTRIES.
+table Fetch {
+  keys: [Blob] (id: 0);
+}
+
+/// Promotion reconciliation: 256 bucket sums over the keys that moved from a removed primary
+/// to the sender between the two epochs. The reply is ENTRIES with the differing buckets.
+table Digest {
+  from: EpochId (id: 0);
+  to: EpochId (id: 1);
+  sums: [ulong] (id: 2);
+}

@@ -1,1 +1,4 @@
 /target/
+.rumdl_cache/
+.superpowers/
+docs/superpowers/

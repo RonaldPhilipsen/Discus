@@ -1,0 +1,28 @@
+# Each of these binaries starts multi-node clusters with Raft timers. Two clusters of one binary
+# at once can starve those timers, so each binary runs its own tests one at a time. The groups
+# are separate, so the three binaries still run side by side.
+[test-groups]
+counters-raft = { max-threads = 1 }
+counters-life = { max-threads = 1 }
+scaling = { max-threads = 1 }
+
+[profile.default]
+fail-fast = false
+# The waits of the longest multi-node test add up to minutes on a loaded 4-core machine, so a
+# test is only killed after 10 minutes.
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+[[profile.default.overrides]]
+filter = "binary(counters_raft)"
+test-group = "counters-raft"
+
+[[profile.default.overrides]]
+filter = "binary(counters_life)"
+test-group = "counters-life"
+
+[[profile.default.overrides]]
+filter = "binary(scaling)"
+test-group = "scaling"
+
+[profile.ci]
+failure-output = "immediate-final"

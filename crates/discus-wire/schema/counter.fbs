@@ -1,0 +1,179 @@
+// Message bodies for the counter tier (spec sections 10 and 13.2): leader hints, leader-follower
+// sync, and Raft. They travel on the bulk lane of discus-rpc and need the COUNTERS capability.
+
+include "common.fbs";
+
+namespace discus.wire;
+
+/// One leadership of a group: a leader-follower lease term or a Raft instance. Ordered by
+/// generation, then origin.
+struct Regime {
+  generation: ulong;
+  origin: Id128;
+}
+
+/// A Raft log position. `leader` is the replica ID of the leader that wrote the entry.
+struct RaftLogId {
+  term: ulong;
+  leader: ulong;
+  index: ulong;
+}
+
+struct RaftVote {
+  term: ulong;
+  leader: ulong;
+  committed: bool;
+}
+
+/// Append-only.
+enum CounterMode: ubyte {
+  LEADER_FOLLOWER = 0,
+  RAFT = 1,
+}
+
+/// What one node knows about the leader of one group.
+table GroupHint {
+  group: ushort (id: 0);
+  mode: CounterMode (id: 1);
+  regime: Regime (id: 2);
+  leader: Id128 (id: 3);
+  /// The Raft term. Zero in leader-follower mode.
+  term: ulong (id: 4);
+  follower: Id128 (id: 5);
+  voters: [Id128] (id: 6);
+  learners: [Id128] (id: 7);
+}
+
+/// The gossip leader hints of a member, and the body of RAFT_LEADER. A request lists nothing.
+table LeaderHints {
+  groups: [GroupHint] (id: 0);
+}
+
+/// RAFT_CONFIG: the leader of `regime` asks a target to prepare a learner replica. The reply
+/// carries the replica ID, or zero when the target refuses the regime.
+table RaftConfig {
+  group: ushort (id: 0);
+  regime: Regime (id: 1);
+  replica: ulong (id: 2);
+  leader: Id128 (id: 3);
+}
+
+table RaftNodeIds {
+  ids: [ulong] (id: 0);
+}
+
+table RaftPeer {
+  replica: ulong (id: 0);
+  node: Id128 (id: 1);
+}
+
+/// A Raft membership: one voter set, or two during a joint change, and every node by replica ID.
+table RaftMembership {
+  configs: [RaftNodeIds] (id: 0);
+  nodes: [RaftPeer] (id: 1);
+}
+
+/// Append-only.
+enum RaftEntryKind: ubyte {
+  BLANK = 0,
+  COMMAND = 1,
+  MEMBERSHIP = 2,
+}
+
+table RaftEntry {
+  log_id: RaftLogId (id: 0);
+  kind: RaftEntryKind (id: 1);
+  /// COMMAND: the leader stamp in Unix milliseconds and the raw RESP command.
+  stamp_ms: ulong (id: 2);
+  command: [ubyte] (id: 3);
+  membership: RaftMembership (id: 4);
+}
+
+/// The group, the regime, and the replica ID that a Raft message is for.
+table RaftHeader {
+  group: ushort (id: 0);
+  regime: Regime (id: 1);
+  target: ulong (id: 2);
+}
+
+table RaftAppend {
+  header: RaftHeader (id: 0);
+  vote: RaftVote (id: 1);
+  prev: RaftLogId (id: 2);
+  entries: [RaftEntry] (id: 3);
+  committed: RaftLogId (id: 4);
+}
+
+table RaftVoteRequest {
+  header: RaftHeader (id: 0);
+  vote: RaftVote (id: 1);
+  last: RaftLogId (id: 2);
+}
+
+/// One chunk of a snapshot. The data is a chunk of a CounterSnapshot.
+table RaftSnapshot {
+  header: RaftHeader (id: 0);
+  vote: RaftVote (id: 1);
+  last: RaftLogId (id: 2);
+  membership_log: RaftLogId (id: 3);
+  membership: RaftMembership (id: 4);
+  snapshot_id: string (id: 5);
+  offset: ulong (id: 6);
+  data: [ubyte] (id: 7);
+  done: bool (id: 8);
+}
+
+/// Append-only. REFUSED: the receiver has no replica for the regime and the target.
+enum RaftOutcome: ubyte {
+  OK = 0,
+  CONFLICT = 1,
+  HIGHER_VOTE = 2,
+  PARTIAL = 3,
+  REFUSED = 4,
+}
+
+/// The reply to RAFT_VOTE, RAFT_APPEND, and RAFT_SNAPSHOT.
+table RaftReply {
+  outcome: RaftOutcome (id: 0);
+  vote: RaftVote (id: 1);
+  granted: bool (id: 2);
+  last: RaftLogId (id: 3);
+}
+
+/// One leader-follower op: the leader stamp and the raw RESP command.
+table CounterOp {
+  stamp_ms: ulong (id: 0);
+  command: [ubyte] (id: 1);
+}
+
+/// COUNTER_SYNC: ops from the leader to the follower. `seq` numbers the first op, or the state of
+/// the snapshot. A sync without ops and without a snapshot is a heartbeat.
+table CounterSync {
+  group: ushort (id: 0);
+  regime: Regime (id: 1);
+  seq: ulong (id: 2);
+  ops: [CounterOp] (id: 3);
+  snapshot: [ubyte] (id: 4);
+  has_snapshot: bool (id: 5);
+}
+
+table CounterAck {
+  group: ushort (id: 0);
+  regime: Regime (id: 1);
+  /// The last op that the follower applied.
+  seq: ulong (id: 2);
+  need_snapshot: bool (id: 3);
+}
+
+table CounterEntry {
+  key: [ubyte] (id: 0);
+  value: [ubyte] (id: 1);
+  /// The absolute deadline in Unix milliseconds. Zero means no expiry.
+  expires_at_ms: ulong (id: 2);
+}
+
+/// The snapshot format of a counter group: the clock of the state and every entry.
+table CounterSnapshot {
+  clock_ms: ulong (id: 0);
+  entries: [CounterEntry] (id: 1);
+}

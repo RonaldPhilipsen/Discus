@@ -1,6 +1,46 @@
 [tools]
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.151"
+flatc = "25.12.19-2026-02-06-03fffb2"
+"conda:redis-server" = "latest"
 rumdl = "latest"
+rust = "stable"
 
 [tasks.lint-docs]
 description = "Lint the Markdown documentation with rumdl"
 run = "rumdl check docs/ README.md"
+
+[tasks.test]
+description = "Run all Rust tests, then the telemetry tests without the otel feature"
+run = [
+  "cargo nextest run --workspace",
+  "cargo test --doc --workspace",
+  "cargo nextest run -p discus-membership --features testing",
+  "cargo nextest run -p discus-membership --features testing,k8s --test k8s_lease",
+  "cargo nextest run -p discus-telemetry",
+  "cargo nextest run -p discus --no-default-features --features tls-aws-lc,roots-system --test telemetry --test cluster_trace",
+]
+
+[tasks.lint]
+description = "Run rustfmt, clippy, and the documentation lint"
+run = [
+  "cargo fmt --check",
+  "cargo clippy --workspace --all-targets -- -D warnings",
+  "rumdl check docs/ README.md",
+  "bash scripts/gen-wire.sh --check",
+]
+
+[tasks.gen-wire]
+description = "Regenerate the Rust code for the FlatBuffers wire contract"
+run = "bash scripts/gen-wire.sh"
+
+[tasks.compat]
+description = "Run the redis-cli compatibility matrix against a fresh node"
+run = "bash scripts/compat.sh"
+
+[tasks.bench]
+description = "Benchmark smoke with redis-benchmark against a release build"
+run = "bash scripts/bench.sh"
+
+[tasks.build-matrix]
+description = "Check every build feature combination and the rejected ones"
+run = "bash scripts/build-matrix.sh"

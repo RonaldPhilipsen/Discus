@@ -1,0 +1,46 @@
+// Shared fixed shapes and the epoch for the Discus wire contract.
+//
+// Rules (spec section 13.3): every table field has an explicit id. A new field takes the next
+// free id. A field is never removed or reused, only marked deprecated. Enum values are
+// append-only. A struct never changes after release.
+
+namespace discus.wire;
+
+/// A 128-bit identifier. NodeId and ClusterId use big-endian bytes.
+struct Id128 {
+  bytes: [ubyte:16];
+}
+
+/// An HLC version in the uhlc format: the NTP64 time and the 16-byte origin ID in uhlc byte
+/// order (the little-endian bytes of the u128 NodeId).
+struct Version {
+  time: ulong;
+  id: Id128;
+}
+
+/// An epoch identity, ordered by generation, then origin.
+struct EpochId {
+  generation: ulong;
+  origin: Id128;
+}
+
+enum MemberState: ubyte {
+  JOINING = 0,
+  NORMAL = 1,
+  LEAVING = 2,
+  DEAD = 3,
+}
+
+table Member {
+  id: Id128 (id: 0);
+  addr: string (id: 1);
+  state: MemberState (id: 2);
+  weight: double = 1.0 (id: 3);
+}
+
+/// A full epoch: identity, cluster, and the sorted member list.
+table Epoch {
+  id: EpochId (id: 0);
+  cluster_id: Id128 (id: 1);
+  members: [Member] (id: 2);
+}

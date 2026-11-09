@@ -1,0 +1,93 @@
+// Message bodies for the discus-rpc ALPN.
+
+include "common.fbs";
+
+namespace discus.wire;
+
+/// Both sides send HELLO. The agreed capabilities are the bitwise AND, and the agreed maximum
+/// frame size is the smaller offer.
+table Hello {
+  node_id: Id128 (id: 0);
+  cluster_id: Id128 (id: 1);
+  capabilities: ulong (id: 2);
+  epoch: EpochId (id: 3);
+  max_frame: uint (id: 4);
+}
+
+enum HandshakeCode: ubyte {
+  OTHER = 0,
+  CLUSTER_MISMATCH = 1,
+  FRAME_TOO_SMALL = 2,
+  NOT_HELLO = 3,
+  UNEXPECTED_NODE = 4,
+}
+
+table HandshakeFailed {
+  code: HandshakeCode (id: 0);
+  reason: string (id: 1);
+}
+
+/// The reply to a message type that the receiver does not know.
+table Unsupported {
+  message_type: ushort (id: 0);
+}
+
+enum ForwardMode: ubyte {
+  /// The receiver routes the command again if it does not own it.
+  ROUTE = 0,
+  /// The receiver executes the command locally with no routing.
+  LOCAL = 1,
+}
+
+table Forward {
+  /// The raw command as a RESP multibulk.
+  command: [ubyte] (id: 0);
+  epoch: EpochId (id: 1);
+  /// The full sender epoch, only with the EPOCH_PUSH capability.
+  epoch_body: Epoch (id: 2);
+  /// Forwards so far, including this one.
+  hops: ubyte (id: 3);
+  /// The nodes that forwarded this command, in order.
+  path: [Id128] (id: 4);
+  mode: ForwardMode (id: 5);
+  /// The sender keeps the key in a write set. The reply reports `observed` and `settled`.
+  track: bool (id: 6);
+}
+
+enum RespKind: ubyte {
+  SIMPLE = 0,
+  ERROR = 1,
+  INTEGER = 2,
+  BULK = 3,
+  NULL = 4,
+  ARRAY = 5,
+  MAP = 6,
+  BOOLEAN = 7,
+  DOUBLE = 8,
+}
+
+/// A RESP reply. A map stores its pairs flattened in `items`.
+table RespValue {
+  kind: RespKind (id: 0);
+  bytes: [ubyte] (id: 1);
+  integer: long (id: 2);
+  double: double (id: 3);
+  boolean: bool (id: 4);
+  items: [RespValue] (id: 5);
+}
+
+table ForwardReply {
+  value: RespValue (id: 0);
+  /// The HLC stamp that the command took, if it wrote.
+  applied: Version (id: 1);
+  /// The epoch of the receiver after it acted.
+  epoch: EpochId (id: 2);
+  /// A tracked read: the version that the read saw.
+  observed: Version (id: 3);
+  /// A tracked read: no replication queue, batch in flight, or hint holds the key.
+  settled: bool (id: 4);
+}
+
+table Ping {
+  nonce: ulong (id: 0);
+}

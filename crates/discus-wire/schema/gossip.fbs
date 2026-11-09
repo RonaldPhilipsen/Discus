@@ -1,0 +1,72 @@
+// Message bodies for the discus-gossip ALPN (spec section 6.1). One message type, GOSSIP, carries
+// every body. The kind field says what the body is. Each request takes one QUIC stream with one
+// reply.
+
+include "common.fbs";
+
+namespace discus.wire;
+
+/// What the sender believes about a member's liveness.
+enum Liveness: ubyte {
+  ALIVE = 0,
+  SUSPECT = 1,
+  DEAD = 2,
+}
+
+/// The gossip payload of one member. Only the member itself raises its incarnation.
+table MemberInfo {
+  id: Id128 (id: 0);
+  addr: string (id: 1);
+  state: MemberState (id: 2);
+  incarnation: ulong (id: 3);
+  weight: double = 1.0 (id: 4);
+  /// The epoch that the member holds.
+  epoch: EpochId (id: 5);
+  /// The same capability bits as HELLO.
+  capabilities: ulong (id: 6);
+  /// Capacity hints: memory in use and the memory limit, in bytes.
+  capacity_used: ulong (id: 7);
+  capacity_max: ulong (id: 8);
+  /// Counter leader hints. Opaque to membership. The counter plan defines the content.
+  leader_hints: [ubyte] (id: 9);
+}
+
+/// One member update with its liveness. A suspect rumor names the accuser.
+table Rumor {
+  info: MemberInfo (id: 0);
+  liveness: Liveness (id: 1);
+  accuser: Id128 (id: 2);
+}
+
+/// Append-only.
+enum GossipKind: ubyte {
+  PING = 0,
+  ACK = 1,
+  NACK = 2,
+  PING_REQ = 3,
+  SYNC = 4,
+  SYNC_REPLY = 5,
+  JOIN = 6,
+  JOIN_REPLY = 7,
+  LEAVE = 8,
+}
+
+table Gossip {
+  kind: GossipKind (id: 0);
+  /// The sender's own payload.
+  from: MemberInfo (id: 1);
+  /// The sender's cluster. All zero when the sender is not in a cluster yet.
+  cluster_id: Id128 (id: 2);
+  /// The NORMAL members in the sender's current epoch.
+  cluster_size: uint (id: 3);
+  /// The full sender epoch, when the receiver has an older one.
+  epoch_body: Epoch (id: 4);
+  /// The sender's HLC (NTP64), or the cluster maximum in a join reply.
+  hlc: ulong (id: 5);
+  /// The probe target of a PING_REQ.
+  target_id: Id128 (id: 6);
+  target_addr: string (id: 7);
+  rumors: [Rumor] (id: 8);
+  /// A refused join waits this long before it tries again.
+  retry_after_ms: uint (id: 9);
+}
