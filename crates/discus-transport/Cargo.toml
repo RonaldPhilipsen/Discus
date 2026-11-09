@@ -12,7 +12,7 @@ bytes = "1"
 discus-placement = { path = "../discus-placement" }
 discus-wire = { path = "../discus-wire" }
 futures = "0.3"
-parking_lot = "0.12"
+parking_lot = "0.13"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
 rcgen = { version = "0.14", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["std", "logging"] }
@@ -37,5 +37,5 @@ testing = ["dep:rcgen"]
 
 [dev-dependencies]
 discus-transport = { path = ".", default-features = false, features = ["testing"] }
-parking_lot = "0.12"
+parking_lot = "0.13"
 tokio = { version = "1", features = ["full"] }
