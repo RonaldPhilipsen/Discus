@@ -383,6 +383,7 @@ the CPU limit of the container from the cgroup (the Linux resource control group
 | `--write-set-ttl-ms` | 5000 | Time that a written key stays in the write set. |
 | `--hold-budget-ms` | 3000 | Time that a write to a failed primary waits for a new primary. |
 | `--counter-prefix` | `cnt:` | Keys with this prefix are counter keys. The counter groups serve them. |
+| `--primary-read-prefix` | none | Keys with this prefix read from the primary only and never enter a write set. A counter key stays a counter key. Repeat the flag for more prefixes. An empty value stops the node. |
 | `--counter-groups` | 8 | The number of counter groups. A change is an offline procedure. |
 | `--counter-memory-percent` | 5 | The share of `--max-memory` for counter state. |
 | `--counter-timeout-ms` | 1000 | Time that a counter command waits for a leader, a quorum, or a commit. |

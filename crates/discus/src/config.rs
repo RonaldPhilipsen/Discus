@@ -280,6 +280,10 @@ pub struct Config {
     /// Keys with this prefix are strong counter keys. Counter groups serve them linearizably.
     #[arg(long, default_value = "cnt:")]
     pub counter_prefix: String,
+    /// Keys with this prefix read from the primary only and never enter a write set. A counter
+    /// key stays a counter key. Repeat the flag for more prefixes.
+    #[arg(long)]
+    pub primary_read_prefix: Vec<String>,
     /// Counter groups (spec section 10). A change is an offline re-shard.
     #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=1024))]
     pub counter_groups: u16,
@@ -424,6 +428,9 @@ impl Config {
 
     /// Check the flags that depend on each other. The message names the flags to fix.
     pub fn validate(&self) -> Result<(), String> {
+        if self.primary_read_prefix.iter().any(String::is_empty) {
+            return Err("--primary-read-prefix needs a non-empty value".into());
+        }
         let certs = self.cert_flags();
         let set = certs.iter().filter(|(_, s)| *s).count();
         if !(0..=19).contains(&self.data_nice) {

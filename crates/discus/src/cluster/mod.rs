@@ -351,6 +351,8 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
 
 /// The nodes that may serve `key`, in the order to try them. Empty when no member is `NORMAL`.
 ///
+/// A read of a primary-read key (`--primary-read-prefix`) goes to the primary only.
+///
 /// A read that must see `need` (a key in the write set, spec section 7.4) goes to the primary,
 /// unless this node owns the key and already holds a version at least as new.
 pub fn candidates(
@@ -367,7 +369,7 @@ pub fn candidates(
         }
         return owners.iter().take(1).copied().collect();
     }
-    if !replica_reads(node, write) {
+    if !replica_reads(node, write, key) {
         return owners.iter().take(1).copied().collect();
     }
     if owners.contains(&node.id) {
@@ -381,15 +383,16 @@ pub fn candidates(
     owners
 }
 
-/// A read may go to any owner, with `--read-from-replicas`.
-pub(crate) fn replica_reads(node: &Node, write: bool) -> bool {
-    !write && node.link().is_some_and(|l| l.read_from_replicas)
+/// A read may go to any owner, with `--read-from-replicas`, unless the key reads from the primary
+/// only (`--primary-read-prefix`).
+pub(crate) fn replica_reads(node: &Node, write: bool, key: &[u8]) -> bool {
+    !write && node.link().is_some_and(|l| l.read_from_replicas) && !node.is_primary_read_key(key)
 }
 
 /// The budget is spent or every target is on the path. Serve locally if this node was the
 /// required owner in the previous epoch, else `-TRYAGAIN`.
 fn spent(node: &Node, spec: &CommandSpec, cmd: &Command, keys: &[&[u8]], write: bool) -> Reply {
-    let replicas = replica_reads(node, write);
+    let replicas = keys.iter().all(|k| replica_reads(node, write, k));
     let owned_before = keys.iter().all(|key| match node.previous_owners(key) {
         Some(owners) if replicas => owners.contains(&node.id),
         Some(owners) => owners.first() == Some(&node.id),
@@ -424,9 +427,13 @@ enum Plan {
     Moved(CommandError),
 }
 
-fn single(node: &Arc<Node>, job: Job, hop: Hop, write: bool, route: Span) -> Dispatch {
+fn single(node: &Arc<Node>, mut job: Job, hop: Hop, write: bool, route: Span) -> Dispatch {
     let key = job.cmd[1].clone();
-    let need = match (&job.writes, write) {
+    let writes = job
+        .writes
+        .take()
+        .filter(|_| !node.is_primary_read_key(&key));
+    let need = match (&writes, write) {
         (Some(w), false) => w.lock().required(&key, std::time::Instant::now()),
         _ => None,
     };
@@ -434,7 +441,7 @@ fn single(node: &Arc<Node>, job: Job, hop: Hop, write: bool, route: Span) -> Dis
     let dispatch = single_planned(
         node, job.spec, job.cmd, hop, write, job.rr, need, readonly, route,
     );
-    let Some(writes) = job.writes else {
+    let Some(writes) = writes else {
         return dispatch;
     };
     // The write set changes before the key order releases the next command on this key.

@@ -185,11 +185,16 @@ pub fn multi(node: &Arc<Node>, job: Job, hop: Hop, route: tracing::Span) -> Disp
         return Dispatch::Ready(Reply::try_again());
     };
     // Each written key enters the write set with the stamp of its own part.
+    let owner = node.clone();
     let note = move |keys: &[Bytes], reply: &Reply| {
         if let (Some(w), Some(v)) = (&writes, reply.applied) {
             if write && !matches!(reply.value, Value::Error(_)) {
                 let mut w = w.lock();
-                for k in keys.iter().step_by(width) {
+                for k in keys
+                    .iter()
+                    .step_by(width)
+                    .filter(|k| !owner.is_primary_read_key(k))
+                {
                     w.record(k, v, Instant::now());
                 }
             }

@@ -480,6 +480,17 @@ impl Node {
         key.starts_with(self.config.counter_prefix.as_bytes())
     }
 
+    /// A key that reads from the primary only, by `--primary-read-prefix`. A counter key never
+    /// matches, because the counter path takes it first.
+    pub fn is_primary_read_key(&self, key: &[u8]) -> bool {
+        !self.is_counter_key(key)
+            && self
+                .config
+                .primary_read_prefix
+                .iter()
+                .any(|p| key.starts_with(p.as_bytes()))
+    }
+
     /// Changes of the current epoch: every adoption and every reset of the history.
     pub fn subscribe_epoch(&self) -> tokio::sync::watch::Receiver<EpochId> {
         self.epoch_tx.subscribe()
