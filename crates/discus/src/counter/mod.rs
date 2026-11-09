@@ -73,6 +73,7 @@ pub struct Settings {
     pub raft: raft::RaftTiming,
     pub catchup_entries: u64,
     pub voter_timeout: Duration,
+    pub settle_timeout: Duration,
 }
 
 impl Settings {
@@ -96,6 +97,7 @@ impl Settings {
             },
             catchup_entries: c.raft_catchup_entries,
             voter_timeout: Duration::from_millis(c.raft_voter_timeout_ms),
+            settle_timeout: Duration::from_millis(c.counter_settle_timeout_ms),
         }
     }
 }
@@ -183,6 +185,8 @@ pub struct Counters {
     /// The last membership change that this node started, in any group.
     last_change: Mutex<Option<Instant>>,
     settled: AtomicBool,
+    /// Since when this node waits for the counter tier to settle.
+    settle_since: Mutex<Option<Instant>>,
 }
 
 /// The shortest time between two membership changes of this node across all groups (spec
@@ -201,6 +205,7 @@ impl Counters {
             dwell_since: Mutex::new(None),
             last_change: Mutex::new(None),
             settled: AtomicBool::new(false),
+            settle_since: Mutex::new(None),
             node: Arc::downgrade(node),
             id: node.id,
             budget: Arc::new(Budget::new(settings.reserve, Some(node.store.clone()))),
@@ -490,7 +495,9 @@ impl Counters {
 
     /// The counter tier is settled (spec section 15.2): in every group this node is the leader,
     /// a synced follower, a voter of a Raft group that targets it, or not needed. Once true, it
-    /// stays true, so a later change of targets never fails the startup probe.
+    /// stays true, so a later change of targets never fails the startup probe. The wait ends
+    /// after `settle_timeout`: a restart gives the pod a new node ID and starts its promotion
+    /// again, so a probe that waits forever can keep a promotion from ever finishing.
     pub fn settled(self: &Arc<Self>) -> bool {
         if self.settled.load(Ordering::Acquire) {
             return true;
@@ -501,18 +508,30 @@ impl Counters {
         let done = node.link().is_none()
             || self.view().is_some_and(|view| {
                 view.me_normal
-                    && self.groups.iter().all(|g| {
+                    && (self.groups.iter().all(|g| {
                         let settled = g.settled_for(&view);
                         if settled.is_none() {
                             self.ask_leader(g.g);
                         }
                         settled == Some(true)
-                    })
+                    }) || self.settle_timed_out())
             });
         if done {
             self.settled.store(true, Ordering::Release);
         }
         done
+    }
+
+    fn settle_timed_out(&self) -> bool {
+        let since = *self.settle_since.lock().get_or_insert_with(Instant::now);
+        let timed_out = since.elapsed() >= self.settings.settle_timeout;
+        if timed_out {
+            tracing::warn!(
+                "the counter tier did not settle in time, the node starts without it and its \
+                 promotion continues"
+            );
+        }
+        timed_out
     }
 
     /// Wait until this node holds no leadership and no voter slot, so a drain leaves every
