@@ -119,6 +119,13 @@ impl HintStore {
         self.targets.values().any(|t| t.hints.contains(key))
     }
 
+    /// `target` has a hint for `key`.
+    pub fn holds_for(&self, target: NodeId, key: &[u8]) -> bool {
+        self.targets
+            .get(&target)
+            .is_some_and(|t| t.hints.contains(key))
+    }
+
     /// Record the latest entry of `key` for `target`, replacing an older hint. Returns the
     /// hints that the bounds evicted, by target.
     pub fn record(
@@ -324,6 +331,15 @@ mod tests {
         assert_eq!(h.count(T), 1);
         assert_eq!(h.bytes(), one);
         assert_eq!(h.batch(T, 10)[0].1.version, entry(2).version);
+    }
+
+    #[test]
+    fn holds_for_looks_at_one_target_only() {
+        let mut h = HintStore::new(limits(10));
+        h.record(T, k("a"), entry(1), Instant::now());
+        assert!(h.holds_for(T, b"a"));
+        assert!(!h.holds_for(T, b"b"));
+        assert!(!h.holds_for(NodeId::from_u128(10), b"a"));
     }
 
     #[test]

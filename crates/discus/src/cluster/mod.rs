@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use discus_placement::{ClusterId, EpochId, NodeId, Version};
 use discus_resp::{Command, Value};
 use discus_transport::Transport;
@@ -275,6 +276,38 @@ pub fn local(node: &Node, spec: &CommandSpec, cmd: &Command) -> Reply {
     }
 }
 
+/// The keys of `cmd` that must reach a secondary before the reply: the listed keys of a command
+/// that deletes them. A deleted session must stay deleted when the primary fails.
+pub(crate) fn acked_delete_keys(node: &Node, spec: &CommandSpec, cmd: &Command) -> Vec<Bytes> {
+    if !matches!(spec.name, "DEL" | "GETDEL" | "DISCUS.TAKE") {
+        return Vec::new();
+    }
+    cmd[1..]
+        .iter()
+        .filter(|k| node.is_primary_read_key(k))
+        .cloned()
+        .collect()
+}
+
+/// Run `cmd` here like [`local`]. A delete of a listed key then waits for one secondary. After
+/// the wait it replies with success anyway (fail open), and the hints deliver the tombstone.
+pub fn local_acked(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> Dispatch {
+    let reply = local(node, spec, &cmd);
+    if reply.applied.is_none() {
+        return Dispatch::Ready(reply);
+    }
+    let keys = acked_delete_keys(node, spec, &cmd);
+    let Some(replicator) = node.replicator().filter(|_| !keys.is_empty()).cloned() else {
+        return Dispatch::Ready(reply);
+    };
+    let node = node.clone();
+    Dispatch::Pending(Box::pin(async move {
+        let unacked = replicator.unacked_after_wait(&node, &keys).await;
+        discus_telemetry::global().primary_read_delete_unacked(unacked);
+        reply
+    }))
+}
+
 /// Fill `observed` and `settled` of a read of `key` that ran here.
 fn track_here(node: &Node, key: &[u8], reply: &mut Reply) {
     if reply.observed.is_none() {
@@ -295,12 +328,12 @@ pub fn serve_here(
     let key = cmd[1].clone();
     let sources = crate::replication::repair::sources(node, &key, write, owners);
     if sources.is_empty() {
-        return Dispatch::Ready(local(node, spec, &cmd));
+        return local_acked(node, spec, cmd);
     }
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
         crate::replication::repair::fetch(&node, &key, sources).await;
-        local(&node, spec, &cmd)
+        local_acked(&node, spec, cmd).finish().await
     }))
 }
 
@@ -512,9 +545,20 @@ fn single_planned(
         Plan::Retry => return Dispatch::Ready(Reply::try_again()),
         Plan::Moved(moved) => return Dispatch::Ready(Reply::error(moved)),
         Plan::Local if need.is_some() || hop.track => {
-            let mut reply = local(node, spec, &cmd);
-            track_here(node, &key, &mut reply);
-            return Dispatch::Ready(reply);
+            return match local_acked(node, spec, cmd) {
+                Dispatch::Ready(mut reply) => {
+                    track_here(node, &key, &mut reply);
+                    Dispatch::Ready(reply)
+                }
+                Dispatch::Pending(f) => {
+                    let node = node.clone();
+                    Dispatch::Pending(Box::pin(async move {
+                        let mut reply = f.await;
+                        track_here(&node, &key, &mut reply);
+                        reply
+                    }))
+                }
+            };
         }
         Plan::Local => return serve_here(node, spec, cmd, write, &owners),
         Plan::Forward(targets) => targets,

@@ -9,7 +9,7 @@ use discus_wire::{Forward, ForwardMode, ForwardReply, Message, TraceContext};
 use futures::future::BoxFuture;
 
 use super::route::Route;
-use super::{local, run_hop, Hop, Job, Reply};
+use super::{local, local_acked, run_hop, Hop, Job, Reply};
 use crate::command;
 use crate::node::Node;
 use crate::telemetry;
@@ -159,8 +159,11 @@ async fn forwarded(
         Ok(spec) => spec,
         Err(e) => return Reply::error(e),
     };
-    if f.mode == ForwardMode::Local || spec.route == Route::Connection {
+    if spec.route == Route::Connection {
         return local(node, spec, &cmd);
+    }
+    if f.mode == ForwardMode::Local {
+        return local_acked(node, spec, cmd).finish().await;
     }
     // The hop keeps the inbound context. A further forward sends the context of its own span
     // with `otel`, else this context unchanged.

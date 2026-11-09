@@ -52,6 +52,16 @@ pub fn resendable(cmd: &Command, failure: Failure) -> bool {
     failure.unsent || idempotent(cmd)
 }
 
+/// The forward timeout of a delete of a listed key. The owner waits for a secondary before it
+/// replies, so a timeout without this allowance would turn a fail-open delete into `-TRYAGAIN`.
+fn delete_timeout(node: &Node, spec: &CommandSpec, cmd: &Command, write: bool) -> Option<Duration> {
+    if !write || super::acked_delete_keys(node, spec, cmd).is_empty() {
+        return None;
+    }
+    let wait = Duration::from_millis(node.config.replication_timeout_ms);
+    node.link().map(|link| link.write_timeout + wait)
+}
+
 /// Forward `cmd` to `target`. A failed read gives `None`, so the caller tries the next owner. A
 /// failed write waits for a new primary, on the entry node only.
 pub async fn send_or_hold(
@@ -62,7 +72,8 @@ pub async fn send_or_hold(
     hop: &Hop,
     write: bool,
 ) -> Option<Reply> {
-    match super::forward::send(node, target, cmd, hop, ForwardMode::Route, write, None).await {
+    let timeout = delete_timeout(node, spec, cmd, write);
+    match super::forward::send(node, target, cmd, hop, ForwardMode::Route, write, timeout).await {
         Ok(reply) => Some(reply),
         Err(_) if !write => None,
         Err(e) if hop.hops == 0 && !hop.held => {

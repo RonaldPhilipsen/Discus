@@ -164,6 +164,7 @@ and 100.
 | `discus.local_health.multiplier` | gauge | none | The factor, from 1 to 9, that stretches the probe and suspicion timeouts. |
 | `discus.local_health.evidence_dropped` | counter | none | Data-path evidence dropped while the local health was at or above the evidence cutoff (multiplier 1.5). |
 | `discus.tombstones` | gauge | none | Stored tombstones (delete markers). |
+| `discus.primary_read.delete_unacked` | counter | none | Deleted keys under `--primary-read-prefix` with no secondary acknowledgment in `--replication-timeout-ms`. The delete still returned success. Exported as `discus_primary_read_delete_unacked_total`. |
 | `discus.counter.roles` | gauge | `state` | Counter groups by the role of this node: `leader`, `follower`, `voter`, `learner`, or `idle`. |
 | `discus.counter.memory` | gauge (bytes) | none | Counter state that this node holds. |
 | `discus.counter.mode.switches` | counter | `state` | Mode switches of a counter group by the new mode, `raft` or `leader_follower`. |
