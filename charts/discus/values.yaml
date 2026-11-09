@@ -71,6 +71,15 @@ otel:
     # Also presents the client certificate from the keys tls.crt and tls.key of the Secret.
     mutual: false
 
+# A GrafanaDashboard resource for the Grafana Operator. It needs otel.enabled and a metrics store
+# that keeps the OTLP metric names, for example VictoriaMetrics.
+grafanaDashboard:
+  enabled: false
+  # Required when enabled. Selects the Grafana instance, for example:
+  #   matchLabels:
+  #     dashboards: grafana
+  instanceSelector: {}
+
 extraArgs: []
 extraEnv: []
 podAnnotations: {}

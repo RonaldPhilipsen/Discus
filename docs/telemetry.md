@@ -40,6 +40,10 @@ For TLS to the collector, use an `https://` endpoint. To trust a private CA, set
 `otel.tls.secretName` to a Secret with the key `ca.crt`. For mTLS, also set
 `otel.tls.mutual=true`. The Secret must then also have the keys `tls.crt` and `tls.key`.
 
+The chart also includes a Grafana dashboard. To install it with the Grafana Operator, set
+`grafanaDashboard.enabled=true` and set `grafanaDashboard.instanceSelector`. The dashboard needs a
+metrics store that keeps the OTLP metric names with their dots, for example VictoriaMetrics.
+
 ## Flags
 
 | Flag | Default | Meaning |
