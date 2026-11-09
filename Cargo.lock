@@ -680,7 +680,7 @@ dependencies = [
  "asn1-rs",
  "displaydoc",
  "nom",
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "rusticata-macros",
 ]
@@ -766,7 +766,7 @@ dependencies = [
  "ipnet",
  "jsonwebtoken",
  "lru",
- "num-bigint",
+ "num-bigint 0.5.1",
  "openraft",
  "parking_lot",
  "ppp",
@@ -2033,6 +2033,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "num-bigint-dig"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2824,7 +2834,7 @@ dependencies = [
  "futures-util",
  "itertools",
  "itoa",
- "num-bigint",
+ "num-bigint 0.4.8",
  "percent-encoding",
  "pin-project-lite",
  "ryu",
@@ -3416,7 +3426,7 @@ version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "thiserror 2.0.21",
  "time",
