@@ -53,14 +53,14 @@ discus-placement = { path = "../discus-placement", features = ["mock-clock"] }
 discus-resp = { path = "../discus-resp" }
 discus-transport = { path = "../discus-transport", default-features = false, features = ["testing"] }
 discus-wire = { path = "../discus-wire" }
-futures = "0.3"
-proptest = "1"
-tempfile = "3"
-redis = { version = "0.27", features = ["tokio-comp"] }
-reqwest = { version = "0.12", default-features = false }
-rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
-base64 = "0.23"
-serde_json = "1"
+futures = "=0.3.34"
+proptest = "=1.12.0"
+tempfile = "=3.27.0"
+redis = { version = "=0.27.6", features = ["tokio-comp"] }
+reqwest = { version = "=0.12.28", default-features = false }
+rcgen = { version = "=0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }
+base64 = "=0.23.1"
+serde_json = "=1.0.154"
 discus-telemetry = { path = "../discus-telemetry", features = ["testing"] }
 
 # Build features, spec §15.5. Exactly one TLS backend and one trust root feature must be on.

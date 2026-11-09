@@ -20,4 +20,4 @@ mock-clock = []
 
 [dev-dependencies]
 discus-placement = { path = ".", features = ["mock-clock"] }
-proptest = "1"
+proptest = "=1.12.0"
