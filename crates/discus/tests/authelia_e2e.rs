@@ -215,6 +215,8 @@ async fn sign_in_second_factor_and_sign_out() {
         &[
             "--primary-read-prefix",
             SESSION_PREFIX,
+            "--replication-factor",
+            "3",
             "--hold-budget-ms",
             "2000",
         ],
