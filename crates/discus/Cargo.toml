@@ -21,7 +21,7 @@ discus-wire = { path = "../discus-wire" }
 discus-telemetry = { path = "../discus-telemetry" }
 fastrand = "2"
 futures = "0.3"
-parking_lot = "0.12"
+parking_lot = "0.13"
 subtle = "2"
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
