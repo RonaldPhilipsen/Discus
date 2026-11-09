@@ -37,5 +37,5 @@ testing = ["dep:rcgen"]
 
 [dev-dependencies]
 discus-transport = { path = ".", default-features = false, features = ["testing"] }
-parking_lot = "0.13"
-tokio = { version = "1", features = ["full"] }
+parking_lot = "=0.13.0"
+tokio = { version = "=1.54.1", features = ["full"] }
