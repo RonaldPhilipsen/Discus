@@ -56,6 +56,32 @@ async fn startupz_waits_for_counter_promotion() {
     assert!(waited, "the startup probe never waited for the counters");
 }
 
+/// A restart gives a pod a new node ID, so a probe that waits forever can restart the promotion
+/// without end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn startupz_stops_waiting_for_a_stuck_promotion() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let nodes = raft_cluster(&net, &leases, 3, &[]).await;
+    let extra = ["--counter-settle-timeout-ms", "3000"];
+    let (fourth, _) = join_to(&net, &leases, &refs(&nodes), &flags(&extra)).await;
+    fourth.stall_counters(600_000);
+    let mut all = refs(&nodes);
+    all.push(&fourth);
+    wait_agreed(&all, Duration::from_secs(15)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while http_status(fourth.admin, "/startupz").await != 200 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the startup probe waited forever for a promotion that cannot finish"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        targeted(&fourth).is_empty() || !promoted(&fourth),
+        "the promotion was not stuck, so this test proved nothing"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn drain_moves_raft_roles_away() {
     let (net, leases) = (Net::new(), Leases::new());

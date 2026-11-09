@@ -281,6 +281,10 @@ pub struct Config {
     /// The leader removes a voter that has not answered for this long, in milliseconds.
     #[arg(long, default_value_t = 10_000)]
     pub raft_voter_timeout_ms: u64,
+    /// How long the startup probe waits for the counter tier to settle after the node turns
+    /// `NORMAL`, in milliseconds. Keep it below the startup probe budget.
+    #[arg(long, default_value_t = 45_000)]
+    pub counter_settle_timeout_ms: u64,
     /// Bytes per second that one handoff scan sends at most.
     #[arg(long, default_value_t = 33_554_432)]
     pub handoff_rate_bytes: u64,

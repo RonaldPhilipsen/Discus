@@ -123,7 +123,7 @@ roleRef:
 | Path | Answers 200 when |
 | --- | --- |
 | `/healthz` | The process runs. |
-| `/startupz` | The node was `NORMAL` at least once, the store is ready, and the counter tier is settled. The store is ready once the node received its handoff (see [Handoff](#handoff)). The counter tier is settled once the node holds what each counter group needs from it (see [Strong counters](#strong-counters)). |
+| `/startupz` | The node was `NORMAL` at least once, the store is ready, and the counter tier is settled. The store is ready once the node received its handoff (see [Handoff](#handoff)). The counter tier is settled once the node holds what each counter group needs from it (see [Strong counters](#strong-counters)). The node stops this wait after `--counter-settle-timeout-ms`. |
 | `/readyz` | The node is `NORMAL` in its current epoch and does not drain. |
 
 A join does not make the serving nodes unready.
@@ -295,6 +295,7 @@ Follow these rules:
 | `--counter-groups` | 8 | The number of counter groups. A change is an offline procedure. |
 | `--counter-memory-percent` | 5 | The share of `--max-memory` for counter state. |
 | `--counter-timeout-ms` | 1000 | Time that a counter command waits for a leader, a quorum, or a commit. |
+| `--counter-settle-timeout-ms` | 45000 | The longest time that `/startupz` waits for the counter tier after the node turns `NORMAL`. Keep it below the startup probe budget. |
 | `--counter-lease-duration-ms` | 5000 | The duration of a counter group lease. |
 | `--counter-lease-renew-ms` | 1000 | The renewal interval of a counter group lease. |
 | `--counter-lease-margin-ms` | 1000 | A leader stops this long before its lease ends. |
@@ -612,6 +613,10 @@ A false `DEAD` during a partition lets both sides rebuild a group. On heal, the 
 discards its counters, and the writes that it accepted are lost.
 
 ### Startup and drain
+
+After `--counter-settle-timeout-ms` (default 45 s), the node passes `/startupz` without the counter
+tier and logs a warning. Its promotion continues. A restart gives a pod a new node ID and starts the
+promotion again, so a wait without an end can stop a rollout.
 
 `/startupz` looks at every group. A group is settled for the node in four cases:
 
