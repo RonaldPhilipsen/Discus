@@ -42,7 +42,7 @@ toml = "1.0"
 x509-parser = "0.18"
 ppp = "2"
 jsonwebtoken = { version = "11", default-features = false, features = ["use_pem"], optional = true }
-reqwest = { version = "0.13", default-features = false, features = ["rustls-tls-manual-roots-no-provider", "json"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "form"], optional = true }
 serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
