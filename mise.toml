@@ -44,6 +44,10 @@ run = "bash scripts/gen-wire.sh"
 description = "Run the redis-cli compatibility matrix against a fresh node"
 run = "bash scripts/compat.sh"
 
+[tasks.authelia-e2e]
+description = "Run Authelia in a container against a three-node cluster (needs Docker)"
+run = "cargo nextest run -p discus --test authelia_e2e --run-ignored only"
+
 [tasks.bench]
 description = "Benchmark smoke with redis-benchmark against a release build"
 run = "bash scripts/bench.sh"

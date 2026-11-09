@@ -909,11 +909,13 @@ dependencies = [
 name = "discus"
 version = "0.0.0"
 dependencies = [
+ "aws-lc-rs",
  "axum",
  "base64 0.23.1",
  "bytes",
  "clap",
  "ctutils",
+ "data-encoding",
  "discus",
  "discus-membership",
  "discus-placement",

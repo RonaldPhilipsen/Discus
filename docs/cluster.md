@@ -928,6 +928,59 @@ its leader, so they are atomic. Keys of several groups fan out like normal keys.
 mixes counter keys and other keys returns
 `-ERR counter keys and other keys cannot be mixed in one command`.
 
+## Run Authelia on Discus
+
+[Authelia](https://www.authelia.com/) is an authentication server. It can keep its user sessions
+in a Discus cluster through its `session.redis` settings. Discus does not make sessions strongly
+consistent. A node loss can lose the last session writes that the primary did not replicate yet.
+
+Follow these requirements:
+
+- Set `--primary-read-prefix authelia-session` on every node. Authelia names each session key
+  with this prefix. A read of a session then goes to the primary and returns the latest write,
+  also on a new connection.
+- Set `--hold-budget-ms` to 2000 or less. A write that waits for a new primary then ends before
+  the 3 s timeout of the Authelia client.
+- Use TLS and a shared token between Authelia and Discus. Set `--tls-mode`, `--tls-cert`, and
+  `--tls-key`. Set `--shared-token` and `--auth-policy all:tls,shared_token`.
+- Set `database_index` to 0.
+- Do not configure the `high_availability` section of `session.redis`, because Discus has no
+  Sentinel support. To survive a node loss, point `host` at a load balancer or a DNS name that
+  resolves to the nodes.
+
+Start each node with these flags, in addition to the cluster flags:
+
+```bash
+discus \
+  --primary-read-prefix authelia-session \
+  --hold-budget-ms 2000 \
+  --tls-mode node \
+  --tls-cert /etc/discus/tls.crt \
+  --tls-key /etc/discus/tls.key \
+  --auth-policy all:tls,shared_token \
+  --shared-token "$SESSION_TOKEN"
+```
+
+Configure Authelia with the same token:
+
+```yaml
+session:
+  redis:
+    host: 'cache.example.com'
+    port: 6379
+    password: 'the value of SESSION_TOKEN'
+    database_index: 0
+    tls:
+      server_name: 'cache.example.com'
+      minimum_version: 'TLS1.2'
+```
+
+Sessions live in memory only. A full restart of the cluster signs out every user.
+
+The task `mise run authelia-e2e` runs Authelia in a container against three nodes. It needs
+Docker. It covers sign-in, a second factor, a session on later requests, and sign-out. It runs
+without TLS and without a token.
+
 ## Limits of this release
 
 - Replication is asynchronous. A node loss can lose the last writes, including deletes, that the
