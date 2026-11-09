@@ -68,7 +68,7 @@ fn take(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     }
     node.write(key, node.stamp()?, |slot| match slot.as_ref() {
         None => Ok(Value::Null),
-        Some(e) if e.version != seen => Err(CommandError::TryAgain),
+        Some(e) if e.version != seen => Err(CommandError::ClusterTryAgain),
         Some(_) => {
             slot.set(None);
             Ok(Value::bulk(blob))

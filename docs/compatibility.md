@@ -225,6 +225,8 @@ In a cluster, replication adds these deviations:
 - `MSET` and multi-key `DEL` hold their failed parts like single writes. If a part still fails,
   the command returns `-TRYAGAIN` with the other parts applied.
 - `RENAME` is not atomic. A failure in a cluster can lose the value.
+- A cluster `RENAME` refuses a value whose encoded form is larger than `--max-value-bytes`. The
+  source then stays unchanged.
 
 Counter keys add these deviations:
 

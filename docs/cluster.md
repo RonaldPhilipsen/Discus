@@ -939,8 +939,12 @@ Follow these requirements:
 - Set `--primary-read-prefix authelia-session` on every node. Authelia names each session key
   with this prefix. A read of a session then goes to the primary and returns the latest write,
   also on a new connection.
-- Set `--hold-budget-ms` to 2000 or less. A write that waits for a new primary then ends before
-  the 3 s timeout of the Authelia client.
+- Keep `--hold-budget-ms` plus `--replication-timeout-ms` plus two times
+  `--forward-write-timeout-ms` below the 3 s read timeout of the Authelia client. A delete of a
+  listed key can spend the write forward timeout and the replication timeout before the hold
+  starts. With the other defaults, set `--hold-budget-ms 1500`.
+- Set `--forward-read-timeout-ms 200`. A read of a listed key makes one attempt and has no
+  replica fallback, so the default of 20 ms can fail a read on a busy primary.
 - Use TLS and a shared token between Authelia and Discus. Set `--tls-mode`, `--tls-cert`, and
   `--tls-key`. Set `--shared-token` and `--auth-policy all:tls,shared_token`.
 - Set `database_index` to 0.
@@ -953,7 +957,8 @@ Start each node with these flags, in addition to the cluster flags:
 ```bash
 discus \
   --primary-read-prefix authelia-session \
-  --hold-budget-ms 2000 \
+  --hold-budget-ms 1500 \
+  --forward-read-timeout-ms 200 \
   --tls-mode node \
   --tls-cert /etc/discus/tls.crt \
   --tls-key /etc/discus/tls.key \

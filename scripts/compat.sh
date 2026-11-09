@@ -123,6 +123,17 @@ ok RENAME '^OK$' RENAME "$p:rn1" "$p:rn2"
 ok GETDEL '^1$' GETDEL "$p:a"
 ok DEL '^1$' DEL "$p:b"
 cli DEL "$p:rn2" >/dev/null
+ok "RENAME missing source" 'no such key' RENAME "$p:rnmissing" "$p:rnx"
+cli SET "$p:rnself" 1 >/dev/null
+ok "RENAME same key" '^OK$' RENAME "$p:rnself" "$p:rnself"
+cli SET "$p:rnsrc" new >/dev/null
+cli SET "$p:rndst" old >/dev/null
+ok "RENAME overwrite" '^OK$' RENAME "$p:rnsrc" "$p:rndst"
+ok "RENAME overwrite GET" '^new$' GET "$p:rndst"
+cli SET "$p:rnttl" v EX 100 >/dev/null
+ok "RENAME with TTL" '^OK$' RENAME "$p:rnttl" "$p:rnttl2"
+ok "RENAME keeps TTL" '^(100|99)$' TTL "$p:rnttl2"
+cli DEL "$p:rnself" "$p:rndst" "$p:rnttl2" >/dev/null
 
 # Hashes
 ok HSET '^1$' HSET "$p:h" f 1

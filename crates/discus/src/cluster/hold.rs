@@ -26,7 +26,8 @@ use crate::Node;
 /// A held command plans its route again at least this often.
 const RETRY: Duration = Duration::from_millis(200);
 
-/// True for a command that is safe to apply twice: the exact list of spec section 7.5.
+/// True for a command that is safe to apply twice: the exact list of spec section 7.5
+/// plus the internal `DISCUS.PUT`.
 pub fn idempotent(cmd: &Command) -> bool {
     let name = upper(&cmd[0]);
     match name.as_str() {

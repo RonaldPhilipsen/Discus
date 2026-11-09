@@ -65,6 +65,7 @@ fn the_idempotent_list_is_exact() {
         "ZADD z 1 m",
         "ZADD z NX CH 1 incr",
         "ZREM z m",
+        "DISCUS.PUT k x",
     ] {
         assert!(idempotent(&cmd(yes)), "{yes}");
     }
@@ -78,6 +79,7 @@ fn the_idempotent_list_is_exact() {
         "GETDEL k",
         "SPOP s",
         "HINCRBY h f 1",
+        "DISCUS.TAKE k",
     ] {
         assert!(!idempotent(&cmd(no)), "{no}");
     }
