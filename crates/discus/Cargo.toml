@@ -44,6 +44,7 @@ ppp = "2"
 jsonwebtoken = { version = "11", default-features = false, features = ["use_pem"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots-no-provider", "json"], optional = true }
 serde_json = { version = "1", optional = true }
+sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 
 [dev-dependencies]
 discus = { path = ".", default-features = false, features = ["testing"] }

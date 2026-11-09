@@ -69,8 +69,9 @@ pub struct Config {
     /// Number of store shards.
     #[arg(long, default_value_t = 256)]
     pub shards: usize,
-    /// Memory budget in bytes.
-    #[arg(long, default_value_t = 1 << 30)]
+    /// Memory budget in bytes. Default: 75% of the container memory limit, or 1 GiB without a
+    /// limit.
+    #[arg(long, default_value_t = default_max_memory(), hide_default_value = true)]
     pub max_memory: u64,
     /// How long a delete marker (tombstone) lives, in milliseconds.
     #[arg(long, default_value_t = discus_store::DEFAULT_TOMBSTONE_TTL_MS)]
@@ -184,7 +185,7 @@ pub struct Config {
     /// PEM file with this node's private key.
     #[arg(long)]
     pub cluster_key: Option<PathBuf>,
-    /// The URI SAN that every peer certificate must carry.
+    /// The URI SAN that every peer certificate must carry. Empty: any certificate from the CA.
     #[arg(long, default_value = "spiffe://cluster.local/ns/default/sa/discus")]
     pub cluster_san: String,
     /// Forward timeout for reads, in milliseconds. Then the next owner is tried.
@@ -249,7 +250,11 @@ pub struct Config {
     /// Then it returns `-TRYAGAIN`.
     #[arg(long, default_value_t = 1_000)]
     pub counter_timeout_ms: u64,
-    /// The duration of a counter group lease `discus-counter-<g>`, in milliseconds.
+    /// The name prefix of the counter group leases. The lease of group `g` is `<prefix>-<g>`.
+    /// Every member of a cluster uses the same value, and each cluster in a namespace its own.
+    #[arg(long, default_value = "discus-counter")]
+    pub counter_lease_prefix: String,
+    /// The duration of a counter group lease, in milliseconds.
     #[arg(long, default_value_t = 5_000)]
     pub counter_lease_duration_ms: u64,
     /// The renewal interval of a counter group lease, in milliseconds.
@@ -328,6 +333,11 @@ impl Config {
         T: Into<std::ffi::OsString> + Clone,
     {
         <Config as Parser>::try_parse_from(args)
+    }
+
+    /// The name of the lease of counter group `g`.
+    pub fn counter_lease_name(&self, g: u16) -> String {
+        format!("{}-{g}", self.counter_lease_prefix)
     }
 
     fn cert_flags(&self) -> [(&'static str, bool); 3] {
@@ -473,10 +483,58 @@ fn parse_rf(s: &str) -> Result<usize, String> {
     }
 }
 
+fn default_max_memory() -> u64 {
+    let limit = sysinfo::System::new()
+        .ok()
+        .and_then(|system| system.cgroup_limits())
+        .map(|limits| limits.total_memory);
+    budget_for_limit(limit)
+}
+
+/// The rest of the limit is for what the budget does not count: connection buffers, replication,
+/// and allocator overhead. Past the limit, the kernel kills the process.
+fn budget_for_limit(limit: Option<u64>) -> u64 {
+    limit.map_or(1 << 30, |bytes| bytes / 4 * 3)
+}
+
 fn parse_weight(s: &str) -> Result<f64, String> {
     s.parse::<f64>()
         .ok()
         .and_then(discus_placement::Weight::new)
         .map(|w| w.get())
         .ok_or_else(|| "the weight is a finite number greater than zero".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_budget_is_three_quarters_of_the_limit() {
+        assert_eq!(budget_for_limit(Some(4 << 30)), 3 << 30);
+    }
+
+    #[test]
+    fn the_budget_is_one_gibibyte_without_a_limit() {
+        assert_eq!(budget_for_limit(None), 1 << 30);
+    }
+
+    #[test]
+    fn an_explicit_max_memory_wins() {
+        let config = Config::parse_from(["discus", "--max-memory", "4096"]).unwrap();
+        assert_eq!(config.max_memory, 4096);
+    }
+
+    #[test]
+    fn counter_lease_name_defaults_to_the_documented_name() {
+        let config = Config::parse_from(["discus"]).unwrap();
+        assert_eq!(config.counter_lease_name(3), "discus-counter-3");
+    }
+
+    #[test]
+    fn counter_lease_name_uses_the_prefix() {
+        let config =
+            Config::parse_from(["discus", "--counter-lease-prefix", "blue-counter"]).unwrap();
+        assert_eq!(config.counter_lease_name(0), "blue-counter-0");
+    }
 }

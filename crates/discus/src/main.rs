@@ -26,6 +26,7 @@ async fn main() -> std::io::Result<()> {
         features = discus::build::FEATURES.join(","),
         tls_backend = discus::build::TLS_BACKEND,
         trust_roots = discus::build::TRUST_ROOTS,
+        max_memory = config.max_memory,
         "starting"
     );
     let server = Server::bind(config).await?;

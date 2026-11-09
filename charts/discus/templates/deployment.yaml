@@ -1,0 +1,166 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "discus.fullname" . }}
+  labels:
+    {{- include "discus.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  # One replacement finishes before the next one begins.
+  minReadySeconds: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "discus.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "discus.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "discus.serviceAccountName" . }}
+      # Longer than the drain, so that the drain ends before Kubernetes kills the container.
+      terminationGracePeriodSeconds: {{ add .Values.shutdownTimeoutSeconds 15 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: discus
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: KUBERNETES_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          args:
+            - --discovery-dns={{ include "discus.fullname" . }}-peers.{{ .Release.Namespace }}.svc
+            - --cluster-advertise=$(POD_IP):7379
+            - --lease-name={{ include "discus.fullname" . }}-cluster
+            - --counter-lease-prefix={{ include "discus.fullname" . }}-counter
+            - --cluster-ca=/tls/ca.crt
+            - --cluster-cert=/tls/tls.crt
+            - --cluster-key=/tls/tls.key
+            - --cluster-san={{ if .Values.cluster.san.enabled }}{{ .Values.cluster.san.value | default (printf "spiffe://cluster.local/ns/%s/sa/%s" .Release.Namespace (include "discus.serviceAccountName" .)) }}{{ end }}
+            - --shutdown-timeout-secs={{ .Values.shutdownTimeoutSeconds }}
+            {{- with .Values.otel }}
+            {{- if .enabled }}
+            - --otel
+            - --otel-endpoint={{ .endpoint }}
+            - --otel-sampling-ratio={{ .samplingRatio }}
+            - --otel-export-interval-secs={{ int64 .exportIntervalSeconds }}
+            - --otel-span-queue={{ int64 .spanQueue }}
+            {{- if .tls.secretName }}
+            {{- if not (hasPrefix "https://" .endpoint) }}
+            {{- fail "otel.tls.secretName needs an https:// otel.endpoint" }}
+            {{- end }}
+            - --otel-ca-file=/otel-tls/ca.crt
+            {{- if .tls.mutual }}
+            - --otel-cert-file=/otel-tls/tls.crt
+            - --otel-key-file=/otel-tls/tls.key
+            {{- end }}
+            {{- else if .tls.mutual }}
+            {{- fail "otel.tls.mutual needs otel.tls.secretName" }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: resp
+              containerPort: 6379
+            - name: cluster
+              containerPort: 7379
+              protocol: UDP
+            - name: admin
+              containerPort: 9100
+          startupProbe:
+            httpGet:
+              path: /startupz
+              port: admin
+            failureThreshold: 60
+            periodSeconds: 1
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: admin
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+            {{- if and .Values.otel.enabled .Values.otel.tls.secretName }}
+            - name: otel-tls
+              mountPath: /otel-tls
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ required "cluster.tls.secretName is required" .Values.cluster.tls.secretName }}
+        {{- if and .Values.otel.enabled .Values.otel.tls.secretName }}
+        - name: otel-tls
+          secret:
+            secretName: {{ .Values.otel.tls.secretName }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

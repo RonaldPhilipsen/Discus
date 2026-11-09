@@ -211,8 +211,9 @@ fn uri_sans(der: &[u8]) -> Vec<String> {
 }
 
 impl PeerVerifier {
+    /// An empty expected SAN turns this check off. Then every certificate from the CA is a member.
     fn check_san(&self, end_entity: &CertificateDer<'_>) -> Result<(), Error> {
-        if uri_sans(end_entity).iter().any(|s| s == &self.san) {
+        if self.san.is_empty() || uri_sans(end_entity).iter().any(|s| s == &self.san) {
             Ok(())
         } else {
             Err(Error::General(format!(

@@ -50,6 +50,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: mise run build-matrix
 
+  helm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: helm lint charts/discus --strict --set cluster.tls.secretName=discus-tls
+      - run: helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+
   # redis-cli against a fresh node, for every supported and unsupported command.
   compat:
     runs-on: ubuntu-latest
