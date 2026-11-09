@@ -15,7 +15,6 @@ fastrand = "2"
 futures = "0.3"
 parking_lot = "0.13"
 thiserror = "2"
-phi-accrual-failure-detector = "0.1"
 tracing = "0.1"
 tokio = { version = "1", features = ["time"], optional = true }
 kube = { version = "5", default-features = false, features = ["client", "rustls-tls"], optional = true }
