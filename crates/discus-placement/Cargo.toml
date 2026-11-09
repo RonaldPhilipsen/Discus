@@ -9,7 +9,7 @@ workspace = true
 
 [dependencies]
 fastrand = "2"
-getrandom = "0.3"
+getrandom = "0.4"
 uhlc = { version = "0.9", default-features = false }
 thiserror = "2"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
