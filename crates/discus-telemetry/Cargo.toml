@@ -21,8 +21,8 @@ thiserror = "2"
 governor = { version = "0.10", default-features = false, features = ["std", "dashmap", "quanta"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros"] }
-serde_json = "1"
+tokio = { version = "=1.54.1", features = ["rt", "macros"] }
+serde_json = "=1.0.154"
 
 # The node crate forwards its features here. The TLS and root features are weak, so they never
 # turn on `otel` by themselves.
