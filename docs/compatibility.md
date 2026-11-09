@@ -13,7 +13,7 @@ features from that value.
 | --- | --- |
 | Connection | `PING`, `ECHO`, `QUIT`, `AUTH`, `HELLO` (RESP2 and RESP3), `SELECT` (database 0 only), `COMMAND` (`COUNT`, `INFO`, `GETKEYS`, and the full list), `READONLY`, `READWRITE`, `ASKING`, `CLUSTER` (see below), `CLIENT` (`SETNAME`, `GETNAME`, `ID`, `SETINFO`), `INFO`, `CONFIG GET` (`maxmemory`, `databases`, `maxclients`) |
 | Strings | `GET`, `SET` (`EX`, `PX`, `EXAT`, `PXAT`, `NX`, `XX`, `KEEPTTL`, `GET`), `GETDEL`, `GETEX`, `MGET`, `MSET`, `INCR`, `DECR`, `INCRBY`, `DECRBY`, `INCRBYFLOAT`, `APPEND`, `STRLEN` |
-| Keys and expiry | `DEL`, `EXISTS`, `TYPE`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `SCAN` (`MATCH`, `COUNT`), `RANDOMKEY`, `DBSIZE`, `FLUSHDB`, `FLUSHALL` |
+| Keys and expiry | `DEL`, `EXISTS`, `TYPE`, `RENAME`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `SCAN` (`MATCH`, `COUNT`), `RANDOMKEY`, `DBSIZE`, `FLUSHDB`, `FLUSHALL` |
 | Hashes | `HSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HINCRBY`, `HKEYS`, `HVALS` |
 | Sets | `SADD`, `SREM`, `SMEMBERS`, `SISMEMBER`, `SMISMEMBER`, `SCARD`, `SPOP`, `SRANDMEMBER` |
 | Sorted sets | `ZADD` (`NX`, `XX`, `CH`), `ZSCORE`, `ZMSCORE`, `ZREM`, `ZCARD`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE` (`WITHSCORES`, `LIMIT`), `ZINCRBY`, `ZCOUNT` |
@@ -24,7 +24,7 @@ These commands return `-ERR command not supported by Discus`:
 
 `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH`, `EVAL`, `EVALSHA`, `SCRIPT`, `FUNCTION`,
 `SUBSCRIBE`, `PSUBSCRIBE`, `PUBLISH`, `PUBSUB`, `BLPOP`, `BRPOP`, `BLMOVE`, `BRPOPLPUSH`, `SORT`,
-`RENAME`, `RENAMENX`, `SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE`, `BITOP`, `BITFIELD`, `PFADD`,
+`RENAMENX`, `SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE`, `BITOP`, `BITFIELD`, `PFADD`,
 `PFCOUNT`, `MIGRATE`, `WAIT`, `DEBUG`, every stream command that starts with `X`, and every
 command that starts with `GEO`.
 
@@ -224,6 +224,7 @@ In a cluster, replication adds these deviations:
 - A delete leaves a tombstone for one hour. Tombstones take memory, up to 5% of `--max-memory`.
 - `MSET` and multi-key `DEL` hold their failed parts like single writes. If a part still fails,
   the command returns `-TRYAGAIN` with the other parts applied.
+- `RENAME` is not atomic. A failure in a cluster can lose the value.
 
 Counter keys add these deviations:
 

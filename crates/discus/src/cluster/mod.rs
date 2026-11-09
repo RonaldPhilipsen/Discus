@@ -342,7 +342,7 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
             drop(route);
             Dispatch::Ready(Reply::value(command::keys::scan_primary(node, &job.cmd)))
         }
-        Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => {
+        Route::Connection | Route::Rename | Route::Local | Route::Fanout | Route::Broadcast => {
             drop(route);
             Dispatch::Ready(local(node, job.spec, &job.cmd))
         }

@@ -124,7 +124,6 @@ const UNSUPPORTED: &[&str] = &[
     "PSUBSCRIBE",
     "PUBLISH",
     "PUBSUB",
-    "RENAME",
     "RENAMENX",
     "SCRIPT",
     "SINTERSTORE",
