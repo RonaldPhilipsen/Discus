@@ -1,0 +1,89 @@
+replicaCount: 3
+
+image:
+  repository: ghcr.io/ronaldphilipsen/discus
+  # The default is the appVersion of the chart.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  # The default is the full name of the release.
+  name: ""
+  annotations: {}
+
+# Creates the Role that lets the pods use the cluster lease.
+rbac:
+  create: true
+
+service:
+  type: ClusterIP
+  port: 6379
+
+cluster:
+  tls:
+    # Required. A Secret with the keys ca.crt, tls.crt, and tls.key.
+    secretName: ""
+  san:
+    # Requires a URI SAN on every peer certificate, for example a SPIFFE identity. While this is
+    # false, every certificate from the CA is a member, so use a CA that serves only this release.
+    enabled: false
+    # The default is spiffe://cluster.local/ns/<namespace>/sa/<service account>.
+    value: ""
+
+# The termination grace period of the pod is this value plus 15 seconds.
+shutdownTimeoutSeconds: 30
+
+# Tokio and the Rust standard library read the CPU limit from the cgroup. Without a CPU limit,
+# the node starts one worker thread per host core. A fractional limit rounds down.
+#
+# The memory budget of the store is 75% of limits.memory. Without a memory limit, it is 1 GiB.
+# To set the budget in bytes, add --max-memory to extraArgs.
+resources:
+  requests:
+    cpu: "2"
+    memory: 2Gi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+# OTLP/gRPC export of metrics and traces. Logs always go to stdout.
+otel:
+  enabled: false
+  # An https:// endpoint turns on TLS.
+  endpoint: http://otel-collector:4317
+  # The fraction of new traces to keep, from 0 to 1.
+  samplingRatio: 0.01
+  exportIntervalSeconds: 10
+  spanQueue: 2048
+  tls:
+    # A Secret with the key ca.crt. Without it, the node uses the trust roots of the build.
+    # Needs an https:// endpoint.
+    secretName: ""
+    # Also presents the client certificate from the keys tls.crt and tls.key of the Secret.
+    mutual: false
+
+# A GrafanaDashboard resource for the Grafana Operator. It needs otel.enabled and a metrics store
+# that keeps the OTLP metric names, for example VictoriaMetrics.
+grafanaDashboard:
+  enabled: false
+  # Required when enabled. Selects the Grafana instance, for example:
+  #   matchLabels:
+  #     dashboards: grafana
+  instanceSelector: {}
+
+extraArgs: []
+extraEnv: []
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []

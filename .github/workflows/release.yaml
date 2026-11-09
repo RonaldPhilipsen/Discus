@@ -69,9 +69,34 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  chart:
+    name: Package and push Helm chart
+    needs: [version, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v4
+      - name: Log in to the registry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$GH_TOKEN" | helm registry login ghcr.io --username "$ACTOR" --password-stdin
+      # The versions in Chart.yaml are placeholders. The released image tag is the source of truth.
+      - name: Package chart
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: helm package charts/discus --version "$VERSION" --app-version "$VERSION"
+      - name: Push chart
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: helm push "discus-$VERSION.tgz" oci://ghcr.io/ronaldphilipsen/charts
+
   release:
     name: Create GitHub release
-    needs: [version, image]
+    needs: [version, image, chart]
     runs-on: ubuntu-latest
     permissions:
       contents: write

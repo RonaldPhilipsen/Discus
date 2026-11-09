@@ -1,0 +1,19 @@
+{{- with .Values.grafanaDashboard }}
+{{- if .enabled }}
+{{- if not .instanceSelector }}
+{{- fail "grafanaDashboard.instanceSelector is required" }}
+{{- end }}
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: {{ include "discus.fullname" $ }}
+  labels:
+    {{- include "discus.labels" $ | nindent 4 }}
+spec:
+  allowCrossNamespaceImport: true
+  instanceSelector:
+    {{- toYaml .instanceSelector | nindent 4 }}
+  json: |
+    {{- $.Files.Get "dashboards/discus.json" | nindent 4 }}
+{{- end }}
+{{- end }}

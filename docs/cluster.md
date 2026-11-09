@@ -18,7 +18,8 @@ also not in development.
 Each node presents a certificate. The peer accepts the certificate only in two cases together:
 
 - The certificate chains to the CA in `--cluster-ca`.
-- The certificate carries a URI SAN equal to `--cluster-san`.
+- The certificate carries a URI SAN equal to `--cluster-san`. If `--cluster-san` is empty, the
+  peer does not do this test.
 
 The certificate proves that a node belongs to the cluster. It does not prove which node it is. So
 one certificate can serve every node. The certificate is used for both sides of a connection. It
@@ -238,6 +239,51 @@ Follow these rules:
 - Mount the node certificate at `/tls`, for example from a cert-manager `Certificate` with the URI
   SAN `spiffe://cluster.local/ns/<namespace>/sa/discus`. Set `--cluster-san` to the same value.
 
+### Install with Helm
+
+The chart in `charts/discus` creates the resources above and a PodDisruptionBudget. Each release
+publishes the chart with the same version as the image.
+
+Before you install the chart, create a Secret with the keys `ca.crt`, `tls.crt`, and `tls.key`.
+Use a CA that serves only this release, because every certificate from the CA is a member of the
+cluster. Then install the chart:
+
+```bash
+helm install <release> oci://ghcr.io/ronaldphilipsen/charts/discus \
+  --version <version> \
+  --namespace <namespace> \
+  --set cluster.tls.secretName=<secret>
+```
+
+The chart does not require a URI SAN by default. To require a SPIFFE identity, set
+`cluster.san.enabled=true`. The certificate must then carry the URI SAN
+`spiffe://cluster.local/ns/<namespace>/sa/<account>`. The value `<account>` is the service account
+of the release. By default, it is the full name of the release, for example `discus` or
+`blue-discus`. To require a different URI, set `cluster.san.value`.
+
+You can install more than one release in a namespace. The chart gives each release its own lease
+names, so each release is a separate cluster. Use a different CA for each release, or require a
+URI SAN that is different for each release.
+
+### Memory budget
+
+If you do not set `--max-memory`, the node reads the memory limit of the container from the
+cgroup. The budget is then 75% of that limit. Connections, replication, and the allocator use the
+remaining 25%. If the container has no memory limit, the budget is 1 GiB. The node logs its budget
+at startup in the field `max_memory`.
+
+### CPU limits
+
+The node starts one Tokio worker thread for each CPU that the container can use. The node reads
+the CPU limit of the container from the cgroup (the Linux resource control group).
+
+| `resources.limits.cpu` | Worker threads |
+| --- | --- |
+| `4` | 4 |
+| `3500m` | 3 |
+| `500m` | 1 |
+| Not set | One for each host core |
+
 ## Flags
 
 | Flag | Default | Meaning |
@@ -266,7 +312,7 @@ Follow these rules:
 | `--cluster-ca` | none | PEM file with the CA certificate. |
 | `--cluster-cert` | none | PEM file with this node's certificate chain. |
 | `--cluster-key` | none | PEM file with this node's private key. |
-| `--cluster-san` | `spiffe://cluster.local/ns/default/sa/discus` | The URI SAN that every peer must carry. |
+| `--cluster-san` | `spiffe://cluster.local/ns/default/sa/discus` | The URI SAN that every peer must carry. If the value is empty, any certificate from the CA is accepted. |
 | `--forward-read-timeout-ms` | 20 | Time to wait for a forwarded read. |
 | `--forward-write-timeout-ms` | 200 | Time to wait for a forwarded write. |
 | `--cluster-handshake-timeout-ms` | 2000 | Time to wait for a new connection and its `HELLO`. |
@@ -296,6 +342,7 @@ Follow these rules:
 | `--counter-memory-percent` | 5 | The share of `--max-memory` for counter state. |
 | `--counter-timeout-ms` | 1000 | Time that a counter command waits for a leader, a quorum, or a commit. |
 | `--counter-settle-timeout-ms` | 45000 | The longest time that `/startupz` waits for the counter tier after the node turns `NORMAL`. Keep it below the startup probe budget. |
+| `--counter-lease-prefix` | `discus-counter` | The name prefix of the counter group leases. Every member of a cluster must use the same value. |
 | `--counter-lease-duration-ms` | 5000 | The duration of a counter group lease. |
 | `--counter-lease-renew-ms` | 1000 | The renewal interval of a counter group lease. |
 | `--counter-lease-margin-ms` | 1000 | A leader stops this long before its lease ends. |
@@ -542,7 +589,8 @@ the group as the key.
 
 ### Leader-follower mode
 
-The Kubernetes `Lease` `discus-counter-<g>` names the leader of group `g`. Its duration is
+The Kubernetes `Lease` `<prefix>-<g>` names the leader of group `g`. The value `<prefix>` is
+`--counter-lease-prefix` (default `discus-counter`). The duration of the lease is
 `--counter-lease-duration-ms` (default 5 s), and the leader renews it every
 `--counter-lease-renew-ms` (default 1 s).
 

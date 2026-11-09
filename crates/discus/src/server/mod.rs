@@ -45,8 +45,8 @@ fn lease_namespace(config: &Config) -> String {
     })
 }
 
-/// The counter group leases that `--lease-provider` names: one `discus-counter-<g>` per group
-/// with `k8s`, none with `none` or static membership (spec section 10.1).
+/// The counter group leases that `--lease-provider` names: one per group with `k8s`, none with
+/// `none` or static membership (spec section 10.1).
 fn counter_leases(config: &Config) -> Result<Option<crate::counter::CounterLeases>, String> {
     if !config.gossip_enabled() || config.lease_provider == LeaseKind::None {
         return Ok(None);
@@ -57,7 +57,7 @@ fn counter_leases(config: &Config) -> Result<Option<crate::counter::CounterLease
         let duration = Duration::from_millis(config.counter_lease_duration_ms);
         let mut leases: Vec<Arc<dyn LeaseProvider>> = Vec::new();
         for g in 0..config.counter_groups {
-            let name = format!("discus-counter-{g}");
+            let name = config.counter_lease_name(g);
             let lease = discus_membership::lease::K8sLease::in_cluster(&namespace, &name, duration)
                 .map_err(|e| format!("--lease-provider k8s: {e}"))?;
             leases.push(Arc::new(lease));
@@ -139,6 +139,12 @@ impl Server {
             let tls = TlsMaterial::from_files(ca, cert, key, &config.cluster_san)
                 .map_err(|e| invalid(e.to_string()))?;
             tls.check().map_err(|e| invalid(e.to_string()))?;
+            if config.cluster_san.is_empty() {
+                tracing::warn!(
+                    "--cluster-san is empty, so every certificate from --cluster-ca is a member. \
+                     Use a CA that serves only this cluster"
+                );
+            }
             Some(tls)
         } else {
             None

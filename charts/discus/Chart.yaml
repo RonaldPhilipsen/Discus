@@ -1,0 +1,10 @@
+apiVersion: v2
+name: discus
+description: A Redis-compatible, horizontally scalable cache
+type: application
+# The release workflow replaces both versions with the release version.
+version: 0.1.0-rc.3
+appVersion: "0.1.0-rc.3"
+home: https://github.com/RonaldPhilipsen/discus
+sources:
+  - https://github.com/RonaldPhilipsen/discus
