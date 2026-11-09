@@ -72,7 +72,7 @@ impl Source {
         }
         let tls = tls::client_config(config.ca_file.as_deref()).map_err(|e| e.to_string())?;
         let client = reqwest::Client::builder()
-            .use_preconfigured_tls(tls)
+            .tls_backend_preconfigured(tls)
             .timeout(FETCH_TIMEOUT)
             .build()
             .map_err(|e| e.to_string())?;
