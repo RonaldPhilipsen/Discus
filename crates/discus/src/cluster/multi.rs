@@ -70,7 +70,11 @@ async fn run_group(
             return Some(Reply::try_again());
         };
         let keys: Vec<&[u8]> = keys.iter().map(|k| &k[..]).collect();
-        return Some(spent(node, spec, &g.cmd, &keys, write));
+        return Some(
+            spent(node, spec, g.cmd.clone(), &keys, write)
+                .finish()
+                .await,
+        );
     }
     hold::send_or_hold(node, spec, g.target, &g.cmd, hop, write).await
 }

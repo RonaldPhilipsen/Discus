@@ -429,7 +429,13 @@ pub(crate) fn replica_reads(node: &Node, write: bool, key: &[u8]) -> bool {
 
 /// The budget is spent or every target is on the path. Serve locally if this node was the
 /// required owner in the previous epoch, else `-TRYAGAIN`.
-fn spent(node: &Node, spec: &CommandSpec, cmd: &Command, keys: &[&[u8]], write: bool) -> Reply {
+fn spent(
+    node: &Arc<Node>,
+    spec: &'static CommandSpec,
+    cmd: Command,
+    keys: &[&[u8]],
+    write: bool,
+) -> Dispatch {
     let replicas = keys.iter().all(|k| replica_reads(node, write, k));
     let owned_before = keys.iter().all(|key| match node.previous_owners(key) {
         Some(owners) if replicas => owners.contains(&node.id),
@@ -437,9 +443,9 @@ fn spent(node: &Node, spec: &CommandSpec, cmd: &Command, keys: &[&[u8]], write: 
         None => false,
     });
     if owned_before {
-        local(node, spec, cmd)
+        local_acked(node, spec, cmd)
     } else {
-        Reply::try_again()
+        Dispatch::Ready(Reply::try_again())
     }
 }
 
@@ -564,7 +570,7 @@ fn single_planned(
         Plan::Forward(targets) => targets,
     };
     if targets.is_empty() {
-        return Dispatch::Ready(spent(node, spec, &cmd, &[&key], write));
+        return spent(node, spec, cmd, &[&key], write);
     }
     hop.track |= need.is_some();
     let node = node.clone();

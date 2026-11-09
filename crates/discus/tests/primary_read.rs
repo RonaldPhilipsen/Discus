@@ -5,9 +5,13 @@ mod common;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use common::cluster::{start_cluster, Cluster, ClusterNode};
 use common::counters::is_try_again;
 use common::gossip::wait_until;
+use discus::cluster::{run_hop, Hop, Job, MAX_HOPS};
+use discus_placement::{Epoch, EpochId, Member, MemberState, NodeId};
+use discus_resp::Value;
 use redis::AsyncCommands;
 
 const ARGS: &[&str] = &[
@@ -254,4 +258,78 @@ async fn getdel_and_rename_also_wait_for_a_secondary() {
     let secondary_has_tombstone_for_rename_source = any_tombstone(&replicas, &src);
 
     assert!(secondary_has_tombstone_for_getdel && secondary_has_tombstone_for_rename_source);
+}
+
+/// An epoch of generation `generation` where only `normal` can own keys.
+fn epoch_of(c: &Cluster, generation: u64, normal: &[NodeId]) -> Epoch {
+    let members: Vec<Member> = c.nodes[0]
+        .node
+        .epochs()
+        .current()
+        .members()
+        .iter()
+        .map(|m| Member {
+            state: if normal.contains(&m.id) {
+                MemberState::Normal
+            } else {
+                MemberState::Leaving
+            },
+            ..m.clone()
+        })
+        .collect();
+    let id = EpochId {
+        generation,
+        origin: normal[0],
+    };
+    Epoch::new(id, c.cluster_id, members).unwrap()
+}
+
+/// Run `parts` on `node` as a command that already used its whole hop budget.
+async fn run_spent(node: &ClusterNode, parts: &[&str]) -> Value {
+    let cmd: Vec<Bytes> = parts
+        .iter()
+        .map(|p| Bytes::copy_from_slice(p.as_bytes()))
+        .collect();
+    let spec = discus::command::lookup(&cmd[0]).unwrap();
+    let job = Job::plain(cmd, spec);
+    let hop = Hop {
+        hops: MAX_HOPS,
+        ..Hop::default()
+    };
+    run_hop(&node.node, job, hop, tracing::Span::none())
+        .finish()
+        .await
+        .value
+}
+
+/// A former primary serves a delete after the budget ends, during the epoch change that this
+/// wait protects. The other two nodes are the only owners in its current epoch.
+#[tokio::test]
+async fn a_former_primary_waits_for_a_secondary_on_a_spent_delete() {
+    let c = start_cluster(3, WAITING).await;
+    let former = &c.nodes[2];
+    let others = [&c.nodes[0], &c.nodes[1]];
+    let only_former = epoch_of(&c, 2, &[former.id]);
+    let without_former = epoch_of(&c, 3, &[others[0].id, others[1].id]);
+    former.node.adopt_epoch(only_former).unwrap();
+    former.node.adopt_epoch(without_former).unwrap();
+
+    for (command, key) in [("DEL", "sess:del"), ("GETDEL", "sess:getdel")] {
+        assert_eq!(
+            run_spent(former, &["SET", key, "v0"]).await,
+            Value::ok(),
+            "{key}"
+        );
+        let replicator = former.node.replicator().unwrap();
+        assert!(
+            wait_until(Duration::from_secs(10), || replicator
+                .settled(key.as_bytes()))
+            .await
+        );
+        stall(&others, SLOW_MS);
+        let reply = run_spent(former, &[command, key]).await;
+        assert!(!matches!(reply, Value::Error(_)), "{reply:?}");
+        assert!(any_tombstone(&others, key), "{command}");
+        stall(&others, 0);
+    }
 }
