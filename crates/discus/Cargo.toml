@@ -42,7 +42,7 @@ toml = "1.0"
 x509-parser = "0.18"
 ppp = "2"
 jsonwebtoken = { version = "11", default-features = false, features = ["use_pem"], optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots-no-provider", "json"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "form"], optional = true }
 serde_json = { version = "1", optional = true }
 sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 
@@ -57,7 +57,7 @@ futures = "=0.3.34"
 proptest = "=1.12.0"
 tempfile = "=3.27.0"
 redis = { version = "=1.8.1", features = ["tokio-comp"] }
-reqwest = { version = "=0.12.28", default-features = false }
+reqwest = { version = "=0.13.5", default-features = false }
 rcgen = { version = "=0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }
 base64 = "=0.23.1"
 serde_json = "=1.0.154"
