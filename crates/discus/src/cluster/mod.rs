@@ -4,6 +4,7 @@ pub mod forward;
 pub mod hold;
 pub mod multi;
 pub mod redirect;
+pub mod rename;
 pub mod route;
 pub mod service;
 pub mod topology;
@@ -342,7 +343,11 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
             drop(route);
             Dispatch::Ready(Reply::value(command::keys::scan_primary(node, &job.cmd)))
         }
-        Route::Connection | Route::Rename | Route::Local | Route::Fanout | Route::Broadcast => {
+        Route::Rename => {
+            drop(route);
+            rename::run(node, job, hop)
+        }
+        Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => {
             drop(route);
             Dispatch::Ready(local(node, job.spec, &job.cmd))
         }

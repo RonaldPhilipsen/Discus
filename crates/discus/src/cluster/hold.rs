@@ -42,7 +42,7 @@ pub fn idempotent(cmd: &Command) -> bool {
             .take_while(|a| matches!(a.as_str(), "NX" | "XX" | "GT" | "LT" | "CH" | "INCR"))
             .any(|a| a == "INCR"),
         "DEL" | "EXPIRE" | "PEXPIRE" | "EXPIREAT" | "PEXPIREAT" | "PERSIST" | "MSET" | "HSET"
-        | "HDEL" | "SADD" | "SREM" | "ZREM" => true,
+        | "HDEL" | "SADD" | "SREM" | "ZREM" | "DISCUS.PUT" => true,
         _ => false,
     }
 }

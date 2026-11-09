@@ -151,7 +151,7 @@ async fn forwarded(
         Ok(cmd) => cmd,
         Err(value) => return Reply::value(value),
     };
-    let spec = command::lookup(&cmd[0]);
+    let spec = command::lookup(&cmd[0]).or_else(|| command::lookup_internal(&cmd[0]));
     telemetry::record_operation(spec, &cmd);
     // The sender authorized the command on its entry node, and cluster mTLS authenticated the
     // sender, so only the lookup and the arity run here.
