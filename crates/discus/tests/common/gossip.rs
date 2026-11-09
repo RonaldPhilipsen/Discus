@@ -59,7 +59,7 @@ impl GossipNode {
     pub async fn redis(&self) -> redis::aio::MultiplexedConnection {
         let client = redis::Client::open(format!("redis://{}", self.addr)).unwrap();
         let config =
-            redis::AsyncConnectionConfig::new().set_response_timeout(Duration::from_secs(30));
+            redis::AsyncConnectionConfig::new().set_response_timeout(Some(Duration::from_secs(30)));
         client
             .get_multiplexed_async_connection_with_config(&config)
             .await
