@@ -26,6 +26,20 @@ Export never blocks a command. If the collector is down or slow, the node keeps 
 the spans that do not fit in the queue and counts them. At shutdown, the node makes a last export.
 That export waits about 5 seconds when the collector does not answer.
 
+To turn on export with the Helm chart, set the `otel` values:
+
+```sh
+helm upgrade <release> oci://ghcr.io/ronaldphilipsen/charts/discus \
+  --reuse-values \
+  --version <version> \
+  --set otel.enabled=true \
+  --set otel.endpoint=http://otel-collector.observability:4317
+```
+
+For TLS to the collector, use an `https://` endpoint. To trust a private CA, set
+`otel.tls.secretName` to a Secret with the key `ca.crt`. For mTLS, also set
+`otel.tls.mutual=true`. The Secret must then also have the keys `tls.crt` and `tls.key`.
+
 ## Flags
 
 | Flag | Default | Meaning |
