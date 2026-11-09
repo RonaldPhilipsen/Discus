@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v5
       - uses: Swatinem/rust-cache@v2
       - run: mise run lint
 
@@ -35,7 +35,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v5
       - uses: Swatinem/rust-cache@v2
       - run: mise run test
         env:
@@ -46,7 +46,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v5
       - uses: Swatinem/rust-cache@v2
       - run: mise run build-matrix
 
@@ -56,6 +56,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v5
       - uses: Swatinem/rust-cache@v2
       - run: mise run compat
