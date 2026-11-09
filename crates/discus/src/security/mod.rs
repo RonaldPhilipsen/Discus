@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use tokio::net::TcpStream;
 
-use subtle::ConstantTimeEq;
+use ctutils::CtEq;
 
 pub use args::{ClientAuth, SecurityArgs, TlsMode};
 pub use file::AuthFile;
