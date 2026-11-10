@@ -175,6 +175,7 @@ impl Node {
         let me = Member {
             id,
             addr: config.cluster_listen,
+            rpc_addr: config.cluster_listen,
             state: MemberState::Normal,
             weight: Weight::new(config.weight).unwrap_or_default(),
         };
@@ -480,6 +481,7 @@ fn static_epoch(me: Member, config: &Config, cluster_id: ClusterId) -> Epoch {
         // Config::validate requires the ID with static membership.
         id: p.id.unwrap_or(NodeId::NIL),
         addr: p.addr,
+        rpc_addr: p.addr,
         state: MemberState::Normal,
         weight: Weight::default(),
     }));

@@ -36,6 +36,7 @@ table Member {
   addr: string (id: 1);
   state: MemberState (id: 2);
   weight: double = 1.0 (id: 3);
+  rpc_addr: string (id: 4);
 }
 
 /// A full epoch: identity, cluster, and the sorted member list.

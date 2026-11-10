@@ -524,6 +524,7 @@ impl Swim {
         Some(Member {
             id,
             addr: info.addr,
+            rpc_addr: info.rpc_addr,
             state,
             weight: info.weight,
         })
@@ -765,6 +766,7 @@ impl Swim {
         let me = Member {
             id: self.me.id,
             addr: self.me.addr,
+            rpc_addr: self.me.rpc_addr,
             state: MemberState::Normal,
             weight: self.me.weight,
         };

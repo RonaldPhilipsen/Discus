@@ -22,6 +22,7 @@ fn info(n: u128, port: u16, state: MemberState) -> MemberInfo {
     MemberInfo {
         id: id(n),
         addr: addr(port),
+        rpc_addr: addr(port + 1),
         state,
         incarnation: n as u64 + 3,
         weight: Weight::new(2.0).unwrap(),
@@ -43,6 +44,7 @@ fn epoch() -> Epoch {
         .map(|n| Member {
             id: id(n),
             addr: addr(7000 + n as u16),
+            rpc_addr: addr(7500 + n as u16),
             state: MemberState::Normal,
             weight: Weight::default(),
         })
@@ -121,11 +123,13 @@ fn raw_gossip(kind: u8, with_sender: bool) -> Vec<u8> {
     let mut fbb = flatbuffers::FlatBufferBuilder::new();
     let from = with_sender.then(|| {
         let a = fbb.create_string("127.0.0.1:7001");
+        let r = fbb.create_string("127.0.0.1:7002");
         fb::MemberInfo::create(
             &mut fbb,
             &fb::MemberInfoArgs {
                 id: Some(&fb::Id128::new(&[1; 16])),
                 addr: Some(a),
+                rpc_addr: Some(r),
                 epoch: Some(&fb::EpochId::new(1, &fb::Id128::new(&[1; 16]))),
                 weight: 1.0,
                 ..Default::default()
@@ -178,4 +182,71 @@ fn gossip_is_message_type_8() {
 fn gossip_is_a_capability() {
     assert_eq!(discus_wire::caps::GOSSIP, 2);
     assert_ne!(discus_wire::caps::KNOWN & discus_wire::caps::GOSSIP, 0);
+}
+
+fn raw_info_gossip(addr: &str, rpc_addr: Option<&str>) -> Vec<u8> {
+    let mut fbb = flatbuffers::FlatBufferBuilder::new();
+    let a = fbb.create_string(addr);
+    let r = rpc_addr.map(|r| fbb.create_string(r));
+    let from = fb::MemberInfo::create(
+        &mut fbb,
+        &fb::MemberInfoArgs {
+            id: Some(&fb::Id128::new(&[1; 16])),
+            addr: Some(a),
+            rpc_addr: r,
+            epoch: Some(&fb::EpochId::new(1, &fb::Id128::new(&[1; 16]))),
+            weight: 1.0,
+            ..Default::default()
+        },
+    );
+    let g = fb::Gossip::create(
+        &mut fbb,
+        &fb::GossipArgs {
+            kind: fb::GossipKind::PING,
+            from: Some(from),
+            ..Default::default()
+        },
+    );
+    fbb.finish_minimal(g);
+    let body = fbb.finished_data().to_vec();
+    encode_envelope(
+        fb::MessageType::GOSSIP.0,
+        1,
+        &TraceContext::default(),
+        &body,
+    )
+}
+
+#[test]
+fn member_info_keeps_its_gossip_and_rpc_addresses_apart() {
+    let m = info(1, 7379, MemberState::Normal);
+    let frame = Frame {
+        request_id: 1,
+        trace: TraceContext::default(),
+        message: Message::Gossip(Gossip::new(GossipKind::Ping, m.clone())),
+    };
+    let Message::Gossip(g) = decode_frame(&encode_frame(&frame), &Limits::default())
+        .unwrap()
+        .message
+    else {
+        panic!("not gossip");
+    };
+    assert_eq!(g.from.addr, addr(7379));
+    assert_eq!(g.from.rpc_addr, addr(7380));
+}
+
+#[test]
+fn a_member_info_with_a_bad_or_missing_rpc_addr_fails_to_decode() {
+    for rpc in [Some("not an address"), None] {
+        let bytes = raw_info_gossip("127.0.0.1:7001", rpc);
+        assert!(matches!(
+            decode_frame(&bytes, &Limits::default()),
+            Err(DecodeError::Invalid(_))
+        ));
+    }
+    let bytes = raw_info_gossip("bad", Some("127.0.0.1:7002"));
+    assert!(matches!(
+        decode_frame(&bytes, &Limits::default()),
+        Err(DecodeError::Invalid(_))
+    ));
 }

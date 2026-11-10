@@ -294,6 +294,7 @@ mod otel {
         let member = |state| Member {
             id: NodeId::random(),
             addr: "127.0.0.1:7379".parse().unwrap(),
+            rpc_addr: "127.0.0.1:7379".parse().unwrap(),
             state,
             weight: Weight::default(),
         };

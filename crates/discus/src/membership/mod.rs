@@ -82,11 +82,13 @@ impl Membership {
         transport: Transport,
         lease: Arc<dyn LeaseProvider>,
         advertise: SocketAddr,
+        rpc_advertise: SocketAddr,
     ) -> Arc<Membership> {
         let config = &node.config;
         let me = MemberInfo {
             id: node.id,
             addr: advertise,
+            rpc_addr: rpc_advertise,
             state: MemberState::Joining,
             incarnation: 0,
             weight: Weight::new(config.weight).unwrap_or_default(),

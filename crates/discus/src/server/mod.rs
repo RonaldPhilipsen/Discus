@@ -185,7 +185,8 @@ impl Server {
             };
             if let Some(lease) = lease {
                 let advertise = discovery::advertise(&node.config).await;
-                let membership = Membership::new(&node, transport.clone(), lease, advertise);
+                let membership =
+                    Membership::new(&node, transport.clone(), lease, advertise, advertise);
                 node.set_membership(membership);
             }
             node.set_link(ClusterLink::new(transport, &node.config));

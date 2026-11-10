@@ -59,6 +59,7 @@ fn ping(from: NodeId) -> Message {
         MemberInfo {
             id: from,
             addr: "127.0.0.1:1".parse().unwrap(),
+            rpc_addr: "127.0.0.1:1".parse().unwrap(),
             state: MemberState::Joining,
             incarnation: 0,
             weight: Weight::default(),

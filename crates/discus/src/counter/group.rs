@@ -681,6 +681,7 @@ mod tests {
             .map(|id| Member {
                 id: *id,
                 addr: std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+                rpc_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
                 state: MemberState::Normal,
                 weight: Weight::default(),
             })

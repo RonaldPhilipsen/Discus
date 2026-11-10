@@ -241,6 +241,7 @@ impl Sim {
         let info = MemberInfo {
             id,
             addr,
+            rpc_addr: addr,
             state: MemberState::Joining,
             incarnation: 0,
             weight: Weight::default(),
@@ -284,6 +285,7 @@ impl Sim {
             .map(|id| Member {
                 id: *id,
                 addr: self.nodes[id].swim.me().addr,
+                rpc_addr: self.nodes[id].swim.me().rpc_addr,
                 state: MemberState::Normal,
                 weight: Weight::default(),
             })
