@@ -10,7 +10,7 @@ use common::{config, epoch};
 use discus_placement::{ClusterId, EpochId, MemberState, NodeId, Weight};
 use discus_transport::testing::TestCa;
 use discus_transport::{Channels, GossipError, Inbound, Service, Transport, TransportError};
-use discus_wire::{Capacity, Gossip, GossipKind, MemberInfo, Message};
+use discus_wire::{Capacity, Gossip, GossipKind, MemberInfo, Message, TraceContext};
 use futures::future::BoxFuture;
 
 struct AckService(NodeId);
@@ -109,10 +109,24 @@ async fn a_transport_does_not_dial_a_channel_it_does_not_serve() {
         .await
         .unwrap_err();
     assert!(matches!(err, GossipError::Unreachable(_)), "{err:?}");
+    let mut events = gossip_only.events();
     gossip_only
         .peer(target_id, target.local_addr())
         .await
         .unwrap_err();
+    gossip_only
+        .request(
+            target_id,
+            target.local_addr(),
+            Message::Ping { nonce: 1 },
+            TraceContext::default(),
+            TIMEOUT,
+            false,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(gossip_only.stats().snapshot().handshake_failures, 0);
+    assert!(events.try_recv().is_err());
     assert_eq!(target.stats().snapshot().handshake_failures, 0);
 }
 

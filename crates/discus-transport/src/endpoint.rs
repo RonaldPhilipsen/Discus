@@ -621,6 +621,15 @@ impl Transport {
         if self.0.closed.is_cancelled() {
             return Err(TransportError::Connect("the transport is closed".into()));
         }
+        let configured = match channel {
+            Channel::Rpc => self.0.client.is_some(),
+            Channel::Gossip => self.0.gossip_client.is_some(),
+        };
+        if !configured {
+            return Err(TransportError::Connect(format!(
+                "this endpoint does not serve {channel:?}"
+            )));
+        }
         let slot = pool.lock().entry(key).or_default().clone();
         let mut guard = slot.lock().await;
         if let Some(c) = guard.as_ref() {
@@ -675,7 +684,7 @@ impl Transport {
             Channel::Rpc => self.0.client.clone(),
             Channel::Gossip => self.0.gossip_client.clone(),
         }
-        .ok_or_else(|| connect(&format!("this endpoint does not serve {channel:?}")))?;
+        .ok_or_else(|| connect(&"this endpoint does not serve the channel"))?;
         let conn = self
             .0
             .endpoint
