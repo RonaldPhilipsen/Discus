@@ -12,7 +12,7 @@ itoa = "1"
 thiserror = "2"
 
 [dev-dependencies]
-criterion = "=0.7.0"
+criterion = "=0.8.2"
 
 [[bench]]
 name = "resp"
