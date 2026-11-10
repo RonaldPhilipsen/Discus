@@ -37,8 +37,8 @@ pub enum Lane {
     Bulk,
 }
 
-/// The largest write request that takes the shared stream. A larger one takes its own stream,
-/// so it does not hold up the small requests behind it.
+/// The largest request that takes the shared stream. A larger one takes its own stream, so it
+/// does not hold up the small requests behind it.
 const SHARED_REQUEST_BYTES: usize = 64 * 1024;
 
 /// The ALPN of a connection.
@@ -237,7 +237,8 @@ pub struct Transport(Arc<Inner>);
 fn quinn_transport(config: &TransportConfig) -> io::Result<Arc<quinn::TransportConfig>> {
     let mut t = quinn::TransportConfig::default();
     t.max_concurrent_bidi_streams(quinn::VarInt::from_u32(config.max_streams));
-    t.max_concurrent_uni_streams(quinn::VarInt::from_u32(0));
+    // The acceptor of a shared stream sends large replies on unidirectional streams.
+    t.max_concurrent_uni_streams(quinn::VarInt::from_u32(config.max_streams));
     let idle = quinn::IdleTimeout::try_from(config.idle_timeout)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
     t.max_idle_timeout(Some(idle));
@@ -454,9 +455,10 @@ impl Transport {
     /// after the connection exists. `write` labels a timeout in the evidence channel. A bulk
     /// timeout is not evidence, because a large batch can be slow on a healthy peer.
     ///
-    /// A small write on the command lane takes the shared stream when the peer has it. Any other
-    /// request takes a new stream. The reply to a read can be large, and on the shared stream it
-    /// would delay the replies behind it past the short read timeout.
+    /// A small request on the command lane takes the shared stream when the peer has it: a write
+    /// with `SHARED_STREAM`, a read only with `SHARED_READS`. Any other request takes a new
+    /// stream. Without `SHARED_READS`, the large reply to a read would delay the replies behind it
+    /// on the shared stream past the short read timeout.
     #[allow(clippy::too_many_arguments)]
     pub async fn request_with(
         &self,
@@ -486,7 +488,8 @@ impl Transport {
         let request_id = frame.request_id;
         let sent_type = frame.message.type_code();
         let bytes = encode_frame(&frame);
-        let shared = shared.filter(|_| write && bytes.len() <= SHARED_REQUEST_BYTES);
+        let reads = info.capabilities & caps::SHARED_READS != 0;
+        let shared = shared.filter(|_| (write || reads) && bytes.len() <= SHARED_REQUEST_BYTES);
         let limits = Limits {
             max_frame: info.max_frame,
         };
@@ -553,11 +556,12 @@ impl Transport {
     async fn open_shared(&self, conn: &Conn) -> Option<Arc<Shared>> {
         let inner = self.0.clone();
         let peer = conn.info.node_id;
-        let rejected = move |reason: &str| {
+        let rejected: shared::Rejected = Arc::new(move |reason: &str| {
             TransportStats::bump(&inner.stats.frames_rejected);
             tracing::warn!(%peer, reason, "dropped a reply frame on the shared stream");
-        };
-        Shared::open(&conn.conn, conn.info.max_frame, rejected).await
+        });
+        let reads = conn.info.capabilities & caps::SHARED_READS != 0;
+        Shared::open(&conn.conn, conn.info.max_frame, reads, rejected).await
     }
 
     fn pool(&self, lane: Lane) -> &Mutex<HashMap<NodeId, Slot>> {
@@ -834,7 +838,7 @@ async fn serve_connection(inner: Arc<Inner>, incoming: quinn::Incoming) {
         };
         match stream {
             Ok((send, recv)) => {
-                tokio::spawn(serve_stream(inner.clone(), info, send, recv));
+                tokio::spawn(serve_stream(inner.clone(), conn.clone(), info, send, recv));
             }
             Err(_) => return,
         }
@@ -919,6 +923,7 @@ async fn accept_hello(
 
 async fn serve_stream(
     inner: Arc<Inner>,
+    conn: quinn::Connection,
     peer: PeerInfo,
     mut send: quinn::SendStream,
     recv: quinn::RecvStream,
@@ -928,7 +933,7 @@ async fn serve_stream(
         None => return,
         Some(Err(e)) => return reject(&inner, &peer, &mut send, frames.get_mut(), &e.to_string()),
         Some(Ok(bytes)) if bytes.is_empty() && peer.capabilities & caps::SHARED_STREAM != 0 => {
-            return serve_shared(inner, peer, send, frames).await;
+            return serve_shared(inner, conn, peer, send, frames).await;
         }
         Some(Ok(bytes)) => match decode_request(&inner, &peer, &bytes) {
             Ok(request) => request,
@@ -943,9 +948,11 @@ async fn serve_stream(
 
 /// Serve a shared stream until the dialer finishes it. Each request runs in its own task, at
 /// most `max_streams` at a time, and its reply goes out when it is ready. At the limit the
-/// reader waits, so flow control holds back the dialer as the stream limit does.
+/// reader waits, so flow control holds back the dialer as the stream limit does. A reply over
+/// the shared limit goes on a new unidirectional stream when the dialer has `SHARED_READS`.
 async fn serve_shared(
     inner: Arc<Inner>,
+    conn: quinn::Connection,
     peer: PeerInfo,
     send: quinn::SendStream,
     mut frames: FramedRead<quinn::RecvStream, LengthDelimitedCodec>,
@@ -980,10 +987,23 @@ async fn serve_shared(
             return;
         };
         let inner = inner.clone();
+        let conn = conn.clone();
         let out = out.clone();
         tokio::spawn(async move {
-            let reply = reply_to(inner, peer, request).await;
-            let _ = out.send(Out::Frame(encode_frame(&reply)));
+            let reply = encode_frame(&reply_to(inner.clone(), peer, request).await);
+            let large = reply.len() > shared::SHARED_REPLY_BYTES
+                && peer.capabilities & caps::SHARED_READS != 0;
+            if large {
+                TransportStats::bump(&inner.stats.large_replies_out);
+                // A failed send leaves the request to time out on the dialer, like a lost stream.
+                if let Ok(mut send) = conn.open_uni().await {
+                    if write_frame(&mut send, &reply).await.is_ok() {
+                        let _ = send.finish();
+                    }
+                }
+            } else {
+                let _ = out.send(Out::Frame(reply));
+            }
             drop(permit);
         });
     }

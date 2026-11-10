@@ -18,6 +18,8 @@ use discus_wire::{caps, decode_frame, encode_frame, Frame, Limits, Message, Trac
 use futures::future::BoxFuture;
 
 /// Answers `Ping` with `Pong` after `nonce` milliseconds, so replies can come back out of order.
+/// Answers `Fetch` of the key `size:n` with a `Fetch` of one key of `n` bytes, so a small
+/// request can get a large reply.
 struct Delay(EpochId);
 
 impl Service for Delay {
@@ -31,6 +33,18 @@ impl Service for Delay {
                 Message::Ping { nonce } => {
                     tokio::time::sleep(Duration::from_millis(nonce)).await;
                     Message::Pong { nonce }
+                }
+                Message::Fetch { keys } => {
+                    let size = std::str::from_utf8(&keys[0])
+                        .ok()
+                        .and_then(|k| k.strip_prefix("size:"))
+                        .and_then(|n| n.parse().ok());
+                    match size {
+                        Some(n) => Message::Fetch {
+                            keys: vec![Bytes::from(vec![7u8; n])],
+                        },
+                        None => Message::Unsupported { message_type: 0 },
+                    }
                 }
                 _ => Message::Unsupported { message_type: 0 },
             }
@@ -103,6 +117,17 @@ impl Pair {
             other => panic!("expected PONG, got {other:?}"),
         }
     }
+
+    /// Ask for a reply with a key of `size` bytes and return the size that came back.
+    async fn sized(&self, size: usize, write: bool) -> Result<usize, TransportError> {
+        let ask = Message::Fetch {
+            keys: vec![Bytes::from(format!("size:{size}"))],
+        };
+        match self.send(ask, LONG, write).await?.message {
+            Message::Fetch { keys } => Ok(keys[0].len()),
+            other => panic!("expected FETCH, got {other:?}"),
+        }
+    }
 }
 
 const LONG: Duration = Duration::from_secs(10);
@@ -127,18 +152,56 @@ async fn concurrent_writes_share_the_stream_and_get_their_own_replies() {
 }
 
 #[tokio::test]
-async fn reads_and_large_writes_take_their_own_streams() {
+async fn large_requests_take_their_own_streams() {
     let (_ca, p) = pair(caps::KNOWN).await;
-    assert_eq!(p.ping(0, LONG, false).await.unwrap(), 0);
+    let big = Message::Ping { nonce: 0 };
+    assert!(p.send(big, LONG, true).await.is_ok());
     let big = Message::Fetch {
         keys: vec![Bytes::from(vec![7u8; 100_000])],
     };
-    // The test service does not know FETCH. The reply still shows which stream it took.
-    let err = p.send(big, LONG, true).await.unwrap_err();
+    // The test service does not know this message. The reply still shows which stream it took.
+    let err = p.send(big, LONG, false).await.unwrap_err();
     assert!(matches!(err, TransportError::PeerUnsupported(_)), "{err:?}");
     let stats = p.b.stats().snapshot();
     assert_eq!(stats.requests_in, 2);
-    assert_eq!(stats.shared_in, 0);
+    assert_eq!(stats.shared_in, 1);
+}
+
+#[tokio::test]
+async fn reads_share_the_stream_and_a_large_reply_takes_its_own() {
+    let (_ca, p) = pair(caps::KNOWN).await;
+    let p = Arc::new(p);
+    let large = {
+        let p = p.clone();
+        tokio::spawn(async move { p.sized(1_000_000, false).await })
+    };
+    let small: Vec<_> = (0..50u64)
+        .map(|i| {
+            let p = p.clone();
+            tokio::spawn(async move { p.ping(i % 5, LONG, false).await })
+        })
+        .collect();
+    for (i, t) in small.into_iter().enumerate() {
+        assert_eq!(t.await.unwrap().unwrap(), i as u64 % 5);
+    }
+    assert_eq!(large.await.unwrap().unwrap(), 1_000_000);
+    // A reply just under the limit stays on the shared stream.
+    assert_eq!(p.sized(60_000, false).await.unwrap(), 60_000);
+    let stats = p.b.stats().snapshot();
+    assert_eq!(stats.shared_in, 52);
+    assert_eq!(stats.large_replies_out, 1);
+}
+
+#[tokio::test]
+async fn a_peer_without_shared_reads_gets_a_stream_per_read() {
+    let (_ca, p) = pair(caps::KNOWN & !caps::SHARED_READS).await;
+    assert_eq!(p.ping(0, LONG, false).await.unwrap(), 0);
+    assert_eq!(p.b.stats().snapshot().shared_in, 0);
+    // Writes still share the stream, and their replies stay on it at any size.
+    assert_eq!(p.sized(200_000, true).await.unwrap(), 200_000);
+    let stats = p.b.stats().snapshot();
+    assert_eq!(stats.shared_in, 1);
+    assert_eq!(stats.large_replies_out, 0);
 }
 
 #[tokio::test]
