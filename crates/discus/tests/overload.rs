@@ -72,12 +72,11 @@ async fn members_carry_both_addresses_and_forwards_use_rpc() {
 
     let key = key_elsewhere(&nodes[0], "fwd");
     let mut c = nodes[0].redis().await;
+    let rpc = || nodes[0].node.link().unwrap().transport.stats().snapshot();
+    let before = rpc();
     let _: () = c.set(&key, "v").await.unwrap();
-    let rpc = nodes[0].node.link().unwrap().transport.stats().snapshot();
-    let membership = nodes[0].node.membership().unwrap();
-    let gossip = membership.gossip_transport().stats().snapshot();
-    assert!(rpc.requests_out > 0, "{rpc:?}");
-    assert_eq!(gossip.requests_out, 0, "{gossip:?}");
+    let after = rpc();
+    assert!(after.requests_out > before.requests_out, "{after:?}");
 }
 
 #[tokio::test]

@@ -52,6 +52,15 @@ async fn gossip_and_rpc_traffic_report_on_their_own_channels() {
         .await,
         "no gossip requests were counted"
     );
+    assert!(
+        wait_until(give_up, || requests(
+            &h,
+            "discus.transport.requests.out",
+            "gossip"
+        ) > 0.0)
+        .await,
+        "no outbound gossip requests were counted"
+    );
     let points = h.points();
     assert!(points
         .iter()

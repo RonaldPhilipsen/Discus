@@ -397,6 +397,7 @@ impl Transport {
             message,
         };
         let request = encode_frame(&frame);
+        TransportStats::bump(&self.0.stats.requests_out);
         let bytes = match tokio::time::timeout(timeout, exchange(&conn, &info, &request)).await {
             Err(_) => return Err(GossipError::Silent(Box::new(info))),
             Ok(Err(e)) => {

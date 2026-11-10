@@ -440,9 +440,9 @@ pub fn record_epoch(metrics: &Metrics, epoch: &discus_placement::Epoch) {
     }
 }
 
-/// Record one transport event of the endpoint `channel`. A failed handshake and a lost connection are QUIC failures. A
-/// request without a reply in time is a peer error. An event without a known peer has no label,
-/// so it is not recorded.
+/// Record one transport event of the endpoint `channel`. A failed handshake and a lost connection
+/// are QUIC failures. A request without a reply in time is a peer error. An event without a known
+/// peer has no label, so it is not recorded.
 pub fn record_peer_event(
     metrics: &Metrics,
     event: &discus_transport::PeerEvent,
