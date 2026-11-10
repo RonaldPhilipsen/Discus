@@ -10,16 +10,9 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 fn main() -> std::io::Result<()> {
     let config = Config::parse();
     let nice = config.data_nice;
-    let warn = std::sync::Once::new();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .on_thread_start(move || {
-            if let Err(e) = discus::priority::lower_current_thread(nice) {
-                warn.call_once(|| {
-                    tracing::warn!(error = %e, nice, "could not lower the data runtime priority");
-                });
-            }
-        })
+        .on_thread_start(move || discus::priority::lower_current_thread_recorded(nice))
         .build()?;
     runtime.block_on(run(config))
 }
@@ -41,6 +34,9 @@ async fn run(mut config: Config) -> std::io::Result<()> {
             std::process::exit(2);
         }
     };
+    if let Some(e) = discus::priority::first_failure() {
+        tracing::warn!(error = %e, nice = config.data_nice, "could not lower the data runtime priority");
+    }
     tracing::info!(
         build = discus::build::BUILD_ID,
         features = discus::build::FEATURES.join(","),

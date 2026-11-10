@@ -377,7 +377,8 @@ The advertised address is the first of these that applies:
 In Kubernetes, set `--cluster-advertise $(POD_IP):7379` from the downward API. The RPC address
 follows from it, so `--rpc-advertise` is rarely needed.
 
-If a NetworkPolicy or a firewall limits pod traffic, allow both UDP ports between the pods:
+If a NetworkPolicy or a firewall limits pod traffic, allow both UDP ports between the pods. This is
+the ingress rule of the policy:
 
 ```yaml
 ingress:

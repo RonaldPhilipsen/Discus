@@ -1,4 +1,24 @@
 use std::io;
+use std::sync::OnceLock;
+
+static FIRST_FAILURE: OnceLock<io::Error> = OnceLock::new();
+
+/// Lower the calling thread and remember the first failure of the process. The runtime starts its
+/// workers before the tracing subscriber exists, so `main` reads the failure later with
+/// `first_failure` and logs it once.
+pub fn lower_current_thread_recorded(nice: i32) {
+    record(&FIRST_FAILURE, lower_current_thread(nice));
+}
+
+pub fn first_failure() -> Option<&'static io::Error> {
+    FIRST_FAILURE.get()
+}
+
+fn record(slot: &OnceLock<io::Error>, result: io::Result<()>) {
+    if let Err(e) = result {
+        let _ = slot.set(e);
+    }
+}
 
 /// Raise the nice value of the calling thread by `nice`, capped at 19. Nice is per thread on
 /// Linux, so the other threads of the process keep their priority. Elsewhere this does nothing.
@@ -29,6 +49,21 @@ pub fn lower_current_thread(nice: i32) -> io::Result<()> {
 #[cfg(not(target_os = "linux"))]
 pub fn lower_current_thread(_nice: i32) -> io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_the_first_failure_only() {
+        let slot = OnceLock::new();
+        record(&slot, Ok(()));
+        assert!(slot.get().is_none());
+        record(&slot, Err(io::Error::other("first")));
+        record(&slot, Err(io::Error::other("second")));
+        assert_eq!(slot.get().unwrap().to_string(), "first");
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
