@@ -82,10 +82,10 @@ fn health_stats_are_observed() {
         });
     let points = h.points();
     for (name, value) in [
-        ("discus.local_health.lag_ms", 12.0),
-        ("discus.local_health.score_ms", 3.5),
+        ("discus.local_health.lag", 12.0),
+        ("discus.local_health.score", 3.5),
         ("discus.local_health.multiplier", 1.5),
-        ("discus.membership.evidence_dropped", 4.0),
+        ("discus.local_health.evidence_dropped", 4.0),
     ] {
         assert_eq!(find(&points, name, None).unwrap().value, value, "{name}");
     }

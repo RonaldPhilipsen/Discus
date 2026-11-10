@@ -344,13 +344,13 @@ mod imp {
                     .build()
             };
             observers.push(Box::new(health_gauge(
-                "discus.local_health.lag_ms",
+                "discus.local_health.lag",
                 "Lag of the data runtime",
                 "ms",
                 |h| h.lag_ms as f64,
             )));
             observers.push(Box::new(health_gauge(
-                "discus.local_health.score_ms",
+                "discus.local_health.score",
                 "Smoothed lag that scales the membership timeouts",
                 "ms",
                 |h| h.score_ms,
@@ -364,8 +364,8 @@ mod imp {
             let evidence = health.clone();
             observers.push(Box::new(
                 meter
-                    .u64_observable_counter("discus.membership.evidence_dropped")
-                    .with_description("Data-path evidence dropped because the queue was full")
+                    .u64_observable_counter("discus.local_health.evidence_dropped")
+                    .with_description("Data-path evidence dropped while the local health was at or above the evidence cutoff")
                     .with_callback(move |o| {
                         if let Some(f) = evidence.read().ok().as_ref().and_then(|s| s.as_ref()) {
                             o.observe(f().evidence_dropped, &[]);

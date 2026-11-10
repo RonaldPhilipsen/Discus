@@ -156,6 +156,10 @@ and 100.
 | `discus.hints.replayed` | counter | `peer` | Hints that a peer acknowledged after a replay. |
 | `discus.hints.evicted` | counter | `peer` | Hints lost to a bound before a replay. |
 | `discus.gossip.rtt` | histogram (ms) | `peer` | The round-trip time of gossip requests. |
+| `discus.local_health.lag` | gauge (ms) | none | The lag of the data runtime: how late its 10 ms timer fired, or how long it has not fired. |
+| `discus.local_health.score` | gauge (ms) | none | The smoothed lag forecast that sets the multiplier. |
+| `discus.local_health.multiplier` | gauge | none | The factor, from 1 to 9, that stretches the probe and suspicion timeouts. |
+| `discus.local_health.evidence_dropped` | counter | none | Data-path evidence dropped while the local health was at or above the evidence cutoff (multiplier 1.5). |
 | `discus.tombstones` | gauge | none | Stored tombstones (delete markers). |
 | `discus.counter.roles` | gauge | `state` | Counter groups by the role of this node: `leader`, `follower`, `voter`, `learner`, or `idle`. |
 | `discus.counter.memory` | gauge (bytes) | none | Counter state that this node holds. |
