@@ -35,6 +35,8 @@ pub struct TransportStats {
     pub unsupported: AtomicU64,
     pub handshake_failures: AtomicU64,
     pub requests_in: AtomicU64,
+    /// Requests that arrived on a shared stream. They count in `requests_in` too.
+    pub shared_in: AtomicU64,
     pub requests_out: AtomicU64,
 }
 
@@ -45,6 +47,7 @@ pub struct StatsSnapshot {
     pub unsupported: u64,
     pub handshake_failures: u64,
     pub requests_in: u64,
+    pub shared_in: u64,
     pub requests_out: u64,
 }
 
@@ -56,6 +59,7 @@ impl TransportStats {
             unsupported: get(&self.unsupported),
             handshake_failures: get(&self.handshake_failures),
             requests_in: get(&self.requests_in),
+            shared_in: get(&self.shared_in),
             requests_out: get(&self.requests_out),
         }
     }

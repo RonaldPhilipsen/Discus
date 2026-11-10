@@ -6,7 +6,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
 
-fn codec(max: usize) -> LengthDelimitedCodec {
+pub(crate) fn codec(max: usize) -> LengthDelimitedCodec {
     LengthDelimitedCodec::builder()
         .length_field_length(4)
         .big_endian()

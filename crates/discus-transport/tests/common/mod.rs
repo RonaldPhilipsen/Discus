@@ -4,10 +4,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::net::SocketAddr;
+
 use discus_placement::{ClusterId, EpochId, NodeId};
-use discus_transport::testing::{TestCa, TEST_SAN};
-use discus_transport::{Inbound, Service, Transport, TransportConfig};
-use discus_wire::Message;
+use discus_transport::testing::{quic_client, TestCa, TEST_SAN};
+use discus_transport::{frame, Inbound, Service, Transport, TransportConfig, ALPN_RPC};
+use discus_wire::{caps, decode_frame, encode_frame, Frame, Hello, Limits, Message, TraceContext};
 use futures::future::BoxFuture;
 
 /// A service that answers `Ping` with `Pong` after an optional delay, and tracks concurrency.
@@ -81,4 +83,35 @@ pub async fn start(config: TransportConfig) -> (Transport, Arc<TestService>) {
     let service = TestService::new(epoch(1, config.node_id));
     let t = Transport::bind(config, service.clone()).await.unwrap();
     (t, service)
+}
+
+/// A raw connection that passed HELLO, for sending hand-made frames.
+pub async fn raw(ca: &TestCa, cluster: ClusterId, addr: SocketAddr) -> quinn::Connection {
+    let client = quic_client(ca.material(TEST_SAN).client_config(ALPN_RPC));
+    let conn = client.connect(addr, "discus").unwrap().await.unwrap();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    let id = NodeId::random();
+    let hello = Frame {
+        request_id: 0,
+        trace: TraceContext::default(),
+        message: Message::Hello(Hello {
+            node_id: id,
+            cluster_id: cluster,
+            capabilities: caps::KNOWN,
+            epoch: epoch(1, id),
+            max_frame: 65536,
+        }),
+    };
+    frame::write_frame(&mut send, &encode_frame(&hello))
+        .await
+        .unwrap();
+    send.finish().unwrap();
+    let reply = frame::read_frame(&mut recv, 65536).await.unwrap().unwrap();
+    assert!(matches!(
+        decode_frame(&reply, &Limits::default()).unwrap().message,
+        Message::Hello(_)
+    ));
+    // Keep the client endpoint alive with the connection.
+    std::mem::forget(client);
+    conn
 }

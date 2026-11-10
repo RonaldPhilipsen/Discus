@@ -13,14 +13,17 @@ use discus_wire::{
     Limits, Message, TraceContext, DEFAULT_MAX_FRAME, HELLO_FRAME_LIMIT,
 };
 use futures::future::BoxFuture;
+use futures::StreamExt;
 use parking_lot::Mutex;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc, Semaphore};
+use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
 
 use crate::events::{PeerEvent, PeerEventKind, TransportStats, EVENT_CAPACITY};
-use crate::frame::{read_frame, write_frame};
+use crate::frame::{codec, read_frame, write_frame};
 use crate::hello;
+use crate::shared::{self, Out, Shared};
 use crate::tls::TlsMaterial;
 use crate::{ALPN_GOSSIP, ALPN_RPC, CLOSE_HANDSHAKE_FAILED, CLOSE_SHUTDOWN, RESET_BAD_FRAME};
 
@@ -33,6 +36,10 @@ pub enum Lane {
     /// Replication, hints, handoff, and repair. A timeout here is not data-path evidence.
     Bulk,
 }
+
+/// The largest write request that takes the shared stream. A larger one takes its own stream,
+/// so it does not hold up the small requests behind it.
+const SHARED_REQUEST_BYTES: usize = 64 * 1024;
 
 /// The ALPN of a connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -188,6 +195,15 @@ pub enum GossipError {
 struct Conn {
     conn: quinn::Connection,
     info: PeerInfo,
+    /// The shared stream of a command-lane connection, when the peer has `SHARED_STREAM`.
+    shared: Option<Arc<Shared>>,
+}
+
+/// A pooled connection as a request uses it.
+struct Pooled {
+    conn: quinn::Connection,
+    info: PeerInfo,
+    shared: Option<Arc<Shared>>,
 }
 
 type Slot = Arc<tokio::sync::Mutex<Option<Conn>>>;
@@ -201,6 +217,8 @@ struct Inner {
     capabilities: u64,
     max_frame: usize,
     handshake_timeout: Duration,
+    /// Requests of one shared stream that run at the same time, like the stream limit.
+    max_streams: usize,
     service: Arc<dyn Service>,
     pool: Mutex<HashMap<NodeId, Slot>>,
     bulk_pool: Mutex<HashMap<NodeId, Slot>>,
@@ -275,6 +293,7 @@ impl Transport {
             capabilities: config.capabilities,
             max_frame: config.max_frame,
             handshake_timeout: config.handshake_timeout,
+            max_streams: config.max_streams as usize,
             service,
             pool: Mutex::new(HashMap::new()),
             bulk_pool: Mutex::new(HashMap::new()),
@@ -322,8 +341,8 @@ impl Transport {
         timeout: Duration,
     ) -> Result<(PeerInfo, Message), GossipError> {
         let pool = &self.0.gossip_pool;
-        let (conn, info) = self
-            .cached_or_dial(pool, addr, None, addr, Channel::Gossip)
+        let Pooled { conn, info, .. } = self
+            .cached_or_dial(pool, addr, None, addr, Channel::Gossip, false)
             .await
             .map_err(|e| match e {
                 TransportError::Handshake { reason, .. } => GossipError::Refused(reason),
@@ -342,7 +361,8 @@ impl Transport {
             trace: TraceContext::default(),
             message,
         };
-        let bytes = match tokio::time::timeout(timeout, exchange(&conn, &info, &frame)).await {
+        let request = encode_frame(&frame);
+        let bytes = match tokio::time::timeout(timeout, exchange(&conn, &info, &request)).await {
             Err(_) => return Err(GossipError::Silent(Box::new(info))),
             Ok(Err(e)) => {
                 let reason = e.reason();
@@ -392,10 +412,10 @@ impl Transport {
     /// Connect to `node` at `addr` and run `HELLO`, unless a live connection exists.
     pub async fn peer(&self, node: NodeId, addr: SocketAddr) -> Result<PeerInfo, TransportError> {
         let pool = self.pool(Lane::Command);
-        let (_, info) = self
-            .cached_or_dial(pool, node, Some(node), addr, Channel::Rpc)
+        let pooled = self
+            .cached_or_dial(pool, node, Some(node), addr, Channel::Rpc, true)
             .await?;
-        Ok(info)
+        Ok(pooled.info)
     }
 
     /// Send one request on the command lane. See [`Transport::request_on`].
@@ -429,11 +449,14 @@ impl Transport {
             .await
     }
 
-    /// Send one request on a new stream of `lane` and wait for its reply frame. `build` makes
-    /// the request from the `PeerInfo` of the connection, or refuses to send it. `timeout`
-    /// covers the request after the connection exists. `write` labels a timeout in the evidence
-    /// channel. A bulk timeout is not evidence, because a large batch can be slow on a healthy
-    /// peer.
+    /// Send one request on `lane` and wait for its reply frame. `build` makes the request from
+    /// the `PeerInfo` of the connection, or refuses to send it. `timeout` covers the request
+    /// after the connection exists. `write` labels a timeout in the evidence channel. A bulk
+    /// timeout is not evidence, because a large batch can be slow on a healthy peer.
+    ///
+    /// A small write on the command lane takes the shared stream when the peer has it. Any other
+    /// request takes a new stream. The reply to a read can be large, and on the shared stream it
+    /// would delay the replies behind it past the short read timeout.
     #[allow(clippy::too_many_arguments)]
     pub async fn request_with(
         &self,
@@ -445,17 +468,41 @@ impl Transport {
         timeout: Duration,
         write: bool,
     ) -> Result<Frame, TransportError> {
-        let (conn, info) = self
-            .cached_or_dial(self.pool(lane), node, Some(node), addr, Channel::Rpc)
+        let Pooled { conn, info, shared } = self
+            .cached_or_dial(
+                self.pool(lane),
+                node,
+                Some(node),
+                addr,
+                Channel::Rpc,
+                lane == Lane::Command,
+            )
             .await?;
         let frame = Frame {
             request_id: self.0.next_request.fetch_add(1, Ordering::Relaxed),
             trace,
             message: build(&info)?,
         };
+        let request_id = frame.request_id;
         let sent_type = frame.message.type_code();
+        let bytes = encode_frame(&frame);
+        let shared = shared.filter(|_| write && bytes.len() <= SHARED_REQUEST_BYTES);
+        let limits = Limits {
+            max_frame: info.max_frame,
+        };
         TransportStats::bump(&self.0.stats.requests_out);
-        let bytes = match tokio::time::timeout(timeout, exchange(&conn, &info, &frame)).await {
+        let sent = async {
+            let bytes = match shared {
+                Some(s) => match s.exchange(request_id, bytes).await {
+                    Ok(reply) => return reply.map_err(ExchangeError::Stream),
+                    Err(unsent) => unsent,
+                },
+                None => bytes,
+            };
+            let reply = exchange(&conn, &info, &bytes).await?;
+            Ok(decode_frame(&reply, &limits))
+        };
+        let decoded = match tokio::time::timeout(timeout, sent).await {
             Err(_) => {
                 if lane == Lane::Command {
                     emit(
@@ -487,12 +534,9 @@ impl Transport {
                 }
                 return Err(TransportError::Frame(reason));
             }
-            Ok(Ok(bytes)) => bytes,
+            Ok(Ok(decoded)) => decoded,
         };
-        let limits = Limits {
-            max_frame: info.max_frame,
-        };
-        match decode_frame(&bytes, &limits) {
+        match decoded {
             Ok(Frame {
                 message: Message::Unsupported { .. },
                 ..
@@ -506,6 +550,16 @@ impl Transport {
         }
     }
 
+    async fn open_shared(&self, conn: &Conn) -> Option<Arc<Shared>> {
+        let inner = self.0.clone();
+        let peer = conn.info.node_id;
+        let rejected = move |reason: &str| {
+            TransportStats::bump(&inner.stats.frames_rejected);
+            tracing::warn!(%peer, reason, "dropped a reply frame on the shared stream");
+        };
+        Shared::open(&conn.conn, conn.info.max_frame, rejected).await
+    }
+
     fn pool(&self, lane: Lane) -> &Mutex<HashMap<NodeId, Slot>> {
         match lane {
             Lane::Command => &self.0.pool,
@@ -515,7 +569,8 @@ impl Transport {
 
     /// The live pooled connection under `key`, or a new one to `addr`. Concurrent callers wait
     /// on the slot lock, so they share one dial. `node` is the expected peer of an RPC
-    /// connection: its connection is watched, and its failed dial is evidence.
+    /// connection: its connection is watched, and its failed dial is evidence. `share` opens the
+    /// shared stream on a new connection when the peer has it.
     async fn cached_or_dial<K: std::hash::Hash + Eq>(
         &self,
         pool: &Mutex<HashMap<K, Slot>>,
@@ -523,7 +578,8 @@ impl Transport {
         node: Option<NodeId>,
         addr: SocketAddr,
         channel: Channel,
-    ) -> Result<(quinn::Connection, PeerInfo), TransportError> {
+        share: bool,
+    ) -> Result<Pooled, TransportError> {
         if self.0.closed.is_cancelled() {
             return Err(TransportError::Connect("the transport is closed".into()));
         }
@@ -531,7 +587,11 @@ impl Transport {
         let mut guard = slot.lock().await;
         if let Some(c) = guard.as_ref() {
             if c.conn.close_reason().is_none() {
-                return Ok((c.conn.clone(), c.info));
+                return Ok(Pooled {
+                    conn: c.conn.clone(),
+                    info: c.info,
+                    shared: c.shared.clone(),
+                });
             }
         }
         *guard = None;
@@ -541,11 +601,18 @@ impl Transport {
             Err(_) => Err(TransportError::Connect("the handshake timed out".into())),
         };
         match (result, node) {
-            (Ok(conn), node) => {
-                let out = (conn.conn.clone(), conn.info);
+            (Ok(mut conn), node) => {
                 if let Some(node) = node {
                     tokio::spawn(watch(self.0.clone(), node, conn.conn.clone()));
                 }
+                if share && conn.info.capabilities & caps::SHARED_STREAM != 0 {
+                    conn.shared = self.open_shared(&conn).await;
+                }
+                let out = Pooled {
+                    conn: conn.conn.clone(),
+                    info: conn.info,
+                    shared: conn.shared.clone(),
+                };
                 *guard = Some(conn);
                 Ok(out)
             }
@@ -616,6 +683,7 @@ impl Transport {
                     channel,
                 ) {
                     Ok(agreed) => Ok(Conn {
+                        shared: None,
                         info: PeerInfo {
                             node_id: theirs.node_id,
                             addr,
@@ -639,17 +707,17 @@ impl Transport {
     }
 }
 
-/// Write one request frame on a new stream and read the reply frame.
+/// Write one encoded request frame on a new stream and read the reply frame.
 async fn exchange(
     conn: &quinn::Connection,
     info: &PeerInfo,
-    frame: &Frame,
+    frame: &[u8],
 ) -> Result<bytes::Bytes, ExchangeError> {
     let (mut send, mut recv) = conn
         .open_bi()
         .await
         .map_err(|e| ExchangeError::NotSent(e.to_string()))?;
-    write_frame(&mut send, &encode_frame(frame))
+    write_frame(&mut send, frame)
         .await
         .map_err(|e| ExchangeError::Lost(e.to_string()))?;
     let _ = send.finish();
@@ -853,26 +921,112 @@ async fn serve_stream(
     inner: Arc<Inner>,
     peer: PeerInfo,
     mut send: quinn::SendStream,
-    mut recv: quinn::RecvStream,
+    recv: quinn::RecvStream,
 ) {
-    let reject = |send: &mut quinn::SendStream, recv: &mut quinn::RecvStream, reason: &str| {
-        TransportStats::bump(&inner.stats.frames_rejected);
-        tracing::warn!(peer = %peer.node_id, addr = %peer.addr, reason, "dropped a frame");
-        let code = quinn::VarInt::from_u32(RESET_BAD_FRAME);
-        let _ = recv.stop(code);
-        let _ = send.reset(code);
+    let mut frames = FramedRead::new(recv, codec(peer.max_frame));
+    let request = match frames.next().await {
+        None => return,
+        Some(Err(e)) => return reject(&inner, &peer, &mut send, frames.get_mut(), &e.to_string()),
+        Some(Ok(bytes)) if bytes.is_empty() && peer.capabilities & caps::SHARED_STREAM != 0 => {
+            return serve_shared(inner, peer, send, frames).await;
+        }
+        Some(Ok(bytes)) => match decode_request(&inner, &peer, &bytes) {
+            Ok(request) => request,
+            Err(reason) => return reject(&inner, &peer, &mut send, frames.get_mut(), &reason),
+        },
     };
-    let bytes = match read_frame(&mut recv, peer.max_frame).await {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => return,
-        Err(e) => return reject(&mut send, &mut recv, &e.to_string()),
-    };
+    let reply = reply_to(inner, peer, request).await;
+    if write_frame(&mut send, &encode_frame(&reply)).await.is_ok() {
+        let _ = send.finish();
+    }
+}
+
+/// Serve a shared stream until the dialer finishes it. Each request runs in its own task, at
+/// most `max_streams` at a time, and its reply goes out when it is ready. At the limit the
+/// reader waits, so flow control holds back the dialer as the stream limit does.
+async fn serve_shared(
+    inner: Arc<Inner>,
+    peer: PeerInfo,
+    send: quinn::SendStream,
+    mut frames: FramedRead<quinn::RecvStream, LengthDelimitedCodec>,
+) {
+    let (out, rx) = mpsc::unbounded_channel();
+    tokio::spawn(shared::pump(send, rx, inner.closed.child_token()));
+    let limit = Arc::new(Semaphore::new(inner.max_streams));
+    loop {
+        let next = tokio::select! {
+            _ = inner.closed.cancelled() => return,
+            next = frames.next() => next,
+        };
+        let request = match next {
+            None => return,
+            Some(Ok(bytes)) => decode_request(&inner, &peer, &bytes),
+            Some(Err(e)) => Err(e.to_string()),
+        };
+        let request = match request {
+            Ok(request) => request,
+            Err(reason) => {
+                // The stream carries other requests, so a bad frame ends all of them. The dialer
+                // then fails them at once instead of waiting for a timeout.
+                rejected(&inner, &peer, &reason);
+                let code = quinn::VarInt::from_u32(RESET_BAD_FRAME);
+                let _ = frames.get_mut().stop(code);
+                let _ = out.send(Out::Reset(code));
+                return;
+            }
+        };
+        TransportStats::bump(&inner.stats.shared_in);
+        let Ok(permit) = limit.clone().acquire_owned().await else {
+            return;
+        };
+        let inner = inner.clone();
+        let out = out.clone();
+        tokio::spawn(async move {
+            let reply = reply_to(inner, peer, request).await;
+            let _ = out.send(Out::Frame(encode_frame(&reply)));
+            drop(permit);
+        });
+    }
+}
+
+/// A request frame that passed the verifier.
+enum Request {
+    /// A message for the service.
+    Call(Frame),
+    /// An unknown message type, with its `UNSUPPORTED` reply.
+    Unsupported(Frame),
+}
+
+/// Decode one request frame. `Err` holds why it failed the verifier.
+fn decode_request(inner: &Inner, peer: &PeerInfo, bytes: &[u8]) -> Result<Request, String> {
     let limits = Limits {
         max_frame: peer.max_frame,
     };
-    let reply = match decode_frame(&bytes, &limits) {
+    match decode_frame(bytes, &limits) {
         Ok(frame) => {
             TransportStats::bump(&inner.stats.requests_in);
+            Ok(Request::Call(frame))
+        }
+        Err(DecodeError::UnknownType {
+            message_type,
+            request_id,
+            trace,
+        }) => {
+            TransportStats::bump(&inner.stats.unsupported);
+            Ok(Request::Unsupported(Frame {
+                request_id,
+                trace,
+                message: Message::Unsupported { message_type },
+            }))
+        }
+        Err(DecodeError::Invalid(reason)) => Err(reason),
+    }
+}
+
+async fn reply_to(inner: Arc<Inner>, peer: PeerInfo, request: Request) -> Frame {
+    match request {
+        Request::Unsupported(reply) => reply,
+        Request::Call(frame) => {
             let message = inner
                 .service
                 .clone()
@@ -889,21 +1043,24 @@ async fn serve_stream(
                 message,
             }
         }
-        Err(DecodeError::UnknownType {
-            message_type,
-            request_id,
-            trace,
-        }) => {
-            TransportStats::bump(&inner.stats.unsupported);
-            Frame {
-                request_id,
-                trace,
-                message: Message::Unsupported { message_type },
-            }
-        }
-        Err(DecodeError::Invalid(reason)) => return reject(&mut send, &mut recv, &reason),
-    };
-    if write_frame(&mut send, &encode_frame(&reply)).await.is_ok() {
-        let _ = send.finish();
     }
+}
+
+fn rejected(inner: &Inner, peer: &PeerInfo, reason: &str) {
+    TransportStats::bump(&inner.stats.frames_rejected);
+    tracing::warn!(peer = %peer.node_id, addr = %peer.addr, reason, "dropped a frame");
+}
+
+/// Drop a bad frame and reset its stream.
+fn reject(
+    inner: &Inner,
+    peer: &PeerInfo,
+    send: &mut quinn::SendStream,
+    recv: &mut quinn::RecvStream,
+    reason: &str,
+) {
+    rejected(inner, peer, reason);
+    let code = quinn::VarInt::from_u32(RESET_BAD_FRAME);
+    let _ = recv.stop(code);
+    let _ = send.reset(code);
 }

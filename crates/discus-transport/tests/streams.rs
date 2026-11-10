@@ -2,16 +2,15 @@
 
 mod common;
 
-use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use common::{config, epoch, start, TestService};
+use common::{config, epoch, raw, start, TestService};
 use discus_placement::{ClusterId, NodeId};
-use discus_transport::testing::{quic_client, TestCa, TEST_SAN};
-use discus_transport::{frame, Lane, PeerEventKind, Transport, TransportError, ALPN_RPC};
+use discus_transport::testing::TestCa;
+use discus_transport::{frame, Lane, PeerEventKind, Transport, TransportError};
 use discus_wire::{
-    caps, decode_frame, encode_envelope, encode_frame, Frame, Hello, Limits, Message, TraceContext,
+    decode_frame, encode_envelope, encode_frame, Frame, Limits, Message, TraceContext,
 };
 
 fn trace() -> TraceContext {
@@ -19,37 +18,6 @@ fn trace() -> TraceContext {
         traceparent: Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".into()),
         tracestate: None,
     }
-}
-
-/// A raw connection that passed HELLO, for sending hand-made frames.
-async fn raw(ca: &TestCa, cluster: ClusterId, addr: SocketAddr) -> quinn::Connection {
-    let client = quic_client(ca.material(TEST_SAN).client_config(ALPN_RPC));
-    let conn = client.connect(addr, "discus").unwrap().await.unwrap();
-    let (mut send, mut recv) = conn.open_bi().await.unwrap();
-    let id = NodeId::random();
-    let hello = Frame {
-        request_id: 0,
-        trace: TraceContext::default(),
-        message: Message::Hello(Hello {
-            node_id: id,
-            cluster_id: cluster,
-            capabilities: caps::KNOWN,
-            epoch: epoch(1, id),
-            max_frame: 65536,
-        }),
-    };
-    frame::write_frame(&mut send, &encode_frame(&hello))
-        .await
-        .unwrap();
-    send.finish().unwrap();
-    let reply = frame::read_frame(&mut recv, 65536).await.unwrap().unwrap();
-    assert!(matches!(
-        decode_frame(&reply, &Limits::default()).unwrap().message,
-        Message::Hello(_)
-    ));
-    // Keep the client endpoint alive with the connection.
-    std::mem::forget(client);
-    conn
 }
 
 /// Send raw bytes as one frame on a new stream. Returns the reply frame, or `None` if the stream
