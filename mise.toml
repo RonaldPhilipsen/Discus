@@ -6,6 +6,10 @@ flatc = "25.12.19-2026-02-06-03fffb2"
 rumdl = "latest"
 rust = "stable"
 
+# Install the prek Git hooks after `mise install`, so a fresh clone gets them without a separate step.
+[hooks]
+postinstall = "prek install"
+
 [tasks.lint-docs]
 description = "Lint the Markdown documentation with rumdl"
 run = "rumdl check docs/ README.md"
