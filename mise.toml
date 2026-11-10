@@ -1,5 +1,6 @@
 [tools]
 "aqua:nextest-rs/nextest/cargo-nextest" = "0.9.151"
+prek = "0.5.9"
 flatc = "25.12.19-2026-02-06-03fffb2"
 "conda:redis-server" = "latest"
 rumdl = "latest"
@@ -21,13 +22,15 @@ run = [
 ]
 
 [tasks.lint]
-description = "Run rustfmt, clippy, and the documentation lint"
+description = "Run every prek hook on every file: rustfmt, clippy, rumdl, the wire check, and file hygiene"
 run = [
-  "cargo fmt --check",
-  "cargo clippy --workspace --all-targets -- -D warnings",
-  "rumdl check docs/ README.md",
-  "bash scripts/gen-wire.sh --check",
+  "prek run --all-files --show-diff-on-failure",
+  "prek run --all-files --show-diff-on-failure --stage pre-push",
 ]
+
+[tasks.hooks]
+description = "Install the prek Git hooks (pre-commit and pre-push)"
+run = "prek install"
 
 [tasks.gen-wire]
 description = "Regenerate the Rust code for the FlatBuffers wire contract"
