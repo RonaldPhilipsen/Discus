@@ -1,9 +1,14 @@
 [tools]
 "aqua:nextest-rs/nextest/cargo-nextest" = "0.9.151"
+prek = "0.5.9"
 flatc = "25.12.19-2026-02-06-03fffb2"
 "conda:redis-server" = "latest"
 rumdl = "latest"
 rust = "stable"
+
+# Install the prek Git hooks after `mise install`, so a fresh clone gets them without a separate step.
+[hooks]
+postinstall = "prek install"
 
 [tasks.lint-docs]
 description = "Lint the Markdown documentation with rumdl"
@@ -21,13 +26,15 @@ run = [
 ]
 
 [tasks.lint]
-description = "Run rustfmt, clippy, and the documentation lint"
+description = "Run every prek hook on every file: rustfmt, clippy, rumdl, the wire check, and file hygiene"
 run = [
-  "cargo fmt --check",
-  "cargo clippy --workspace --all-targets -- -D warnings",
-  "rumdl check docs/ README.md",
-  "bash scripts/gen-wire.sh --check",
+  "prek run --all-files --show-diff-on-failure",
+  "prek run --all-files --show-diff-on-failure --stage pre-push",
 ]
+
+[tasks.hooks]
+description = "Install the prek Git hooks (pre-commit and pre-push)"
+run = "prek install"
 
 [tasks.gen-wire]
 description = "Regenerate the Rust code for the FlatBuffers wire contract"
@@ -41,6 +48,22 @@ run = "bash scripts/compat.sh"
 description = "Benchmark smoke with redis-benchmark against a release build"
 run = "bash scripts/bench.sh"
 
+[tasks.bench-unit]
+description = "Run the Criterion benchmarks for the parser and the store"
+run = "cargo bench -p discus-resp -p discus-store"
+
+[tasks.bench-compare]
+description = "Compare one node with Redis and Valkey under redis-benchmark"
+run = "bash scripts/bench-compare.sh"
+
+[tasks.bench-flamegraph]
+description = "Record CPU flamegraphs of one node under redis-benchmark"
+run = "bash scripts/bench-flamegraph.sh"
+
 [tasks.build-matrix]
 description = "Check every build feature combination and the rejected ones"
 run = "bash scripts/build-matrix.sh"
+
+[tasks.bench-k8s]
+description = "Compare Discus, Redis, and Valkey setups on Kubernetes with memtier_benchmark"
+run = "python3 -I scripts/bench-k8s.py"

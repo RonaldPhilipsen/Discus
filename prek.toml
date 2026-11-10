@@ -1,0 +1,32 @@
+# Git hooks for Discus, run by prek (https://prek.j178.dev).
+# `mise run hooks` installs them. `mise run lint` runs every hook on every file, and CI runs that task,
+# so a commit that skips the hooks still fails in CI.
+#:schema https://www.schemastore.org/prek.json
+
+default_install_hook_types = ["pre-commit", "pre-push"]
+default_stages = ["pre-commit"]
+exclude = "^crates/discus-wire/src/generated/"
+
+[[repos]]
+repo = "builtin"
+hooks = [
+    { id = "check-merge-conflict" },
+    { id = "check-added-large-files" },
+    { id = "check-toml" },
+    # Helm templates are not plain YAML.
+    { id = "check-yaml", exclude = "^charts/.*/templates/" },
+    { id = "end-of-file-fixer", stages = ["pre-commit"] },
+    { id = "trailing-whitespace", args = ["--markdown-linebreak-ext=md"], stages = ["pre-commit"] },
+]
+
+# The local hooks run through `mise x` so that a commit from an editor without mise on PATH
+# still gets the pinned tools.
+[[repos]]
+repo = "local"
+hooks = [
+    { id = "cargo-fmt", name = "cargo fmt", entry = "mise x -- cargo fmt --all", language = "system", types = ["rust"], pass_filenames = false },
+    { id = "rumdl", name = "rumdl", entry = "mise x -- rumdl check --fix", language = "system", files = '^(docs/.*|README)\.md$' },
+    { id = "gen-wire", name = "wire code is up to date", entry = "mise x -- bash scripts/gen-wire.sh --check", language = "system", files = "^crates/discus-wire/schema/", pass_filenames = false },
+    # Clippy takes too long for every commit, so it runs before a push.
+    { id = "clippy", name = "cargo clippy", entry = "mise x -- cargo clippy --workspace --all-targets -- -D warnings", language = "system", types = ["rust"], pass_filenames = false, stages = ["pre-push"] },
+]

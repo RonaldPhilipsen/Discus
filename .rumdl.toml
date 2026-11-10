@@ -10,3 +10,7 @@ line-length = 100
 reflow = true
 reflow-mode = "default"
 code-spans = false
+
+# findings.md is a fragment that build.sh inserts under a heading of report.md.
+[per-file-ignores]
+"docs/benchmarks/*/findings.md" = ["MD041"]
