@@ -426,7 +426,9 @@ redis-cli -p 6382 GET greeting
 ```
 
 `INFO discus` on each node shows `discus_membership`, `discus_member_state`,
-`discus_incarnation`, `discus_epoch`, and `discus_members`.
+`discus_incarnation`, `discus_epoch`, and `discus_members`. `discus_cluster_addr` is the bound
+`--cluster-listen` address, which serves gossip, and `discus_rpc_addr` is the bound `--rpc-listen`
+address. With static membership, both show the one cluster address.
 
 ## Static membership
 

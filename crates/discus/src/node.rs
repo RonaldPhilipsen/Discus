@@ -361,6 +361,20 @@ impl Node {
         self.link.get()
     }
 
+    /// The QUIC address of `--cluster-listen`, when the transport runs. With gossip membership
+    /// it serves gossip only.
+    pub fn cluster_addr(&self) -> Option<SocketAddr> {
+        match self.membership() {
+            Some(m) => Some(m.gossip_transport().local_addr()),
+            None => self.rpc_addr(),
+        }
+    }
+
+    /// The QUIC address that serves node-to-node RPC, when the transport runs.
+    pub fn rpc_addr(&self) -> Option<SocketAddr> {
+        self.link().map(|l| l.transport.local_addr())
+    }
+
     /// The link, the address, and the current epoch for a request to member `to`.
     pub(crate) fn peer(
         &self,

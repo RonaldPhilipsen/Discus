@@ -243,3 +243,44 @@ async fn static_mode_keeps_the_static_epoch() {
         assert!(n.node.is_normal());
     }
 }
+
+async fn info_field(n: &common::gossip::GossipNode, name: &str) -> String {
+    let mut con = n.redis().await;
+    let info: String = redis::cmd("INFO")
+        .arg("discus")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    info.lines()
+        .find_map(|l| l.strip_prefix(&format!("{name}:")))
+        .unwrap_or_else(|| panic!("missing {name} in {info}"))
+        .trim()
+        .to_string()
+}
+
+#[tokio::test]
+async fn info_reports_the_gossip_and_rpc_addresses() {
+    let net = Net::new();
+    let n = net.start(&[], &[]).await;
+    assert_ne!(n.cluster_addr, n.rpc_addr);
+    assert_eq!(
+        info_field(&n, "discus_cluster_addr").await,
+        n.cluster_addr.to_string()
+    );
+    assert_eq!(
+        info_field(&n, "discus_rpc_addr").await,
+        n.rpc_addr.to_string()
+    );
+
+    let c = common::cluster::start_cluster(2, &[]).await;
+    let s = &c.nodes[0];
+    assert_eq!(s.cluster_addr, s.rpc_addr);
+    assert_eq!(
+        info_field(s, "discus_cluster_addr").await,
+        s.cluster_addr.to_string()
+    );
+    assert_eq!(
+        info_field(s, "discus_rpc_addr").await,
+        s.rpc_addr.to_string()
+    );
+}

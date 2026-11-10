@@ -244,15 +244,12 @@ impl Server {
     /// The QUIC address of `--cluster-listen`, when the transport runs. With gossip membership
     /// it serves gossip only.
     pub fn cluster_addr(&self) -> Option<SocketAddr> {
-        match self.node.membership() {
-            Some(m) => Some(m.gossip_transport().local_addr()),
-            None => self.rpc_addr(),
-        }
+        self.node.cluster_addr()
     }
 
     /// The QUIC address that serves node-to-node RPC, when the transport runs.
     pub fn rpc_addr(&self) -> Option<SocketAddr> {
-        self.node.link().map(|l| l.transport.local_addr())
+        self.node.rpc_addr()
     }
 
     /// The address that the client listener is bound to.
