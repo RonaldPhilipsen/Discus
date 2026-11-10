@@ -5,6 +5,10 @@
 //! request. Each request and reply is a normal frame. Replies come back in any order and carry
 //! the request ID. A writer task sends all frames that wait in one write, so a busy connection
 //! pays for fewer stream writes, packets, and task wakeups than with a stream per request.
+//!
+//! With `SHARED_READS`, reads use the stream too. The reply to a read can be large, and on the
+//! shared stream it would delay the replies behind it past the short read timeout. So the
+//! acceptor sends a reply over [`SHARED_REPLY_BYTES`] on a new unidirectional stream instead.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,10 +20,17 @@ use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::frame::codec;
+use crate::frame::{codec, read_frame};
 
 /// The bytes that one write takes. Frames that wait past it go out in the next write.
 const WRITE_BYTES: usize = 256 * 1024;
+
+/// The largest reply that the acceptor sends on the shared stream to a dialer with
+/// `SHARED_READS`. A larger one takes a unidirectional stream.
+pub(crate) const SHARED_REPLY_BYTES: usize = 64 * 1024;
+
+/// Runs when a reply frame fails the verifier, with the reason.
+pub(crate) type Rejected = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// What the writer task sends.
 pub(crate) enum Out {
@@ -92,12 +103,14 @@ pub(crate) struct Shared {
 
 impl Shared {
     /// Open the stream on `conn` and start its writer and reader tasks. `rejected` runs when a
-    /// reply frame fails the verifier. Such a frame cannot be matched to a request, so the stream
-    /// ends and its requests fail.
+    /// reply frame fails the verifier. Such a frame on the shared stream cannot be matched to a
+    /// request, so the stream ends and its requests fail. With `reads`, a task also takes the
+    /// large replies that come on unidirectional streams.
     pub(crate) async fn open(
         conn: &quinn::Connection,
         max_frame: usize,
-        rejected: impl Fn(&str) + Send + 'static,
+        reads: bool,
+        rejected: Rejected,
     ) -> Option<Arc<Shared>> {
         let (send, recv) = conn.open_bi().await.ok()?;
         let (out, rx) = mpsc::unbounded_channel();
@@ -115,6 +128,15 @@ impl Shared {
                 fail_all(&waiting, &stop, reason);
             }
         });
+        if reads {
+            tokio::spawn(read_large_replies(
+                conn.clone(),
+                max_frame,
+                waiting.clone(),
+                stop.clone(),
+                rejected.clone(),
+            ));
+        }
         tokio::spawn(read_replies(
             recv,
             max_frame,
@@ -177,7 +199,7 @@ async fn read_replies(
     max_frame: usize,
     waiting: Arc<Waiting>,
     stop: CancellationToken,
-    rejected: impl Fn(&str),
+    rejected: Rejected,
 ) {
     let limits = Limits { max_frame };
     let mut frames = tokio_util::codec::FramedRead::new(recv, codec(max_frame));
@@ -199,10 +221,52 @@ async fn read_replies(
                 break reason;
             }
         };
-        let tx = waiting.lock().as_mut().and_then(|w| w.remove(&request_id));
-        if let Some(tx) = tx {
-            let _ = tx.send(Ok(reply));
-        }
+        deliver(&waiting, request_id, reply);
     };
     fail_all(&waiting, &stop, reason);
+}
+
+fn deliver(waiting: &Waiting, request_id: u64, reply: Result<Frame, DecodeError>) {
+    let tx = waiting.lock().as_mut().and_then(|w| w.remove(&request_id));
+    if let Some(tx) = tx {
+        let _ = tx.send(Ok(reply));
+    }
+}
+
+/// Take each unidirectional stream of `conn` until the shared stream ends. Each carries one
+/// reply frame. A frame that fails the verifier cannot be matched, so its request times out, but
+/// the shared stream goes on.
+async fn read_large_replies(
+    conn: quinn::Connection,
+    max_frame: usize,
+    waiting: Arc<Waiting>,
+    stop: CancellationToken,
+    rejected: Rejected,
+) {
+    let limits = Limits { max_frame };
+    loop {
+        let mut recv = tokio::select! {
+            _ = stop.cancelled() => return,
+            recv = conn.accept_uni() => match recv {
+                Ok(recv) => recv,
+                Err(_) => return,
+            },
+        };
+        let waiting = waiting.clone();
+        let rejected = rejected.clone();
+        tokio::spawn(async move {
+            let bytes = match read_frame(&mut recv, max_frame).await {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => return rejected("a large reply stream ended without a frame"),
+                Err(e) => return rejected(&e.to_string()),
+            };
+            match decode_frame(&bytes, &limits) {
+                Ok(frame) => deliver(&waiting, frame.request_id, Ok(frame)),
+                Err(e @ DecodeError::UnknownType { request_id, .. }) => {
+                    deliver(&waiting, request_id, Err(e))
+                }
+                Err(e @ DecodeError::Invalid(_)) => rejected(&e.to_string()),
+            }
+        });
+    }
 }

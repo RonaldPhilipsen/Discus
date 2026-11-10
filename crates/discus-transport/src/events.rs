@@ -37,6 +37,9 @@ pub struct TransportStats {
     pub requests_in: AtomicU64,
     /// Requests that arrived on a shared stream. They count in `requests_in` too.
     pub shared_in: AtomicU64,
+    /// Replies to shared-stream requests that went out on a unidirectional stream, because
+    /// they were too large for the shared stream.
+    pub large_replies_out: AtomicU64,
     pub requests_out: AtomicU64,
 }
 
@@ -48,6 +51,7 @@ pub struct StatsSnapshot {
     pub handshake_failures: u64,
     pub requests_in: u64,
     pub shared_in: u64,
+    pub large_replies_out: u64,
     pub requests_out: u64,
 }
 
@@ -60,6 +64,7 @@ impl TransportStats {
             handshake_failures: get(&self.handshake_failures),
             requests_in: get(&self.requests_in),
             shared_in: get(&self.shared_in),
+            large_replies_out: get(&self.large_replies_out),
             requests_out: get(&self.requests_out),
         }
     }
