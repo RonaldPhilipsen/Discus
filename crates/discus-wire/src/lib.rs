@@ -58,8 +58,12 @@ pub mod caps {
     /// The node takes many requests on one command-lane stream, opened with an empty frame, and
     /// answers each with its request ID in any order.
     pub const SHARED_STREAM: u64 = 16;
+    /// The dialer takes reads on the shared stream too. The acceptor sends a reply larger than
+    /// the shared limit on a new unidirectional stream, and the dialer accepts those streams.
+    pub const SHARED_READS: u64 = 32;
     /// Every bit this build knows.
-    pub const KNOWN: u64 = EPOCH_PUSH | GOSSIP | REPLICATION | COUNTERS | SHARED_STREAM;
+    pub const KNOWN: u64 =
+        EPOCH_PUSH | GOSSIP | REPLICATION | COUNTERS | SHARED_STREAM | SHARED_READS;
 }
 
 /// The frame limit before `HELLO` completes, and the smallest offer that `HELLO` accepts.
