@@ -1,6 +1,6 @@
 [tools]
 "aqua:nextest-rs/nextest/cargo-nextest" = "0.9.151"
-prek = "0.5.9"
+prek = "0.5.10"
 flatc = "25.12.19-2026-02-06-03fffb2"
 "conda:redis-server" = "latest"
 rumdl = "latest"
