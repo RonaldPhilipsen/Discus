@@ -76,10 +76,11 @@ FINDINGS
 | `run.log` | The log of the run. |
 | `build.sh` | Builds `report.md` from `head.md` and the tables. |
 
-The scripts are in the `scripts` directory of the repository. `scripts/bench-k8s.py` deployed every setup and ran the
-load. `scripts/bench-k8s-aggregate.py` makes the tables from `results.jsonl`.
+The scripts are in the `scripts` directory of the repository. `scripts/bench-k8s.py` deployed every
+setup and ran the load. `scripts/bench-k8s-aggregate.py` makes the tables from `results.jsonl`.
 
-To run the benchmark again, with the `home-ops` context and Helm available, run this from the repository root:
+To run the benchmark again, with the `home-ops` context and Helm available, run this from the
+repository root:
 
 ```bash
 python3 -I scripts/bench-k8s.py --duration 30 --reps 3 --out docs/benchmarks/2026-11-09-k8s/results.jsonl

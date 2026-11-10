@@ -27,5 +27,6 @@ print("\n### Data placement after the runs\n")
 for s in order:
     d = verify.get((s,"after-runs"))
     if not d: continue
-    parts = [f"{n['ip']}:{n['port']} {n.get('role','?')} keys={n['dbsize']} mem={int(n.get('used_memory',0) or 0)//2**20}MiB" for n in d["nodes"]]
-    print(f"- {s}: " + "; ".join(parts))
+    print(f"- {s}:")
+    for n in d["nodes"]:
+        print(f"  - {n['ip']}:{n['port']} {n.get('role','?')} keys={n['dbsize']} mem={int(n.get('used_memory',0) or 0)//2**20}MiB")

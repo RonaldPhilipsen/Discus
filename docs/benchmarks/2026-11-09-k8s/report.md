@@ -54,9 +54,9 @@ worst of the three processes.
   reads spread over all nodes (about 241,000). Discus reached this through one Service address. The
   client did not need to know the topology.
 - Writes: Discus did 52,500 SET/s. Sentinel did about 80,000 and Cluster about 225,000 to 237,000.
-  With 3 nodes and replication factor 3, every node stores every key, so every write costs CPU on all
-  three nodes. Writes therefore do not scale with the node count at 3 nodes. Discus on 3 nodes also
-  wrote 23% slower than Discus on 1 node (68,100).
+  With 3 nodes and replication factor 3, every node stores every key, so every write costs CPU on
+  all three nodes. Writes therefore do not scale with the node count at 3 nodes. Discus on 3 nodes
+  also wrote 23% slower than Discus on 1 node (68,100).
 - Write latency: Discus had a p99 of 4.3 ms for SET. Sentinel had 1.65 ms and Cluster 2.1 to 2.3 ms.
 - Mixed load (1 write, 9 reads): Discus did 141,000 ops/s. This is 1.7 times Sentinel (about 84,500)
   and 0.6 times Cluster (about 230,000 to 242,000). Discus had the lowest p50 (0.59 ms) but a p99
@@ -116,10 +116,11 @@ worst of the three processes.
 | `run.log` | The log of the run. |
 | `build.sh` | Builds `report.md` from `head.md` and the tables. |
 
-The scripts are in the `scripts` directory of the repository. `scripts/bench-k8s.py` deployed every setup and ran the
-load. `scripts/bench-k8s-aggregate.py` makes the tables from `results.jsonl`.
+The scripts are in the `scripts` directory of the repository. `scripts/bench-k8s.py` deployed every
+setup and ran the load. `scripts/bench-k8s-aggregate.py` makes the tables from `results.jsonl`.
 
-To run the benchmark again, with the `home-ops` context and Helm available, run this from the repository root:
+To run the benchmark again, with the `home-ops` context and Helm available, run this from the
+repository root:
 
 ```bash
 python3 -I scripts/bench-k8s.py --duration 30 --reps 3 --out docs/benchmarks/2026-11-09-k8s/results.jsonl
@@ -202,13 +203,43 @@ GET misses per second summed over all runs: 0.0
 
 ### Data placement after the runs
 
-- discus-3: 10.42.0.35:6379 ? keys=1000000 mem=314MiB; 10.42.0.211:6379 ? keys=1000000 mem=314MiB; 10.42.0.114:6379 ? keys=1000000 mem=314MiB
-- redis-sentinel-3: 10.42.0.213:6379 master keys=1000000 mem=351MiB; 10.42.0.145:6379 slave keys=1000000 mem=351MiB; 10.42.0.76:6379 slave keys=1000000 mem=351MiB
-- valkey-sentinel-3: 10.42.0.143:6379 master keys=1000000 mem=363MiB; 10.42.0.135:6379 slave keys=1000000 mem=363MiB; 10.42.0.42:6379 slave keys=1000000 mem=363MiB
-- redis-cluster-noreplica-3: 10.42.0.181:6379 master keys=333340 mem=119MiB; 10.42.0.143:6379 master keys=333354 mem=119MiB; 10.42.0.114:6379 master keys=333306 mem=119MiB
-- valkey-cluster-noreplica-3: 10.42.0.124:6379 master keys=333340 mem=120MiB; 10.42.0.143:6379 master keys=333354 mem=120MiB; 10.42.0.114:6379 master keys=333306 mem=120MiB
-- redis-cluster-replica-3: 10.42.0.149:6379 master keys=333340 mem=121MiB; 10.42.0.149:6380 slave keys=333306 mem=120MiB; 10.42.0.134:6379 master keys=333354 mem=121MiB; 10.42.0.134:6380 slave keys=333340 mem=120MiB; 10.42.0.118:6379 master keys=333306 mem=121MiB; 10.42.0.118:6380 slave keys=333354 mem=120MiB
-- valkey-cluster-replica-3: 10.42.0.88:6379 master keys=333340 mem=130MiB; 10.42.0.88:6380 slave keys=333306 mem=130MiB; 10.42.0.119:6379 master keys=333354 mem=130MiB; 10.42.0.119:6380 slave keys=333340 mem=130MiB; 10.42.0.157:6379 master keys=333306 mem=130MiB; 10.42.0.157:6380 slave keys=333354 mem=130MiB
-- discus-1: 10.42.0.58:6379 ? keys=1000000 mem=314MiB
-- redis-1: 10.42.0.176:6379 master keys=1000000 mem=349MiB
-- valkey-1: 10.42.0.114:6379 master keys=1000000 mem=353MiB
+- discus-3:
+  - 10.42.0.35:6379 ? keys=1000000 mem=314MiB
+  - 10.42.0.211:6379 ? keys=1000000 mem=314MiB
+  - 10.42.0.114:6379 ? keys=1000000 mem=314MiB
+- redis-sentinel-3:
+  - 10.42.0.213:6379 master keys=1000000 mem=351MiB
+  - 10.42.0.145:6379 slave keys=1000000 mem=351MiB
+  - 10.42.0.76:6379 slave keys=1000000 mem=351MiB
+- valkey-sentinel-3:
+  - 10.42.0.143:6379 master keys=1000000 mem=363MiB
+  - 10.42.0.135:6379 slave keys=1000000 mem=363MiB
+  - 10.42.0.42:6379 slave keys=1000000 mem=363MiB
+- redis-cluster-noreplica-3:
+  - 10.42.0.181:6379 master keys=333340 mem=119MiB
+  - 10.42.0.143:6379 master keys=333354 mem=119MiB
+  - 10.42.0.114:6379 master keys=333306 mem=119MiB
+- valkey-cluster-noreplica-3:
+  - 10.42.0.124:6379 master keys=333340 mem=120MiB
+  - 10.42.0.143:6379 master keys=333354 mem=120MiB
+  - 10.42.0.114:6379 master keys=333306 mem=120MiB
+- redis-cluster-replica-3:
+  - 10.42.0.149:6379 master keys=333340 mem=121MiB
+  - 10.42.0.149:6380 slave keys=333306 mem=120MiB
+  - 10.42.0.134:6379 master keys=333354 mem=121MiB
+  - 10.42.0.134:6380 slave keys=333340 mem=120MiB
+  - 10.42.0.118:6379 master keys=333306 mem=121MiB
+  - 10.42.0.118:6380 slave keys=333354 mem=120MiB
+- valkey-cluster-replica-3:
+  - 10.42.0.88:6379 master keys=333340 mem=130MiB
+  - 10.42.0.88:6380 slave keys=333306 mem=130MiB
+  - 10.42.0.119:6379 master keys=333354 mem=130MiB
+  - 10.42.0.119:6380 slave keys=333340 mem=130MiB
+  - 10.42.0.157:6379 master keys=333306 mem=130MiB
+  - 10.42.0.157:6380 slave keys=333354 mem=130MiB
+- discus-1:
+  - 10.42.0.58:6379 ? keys=1000000 mem=314MiB
+- redis-1:
+  - 10.42.0.176:6379 master keys=1000000 mem=349MiB
+- valkey-1:
+  - 10.42.0.114:6379 master keys=1000000 mem=353MiB

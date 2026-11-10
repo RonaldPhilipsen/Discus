@@ -5,9 +5,9 @@
   reads spread over all nodes (about 241,000). Discus reached this through one Service address. The
   client did not need to know the topology.
 - Writes: Discus did 52,500 SET/s. Sentinel did about 80,000 and Cluster about 225,000 to 237,000.
-  With 3 nodes and replication factor 3, every node stores every key, so every write costs CPU on all
-  three nodes. Writes therefore do not scale with the node count at 3 nodes. Discus on 3 nodes also
-  wrote 23% slower than Discus on 1 node (68,100).
+  With 3 nodes and replication factor 3, every node stores every key, so every write costs CPU on
+  all three nodes. Writes therefore do not scale with the node count at 3 nodes. Discus on 3 nodes
+  also wrote 23% slower than Discus on 1 node (68,100).
 - Write latency: Discus had a p99 of 4.3 ms for SET. Sentinel had 1.65 ms and Cluster 2.1 to 2.3 ms.
 - Mixed load (1 write, 9 reads): Discus did 141,000 ops/s. This is 1.7 times Sentinel (about 84,500)
   and 0.6 times Cluster (about 230,000 to 242,000). Discus had the lowest p50 (0.59 ms) but a p99
