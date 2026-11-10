@@ -79,8 +79,8 @@ pub enum Phase {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pending {
-    Direct { target: NodeId },
-    Indirect { target: NodeId },
+    Direct { target: NodeId, probe: u64 },
+    Indirect { target: NodeId, probe: u64 },
     Relay { target: NodeId },
     Sync,
     Join,
@@ -89,9 +89,11 @@ enum Pending {
 
 #[derive(Debug, Clone, Copy)]
 struct Probe {
-    target: NodeId,
+    seq: u64,
     acked: bool,
     indirect_left: usize,
+    /// When the last request of the probe times out.
+    deadline: Millis,
 }
 
 pub struct Swim {
@@ -104,7 +106,9 @@ pub struct Swim {
     rng: fastrand::Rng,
     order: Vec<NodeId>,
     next_probe: Millis,
+    /// The probe in flight. It is cleared when the probe ends.
     probe: Option<Probe>,
+    probe_seq: u64,
     pending: HashMap<u64, Pending>,
     next_token: u64,
     next_sync: Millis,
@@ -153,6 +157,7 @@ impl Swim {
             order: Vec::new(),
             next_probe: 0,
             probe: None,
+            probe_seq: 0,
             pending: HashMap::new(),
             next_token: 1,
             next_sync: 0,
@@ -842,9 +847,14 @@ impl Swim {
         }
         self.rescale_detectors(now);
         self.check_failures(now);
-        if now >= self.next_probe {
-            self.next_probe = now + self.scaled(self.cfg.period_ms);
-            out.extend(self.start_probe(host));
+        // The period does not scale with the health multiplier: a longer period would cut the
+        // heartbeat rate that every peer's phi detector sees. The scaled timeouts can outlast the
+        // period, so a due probe waits for the one in flight instead of replacing it. A replaced
+        // probe would lose its missed-probe evidence, and overlapping probes would multiply the
+        // load of a node that is already slow.
+        if now >= self.next_probe && !self.probing(now) {
+            self.next_probe = now + self.cfg.period_ms;
+            out.extend(self.start_probe(now, host));
         }
         if self.phase == Phase::Seeking {
             self.seek(now, host, &mut out);
@@ -1060,22 +1070,40 @@ impl Swim {
         }
     }
 
-    fn start_probe(&mut self, host: &dyn Host) -> Option<Action> {
+    /// Whether a probe is in flight. Every request resolves at its timeout at the latest, so the
+    /// probe normally ends by its deadline. A period of slack past it keeps a lost outcome from
+    /// stopping the probes for good.
+    fn probing(&self, now: Millis) -> bool {
+        self.probe
+            .is_some_and(|p| now < p.deadline.saturating_add(self.cfg.period_ms))
+    }
+
+    /// The probe in flight with sequence number `seq`, if it has not ended.
+    fn current_probe(&mut self, seq: u64) -> Option<&mut Probe> {
+        self.probe.as_mut().filter(|p| p.seq == seq)
+    }
+
+    fn start_probe(&mut self, now: Millis, host: &dyn Host) -> Option<Action> {
+        self.probe = None;
         let target = self.next_target()?;
         let addr = self.members.get(&target)?.info.addr;
+        let timeout_ms = self.scaled(self.cfg.probe_timeout_ms);
+        self.probe_seq += 1;
+        let seq = self.probe_seq;
         self.probe = Some(Probe {
-            target,
+            seq,
             acked: false,
             indirect_left: 0,
+            deadline: now + timeout_ms,
         });
         let msg = self.message(GossipKind::Ping, Some(target), host);
-        let token = self.token(Pending::Direct { target });
+        let token = self.token(Pending::Direct { target, probe: seq });
         Some(Action {
             token,
             to: addr,
             expected: Some(target),
             msg,
-            timeout_ms: self.scaled(self.cfg.probe_timeout_ms),
+            timeout_ms,
         })
     }
 
@@ -1089,9 +1117,6 @@ impl Swim {
     fn probe_acked(&mut self, now: Millis, target: NodeId) {
         if let Some(r) = self.members.get_mut(&target) {
             r.detector.heartbeat(now);
-        }
-        if let Some(p) = self.probe.as_mut().filter(|p| p.target == target) {
-            p.acked = true;
         }
     }
 
@@ -1109,26 +1134,37 @@ impl Swim {
             self.absorb(now, g, host);
         }
         match pending {
-            Pending::Direct { target } => match outcome {
+            Pending::Direct { target, probe } => match outcome {
                 Outcome::Reply(_) => {
                     self.probe_acked(now, target);
+                    if self.current_probe(probe).is_some() {
+                        self.probe = None;
+                    }
                     Vec::new()
                 }
-                _ => self.start_indirect(now, target, host),
+                _ => self.start_indirect(now, target, probe, host),
             },
-            Pending::Indirect { target } => {
-                if matches!(&outcome, Outcome::Reply(g) if g.kind == GossipKind::Ack) {
+            Pending::Indirect { target, probe } => {
+                let acked = matches!(&outcome, Outcome::Reply(g) if g.kind == GossipKind::Ack);
+                if acked {
                     self.probe_acked(now, target);
                 }
-                let done = match self.probe.as_mut().filter(|p| p.target == target) {
+                let (ended, missed) = match self.current_probe(probe) {
                     Some(p) => {
+                        p.acked |= acked;
                         p.indirect_left = p.indirect_left.saturating_sub(1);
-                        (p.indirect_left == 0 && !p.acked).then_some(target)
+                        (
+                            p.acked || p.indirect_left == 0,
+                            !p.acked && p.indirect_left == 0,
+                        )
                     }
-                    None => None,
+                    None => (false, false),
                 };
-                if let Some(t) = done {
-                    self.missed(now, t);
+                if missed {
+                    self.missed(now, target);
+                }
+                if ended {
+                    self.probe = None;
                 }
                 Vec::new()
             }
@@ -1183,8 +1219,18 @@ impl Swim {
         self.set_state(now, MemberState::Normal, Phase::Member);
     }
 
-    fn start_indirect(&mut self, now: Millis, target: NodeId, host: &dyn Host) -> Vec<Action> {
+    fn start_indirect(
+        &mut self,
+        now: Millis,
+        target: NodeId,
+        probe: u64,
+        host: &dyn Host,
+    ) -> Vec<Action> {
+        if self.current_probe(probe).is_none() {
+            return Vec::new();
+        }
         let Some(t) = self.members.get(&target) else {
+            self.probe = None;
             return Vec::new();
         };
         let target_addr = t.info.addr;
@@ -1198,14 +1244,16 @@ impl Swim {
         helpers.truncate(self.cfg.indirect_probes);
         if helpers.is_empty() {
             self.missed(now, target);
+            self.probe = None;
             return Vec::new();
-        }
-        if let Some(p) = self.probe.as_mut().filter(|p| p.target == target) {
-            p.indirect_left = helpers.len();
         }
         let timeout = self
             .scaled(self.cfg.period_ms.saturating_sub(self.cfg.probe_timeout_ms))
             .max(1);
+        if let Some(p) = self.current_probe(probe) {
+            p.indirect_left = helpers.len();
+            p.deadline = now + timeout;
+        }
         let mut out = Vec::new();
         for helper in helpers {
             let Some(addr) = self.members.get(&helper).map(|r| r.info.addr) else {
@@ -1213,7 +1261,7 @@ impl Swim {
             };
             let mut msg = self.message(GossipKind::PingReq, Some(helper), host);
             msg.target = Some((target, target_addr));
-            let token = self.token(Pending::Indirect { target });
+            let token = self.token(Pending::Indirect { target, probe });
             out.push(Action {
                 token,
                 to: addr,

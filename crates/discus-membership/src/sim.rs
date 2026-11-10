@@ -94,6 +94,8 @@ pub struct Emitted {
     /// The ping was sent for a ping-req of another node.
     pub relay: bool,
     pub timeout_ms: Millis,
+    pub at: Millis,
+    pub to: SocketAddr,
 }
 
 pub struct SimNode {
@@ -448,6 +450,7 @@ impl Sim {
 
     /// Send the actions of `from`.
     pub fn send(&mut self, from: NodeId, actions: Vec<Action>) {
+        let now = self.now;
         for a in actions {
             let node = self.node_mut(from);
             node.sent += 1;
@@ -456,10 +459,11 @@ impl Sim {
                 kind: a.msg.kind,
                 relay,
                 timeout_ms: a.timeout_ms,
+                at: now,
+                to: a.to,
             });
             node.waiting.insert(a.token);
             let lat = self.latency();
-            let now = self.now;
             self.schedule(
                 now + lat,
                 Delivery::Request {
