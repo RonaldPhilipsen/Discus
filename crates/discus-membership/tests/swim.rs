@@ -119,3 +119,33 @@ fn the_message_rate_is_constant() {
         );
     }
 }
+
+#[test]
+fn a_direct_rumor_at_the_same_incarnation_refreshes_the_rpc_address() {
+    use discus_membership::{provisional_epoch, Swim};
+    use discus_placement::{MemberState, NodeId};
+    use discus_wire::{Capacity, MemberInfo, Rumor};
+
+    let info = |n: u128, rpc_port: u16| MemberInfo {
+        id: NodeId::from_u128(n),
+        addr: "10.0.0.1:7379".parse().unwrap(),
+        rpc_addr: format!("10.0.0.1:{rpc_port}").parse().unwrap(),
+        state: MemberState::Normal,
+        incarnation: 5,
+        weight: Default::default(),
+        epoch: provisional_epoch(NodeId::from_u128(n)).id(),
+        capabilities: 0,
+        capacity: Capacity::default(),
+        leader_hints: Bytes::new(),
+    };
+    let rumor = |info| Rumor {
+        info,
+        liveness: Liveness::Alive,
+        accuser: None,
+    };
+    let mut swim = Swim::new(SwimConfig::fast(), info(1, 7380));
+    swim.learn(0, rumor(info(2, 7380)), true);
+    swim.learn(10, rumor(info(2, 9000)), true);
+    let peer = swim.member(NodeId::from_u128(2)).unwrap();
+    assert_eq!(peer.rpc_addr, "10.0.0.1:9000".parse().unwrap());
+}

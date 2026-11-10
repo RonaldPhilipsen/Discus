@@ -475,6 +475,7 @@ impl Swim {
                     r.info.epoch = rumor.info.epoch;
                     r.info.capacity = rumor.info.capacity;
                     r.info.addr = rumor.info.addr;
+                    r.info.rpc_addr = rumor.info.rpc_addr;
                 }
             }
         }
