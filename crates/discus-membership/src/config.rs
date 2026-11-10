@@ -150,11 +150,15 @@ impl SwimConfig {
         if self.health_unit_ms == 0 {
             return Err("the health unit must be above 0".into());
         }
-        if self.health_max_multiplier.is_nan() || self.health_max_multiplier < 1.0 {
-            return Err("the health maximum multiplier must be at least 1".into());
+        if !(self.health_max_multiplier.is_finite() && self.health_max_multiplier >= 1.0) {
+            return Err("the health maximum multiplier must be finite and at least 1".into());
         }
         if self.health_evidence_cutoff.is_nan() || self.health_evidence_cutoff < 1.0 {
             return Err("the health evidence cutoff must be at least 1".into());
+        }
+        // The multiplier never exceeds its maximum, so a higher cutoff never drops evidence.
+        if self.health_evidence_cutoff > self.health_max_multiplier {
+            return Err("the health evidence cutoff must not exceed the maximum multiplier".into());
         }
         Ok(())
     }
@@ -166,18 +170,25 @@ mod tests {
 
     #[test]
     fn validate_rejects_bad_health_values() {
-        let bad: [fn(&mut SwimConfig); 5] = [
+        let bad: [fn(&mut SwimConfig); 9] = [
             |c| c.health_alpha_up = 0.0,
             |c| c.health_beta = 1.5,
             |c| c.health_unit_ms = 0,
             |c| c.health_max_multiplier = 0.5,
+            |c| c.health_max_multiplier = f64::INFINITY,
+            |c| c.health_max_multiplier = f64::NAN,
             |c| c.health_evidence_cutoff = 0.9,
+            |c| c.health_evidence_cutoff = f64::INFINITY,
+            |c| c.health_evidence_cutoff = c.health_max_multiplier + 0.5,
         ];
-        for f in bad {
+        for (i, f) in bad.iter().enumerate() {
             let mut c = SwimConfig::default();
             f(&mut c);
-            assert!(c.validate().is_err());
+            assert!(c.validate().is_err(), "case {i}");
         }
         assert!(SwimConfig::default().validate().is_ok());
+        let mut at_max = SwimConfig::default();
+        at_max.health_evidence_cutoff = at_max.health_max_multiplier;
+        assert!(at_max.validate().is_ok());
     }
 }
