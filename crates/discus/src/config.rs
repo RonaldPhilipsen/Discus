@@ -141,6 +141,11 @@ pub struct Config {
     /// with the bound `--rpc-listen` port.
     #[arg(long)]
     pub rpc_advertise: Option<SocketAddr>,
+    /// Raise the nice value of the data runtime worker threads by this much, from 0 to 19. The
+    /// control thread keeps the process nice value, so it wins CPU under a quota. 0 changes
+    /// nothing. Linux only.
+    #[arg(long, default_value_t = 0)]
+    pub data_nice: i32,
     /// The cluster lease provider.
     #[arg(long, value_enum, default_value_t = LeaseKind::default_kind())]
     pub lease_provider: LeaseKind,
@@ -388,6 +393,9 @@ impl Config {
     pub fn validate(&self) -> Result<(), String> {
         let certs = self.cert_flags();
         let set = certs.iter().filter(|(_, s)| *s).count();
+        if !(0..=19).contains(&self.data_nice) {
+            return Err("--data-nice must be from 0 to 19".into());
+        }
         if self.gossip_enabled() {
             self.swim().validate()?;
             if self.lease_provider == LeaseKind::K8s && !cfg!(feature = "k8s") {
@@ -544,5 +552,21 @@ mod tests {
         let config =
             Config::parse_from(["discus", "--counter-lease-prefix", "blue-counter"]).unwrap();
         assert_eq!(config.counter_lease_name(0), "blue-counter-0");
+    }
+
+    #[test]
+    fn data_nice_above_19_is_rejected() {
+        let config = Config::parse_from(["discus", "--data-nice", "20"]).unwrap();
+        assert!(config.validate().unwrap_err().contains("--data-nice"));
+    }
+
+    #[test]
+    fn data_nice_zero_and_19_are_accepted() {
+        for v in ["0", "19"] {
+            Config::parse_from(["discus", "--data-nice", v])
+                .unwrap()
+                .validate()
+                .unwrap();
+        }
     }
 }

@@ -11,9 +11,11 @@ cluster.
 
 ## How nodes talk
 
-Nodes talk over QUIC on one UDP port per node. The default port is 7379. Every connection uses
-TLS 1.3 with mutual authentication (mTLS). Discus never sends node-to-node traffic as plain text,
-also not in development.
+Nodes talk over QUIC on UDP. With gossip membership, each node uses two ports. Gossip uses the
+cluster port, 7379 by default. Node-to-node requests use the RPC port, 7380 by default. With
+`--membership static`, the RPC traffic stays on `--cluster-listen`, and the node uses one port.
+Every connection uses TLS 1.3 with mutual authentication (mTLS). Discus never sends node-to-node
+traffic as plain text, also not in development.
 
 Each node presents a certificate. The peer accepts the certificate only in two cases together:
 
@@ -163,6 +165,9 @@ spec:
     - name: cluster
       port: 7379
       protocol: UDP
+    - name: rpc
+      port: 7380
+      protocol: UDP
 ---
 apiVersion: v1
 kind: Service
@@ -292,7 +297,10 @@ the CPU limit of the container from the cgroup (the Linux resource control group
 | `--node-id` | random | This node's ID, 32 hex digits. Required with `--membership static`. |
 | `--cluster-id` | minted | The cluster ID, 32 hex digits. With `static`, every member uses the same value, and the flag is required. With `gossip`, it is the ID that this node gives a cluster it forms. |
 | `--cluster-listen` | `0.0.0.0:7379` | The UDP address for node-to-node traffic. |
-| `--cluster-advertise` | see below | The node-to-node address that other members use. |
+| `--cluster-advertise` | see below | The gossip address that other members use. |
+| `--rpc-listen` | `0.0.0.0:7380` | The UDP address for node-to-node requests. With `--membership static`, requests use `--cluster-listen` instead. |
+| `--rpc-advertise` | see below | The RPC address that other members use. Default: the IP of the advertised cluster address with the bound `--rpc-listen` port. |
+| `--data-nice` | `0` | Raise the nice value of the data worker threads by this much, from 0 to 19. The control thread keeps the process value, so it gets CPU first under a quota. 0 changes nothing. Linux only. |
 | `--peer` | none | A seed as `<ip>:<port>`, or `<node-id>@<ip>:<port>`. Repeat the flag. With `static`, list every other member with its node ID. |
 | `--discovery-dns` | none | A headless Service name, as `<host>` or `<host>:<port>`. The port defaults to the `--cluster-listen` port. |
 | `--lease-provider` | `k8s` | `k8s` or `none`. Without the `k8s` build feature, the default is `none`. |
@@ -366,24 +374,44 @@ The advertised address is the first of these that applies:
 3. The local address of the network interface toward the first seed.
 4. `127.0.0.1` with the listen port.
 
-In Kubernetes, set `--cluster-advertise $(POD_IP):7379` from the downward API.
+In Kubernetes, set `--cluster-advertise $(POD_IP):7379` from the downward API. The RPC address
+follows from it, so `--rpc-advertise` is rarely needed.
+
+If a NetworkPolicy or a firewall limits pod traffic, allow both UDP ports between the pods:
+
+```yaml
+ingress:
+  - from:
+      - podSelector:
+          matchLabels:
+            app: discus
+    ports:
+      - port: 7379
+        protocol: UDP
+      - port: 7380
+        protocol: UDP
+```
 
 ## Start three nodes
 
 Outside Kubernetes, give every node the other nodes as seeds and use the lease provider `none`.
 With `none`, start one node first and let it form the cluster. Start the others after it is
-ready. This example runs three nodes on one host.
+ready. This example runs three nodes on one host. Each node needs its own `--rpc-listen`, so the
+nodes do not collide on port 7380.
 
 ```bash
 TLS="--cluster-ca ca.pem --cluster-cert node.pem --cluster-key node-key.pem"
 GOSSIP="--lease-provider none $TLS"
 
 discus --listen 127.0.0.1:6380 --admin-listen 127.0.0.1:9101 --cluster-listen 127.0.0.1:7381 \
+  --rpc-listen 127.0.0.1:7391 \
   $GOSSIP &
 sleep 12
 discus --listen 127.0.0.1:6381 --admin-listen 127.0.0.1:9102 --cluster-listen 127.0.0.1:7382 \
+  --rpc-listen 127.0.0.1:7392 \
   $GOSSIP --peer 127.0.0.1:7381 &
 discus --listen 127.0.0.1:6382 --admin-listen 127.0.0.1:9103 --cluster-listen 127.0.0.1:7383 \
+  --rpc-listen 127.0.0.1:7393 \
   $GOSSIP --peer 127.0.0.1:7381 --peer 127.0.0.1:7382 &
 
 redis-cli -p 6380 SET greeting hello

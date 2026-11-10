@@ -7,9 +7,24 @@ use tokio_util::sync::CancellationToken;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
-    let mut config = Config::parse();
+fn main() -> std::io::Result<()> {
+    let config = Config::parse();
+    let nice = config.data_nice;
+    let warn = std::sync::Once::new();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .on_thread_start(move || {
+            if let Err(e) = discus::priority::lower_current_thread(nice) {
+                warn.call_once(|| {
+                    tracing::warn!(error = %e, nice, "could not lower the data runtime priority");
+                });
+            }
+        })
+        .build()?;
+    runtime.block_on(run(config))
+}
+
+async fn run(mut config: Config) -> std::io::Result<()> {
     // The node ID is fixed before telemetry starts, so the resource carries the real ID.
     if let Err(e) = config.resolve_identity() {
         eprintln!("discus: {e}");

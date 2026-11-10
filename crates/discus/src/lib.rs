@@ -10,6 +10,7 @@ pub mod counter;
 pub mod lag;
 pub mod membership;
 pub mod node;
+pub mod priority;
 pub mod replication;
 pub mod security;
 pub mod server;
