@@ -5,6 +5,7 @@ pub mod build;
 pub mod cluster;
 pub mod command;
 pub mod config;
+pub mod control;
 pub mod counter;
 pub mod lag;
 pub mod membership;

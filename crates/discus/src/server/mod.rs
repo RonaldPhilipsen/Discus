@@ -17,6 +17,7 @@ use crate::admin::serve_admin;
 use crate::cluster::service::NodeService;
 use crate::cluster::ClusterLink;
 use crate::config::LeaseKind;
+use crate::control::ControlLane;
 use crate::membership::{discovery, Membership};
 use crate::security::Security;
 use crate::{Config, Node, Phase};
@@ -110,8 +111,9 @@ mod order;
 /// A node with both listeners bound.
 pub struct Server {
     listener: TcpListener,
-    admin: TcpListener,
+    admin: std::net::TcpListener,
     node: Arc<Node>,
+    lane: ControlLane,
 }
 
 impl Server {
@@ -165,7 +167,8 @@ impl Server {
         let security =
             Arc::new(Security::from_config(&config).map_err(|e| invalid(e.to_string()))?);
         let listener = TcpListener::bind(config.listen).await?;
-        let admin = TcpListener::bind(config.admin_listen).await?;
+        let admin = std::net::TcpListener::bind(config.admin_listen)?;
+        admin.set_nonblocking(true)?;
         let lease = match (config.gossip_enabled(), opts.lease) {
             (true, Some(lease)) => Some(lease),
             (true, None) => Some(lease_provider(&config).map_err(invalid)?),
@@ -180,6 +183,8 @@ impl Server {
             None => counter_leases(&node.config).map_err(invalid)?,
         };
         node.set_counters(crate::counter::Counters::new(&node, leases));
+        node.set_data_handle(tokio::runtime::Handle::current());
+        let lane = ControlLane::start()?;
         if let Some(tls) = tls {
             let cfg = &node.config;
             let mut tc = TransportConfig::new(cfg.cluster_listen, tls, node.id, node.cluster_id());
@@ -205,7 +210,11 @@ impl Server {
                         channels: Channels::GossipOnly,
                         ..tc
                     };
-                    let gossip = bind_transport(gossip_tc, socket, service).await?;
+                    // quinn and the accept loop run on the runtime that binds the endpoint.
+                    let gossip = lane
+                        .spawn(bind_transport(gossip_tc, socket, service))
+                        .await
+                        .map_err(io::Error::other)??;
                     let advertise = discovery::advertise(cfg).await;
                     let rpc_advertise = discovery::rpc_advertise(cfg, advertise, rpc.local_addr());
                     let membership = Membership::new(
@@ -228,6 +237,7 @@ impl Server {
             listener,
             admin,
             node,
+            lane,
         })
     }
 
@@ -274,6 +284,7 @@ impl Server {
             listener,
             admin,
             node,
+            lane,
         } = self;
         let stop_background = CancellationToken::new();
         discus_store::spawn_sweeper(
@@ -283,7 +294,15 @@ impl Server {
             stop_background.clone(),
         );
         node.security.start(stop_background.clone());
-        let admin_task = tokio::spawn(serve_admin(node.clone(), admin, stop_background.clone()));
+        let admin_task = {
+            let (node, stop) = (node.clone(), stop_background.clone());
+            lane.spawn(async move {
+                // A tokio listener belongs to the runtime that registers it, so the conversion
+                // runs on the lane.
+                let admin = TcpListener::from_std(admin)?;
+                serve_admin(node, admin, stop).await
+            })
+        };
         let tracker = TaskTracker::new();
         let hard_stop = CancellationToken::new();
         node.set_phase(Phase::Serving);
@@ -298,7 +317,16 @@ impl Server {
         if let Some(membership) = node.membership() {
             tracing::info!(gossip = %membership.gossip_transport().local_addr(), "gossip transport");
             crate::telemetry::observe_health(discus_telemetry::global(), membership);
+            let _lane = lane.handle().enter();
             membership.spawn(stop_background.clone());
+            let (transport, stop) = (
+                membership.gossip_transport().clone(),
+                stop_background.clone(),
+            );
+            tokio::spawn(async move {
+                crate::telemetry::observe_peer_events(discus_telemetry::global(), &transport, stop)
+                    .await;
+            });
         }
         if let Some(replicator) = node.replicator() {
             replicator.spawn(stop_background.clone());
@@ -308,7 +336,9 @@ impl Server {
         }
         if let Some(link) = node.link() {
             tracing::info!(rpc = %link.transport.local_addr(), "node-to-node transport");
-            crate::telemetry::observe_transport(discus_telemetry::global(), &link.transport);
+            let mut transports = vec![link.transport.clone()];
+            transports.extend(node.membership().map(|m| m.gossip_transport().clone()));
+            crate::telemetry::observe_transport(discus_telemetry::global(), &transports);
             // The transport events feed the peer error and QUIC failure metrics.
             let (transport, stop) = (link.transport.clone(), stop_background.clone());
             tokio::spawn(async move {
@@ -370,15 +400,20 @@ impl Server {
             hard_stop.cancel();
             tracker.wait().await;
         }
+        if let Some(membership) = node.membership().cloned() {
+            let _ = lane.spawn(async move { membership.depart().await }).await;
+        }
+        // The background tasks send on the transports, so they stop before the transports
+        // close.
+        stop_background.cancel();
+        let _ = admin_task.await;
         if let Some(membership) = node.membership() {
-            membership.depart().await;
             membership.gossip_transport().close();
         }
-        stop_background.cancel();
         if let Some(link) = node.link() {
             link.transport.close();
         }
-        let _ = admin_task.await;
+        let _ = tokio::task::spawn_blocking(move || lane.shutdown()).await;
         result
     }
 }

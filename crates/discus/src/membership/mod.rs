@@ -65,6 +65,7 @@ pub struct Membership {
     /// evidence (spec section 6.1).
     rpc: Transport,
     evidence_received: AtomicU64,
+    gossip_handled: AtomicU64,
     lease: Arc<dyn LeaseProvider>,
     inner: Mutex<Inner>,
     start: Instant,
@@ -122,6 +123,7 @@ impl Membership {
             transport: gossip,
             rpc,
             evidence_received: AtomicU64::new(0),
+            gossip_handled: AtomicU64::new(0),
             lease,
             inner: Mutex::new(Inner { swim, host }),
             start: Instant::now(),
@@ -146,6 +148,11 @@ impl Membership {
     /// Data-path events that named a peer, including those the core then dropped.
     pub fn evidence_received(&self) -> u64 {
         self.evidence_received.load(Ordering::Relaxed)
+    }
+
+    /// Inbound gossip messages answered.
+    pub fn gossip_handled(&self) -> u64 {
+        self.gossip_handled.load(Ordering::Relaxed)
     }
 
     pub fn health(&self) -> discus_telemetry::metrics::HealthStats {
@@ -282,6 +289,7 @@ impl Membership {
 
     /// Answer one inbound gossip message from `src`.
     pub async fn handle(self: &Arc<Self>, src: SocketAddr, msg: Gossip) -> Gossip {
+        self.gossip_handled.fetch_add(1, Ordering::Relaxed);
         let now = self.now();
         let handled = self.drive(|swim, host| swim.handle(now, src, msg, host));
         let Some(relay) = handled.relay else {

@@ -66,6 +66,7 @@ pub struct Node {
     link: OnceLock<ClusterLink>,
     membership: OnceLock<Arc<Membership>>,
     lag: LagProbe,
+    data: OnceLock<tokio::runtime::Handle>,
     replicator: OnceLock<Arc<Replicator>>,
     counters: OnceLock<Arc<Counters>>,
     epoch_tx: tokio::sync::watch::Sender<EpochId>,
@@ -210,6 +211,7 @@ impl Node {
             link: OnceLock::new(),
             membership: OnceLock::new(),
             lag: LagProbe::new(),
+            data: OnceLock::new(),
             replicator: OnceLock::new(),
             counters: OnceLock::new(),
             epoch_tx,
@@ -222,6 +224,22 @@ impl Node {
     /// Cancelled by `POST /admin/drain`. `Server::run` then drains as on SIGTERM (spec §15.3).
     pub fn drain_token(&self) -> tokio_util::sync::CancellationToken {
         self.drain.clone()
+    }
+
+    /// The data runtime. Work on the control lane that touches the store, or spawns tasks that
+    /// do, runs here.
+    ///
+    /// # Panics
+    ///
+    /// Before `Server::bind_with` set it.
+    pub fn data_handle(&self) -> &tokio::runtime::Handle {
+        self.data
+            .get()
+            .expect("Server::bind_with sets the data runtime")
+    }
+
+    pub(crate) fn set_data_handle(&self, handle: tokio::runtime::Handle) {
+        let _ = self.data.set(handle);
     }
 
     /// The lag probe of the data runtime.

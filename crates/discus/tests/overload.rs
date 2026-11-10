@@ -2,7 +2,7 @@
 
 mod common;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -131,4 +131,100 @@ async fn cluster_reset_updates_both_transports() {
     let gossip = lone.node.membership().unwrap().gossip_transport();
     assert_eq!(rpc.cluster_id(), want);
     assert_eq!(gossip.cluster_id(), want);
+}
+
+/// `GET /healthz` over a blocking socket. True on a 200 answer.
+fn healthz_ok(admin: std::net::SocketAddr) -> bool {
+    use std::io::{Read, Write};
+    let Ok(mut s) = std::net::TcpStream::connect(admin) else {
+        return false;
+    };
+    let _ = s.set_read_timeout(Some(Duration::from_secs(30)));
+    if s.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut reply = String::new();
+    let _ = s.read_to_string(&mut reply);
+    reply.starts_with("HTTP/1.1 200")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn control_lane_answers_while_data_workers_are_blocked() {
+    let net = Net::new();
+    let nodes = net.start_agreed(2, &[]).await;
+    let admin = nodes[0].admin;
+    let membership = nodes[0].node.membership().unwrap().clone();
+    let before = membership.gossip_handled();
+
+    let blocked = Arc::new(AtomicBool::new(true));
+    let started = Arc::new(AtomicUsize::new(0));
+    // The test body and its sockets may depend on the blocked workers, so a plain thread with
+    // blocking IO observes the node.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    {
+        let (blocked, started) = (blocked.clone(), started.clone());
+        std::thread::spawn(move || {
+            while started.load(Ordering::Acquire) < 2 {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let mut answered = false;
+            let mut gossiped = false;
+            while blocked.load(Ordering::Acquire) && !(answered && gossiped) {
+                let ok = healthz_ok(admin);
+                answered |= ok && blocked.load(Ordering::Acquire);
+                gossiped |= membership.gossip_handled() > before && blocked.load(Ordering::Acquire);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let _ = tx.send((answered, gossiped));
+        });
+    }
+    let blockers: Vec<_> = (0..2)
+        .map(|_| {
+            let started = started.clone();
+            tokio::spawn(async move {
+                started.fetch_add(1, Ordering::AcqRel);
+                std::thread::sleep(Duration::from_secs(3));
+            })
+        })
+        .collect();
+    for b in blockers {
+        b.await.unwrap();
+    }
+    blocked.store(false, Ordering::Release);
+    let (answered, gossiped) = rx.await.unwrap();
+    assert!(
+        answered,
+        "/healthz must answer while the data workers are blocked"
+    );
+    assert!(
+        gossiped,
+        "gossip must be handled while the data workers are blocked"
+    );
+}
+
+#[tokio::test]
+async fn departure_is_gossiped_on_shutdown() {
+    let net = Net::new();
+    // Suspicion cannot declare the node dead before 30 s, so a removal within the 20 s wait comes
+    // from its goodbye.
+    let slow = [
+        "--suspicion-min-ms",
+        "30000",
+        "--suspicion-max-ms",
+        "30000",
+        "--phi-dead",
+        "16",
+    ];
+    let nodes = net.start_agreed(3, &slow).await;
+    nodes[2].shutdown.cancel();
+    let rest = [&nodes[0], &nodes[1]];
+    wait_agreed(&rest, Duration::from_secs(20)).await;
+    assert!(nodes[0]
+        .node
+        .epochs()
+        .current()
+        .member(nodes[2].id)
+        .is_none());
 }

@@ -27,7 +27,11 @@ impl Host for NodeHost {
 
     fn adopt(&mut self, epoch: Epoch) -> Result<Adopt, EpochError> {
         match self.node.upgrade() {
-            Some(node) => node.adopt_epoch(epoch),
+            Some(node) => {
+                // Adoption spawns store work, which belongs on the data runtime.
+                let _data = node.data_handle().enter();
+                node.adopt_epoch(epoch)
+            }
             None => Ok(Adopt::Stale),
         }
     }
@@ -44,6 +48,7 @@ impl Host for NodeHost {
         self.gossip.set_cluster_id(epoch.cluster_id());
         self.rpc.set_cluster_id(epoch.cluster_id());
         if let Some(node) = self.node.upgrade() {
+            let _data = node.data_handle().enter();
             node.reset_cluster(epoch);
         }
     }

@@ -214,18 +214,21 @@ pub fn observe_health(metrics: &Metrics, membership: &Arc<crate::membership::Mem
     metrics.observe_health(move || membership.health());
 }
 
-/// Report the transport counters of `transport` through `metrics`.
-pub fn observe_transport(metrics: &Metrics, transport: &discus_transport::Transport) {
-    let transport = transport.clone();
+/// Report the transport counters of `transports` through `metrics`. The metrics carry no
+/// endpoint attribute, so they are the sums over the gossip and RPC endpoints.
+pub fn observe_transport(metrics: &Metrics, transports: &[discus_transport::Transport]) {
+    let transports = transports.to_vec();
     metrics.observe_transport(move || {
-        let s = transport.stats().snapshot();
-        discus_telemetry::metrics::TransportCounts {
-            frames_rejected: s.frames_rejected,
-            unsupported: s.unsupported,
-            handshake_failures: s.handshake_failures,
-            requests_in: s.requests_in,
-            requests_out: s.requests_out,
+        let mut sum = discus_telemetry::metrics::TransportCounts::default();
+        for t in &transports {
+            let s = t.stats().snapshot();
+            sum.frames_rejected += s.frames_rejected;
+            sum.unsupported += s.unsupported;
+            sum.handshake_failures += s.handshake_failures;
+            sum.requests_in += s.requests_in;
+            sum.requests_out += s.requests_out;
         }
+        sum
     });
 }
 
