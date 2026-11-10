@@ -2,6 +2,11 @@ use clap::Parser;
 use discus::{Config, Server};
 use tokio_util::sync::CancellationToken;
 
+// Every request allocates for parsing, frames, and replies. The system allocator took 10% to 16%
+// of the CPU under load with glibc, and the release image links musl, whose allocator is slower.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let mut config = Config::parse();
