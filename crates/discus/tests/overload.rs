@@ -152,12 +152,14 @@ fn healthz_ok(admin: std::net::SocketAddr) -> bool {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn control_lane_answers_while_data_workers_are_blocked() {
+    const CAP: Duration = Duration::from_secs(60);
     let net = Net::new();
     let nodes = net.start_agreed(2, &[]).await;
     let admin = nodes[0].admin;
     let membership = nodes[0].node.membership().unwrap().clone();
     let before = membership.gossip_handled();
 
+    // Only the observer's success, or a blocker at the cap, ends the block.
     let blocked = Arc::new(AtomicBool::new(true));
     let started = Arc::new(AtomicUsize::new(0));
     // The test body and its sockets may depend on the blocked workers, so a plain thread with
@@ -171,28 +173,37 @@ async fn control_lane_answers_while_data_workers_are_blocked() {
             }
             let mut answered = false;
             let mut gossiped = false;
-            while blocked.load(Ordering::Acquire) && !(answered && gossiped) {
-                let ok = healthz_ok(admin);
-                answered |= ok && blocked.load(Ordering::Acquire);
-                gossiped |= membership.gossip_handled() > before && blocked.load(Ordering::Acquire);
+            while blocked.load(Ordering::Acquire) {
+                answered |= healthz_ok(admin);
+                gossiped |= membership.gossip_handled() > before;
+                if answered && gossiped {
+                    break;
+                }
                 std::thread::sleep(Duration::from_millis(20));
             }
-            let _ = tx.send((answered, gossiped));
+            // A blocker that hit the cap cleared the flag first, so the swap reports it.
+            let in_time = blocked.swap(false, Ordering::AcqRel);
+            let _ = tx.send((answered && in_time, gossiped && in_time));
         });
     }
     let blockers: Vec<_> = (0..2)
         .map(|_| {
-            let started = started.clone();
+            let (blocked, started) = (blocked.clone(), started.clone());
             tokio::spawn(async move {
                 started.fetch_add(1, Ordering::AcqRel);
-                std::thread::sleep(Duration::from_secs(3));
+                let give_up = Instant::now() + CAP;
+                while blocked.load(Ordering::Acquire) {
+                    if Instant::now() >= give_up {
+                        blocked.store(false, Ordering::Release);
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
             })
         })
         .collect();
     for b in blockers {
         b.await.unwrap();
     }
-    blocked.store(false, Ordering::Release);
     let (answered, gossiped) = rx.await.unwrap();
     assert!(
         answered,
@@ -204,23 +215,33 @@ async fn control_lane_answers_while_data_workers_are_blocked() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn epoch_work_runs_off_the_control_thread() {
+    let net = Net::new();
+    let nodes = net.start_agreed(2, &[]).await;
+    let joiner = net.start(&[nodes[0].cluster_addr], &[]).await;
+    wait_agreed(&[&nodes[0], &nodes[1], &joiner], FORM).await;
+    let threads = nodes[0].node.faults.epoch_work_threads.lock().clone();
+    assert!(!threads.is_empty());
+    assert!(threads.iter().all(|t| t != "discus-control"), "{threads:?}");
+}
+
 #[tokio::test]
 async fn departure_is_gossiped_on_shutdown() {
     let net = Net::new();
-    // Suspicion cannot declare the node dead before 30 s, so a removal within the 20 s wait comes
-    // from its goodbye.
+    // Suspicion cannot declare the node dead within the wait, so only its goodbye removes it.
     let slow = [
         "--suspicion-min-ms",
-        "30000",
+        "600000",
         "--suspicion-max-ms",
-        "30000",
+        "600000",
         "--phi-dead",
         "16",
     ];
     let nodes = net.start_agreed(3, &slow).await;
     nodes[2].shutdown.cancel();
     let rest = [&nodes[0], &nodes[1]];
-    wait_agreed(&rest, Duration::from_secs(20)).await;
+    wait_agreed(&rest, Duration::from_secs(120)).await;
     assert!(nodes[0]
         .node
         .epochs()

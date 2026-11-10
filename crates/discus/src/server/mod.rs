@@ -314,6 +314,7 @@ impl Server {
         );
         tracing::info!(addr = ?listener.local_addr().ok(), "serving");
         node.lag().spawn(stop_background.clone());
+        node.spawn_epoch_work(stop_background.clone());
         if let Some(membership) = node.membership() {
             tracing::info!(gossip = %membership.gossip_transport().local_addr(), "gossip transport");
             crate::telemetry::observe_health(discus_telemetry::global(), membership);

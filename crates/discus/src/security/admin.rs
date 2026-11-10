@@ -89,9 +89,7 @@ async fn security_status(State(node): State<Arc<Node>>) -> Json<SecurityStatus> 
 /// Start the drain, as SIGTERM does (spec section 15.3).
 async fn drain(State(node): State<Arc<Node>>) -> (StatusCode, &'static str) {
     tracing::info!("drain requested on the admin port");
-    // The admin server runs on the control lane, which never runs data work.
-    let data = node.data_handle().clone();
-    let _ = data.spawn(async move { node.drain_token().cancel() }).await;
+    node.drain_token().cancel();
     (StatusCode::ACCEPTED, "draining\n")
 }
 

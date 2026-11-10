@@ -150,7 +150,7 @@ impl Membership {
         self.evidence_received.load(Ordering::Relaxed)
     }
 
-    /// Inbound gossip messages answered.
+    /// Inbound gossip messages received.
     pub fn gossip_handled(&self) -> u64 {
         self.gossip_handled.load(Ordering::Relaxed)
     }

@@ -67,6 +67,8 @@ pub struct Node {
     membership: OnceLock<Arc<Membership>>,
     lag: LagProbe,
     data: OnceLock<tokio::runtime::Handle>,
+    /// The ordered consumer of [`Node::apply_epoch`] work on the data runtime.
+    epoch_work: OnceLock<tokio::sync::mpsc::UnboundedSender<(Arc<Epoch>, Arc<Epoch>)>>,
     replicator: OnceLock<Arc<Replicator>>,
     counters: OnceLock<Arc<Counters>>,
     epoch_tx: tokio::sync::watch::Sender<EpochId>,
@@ -87,6 +89,8 @@ pub struct Faults {
     pub stall_forwards: std::sync::atomic::AtomicBool,
     /// Delay inbound counter messages by this many milliseconds.
     pub stall_counter_ms: AtomicU64,
+    /// The names of the threads that ran [`Node::apply_epoch`].
+    pub epoch_work_threads: parking_lot::Mutex<Vec<String>>,
     /// Never answer an inbound message of any kind from these peers. Blocking both sides makes
     /// a partition.
     pub blocked: parking_lot::Mutex<std::collections::HashSet<NodeId>>,
@@ -212,6 +216,7 @@ impl Node {
             membership: OnceLock::new(),
             lag: LagProbe::new(),
             data: OnceLock::new(),
+            epoch_work: OnceLock::new(),
             replicator: OnceLock::new(),
             counters: OnceLock::new(),
             epoch_tx,
@@ -399,14 +404,63 @@ impl Node {
             });
         }
         drop(epochs);
-        if let Some(r) = self.replicator() {
-            r.on_epoch(&old, &new);
-        }
-        if let Some(link) = self.link() {
-            link.forget_non_members(&new);
+        match self.epoch_work.get() {
+            Some(tx) => {
+                if let Err(tokio::sync::mpsc::error::SendError((old, new))) = tx.send((old, new)) {
+                    self.apply_epoch(&old, &new);
+                }
+            }
+            None => self.apply_epoch(&old, &new),
         }
         self.epoch_tx.send_replace(id);
         result
+    }
+
+    /// The work of an adoption that may wait: it grows with the replication backlog.
+    fn apply_epoch(&self, old: &Arc<Epoch>, new: &Arc<Epoch>) {
+        #[cfg(feature = "testing")]
+        self.faults.epoch_work_threads.lock().push(
+            std::thread::current()
+                .name()
+                .unwrap_or_default()
+                .to_string(),
+        );
+        if let Some(r) = self.replicator() {
+            r.on_epoch(old, new);
+        }
+        if let Some(link) = self.link() {
+            link.forget_non_members(new);
+        }
+    }
+
+    /// Run the work of later adoptions on the current runtime, in adoption order, until `stop`.
+    /// Adoptions on the control lane would otherwise run it on the lane. Without the consumer,
+    /// or after `stop`, adoptions run it inline.
+    pub fn spawn_epoch_work(self: &Arc<Self>, stop: tokio_util::sync::CancellationToken) {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(Arc<Epoch>, Arc<Epoch>)>();
+        if self.epoch_work.set(tx).is_err() {
+            return;
+        }
+        let node = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                let work = tokio::select! {
+                    _ = stop.cancelled() => break,
+                    work = rx.recv() => work,
+                };
+                let (Some((old, new)), Some(node)) = (work, node.upgrade()) else {
+                    return;
+                };
+                node.apply_epoch(&old, &new);
+            }
+            // Later sends fail and run inline. Work queued before the close still runs here.
+            rx.close();
+            while let Ok((old, new)) = rx.try_recv() {
+                if let Some(node) = node.upgrade() {
+                    node.apply_epoch(&old, &new);
+                }
+            }
+        });
     }
 
     pub fn epoch_id(&self) -> EpochId {
