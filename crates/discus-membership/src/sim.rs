@@ -94,6 +94,8 @@ pub struct SimNode {
     /// The node answers nothing, but its connections work.
     pub silenced: bool,
     isolated_until: Millis,
+    /// The tick lag that the node reports before each tick.
+    lag_ms: u64,
     sent: u64,
     /// Tokens that wait for a reply or a timeout.
     waiting: BTreeSet<u64>,
@@ -247,6 +249,7 @@ impl Sim {
             alive: true,
             silenced: false,
             isolated_until: 0,
+            lag_ms: 0,
             sent: 0,
             waiting: BTreeSet::new(),
             relays: HashMap::new(),
@@ -378,6 +381,11 @@ impl Sim {
         self.nodes[&id].sent
     }
 
+    /// Make the node report a tick lag of `ms` before each tick, until it is set to 0.
+    pub fn lag(&mut self, id: NodeId, ms: u64) {
+        self.node_mut(id).lag_ms = ms;
+    }
+
     pub fn data_path_failure(&mut self, observer: NodeId, subject: NodeId) {
         let now = self.now;
         self.node_mut(observer).swim.evidence(now, subject);
@@ -475,6 +483,7 @@ impl Sim {
                 let now = self.now;
                 let node = self.node_mut(id);
                 node.host.now = now;
+                node.swim.observe_lag(node.lag_ms);
                 let actions = node.swim.tick(now, &mut node.host);
                 self.send(id, actions);
             }
