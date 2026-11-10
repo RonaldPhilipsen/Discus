@@ -1,19 +1,20 @@
 //! The Raft network: openraft RPCs as `RAFT_*` messages on the bulk lane (spec section 13.2).
 
 use std::collections::{HashMap, HashSet};
+use std::io::Cursor;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use discus_placement::NodeId;
 use discus_wire::{Message, RaftHeader, RaftReply, Regime};
 use futures::future::BoxFuture;
-use openraft::error::{InstallSnapshotError, RPCError, RaftError, Unreachable};
-use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
-use openraft::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
-    VoteRequest, VoteResponse,
-};
+use openraft::errors::{RPCError, RaftError, Unreachable};
+use openraft::network::{Backoff, RPCOption, RaftNetworkFactory};
+use openraft::raft::{AppendEntriesRequest, AppendEntriesResponse, VoteRequest, VoteResponse};
 use openraft::AnyError;
+use openraft_legacy::network_v1::{
+    Adapter, InstallSnapshotError, InstallSnapshotRequest, InstallSnapshotResponse, RaftNetwork,
+};
 use parking_lot::Mutex;
 
 use super::convert;
@@ -70,11 +71,15 @@ pub struct NetFactory {
     pub contacts: Arc<Contacts>,
 }
 
-impl RaftNetworkFactory<TypeConfig> for NetFactory {
-    type Network = NetClient;
+/// The leader sends a snapshot in chunks of `snapshot_max_chunk_size`, as `RAFT_SNAPSHOT` carries
+/// one chunk. `openraft-legacy` keeps that protocol of openraft 0.9.
+pub type NetConn = Adapter<TypeConfig, NetClient, Cursor<Vec<u8>>>;
 
-    async fn new_client(&mut self, target: u64, node: &Peer) -> NetClient {
-        NetClient {
+impl RaftNetworkFactory<TypeConfig> for NetFactory {
+    type Network = NetConn;
+
+    async fn new_client(&mut self, target: u64, node: &Peer) -> NetConn {
+        Adapter::new(NetClient {
             link: self.link.clone(),
             header: RaftHeader {
                 group: self.group,
@@ -83,7 +88,7 @@ impl RaftNetworkFactory<TypeConfig> for NetFactory {
             },
             to: node.node,
             contacts: self.contacts.clone(),
-        }
+        })
     }
 }
 
@@ -94,7 +99,7 @@ pub struct NetClient {
     contacts: Arc<Contacts>,
 }
 
-fn unreachable<E: std::error::Error>(why: impl std::fmt::Display) -> RPCError<u64, Peer, E> {
+fn unreachable<E: std::error::Error>(why: impl std::fmt::Display) -> RPCError<TypeConfig, E> {
     RPCError::Unreachable(Unreachable::new(&AnyError::error(why.to_string())))
 }
 
@@ -106,7 +111,7 @@ impl NetClient {
         message: Message,
         option: &RPCOption,
         of: fn(RaftReply) -> Option<R>,
-    ) -> Result<R, RPCError<u64, Peer, E>> {
+    ) -> Result<R, RPCError<TypeConfig, E>> {
         // A live replica also refuses a snapshot chunk that does not fit, so only the other
         // RPCs prove that the replica is gone.
         let definite = !matches!(message, Message::RaftSnapshot(_));
@@ -138,7 +143,8 @@ impl RaftNetwork<TypeConfig> for NetClient {
         &mut self,
         rpc: AppendEntriesRequest<TypeConfig>,
         option: RPCOption,
-    ) -> Result<AppendEntriesResponse<u64>, RPCError<u64, Peer, RaftError<u64>>> {
+    ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig, RaftError<TypeConfig>>>
+    {
         let message = Message::RaftAppend(convert::append_to(self.header, &rpc));
         self.rpc(message, &option, convert::append_reply_of).await
     }
@@ -148,8 +154,8 @@ impl RaftNetwork<TypeConfig> for NetClient {
         rpc: InstallSnapshotRequest<TypeConfig>,
         option: RPCOption,
     ) -> Result<
-        InstallSnapshotResponse<u64>,
-        RPCError<u64, Peer, RaftError<u64, InstallSnapshotError>>,
+        InstallSnapshotResponse<TypeConfig>,
+        RPCError<TypeConfig, RaftError<TypeConfig, InstallSnapshotError>>,
     > {
         let message = Message::RaftSnapshot(convert::snapshot_to(self.header, rpc));
         self.rpc(message, &option, convert::snapshot_reply_of).await
@@ -157,11 +163,16 @@ impl RaftNetwork<TypeConfig> for NetClient {
 
     async fn vote(
         &mut self,
-        rpc: VoteRequest<u64>,
+        rpc: VoteRequest<TypeConfig>,
         option: RPCOption,
-    ) -> Result<VoteResponse<u64>, RPCError<u64, Peer, RaftError<u64>>> {
+    ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig, RaftError<TypeConfig>>> {
         let message = Message::RaftVote(convert::vote_req_to(self.header, &rpc));
         self.rpc(message, &option, convert::vote_reply_of).await
+    }
+
+    /// The constant 500 ms of openraft 0.9. The `openraft-legacy` default is 200 ms.
+    fn backoff(&self) -> Backoff {
+        Backoff::new(std::iter::repeat(Duration::from_millis(500)))
     }
 }
 

@@ -69,7 +69,7 @@ impl RaftRole {
     async fn run(&self, cmd: &Command, now_ms: u64, timeout: Duration) -> Result<Value, Refusal> {
         let raft = &self.replica.raft;
         if state::is_read(cmd) {
-            return match tokio::time::timeout(timeout, raft.ensure_linearizable()).await {
+            return match tokio::time::timeout(timeout, self.replica.ensure_linearizable()).await {
                 Ok(Ok(_)) => Ok(self.replica.sm.lock().state.get().read(now_ms, cmd)),
                 _ => Err(Refusal::NotLeader),
             };
@@ -341,11 +341,9 @@ impl Group {
         if r.leads() {
             // The read index waits until this leader applied every entry that a quorum
             // committed, also those of earlier leaders.
-            let linearizable = tokio::time::timeout(
-                counters.settings.timeout,
-                replica.raft.ensure_linearizable(),
-            )
-            .await;
+            let linearizable =
+                tokio::time::timeout(counters.settings.timeout, replica.ensure_linearizable())
+                    .await;
             if !matches!(linearizable, Ok(Ok(_))) {
                 return;
             }

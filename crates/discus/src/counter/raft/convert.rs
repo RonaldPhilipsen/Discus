@@ -8,18 +8,15 @@ use discus_wire::{
     encode_command, RaftAppend, RaftEntry, RaftHeader, RaftLogId, RaftMembership, RaftOutcome,
     RaftPayload, RaftReply, RaftSnapshot, RaftVote, RaftVoteReq,
 };
-use openraft::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
-    VoteRequest, VoteResponse,
-};
-use openraft::{
-    CommittedLeaderId, Entry, EntryPayload, LeaderId, LogId, Membership, SnapshotMeta,
-    StoredMembership, Vote,
-};
+use openraft::impls::leader_id_adv::LeaderId;
+use openraft::raft::{AppendEntriesRequest, AppendResult, VoteRequest, VoteResponse};
+use openraft::raft::{AppendEntriesResponse, AppendError};
+use openraft::{EntryPayload, Membership, StoredMembership};
+use openraft_legacy::network_v1::{InstallSnapshotRequest, InstallSnapshotResponse, SnapshotMeta};
 
-use super::{Op, Peer, TypeConfig};
+use super::{Entry, LogId, Op, Peer, Peers, TypeConfig, Vote};
 
-pub fn log_to(l: &LogId<u64>) -> RaftLogId {
+pub fn log_to(l: &LogId) -> RaftLogId {
     RaftLogId {
         term: l.leader_id.term,
         leader: l.leader_id.node_id,
@@ -27,11 +24,17 @@ pub fn log_to(l: &LogId<u64>) -> RaftLogId {
     }
 }
 
-pub fn log_of(l: RaftLogId) -> LogId<u64> {
-    LogId::new(CommittedLeaderId::new(l.term, l.leader), l.index)
+pub fn log_of(l: RaftLogId) -> LogId {
+    LogId::new(
+        LeaderId {
+            term: l.term,
+            node_id: l.leader,
+        },
+        l.index,
+    )
 }
 
-pub fn vote_to(v: &Vote<u64>) -> RaftVote {
+pub fn vote_to(v: &Vote) -> RaftVote {
     RaftVote {
         term: v.leader_id.term,
         leader: v.leader_id.node_id,
@@ -39,14 +42,17 @@ pub fn vote_to(v: &Vote<u64>) -> RaftVote {
     }
 }
 
-pub fn vote_of(v: RaftVote) -> Vote<u64> {
+pub fn vote_of(v: RaftVote) -> Vote {
     Vote {
-        leader_id: LeaderId::new(v.term, v.leader),
+        leader_id: LeaderId {
+            term: v.term,
+            node_id: v.leader,
+        },
         committed: v.committed,
     }
 }
 
-pub fn membership_to(m: &Membership<u64, Peer>) -> RaftMembership {
+pub fn membership_to(m: &Peers) -> RaftMembership {
     RaftMembership {
         configs: m
             .get_joint_config()
@@ -57,18 +63,22 @@ pub fn membership_to(m: &Membership<u64, Peer>) -> RaftMembership {
     }
 }
 
-pub fn membership_of(m: RaftMembership) -> Membership<u64, Peer> {
+/// A voter without a node gets the default node, as openraft 0.9 did.
+pub fn membership_of(m: RaftMembership) -> Option<Peers> {
     let configs: Vec<BTreeSet<u64>> = m
         .configs
         .into_iter()
         .map(|c| c.into_iter().collect())
         .collect();
-    let nodes: BTreeMap<u64, Peer> = m
+    let mut nodes: BTreeMap<u64, Peer> = m
         .nodes
         .into_iter()
         .map(|(id, node)| (id, Peer { node }))
         .collect();
-    Membership::new(configs, nodes)
+    for id in configs.iter().flatten() {
+        nodes.entry(*id).or_default();
+    }
+    Membership::new(configs, nodes).ok()
 }
 
 /// Parse a raw RESP command of a log entry or a sync op.
@@ -81,7 +91,7 @@ pub fn parse_command(raw: &[u8]) -> Option<Command> {
     parser.next().ok().flatten()
 }
 
-fn entry_to(e: &Entry<TypeConfig>) -> RaftEntry {
+fn entry_to(e: &Entry) -> RaftEntry {
     RaftEntry {
         log_id: log_to(&e.log_id),
         payload: match &e.payload {
@@ -95,7 +105,7 @@ fn entry_to(e: &Entry<TypeConfig>) -> RaftEntry {
     }
 }
 
-fn entry_of(e: RaftEntry) -> Option<Entry<TypeConfig>> {
+fn entry_of(e: RaftEntry) -> Option<Entry> {
     Some(Entry {
         log_id: log_of(e.log_id),
         payload: match e.payload {
@@ -104,7 +114,7 @@ fn entry_of(e: RaftEntry) -> Option<Entry<TypeConfig>> {
                 stamp_ms,
                 command: parse_command(&command)?,
             }),
-            RaftPayload::Membership(m) => EntryPayload::Membership(membership_of(m)),
+            RaftPayload::Membership(m) => EntryPayload::Membership(membership_of(m)?),
         },
     })
 }
@@ -129,16 +139,18 @@ pub fn append_of(a: RaftAppend) -> Option<AppendEntriesRequest<TypeConfig>> {
     })
 }
 
-pub fn append_reply_to(r: &AppendEntriesResponse<u64>) -> RaftReply {
+/// The follower's result for a request whose last log ID is `sent`. It accepted all of it, or a
+/// prefix up to the returned log ID.
+pub fn append_reply_to(r: &AppendResult<TypeConfig>, sent: Option<LogId>) -> RaftReply {
     let (outcome, vote, last) = match r {
-        AppendEntriesResponse::Success => (RaftOutcome::Ok, RaftVote::default(), None),
-        AppendEntriesResponse::PartialSuccess(l) => (
+        Ok(l) if *l == sent => (RaftOutcome::Ok, RaftVote::default(), None),
+        Ok(l) => (
             RaftOutcome::Partial,
             RaftVote::default(),
             l.as_ref().map(log_to),
         ),
-        AppendEntriesResponse::Conflict => (RaftOutcome::Conflict, RaftVote::default(), None),
-        AppendEntriesResponse::HigherVote(v) => (RaftOutcome::HigherVote, vote_to(v), None),
+        Err(AppendError::Conflict { .. }) => (RaftOutcome::Conflict, RaftVote::default(), None),
+        Err(AppendError::HigherVote(v)) => (RaftOutcome::HigherVote, vote_to(v), None),
     };
     RaftReply {
         outcome,
@@ -149,7 +161,7 @@ pub fn append_reply_to(r: &AppendEntriesResponse<u64>) -> RaftReply {
 }
 
 /// `None` for a refusal.
-pub fn append_reply_of(r: RaftReply) -> Option<AppendEntriesResponse<u64>> {
+pub fn append_reply_of(r: RaftReply) -> Option<AppendEntriesResponse<TypeConfig>> {
     Some(match r.outcome {
         RaftOutcome::Ok => AppendEntriesResponse::Success,
         RaftOutcome::Partial => AppendEntriesResponse::PartialSuccess(r.last.map(log_of)),
@@ -159,7 +171,9 @@ pub fn append_reply_of(r: RaftReply) -> Option<AppendEntriesResponse<u64>> {
     })
 }
 
-pub fn vote_req_to(header: RaftHeader, r: &VoteRequest<u64>) -> RaftVoteReq {
+/// `leadership_transfer_from` stays off the wire: only a `transfer_leader` RPC sets it, and the
+/// network does not implement that RPC.
+pub fn vote_req_to(header: RaftHeader, r: &VoteRequest<TypeConfig>) -> RaftVoteReq {
     RaftVoteReq {
         header,
         vote: vote_to(&r.vote),
@@ -167,11 +181,11 @@ pub fn vote_req_to(header: RaftHeader, r: &VoteRequest<u64>) -> RaftVoteReq {
     }
 }
 
-pub fn vote_req_of(v: RaftVoteReq) -> VoteRequest<u64> {
+pub fn vote_req_of(v: RaftVoteReq) -> VoteRequest<TypeConfig> {
     VoteRequest::new(vote_of(v.vote), v.last.map(log_of))
 }
 
-pub fn vote_reply_to(r: &VoteResponse<u64>) -> RaftReply {
+pub fn vote_reply_to(r: &VoteResponse<TypeConfig>) -> RaftReply {
     RaftReply {
         outcome: RaftOutcome::Ok,
         vote: vote_to(&r.vote),
@@ -180,7 +194,7 @@ pub fn vote_reply_to(r: &VoteResponse<u64>) -> RaftReply {
     }
 }
 
-pub fn vote_reply_of(r: RaftReply) -> Option<VoteResponse<u64>> {
+pub fn vote_reply_of(r: RaftReply) -> Option<VoteResponse<TypeConfig>> {
     if r.outcome == RaftOutcome::Refused {
         return None;
     }
@@ -205,24 +219,25 @@ pub fn snapshot_to(header: RaftHeader, r: InstallSnapshotRequest<TypeConfig>) ->
     }
 }
 
-pub fn snapshot_of(s: RaftSnapshot) -> InstallSnapshotRequest<TypeConfig> {
-    InstallSnapshotRequest {
+/// `None` when the membership is invalid.
+pub fn snapshot_of(s: RaftSnapshot) -> Option<InstallSnapshotRequest<TypeConfig>> {
+    Some(InstallSnapshotRequest {
         vote: vote_of(s.vote),
         meta: SnapshotMeta {
             last_log_id: s.last.map(log_of),
             last_membership: StoredMembership::new(
                 s.membership_log.map(log_of),
-                membership_of(s.membership),
+                membership_of(s.membership)?,
             ),
             snapshot_id: s.snapshot_id,
         },
         offset: s.offset,
         data: Vec::from(s.data),
         done: s.done,
-    }
+    })
 }
 
-pub fn snapshot_reply_to(r: &InstallSnapshotResponse<u64>) -> RaftReply {
+pub fn snapshot_reply_to(r: &InstallSnapshotResponse<TypeConfig>) -> RaftReply {
     RaftReply {
         outcome: RaftOutcome::Ok,
         vote: vote_to(&r.vote),
@@ -231,7 +246,7 @@ pub fn snapshot_reply_to(r: &InstallSnapshotResponse<u64>) -> RaftReply {
     }
 }
 
-pub fn snapshot_reply_of(r: RaftReply) -> Option<InstallSnapshotResponse<u64>> {
+pub fn snapshot_reply_of(r: RaftReply) -> Option<InstallSnapshotResponse<TypeConfig>> {
     if r.outcome == RaftOutcome::Refused {
         return None;
     }
@@ -258,7 +273,7 @@ mod tests {
         }
     }
 
-    fn membership() -> Membership<u64, Peer> {
+    fn membership() -> Peers {
         let nodes: BTreeMap<u64, Peer> = [(1, 11u128), (2, 22), (5, 55)]
             .into_iter()
             .map(|(r, n)| {
@@ -274,28 +289,39 @@ mod tests {
             vec![BTreeSet::from([1, 2]), BTreeSet::from([1, 2, 5])],
             nodes,
         )
+        .unwrap()
+    }
+
+    fn log_id(index: u64) -> LogId {
+        LogId::new(
+            LeaderId {
+                term: 3,
+                node_id: 2,
+            },
+            index,
+        )
     }
 
     #[test]
     fn conversion_round_trips() {
-        let lid = LogId::new(CommittedLeaderId::new(3, 2), 17);
+        let lid = log_id(17);
         let append = AppendEntriesRequest::<TypeConfig> {
             vote: Vote::new_committed(3, 2),
             prev_log_id: Some(lid),
             entries: vec![
                 Entry {
-                    log_id: LogId::new(CommittedLeaderId::new(3, 2), 18),
+                    log_id: log_id(18),
                     payload: EntryPayload::Blank,
                 },
                 Entry {
-                    log_id: LogId::new(CommittedLeaderId::new(3, 2), 19),
+                    log_id: log_id(19),
                     payload: EntryPayload::Normal(Op {
                         stamp_ms: 1234,
                         command: cmd(&["INCR", "cnt:a", "EX", "5"]),
                     }),
                 },
                 Entry {
-                    log_id: LogId::new(CommittedLeaderId::new(3, 2), 20),
+                    log_id: log_id(20),
                     payload: EntryPayload::Membership(membership()),
                 },
             ],
@@ -309,15 +335,32 @@ mod tests {
         assert_eq!(back.leader_commit, None);
         assert_eq!(back.entries, append.entries);
 
-        for r in [
-            AppendEntriesResponse::Success,
-            AppendEntriesResponse::PartialSuccess(Some(lid)),
-            AppendEntriesResponse::PartialSuccess(None),
-            AppendEntriesResponse::Conflict,
-            AppendEntriesResponse::HigherVote(Vote::new(9, 1)),
+        let sent = Some(log_id(20));
+        for (result, want) in [
+            (Ok(sent), AppendEntriesResponse::Success),
+            (
+                Ok(Some(lid)),
+                AppendEntriesResponse::PartialSuccess(Some(lid)),
+            ),
+            (Ok(None), AppendEntriesResponse::PartialSuccess(None)),
+            (
+                Err(AppendError::Conflict {
+                    log_id: lid,
+                    hint: None,
+                }),
+                AppendEntriesResponse::Conflict,
+            ),
+            (
+                Err(AppendError::HigherVote(Vote::new(9, 1))),
+                AppendEntriesResponse::HigherVote(Vote::new(9, 1)),
+            ),
         ] {
-            assert_eq!(append_reply_of(append_reply_to(&r)), Some(r));
+            assert_eq!(append_reply_of(append_reply_to(&result, sent)), Some(want));
         }
+        assert_eq!(
+            append_reply_of(append_reply_to(&Ok(None), None)),
+            Some(AppendEntriesResponse::Success)
+        );
 
         let vote = VoteRequest::new(Vote::new(5, 7), Some(lid));
         let back = vote_req_of(vote_req_to(header(), &vote));
@@ -341,11 +384,22 @@ mod tests {
             done: true,
         };
         let back = snapshot_of(snapshot_to(header(), snap.clone()));
-        assert_eq!(back, snap);
+        assert_eq!(back, Some(snap));
         let reply = InstallSnapshotResponse {
             vote: Vote::new(6, 1),
         };
         assert_eq!(snapshot_reply_of(snapshot_reply_to(&reply)), Some(reply));
         assert_eq!(append_reply_of(RaftReply::refused()), None);
+    }
+
+    #[test]
+    fn a_voter_without_a_node_gets_the_default_node() {
+        let m = membership_of(RaftMembership {
+            configs: vec![vec![1, 2]],
+            nodes: vec![(1, NodeId::from_u128(11))],
+        })
+        .expect("a valid membership");
+        assert_eq!(m.get_node(&2), Some(&Peer::default()));
+        assert_eq!(m.voter_ids().collect::<Vec<_>>(), vec![1, 2]);
     }
 }
