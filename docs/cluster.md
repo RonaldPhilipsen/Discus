@@ -328,8 +328,8 @@ the CPU limit of the container from the cgroup (the Linux resource control group
 | `--cluster-cert` | none | PEM file with this node's certificate chain. |
 | `--cluster-key` | none | PEM file with this node's private key. |
 | `--cluster-san` | `spiffe://cluster.local/ns/default/sa/discus` | The URI SAN that every peer must carry. If the value is empty, any certificate from the CA is accepted. |
-| `--forward-read-timeout-ms` | 20 | Time to wait for a forwarded read. |
-| `--forward-write-timeout-ms` | 200 | Time to wait for a forwarded write. |
+| `--forward-read-timeout-ms` | 500 | Time to wait for a forwarded read. |
+| `--forward-write-timeout-ms` | 2000 | Time to wait for a forwarded write. |
 | `--cluster-handshake-timeout-ms` | 2000 | Time to wait for a new connection and its `HELLO`. |
 | `--cluster-idle-timeout-ms` | 30000 | A quiet connection closes after this time. |
 | `--cluster-keep-alive-ms` | 5000 | Interval of keep-alive packets on a quiet connection. |

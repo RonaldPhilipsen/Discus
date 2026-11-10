@@ -202,10 +202,10 @@ pub struct Config {
     #[arg(long, default_value = "spiffe://cluster.local/ns/default/sa/discus")]
     pub cluster_san: String,
     /// Forward timeout for reads, in milliseconds. Then the next owner is tried.
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = 500)]
     pub forward_read_timeout_ms: u64,
     /// Forward timeout for writes, in milliseconds.
-    #[arg(long, default_value_t = 200)]
+    #[arg(long, default_value_t = 2000)]
     pub forward_write_timeout_ms: u64,
     /// Timeout for a QUIC connect plus HELLO, in milliseconds.
     #[arg(long, default_value_t = 2000)]
@@ -573,5 +573,12 @@ mod tests {
                 .validate()
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn forward_timeouts_default_to_500_ms_and_2_s() {
+        let config = Config::parse_from(["discus"]).unwrap();
+        assert_eq!(config.forward_read_timeout_ms, 500);
+        assert_eq!(config.forward_write_timeout_ms, 2000);
     }
 }
