@@ -2,7 +2,7 @@
 
 use discus_membership::sim::Sim;
 use discus_membership::SwimConfig;
-use discus_wire::Liveness;
+use discus_wire::{GossipKind, Liveness};
 
 #[test]
 fn lagging_node_keeps_healthy_peers_alive() {
@@ -57,6 +57,7 @@ fn lagging_node_stretches_the_suspicion_timeout() {
         s.liveness(ids[0], ids[1]) == Some(Liveness::Suspect)
     });
     let suspect_at = sim.now();
+    assert!(sim.node(ids[0]).swim.health_multiplier() > 2.0);
     sim.run_until(limit, |s| {
         s.liveness(ids[0], ids[1]) == Some(Liveness::Dead)
     });
@@ -98,4 +99,49 @@ fn healthy_node_still_suspects_after_one_data_path_failure() {
     sim.data_path_failure(ids[0], ids[1]);
     sim.run_ms(10);
     assert_eq!(sim.liveness(ids[0], ids[1]), Some(Liveness::Suspect));
+}
+
+#[test]
+fn lagging_nodes_stretch_the_probe_timeouts() {
+    let cfg = SwimConfig::fast();
+    let mut sim = Sim::new(16, cfg.clone());
+    let ids = sim.cluster(4);
+    sim.run_ms(1_000);
+    for &id in &ids {
+        sim.lag(id, 200);
+    }
+    sim.run_ms(500);
+    for &id in &ids {
+        sim.node_mut(id).emitted.clear();
+    }
+    sim.kill(ids[3]);
+    sim.run_ms(10_000);
+    let (mut direct, mut indirect, mut relayed) = (0, 0, 0);
+    for &id in &ids[..3] {
+        let m = sim.node(id).swim.health_multiplier();
+        assert!(m > 2.0, "{m}");
+        let scale = |ms: u64| (ms as f64 * m).round() as u64;
+        let indirect_ms = scale(cfg.period_ms - cfg.probe_timeout_ms).max(1);
+        for e in &sim.node(id).emitted {
+            match (e.kind, e.relay) {
+                (GossipKind::Ping, false) => {
+                    direct += 1;
+                    assert_eq!(e.timeout_ms, scale(cfg.probe_timeout_ms));
+                }
+                (GossipKind::Ping, true) => {
+                    relayed += 1;
+                    assert_eq!(e.timeout_ms, scale(cfg.probe_timeout_ms));
+                }
+                (GossipKind::PingReq, _) => {
+                    indirect += 1;
+                    assert_eq!(e.timeout_ms, indirect_ms);
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        direct > 0 && indirect > 0 && relayed > 0,
+        "{direct} {indirect} {relayed}"
+    );
 }
