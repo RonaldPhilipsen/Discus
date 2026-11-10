@@ -249,3 +249,34 @@ async fn departure_is_gossiped_on_shutdown() {
         .member(nodes[2].id)
         .is_none());
 }
+
+#[tokio::test]
+async fn late_epoch_work_keeps_the_queue_of_a_peer_that_joined_later() {
+    let c = common::cluster::start_cluster(2, &["--replication-factor", "2"]).await;
+    let (a, p) = (&c.nodes[0], &c.nodes[1]);
+    assert!(wait_until(FORM, || a.node.phase() == discus::Phase::Serving).await);
+    a.node.faults.epoch_work_threads.lock().clear();
+    // P never answers A, so the queued key stays in P's queue or in flight.
+    p.node.faults.blocked.lock().insert(a.id);
+    let all = a.node.epochs().current().members().to_vec();
+    let without_p: Vec<_> = all.iter().filter(|m| m.id != p.id).cloned().collect();
+    let e1 = a.node.epochs().propose(a.id, without_p).unwrap();
+    a.node.adopt_epoch(e1).unwrap();
+    let e2 = a.node.epochs().propose(a.id, all).unwrap();
+    a.node.adopt_epoch(e2).unwrap();
+    // The test runtime has one thread and nothing above yielded, so the work of both adoptions
+    // is still queued when the write reaches P's queue.
+    assert!(a.node.faults.epoch_work_threads.lock().is_empty());
+    let key = bytes::Bytes::from_static(b"late");
+    let replicator = a.node.replicator().unwrap().clone();
+    replicator.written(&a.node, &key);
+    assert!(!replicator.settled(&key));
+    assert!(
+        wait_until(FORM, || a.node.faults.epoch_work_threads.lock().len() == 2).await,
+        "the epoch work did not run"
+    );
+    assert!(
+        !replicator.settled(&key),
+        "the work of the first adoption dropped the queue of P"
+    );
+}

@@ -403,14 +403,15 @@ impl Node {
                 })
             });
         }
+        // Adoptions run on the control lane and on the data runtime, so the send happens under
+        // the lock to keep the work in adoption order.
+        let unsent = match self.epoch_work.get() {
+            Some(tx) => tx.send((old, new)).err().map(|e| e.0),
+            None => Some((old, new)),
+        };
         drop(epochs);
-        match self.epoch_work.get() {
-            Some(tx) => {
-                if let Err(tokio::sync::mpsc::error::SendError((old, new))) = tx.send((old, new)) {
-                    self.apply_epoch(&old, &new);
-                }
-            }
-            None => self.apply_epoch(&old, &new),
+        if let Some((old, new)) = unsent {
+            self.apply_epoch(&old, &new);
         }
         self.epoch_tx.send_replace(id);
         result
@@ -425,11 +426,18 @@ impl Node {
                 .unwrap_or_default()
                 .to_string(),
         );
+        // The work can run after later adoptions. Pruning against `new` would then drop the
+        // queues and hints of a peer that joined in a later epoch, so it prunes against the
+        // current epoch. Work from a cluster that a reset replaced has nothing left to do.
+        let current = self.epochs().current().clone();
+        if current.cluster_id() != new.cluster_id() {
+            return;
+        }
         if let Some(r) = self.replicator() {
-            r.on_epoch(old, new);
+            r.on_epoch(old, new, &current);
         }
         if let Some(link) = self.link() {
-            link.forget_non_members(new);
+            link.forget_non_members(&current);
         }
     }
 
