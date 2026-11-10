@@ -2,8 +2,9 @@
 //!
 //! One UDP port per node. ALPN `discus-rpc` carries forwarded commands, and ALPN `discus-gossip`
 //! carries membership. Every connection starts
-//! with `HELLO` on its first stream, and then each request takes its own bidirectional stream with
-//! one frame each way. Handshake failures, resets, and forward timeouts go to the evidence channel
+//! with `HELLO` on its first stream. Then each request takes its own bidirectional stream with
+//! one frame each way, or, for a small write on the command lane, the shared stream of the
+//! connection. Handshake failures, resets, and forward timeouts go to the evidence channel
 //! that the failure detector of plan 3 consumes.
 
 mod endpoint;
@@ -11,6 +12,7 @@ mod events;
 pub mod frame;
 mod hello;
 mod provider;
+mod shared;
 mod tls;
 
 #[cfg(feature = "testing")]

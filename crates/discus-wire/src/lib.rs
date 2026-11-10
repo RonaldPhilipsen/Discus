@@ -55,8 +55,11 @@ pub mod caps {
     /// The node runs the counter tier: leader hints, leader-follower sync, and Raft (spec
     /// section 10).
     pub const COUNTERS: u64 = 8;
+    /// The node takes many requests on one command-lane stream, opened with an empty frame, and
+    /// answers each with its request ID in any order.
+    pub const SHARED_STREAM: u64 = 16;
     /// Every bit this build knows.
-    pub const KNOWN: u64 = EPOCH_PUSH | GOSSIP | REPLICATION | COUNTERS;
+    pub const KNOWN: u64 = EPOCH_PUSH | GOSSIP | REPLICATION | COUNTERS | SHARED_STREAM;
 }
 
 /// The frame limit before `HELLO` completes, and the smallest offer that `HELLO` accepts.
