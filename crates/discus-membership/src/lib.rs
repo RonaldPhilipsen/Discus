@@ -7,6 +7,7 @@
 
 mod config;
 mod detector;
+mod health;
 mod host;
 pub mod lease;
 pub mod merge;
@@ -18,6 +19,7 @@ pub mod sim;
 
 pub use config::{Millis, SwimConfig};
 pub use detector::Detector;
+pub use health::LocalHealth;
 pub use host::{Event, Host};
 #[cfg(feature = "testing")]
 pub use lease::MemoryLease;
