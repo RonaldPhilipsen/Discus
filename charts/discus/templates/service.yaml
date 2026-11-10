@@ -29,3 +29,6 @@ spec:
     - name: cluster
       port: 7379
       protocol: UDP
+    - name: rpc
+      port: 7380
+      protocol: UDP
