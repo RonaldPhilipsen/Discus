@@ -7,7 +7,7 @@ pub type Millis = u64;
 #[derive(Debug, Clone, PartialEq)]
 pub struct SwimConfig {
     /// The protocol period: one probe per period. It does not scale with the health multiplier.
-    /// A probe that is still in flight when the next one is due delays the next one.
+    /// A probe that is still in flight does not delay the next one, which goes to another target.
     pub period_ms: Millis,
     /// Time to wait for a direct ack before the indirect probes start. The core scales it by the
     /// health multiplier, so the scaled value can be longer than the period. Unscaled, it must be

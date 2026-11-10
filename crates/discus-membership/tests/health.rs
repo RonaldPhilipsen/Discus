@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use discus_membership::sim::{Emitted, Sim};
-use discus_membership::SwimConfig;
+use discus_membership::{Action, Millis, Outcome, SwimConfig};
 use discus_placement::NodeId;
 use discus_wire::{GossipKind, Liveness};
 
@@ -111,9 +111,9 @@ fn lagging_node_keeps_its_probe_rate() {
 }
 
 // The scaled timeouts of a probe of a dead peer add up to more than the period. The next probe
-// waits for it instead of replacing it, so its missed-probe evidence still lands.
+// starts on time anyway, so a lagging node keeps its heartbeat rate at every healthy peer.
 #[test]
-fn timed_out_probe_does_not_overlap_the_next() {
+fn an_unanswered_probe_does_not_delay_the_next() {
     let cfg = SwimConfig::fast();
     let mut sim = Sim::new(17, cfg.clone());
     let ids = sim.cluster(3);
@@ -126,34 +126,153 @@ fn timed_out_probe_does_not_overlap_the_next() {
     let m = sim.node(ids[0]).swim.health_multiplier();
     assert_eq!(m, cfg.health_max_multiplier);
     let scale = |ms: u64| (ms as f64 * m).round() as u64;
-    let direct_ms = scale(cfg.probe_timeout_ms);
-    let indirect_ms = scale(cfg.period_ms - cfg.probe_timeout_ms);
-    assert!(direct_ms + indirect_ms > cfg.period_ms);
+    assert!(scale(cfg.probe_timeout_ms) > cfg.period_ms);
     let dead = sim.node(ids[2]).swim.me().addr;
     sim.node_mut(ids[0]).emitted.clear();
     sim.kill(ids[2]);
     sim.run_ms(10_000);
-    let emitted = sim.node(ids[0]).emitted.clone();
     let pings = direct_pings(&sim, ids[0]);
     let mut checked = 0;
     for pair in pings.windows(2) {
-        let (probe, next) = (pair[0], pair[1]);
-        if probe.to != dead {
-            continue;
+        assert_eq!(pair[1].at - pair[0].at, cfg.period_ms, "{pair:?}");
+        if pair[0].to == dead {
+            checked += 1;
         }
-        let indirect = emitted
-            .iter()
-            .any(|e| e.kind == GossipKind::PingReq && e.at >= probe.at && e.at < next.at);
-        let end = probe.at + direct_ms + if indirect { indirect_ms } else { 0 };
-        assert!(
-            next.at >= end,
-            "a probe at {} ended at {end}, the next started at {}",
-            probe.at,
-            next.at
-        );
-        checked += 1;
     }
     assert!(checked > 0);
+}
+
+/// A cluster of `n` with every node at the maximum multiplier. The tests below drive node
+/// `ids[0]` by hand from the returned time on, so that they choose when each outcome arrives.
+fn lagging_cluster(seed: u64, n: usize) -> (Sim, Vec<NodeId>, Millis) {
+    let cfg = SwimConfig::fast();
+    let mut sim = Sim::new(seed, cfg.clone());
+    let ids = sim.cluster(n);
+    sim.run_ms(1_000);
+    for _ in 0..100 {
+        sim.node_mut(ids[0]).swim.observe_lag(200);
+    }
+    assert_eq!(
+        sim.node(ids[0]).swim.health_multiplier(),
+        cfg.health_max_multiplier
+    );
+    // Past the slack of the probes that the simulator left in flight.
+    let start = sim.now() + 2 * cfg.period_ms;
+    (sim, ids, start)
+}
+
+fn tick(sim: &mut Sim, id: NodeId, now: Millis) -> Vec<Action> {
+    let node = sim.node_mut(id);
+    node.swim.tick(now, &mut node.host)
+}
+
+fn pings(actions: &[Action], kind: GossipKind) -> Vec<Action> {
+    actions
+        .iter()
+        .filter(|a| a.msg.kind == kind)
+        .cloned()
+        .collect()
+}
+
+fn outcome(sim: &mut Sim, id: NodeId, now: Millis, token: u64, o: Outcome) -> Vec<Action> {
+    let node = sim.node_mut(id);
+    node.swim.outcome(now, token, o, &mut node.host)
+}
+
+/// The reply of the target of `a`, sent by `from`.
+fn answer(sim: &mut Sim, from: NodeId, now: Millis, a: &Action) -> Outcome {
+    let src = sim.node(from).swim.me().addr;
+    let node = sim.node_mut(a.expected.unwrap());
+    let handled = node.swim.handle(now, src, a.msg.clone(), &mut node.host);
+    Outcome::Reply(Box::new(handled.reply))
+}
+
+fn score(sim: &Sim, id: NodeId, now: Millis, peer: NodeId) -> f64 {
+    sim.node(id).swim.score(now, peer)
+}
+
+#[test]
+fn an_unanswered_probe_still_counts_a_miss() {
+    let (mut sim, ids, t) = lagging_cluster(19, 3);
+    let me = ids[0];
+    let weight = SwimConfig::fast().missed_ping_weight;
+    let period = SwimConfig::fast().period_ms;
+    let first = pings(&tick(&mut sim, me, t), GossipKind::Ping);
+    assert_eq!(first.len(), 1);
+    let second = pings(&tick(&mut sim, me, t + period), GossipKind::Ping);
+    assert_eq!(second.len(), 1);
+    let (a, b) = (first[0].expected.unwrap(), second[0].expected.unwrap());
+    assert_ne!(a, b);
+    let now = t + period + 10;
+    let reqs = pings(
+        &outcome(&mut sim, me, now, first[0].token, Outcome::Unreachable),
+        GossipKind::PingReq,
+    );
+    assert!(!reqs.is_empty());
+    let (before_a, before_b) = (score(&sim, me, now, a), score(&sim, me, now, b));
+    for r in &reqs {
+        outcome(&mut sim, me, now, r.token, Outcome::Unreachable);
+    }
+    let gained = score(&sim, me, now, a) - before_a;
+    assert!((gained - weight).abs() < 1e-9, "{gained}");
+    assert_eq!(score(&sim, me, now, b), before_b);
+}
+
+// Each probe keeps its own state: the outcomes of an older probe end that probe only.
+#[test]
+fn a_late_outcome_counts_only_for_its_probe() {
+    let (mut sim, ids, t) = lagging_cluster(20, 4);
+    let me = ids[0];
+    let weight = SwimConfig::fast().missed_ping_weight;
+    let period = SwimConfig::fast().period_ms;
+    let first = pings(&tick(&mut sim, me, t), GossipKind::Ping).remove(0);
+    let second = pings(&tick(&mut sim, me, t + period), GossipKind::Ping).remove(0);
+    let (a, b) = (first.expected.unwrap(), second.expected.unwrap());
+    assert_ne!(a, b);
+    let now = t + period + 10;
+    let reqs_b = pings(
+        &outcome(&mut sim, me, now, second.token, Outcome::Unreachable),
+        GossipKind::PingReq,
+    );
+    let reqs_a = pings(
+        &outcome(&mut sim, me, now, first.token, Outcome::Unreachable),
+        GossipKind::PingReq,
+    );
+    assert!(!reqs_a.is_empty() && !reqs_b.is_empty());
+    let (before_a, before_b) = (score(&sim, me, now, a), score(&sim, me, now, b));
+    for r in &reqs_a {
+        outcome(&mut sim, me, now, r.token, Outcome::Unreachable);
+    }
+    assert!((score(&sim, me, now, a) - before_a - weight).abs() < 1e-9);
+    assert_eq!(score(&sim, me, now, b), before_b);
+    for r in &reqs_b {
+        outcome(&mut sim, me, now, r.token, Outcome::Unreachable);
+    }
+    assert!((score(&sim, me, now, b) - before_b - weight).abs() < 1e-9);
+}
+
+#[test]
+fn a_target_with_a_probe_in_flight_is_skipped() {
+    let (mut sim, ids, t) = lagging_cluster(21, 4);
+    let me = ids[0];
+    let period = SwimConfig::fast().period_ms;
+    let first = pings(&tick(&mut sim, me, t), GossipKind::Ping).remove(0);
+    let pending = first.expected.unwrap();
+    // The first probe stays in flight through these periods. The rest of the round that the
+    // simulator left, then one full round over the three targets, reaches `pending` again.
+    assert!(first.timeout_ms + period > 5 * period);
+    let mut probed = Vec::new();
+    for i in 1..=5 {
+        let now = t + i * period;
+        let sent = pings(&tick(&mut sim, me, now), GossipKind::Ping);
+        assert_eq!(sent.len(), 1, "period {i}");
+        let target = sent[0].expected.unwrap();
+        assert_ne!(target, pending, "period {i}");
+        probed.push(target);
+        let reply = answer(&mut sim, me, now, &sent[0]);
+        outcome(&mut sim, me, now + 5, sent[0].token, reply);
+    }
+    assert!(probed.iter().all(|p| ids[1..].contains(p)));
 }
 
 #[test]
@@ -241,4 +360,60 @@ fn lagging_nodes_stretch_the_probe_timeouts() {
         direct > 0 && indirect > 0 && relayed > 0,
         "{direct} {indirect} {relayed}"
     );
+}
+
+// Every node at the maximum multiplier and one dead peer: the probes of the dead peer outlast
+// the period, and they must not starve the heartbeats of the healthy peers.
+#[test]
+fn all_nodes_lagging_with_a_dead_peer_keep_healthy_peers_alive() {
+    let cfg = SwimConfig::default();
+    let bound = 9 * (cfg.suspicion_max_ms + cfg.period_ms * 2);
+    for seed in 18..22 {
+        let mut sim = Sim::new(seed, cfg.clone());
+        let ids = sim.cluster(10);
+        sim.run_ms(1_000);
+        for &id in &ids {
+            sim.lag(id, 200);
+        }
+        sim.run_ms(1_000);
+        for &id in &ids {
+            assert_eq!(
+                sim.node(id).swim.health_multiplier(),
+                cfg.health_max_multiplier
+            );
+        }
+        let dead = ids[9];
+        let live = &ids[..9];
+        sim.kill(dead);
+        let killed = sim.now();
+        let mut bad = Vec::new();
+        let mut dead_at = vec![None; live.len()];
+        for _ in 0..(240_000 / 100) {
+            sim.run_ms(100);
+            for (i, &o) in live.iter().enumerate() {
+                if dead_at[i].is_none() && sim.liveness(o, dead) == Some(Liveness::Dead) {
+                    dead_at[i] = Some(sim.now() - killed);
+                }
+                for &p in live.iter().filter(|p| **p != o) {
+                    let l = sim.liveness(o, p);
+                    if l != Some(Liveness::Alive) {
+                        bad.push((sim.now(), o, p, l));
+                    }
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "seed {seed}: {} non-Alive observations, first {:?}",
+            bad.len(),
+            bad.first()
+        );
+        for (i, at) in dead_at.iter().enumerate() {
+            assert!(
+                at.is_some_and(|ms| ms <= bound),
+                "seed {seed}: {} saw the dead peer as Dead after {at:?}",
+                live[i]
+            );
+        }
+    }
 }

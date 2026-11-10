@@ -60,8 +60,9 @@ missed probe. So a node that the clients reach through several entry nodes becom
 A node whose data runtime lags does not trust its own timers. It measures the lag and turns it into
 a multiplier from 1 to 9. The probe timeouts and the suspicion timeout grow by this multiplier. The
 gossip period does not grow, so the peers keep hearing from the node at the normal rate. If a
-longer probe timeout is still running when the next probe is due, the next probe waits for it.
-While the multiplier is 1.5 or higher, the node ignores forward failures as evidence.
+longer probe timeout is still running when the next probe is due, the next probe starts anyway and
+goes to another member. Each probe keeps its own result. While the multiplier is 1.5 or higher, the
+node ignores forward failures as evidence.
 
 A `DEAD` member leaves the epoch. One node builds the next epoch: the live `NORMAL` member with the
 lowest node ID. It waits a random 0 to 50 ms, then creates the next epoch. The other nodes wait
