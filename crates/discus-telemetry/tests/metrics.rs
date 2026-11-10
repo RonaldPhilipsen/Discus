@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 use discus_telemetry::attrs::{
-    check, CommandLabel, CounterMode, CounterRole, MemberState, NodeLabel, Status, ALLOWED_KEYS,
+    check, CommandLabel, CounterMode, CounterRole, MemberState, NodeLabel, Status,
+    TransportChannel, ALLOWED_KEYS,
 };
 use discus_telemetry::metrics::{StoreStats, TransportCounts, LATENCY_BUCKETS_MS};
 use discus_telemetry::testing::{MetricHarness, Point};
@@ -119,23 +120,59 @@ fn store_stats_are_observed() {
 #[test]
 fn transport_counters_export() {
     let h = MetricHarness::new();
-    h.metrics.observe_transport(|| TransportCounts {
-        frames_rejected: 1,
-        unsupported: 2,
-        handshake_failures: 3,
-        requests_in: 4,
-        requests_out: 5,
-    });
+    h.metrics
+        .observe_transport(TransportChannel::Gossip, || TransportCounts {
+            frames_rejected: 1,
+            unsupported: 2,
+            handshake_failures: 3,
+            requests_in: 4,
+            requests_out: 5,
+        });
+    h.metrics
+        .observe_transport(TransportChannel::Rpc, || TransportCounts {
+            frames_rejected: 10,
+            unsupported: 20,
+            handshake_failures: 30,
+            requests_in: 40,
+            requests_out: 50,
+        });
     let points = h.points();
-    for (name, value) in [
-        ("discus.transport.frames.rejected", 1.0),
-        ("discus.transport.unsupported", 2.0),
-        ("discus.transport.handshake.failures", 3.0),
-        ("discus.transport.requests.in", 4.0),
-        ("discus.transport.requests.out", 5.0),
+    for (name, gossip, rpc) in [
+        ("discus.transport.frames.rejected", 1.0, 10.0),
+        ("discus.transport.unsupported", 2.0, 20.0),
+        ("discus.transport.handshake.failures", 3.0, 30.0),
+        ("discus.transport.requests.in", 4.0, 40.0),
+        ("discus.transport.requests.out", 5.0, 50.0),
     ] {
-        assert_eq!(find(&points, name, None).unwrap().value, value, "{name}");
+        let of = |channel| {
+            find(&points, name, Some(("channel", channel)))
+                .unwrap()
+                .value
+        };
+        assert_eq!(of("gossip"), gossip, "{name}");
+        assert_eq!(of("rpc"), rpc, "{name}");
+        assert_eq!(
+            points.iter().filter(|p| p.name == name).count(),
+            2,
+            "{name}"
+        );
     }
+    assert_bounded(&points);
+}
+
+#[test]
+fn peer_events_carry_the_channel() {
+    let h = MetricHarness::new();
+    let peer = NodeLabel::new("ab").unwrap();
+    h.metrics
+        .quic_failure(&peer, Status::Reset, TransportChannel::Gossip);
+    h.metrics
+        .peer_error(&peer, Status::Timeout, TransportChannel::Rpc);
+    let points = h.points();
+    let q = find(&points, "discus.quic.failures", Some(("channel", "gossip")));
+    assert_eq!(q.unwrap().value, 1.0);
+    let e = find(&points, "discus.peer.errors", Some(("channel", "rpc")));
+    assert_eq!(e.unwrap().value, 1.0);
     assert_bounded(&points);
 }
 
@@ -152,9 +189,9 @@ fn later_plan_instruments_record_with_bounded_attributes() {
     m.hint_replayed(&peer, 2);
     m.hint_evicted(&peer, 1);
     m.gossip_rtt(&peer, Duration::from_millis(1));
-    m.peer_error(&peer, Status::Timeout);
+    m.peer_error(&peer, Status::Timeout, TransportChannel::Rpc);
     m.forward(CommandLabel::new("GET"), Status::Ok, 1);
-    m.quic_failure(&peer, Status::Handshake);
+    m.quic_failure(&peer, Status::Handshake, TransportChannel::Rpc);
     m.tombstones(9);
     let points = h.points();
     for name in [

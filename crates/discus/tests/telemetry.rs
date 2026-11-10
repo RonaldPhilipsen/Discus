@@ -246,6 +246,7 @@ mod otel {
 
     #[test]
     fn transport_events_feed_the_peer_metrics() {
+        use discus_telemetry::attrs::TransportChannel;
         use discus_transport::{PeerEvent, PeerEventKind};
         let _serial = serial();
         let h = TraceHarness::new(0.0);
@@ -261,7 +262,7 @@ mod otel {
             // Without a known peer there is no label, so nothing is recorded.
             event(None, PeerEventKind::HandshakeFailed("unknown".into())),
         ] {
-            discus::telemetry::record_peer_event(&m, &e);
+            discus::telemetry::record_peer_event(&m, &e, TransportChannel::Gossip);
         }
         let points = h.points();
         let hex = peer.to_string();
@@ -283,6 +284,10 @@ mod otel {
             .map(|p| p.value)
             .sum();
         assert_eq!(all, 3.0);
+        assert!(points
+            .iter()
+            .filter(|p| p.name == "discus.quic.failures" || p.name == "discus.peer.errors")
+            .all(|p| p.attrs.iter().any(|(k, v)| k == "channel" && v == "gossip")));
     }
 
     #[test]

@@ -143,13 +143,13 @@ and 100.
 | `discus.members` | gauge | `state` | Members of the current epoch in each state. |
 | `discus.forwards` | counter | `command`, `status` | Forwards to other nodes, with `status` `ok`, `timeout`, or `error`. |
 | `discus.forward.hops` | histogram | none | The hop count of each forward, 1 or 2. |
-| `discus.peer.errors` | counter | `peer`, `status` | Requests to a peer without a reply in time, with `status` `timeout`. |
-| `discus.quic.failures` | counter | `peer`, `status` | Failed handshakes (`handshake`) and lost connections (`reset`). |
-| `discus.transport.frames.rejected` | counter | none | Node-to-node frames that failed the verifier. |
-| `discus.transport.unsupported` | counter | none | Requests of a message type that this build does not know. |
-| `discus.transport.handshake.failures` | counter | none | Failed QUIC handshakes and `HELLO` exchanges. |
-| `discus.transport.requests.in` | counter | none | Node-to-node requests that this node served. |
-| `discus.transport.requests.out` | counter | none | Node-to-node requests that this node sent. |
+| `discus.peer.errors` | counter | `peer`, `status`, `channel` | Requests to a peer without a reply in time, with `status` `timeout`. |
+| `discus.quic.failures` | counter | `peer`, `status`, `channel` | Failed handshakes (`handshake`) and lost connections (`reset`). |
+| `discus.transport.frames.rejected` | counter | `channel` | Node-to-node frames that failed the verifier. |
+| `discus.transport.unsupported` | counter | `channel` | Requests of a message type that this build does not know. |
+| `discus.transport.handshake.failures` | counter | `channel` | Failed QUIC handshakes and `HELLO` exchanges. |
+| `discus.transport.requests.in` | counter | `channel` | Node-to-node requests that this node served. |
+| `discus.transport.requests.out` | counter | `channel` | Node-to-node requests that this node sent. |
 | `discus.replication.queue.depth` | gauge | `peer` | Keys that wait in the replication queue of a peer. |
 | `discus.replication.lag` | gauge (ms) | `peer` | The time that the last replication batch to a peer took. |
 | `discus.hints.recorded` | counter | `peer` | Hints that the primary recorded for a peer that it cannot reach. |
@@ -166,6 +166,13 @@ and 100.
 | `discus.counter.mode.switches` | counter | `state` | Mode switches of a counter group by the new mode, `raft` or `leader_follower`. |
 | `discus.counter.failovers` | counter | none | Leader-follower groups that this node took over from another leader. |
 | `discus.raft.single_voter_groups` | gauge | none | Raft groups that this node leads and that have one voter. If it stays above zero, raise an alert. The next loss then loses the counters of the group. |
+
+The `channel` attribute names the transport endpoint that a metric comes from. A gossip node has
+two endpoints, and each reports on its own: `gossip` is the gossip-only endpoint on
+`--cluster-listen`, and `rpc` is the RPC-only endpoint on `--rpc-listen`. A static cluster has one
+endpoint for both, and it reports as `cluster`. The transport counters have one data point per
+channel. They are not summed. A peer error from a gossip suspicion or a gossip transport event
+has the channel `gossip`.
 
 The `peer` attribute is the node ID of the peer in hex. A transport event without a known peer is
 not counted. The `state` attribute holds a member state, a counter role, or a counter mode. A

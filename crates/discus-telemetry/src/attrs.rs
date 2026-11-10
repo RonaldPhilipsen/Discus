@@ -1,6 +1,6 @@
 //! Metric attributes and the cardinality guard (spec §15.4).
 //!
-//! Every metric attribute is one of five typed values. A command label is a `&'static str`, so it
+//! Every metric attribute is one of six typed values. A command label is a `&'static str`, so it
 //! comes from the code, never from a client. A node or peer label is a short hex node ID, so the
 //! number of values is bounded by the cluster size. [`check`] validates raw pairs against the
 //! same rules. The metrics handle runs it in debug builds, and the tests run it on every exported
@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 /// The only attribute keys that a metric can carry.
-pub const ALLOWED_KEYS: [&str; 5] = ["command", "status", "node", "peer", "state"];
+pub const ALLOWED_KEYS: [&str; 6] = ["command", "status", "node", "peer", "state", "channel"];
 
 const MAX_COMMAND_LEN: usize = 32;
 /// The longest node label: a 128-bit node ID in hex.
@@ -123,6 +123,16 @@ label_enum! {
     }
 }
 
+label_enum! {
+    /// The transport endpoint that a transport metric comes from: the gossip-only endpoint, the
+    /// RPC-only endpoint, or the single endpoint of a static cluster.
+    TransportChannel {
+        Gossip => "gossip",
+        Rpc => "rpc",
+        Cluster => "cluster",
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Attribute {
     Command(CommandLabel),
@@ -134,6 +144,7 @@ pub enum Attribute {
     Role(CounterRole),
     /// A counter mode under the key `state`.
     Mode(CounterMode),
+    Channel(TransportChannel),
 }
 
 impl Attribute {
@@ -143,6 +154,7 @@ impl Attribute {
             Attribute::Status(_) => "status",
             Attribute::Node(_) => "node",
             Attribute::Peer(_) => "peer",
+            Attribute::Channel(_) => "channel",
             Attribute::State(_) | Attribute::Role(_) | Attribute::Mode(_) => "state",
         }
     }
@@ -155,6 +167,7 @@ impl Attribute {
             Attribute::State(s) => s.as_str(),
             Attribute::Role(r) => r.as_str(),
             Attribute::Mode(m) => m.as_str(),
+            Attribute::Channel(c) => c.as_str(),
         }
     }
 }
@@ -201,6 +214,7 @@ pub fn check<'a>(attrs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Result<
                     || CounterRole::parse(value).is_some()
                     || CounterMode::parse(value).is_some(),
             ),
+            "channel" => ("channel", TransportChannel::parse(value).is_some()),
             other => return Err(GuardError::DisallowedKey(other.to_owned())),
         };
         if !ok {

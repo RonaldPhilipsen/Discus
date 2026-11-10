@@ -11,6 +11,7 @@ use tokio_util::task::TaskTracker;
 
 use discus_membership::{LeaseProvider, NoneLease};
 use discus_placement::{Clock, NTP64};
+use discus_telemetry::attrs::TransportChannel;
 use discus_transport::{Channels, Service, TlsMaterial, Transport, TransportConfig};
 
 use crate::admin::serve_admin;
@@ -321,9 +322,16 @@ impl Server {
                 membership.gossip_transport().clone(),
                 stop_background.clone(),
             );
+            let metrics = discus_telemetry::global();
+            crate::telemetry::observe_transport(metrics, &transport, TransportChannel::Gossip);
             tokio::spawn(async move {
-                crate::telemetry::observe_peer_events(discus_telemetry::global(), &transport, stop)
-                    .await;
+                crate::telemetry::observe_peer_events(
+                    metrics,
+                    &transport,
+                    TransportChannel::Gossip,
+                    stop,
+                )
+                .await;
             });
         }
         if let Some(replicator) = node.replicator() {
@@ -334,14 +342,26 @@ impl Server {
         }
         if let Some(link) = node.link() {
             tracing::info!(rpc = %link.transport.local_addr(), "node-to-node transport");
-            let mut transports = vec![link.transport.clone()];
-            transports.extend(node.membership().map(|m| m.gossip_transport().clone()));
-            crate::telemetry::observe_transport(discus_telemetry::global(), &transports);
+            let channel = if node.membership().is_some() {
+                TransportChannel::Rpc
+            } else {
+                TransportChannel::Cluster
+            };
+            crate::telemetry::observe_transport(
+                discus_telemetry::global(),
+                &link.transport,
+                channel,
+            );
             // The transport events feed the peer error and QUIC failure metrics.
             let (transport, stop) = (link.transport.clone(), stop_background.clone());
             tokio::spawn(async move {
-                crate::telemetry::observe_peer_events(discus_telemetry::global(), &transport, stop)
-                    .await;
+                crate::telemetry::observe_peer_events(
+                    discus_telemetry::global(),
+                    &transport,
+                    channel,
+                    stop,
+                )
+                .await;
             });
             // Dial every peer early, so the first forward does not pay the handshake.
             let epoch = node.epochs().current().clone();

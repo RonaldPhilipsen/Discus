@@ -419,8 +419,11 @@ impl Membership {
                     tracing::info!(peer = %id, state = state.name(), ?liveness, "member changed");
                     if matches!(liveness, Liveness::Suspect | Liveness::Dead) {
                         if let Some(label) = crate::telemetry::node_label(*id) {
-                            discus_telemetry::global()
-                                .peer_error(&label, discus_telemetry::attrs::Status::Timeout);
+                            discus_telemetry::global().peer_error(
+                                &label,
+                                discus_telemetry::attrs::Status::Timeout,
+                                discus_telemetry::attrs::TransportChannel::Gossip,
+                            );
                         }
                     }
                 }
