@@ -141,10 +141,10 @@ pub struct Config {
     /// with the bound `--rpc-listen` port.
     #[arg(long)]
     pub rpc_advertise: Option<SocketAddr>,
-    /// Raise the nice value of the data runtime worker threads by this much, from 0 to 19. The
-    /// control thread keeps the process nice value, so it wins CPU under a quota. 0 changes
-    /// nothing. Linux only.
-    #[arg(long, default_value_t = 0)]
+    /// Raise the nice value of the data runtime threads by this much over the process value,
+    /// from 0 to 19. The result is capped at 19. The control thread keeps the process value, so
+    /// it wins CPU under a quota. 0 changes nothing. Linux only.
+    #[arg(long, default_value_t = 5)]
     pub data_nice: i32,
     /// The cluster lease provider.
     #[arg(long, value_enum, default_value_t = LeaseKind::default_kind())]
@@ -552,6 +552,11 @@ mod tests {
         let config =
             Config::parse_from(["discus", "--counter-lease-prefix", "blue-counter"]).unwrap();
         assert_eq!(config.counter_lease_name(0), "blue-counter-0");
+    }
+
+    #[test]
+    fn data_nice_defaults_to_5() {
+        assert_eq!(Config::parse_from(["discus"]).unwrap().data_nice, 5);
     }
 
     #[test]

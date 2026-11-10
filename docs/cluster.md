@@ -306,7 +306,7 @@ the CPU limit of the container from the cgroup (the Linux resource control group
 | `--cluster-advertise` | see below | The gossip address that other members use. |
 | `--rpc-listen` | `0.0.0.0:7380` | The UDP address for node-to-node requests. With `--membership static`, requests use `--cluster-listen` instead. |
 | `--rpc-advertise` | see below | The RPC address that other members use. Default: the IP of the advertised cluster address with the bound `--rpc-listen` port. |
-| `--data-nice` | `0` | Raise the nice value of the data worker threads by this much, from 0 to 19. The control thread keeps the process value, so it gets CPU first under a quota. 0 changes nothing. Linux only. |
+| `--data-nice` | `5` | Raise the nice value of the data runtime threads by this much over the process value, from 0 to 19. The result is capped at 19. The control thread keeps the process value, so it gets CPU first under a quota. 0 changes nothing. Linux only. |
 | `--peer` | none | A seed as `<ip>:<port>`, or `<node-id>@<ip>:<port>`. Repeat the flag. With `static`, list every other member with its node ID. |
 | `--discovery-dns` | none | A headless Service name, as `<host>` or `<host>:<port>`. The port defaults to the `--cluster-listen` port. |
 | `--lease-provider` | `k8s` | `k8s` or `none`. Without the `k8s` build feature, the default is `none`. |
