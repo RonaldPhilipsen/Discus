@@ -46,7 +46,7 @@ pub async fn fetch(node: &Arc<Node>, key: &Bytes, sources: Vec<NodeId>) {
         return;
     };
     for source in sources {
-        let Some(addr) = node.epochs().current().member(source).map(|m| m.addr) else {
+        let Some(addr) = node.epochs().current().member(source).map(|m| m.rpc_addr) else {
             continue;
         };
         let reply = link

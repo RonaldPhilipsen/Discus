@@ -64,3 +64,11 @@ pub async fn advertise(config: &Config) -> SocketAddr {
         listen.port(),
     )
 }
+
+/// The RPC address that other members use: `--rpc-advertise`, else the IP of `advertise` with
+/// the port of `bound`, so a `--rpc-listen` on port 0 advertises the port it got.
+pub fn rpc_advertise(config: &Config, advertise: SocketAddr, bound: SocketAddr) -> SocketAddr {
+    config
+        .rpc_advertise
+        .unwrap_or_else(|| SocketAddr::new(advertise.ip(), bound.port()))
+}

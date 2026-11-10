@@ -702,7 +702,7 @@ impl Replicator {
             .epochs()
             .current()
             .member(peer)
-            .map(|m| m.addr)
+            .map(|m| m.rpc_addr)
             .ok_or_else(|| TransportError::Connect(format!("node {peer} is not a member")))?;
         let code = message.type_code();
         let build = |info: &PeerInfo| match info.capabilities & caps::REPLICATION {

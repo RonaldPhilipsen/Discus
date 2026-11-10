@@ -11,7 +11,7 @@ use tokio_util::task::TaskTracker;
 
 use discus_membership::{LeaseProvider, NoneLease};
 use discus_placement::{Clock, NTP64};
-use discus_transport::{TlsMaterial, Transport, TransportConfig};
+use discus_transport::{Channels, Service, TlsMaterial, Transport, TransportConfig};
 
 use crate::admin::serve_admin;
 use crate::cluster::service::NodeService;
@@ -26,6 +26,8 @@ use crate::{Config, Node, Phase};
 pub struct BindOptions {
     /// The QUIC socket, already bound, so a test knows every address first.
     pub cluster_socket: Option<std::net::UdpSocket>,
+    /// The RPC QUIC socket, already bound, with gossip membership. Static membership ignores it.
+    pub rpc_socket: Option<std::net::UdpSocket>,
     /// The cluster lease instead of the one `--lease-provider` names.
     pub lease: Option<Arc<dyn LeaseProvider>>,
     /// The HLC clock and the wall clock, for example two halves of one mock clock slot.
@@ -88,6 +90,17 @@ fn lease_provider(config: &Config) -> Result<Arc<dyn LeaseProvider>, String> {
         }
         #[cfg(not(feature = "k8s"))]
         LeaseKind::K8s => Err("--lease-provider k8s needs the k8s build feature".into()),
+    }
+}
+
+async fn bind_transport(
+    config: TransportConfig,
+    socket: Option<std::net::UdpSocket>,
+    service: Arc<dyn Service>,
+) -> io::Result<Transport> {
+    match socket {
+        Some(socket) => Transport::bind_socket(config, socket, service),
+        None => Transport::bind(config, service).await,
     }
 }
 
@@ -178,18 +191,37 @@ impl Server {
             tc.idle_timeout = Duration::from_millis(cfg.cluster_idle_timeout_ms);
             tc.keep_alive = Duration::from_millis(cfg.cluster_keep_alive_ms);
             tc.handshake_timeout = Duration::from_millis(cfg.cluster_handshake_timeout_ms);
-            let service = Arc::new(NodeService(Arc::downgrade(&node)));
-            let transport = match socket {
-                Some(socket) => Transport::bind_socket(tc, socket, service)?,
-                None => Transport::bind(tc, service).await?,
+            let service: Arc<dyn Service> = Arc::new(NodeService(Arc::downgrade(&node)));
+            let rpc = match lease {
+                // Gossip membership: gossip on `--cluster-listen`, RPC on `--rpc-listen`.
+                Some(lease) => {
+                    let rpc_tc = TransportConfig {
+                        listen: cfg.rpc_listen,
+                        channels: Channels::RpcOnly,
+                        ..tc.clone()
+                    };
+                    let rpc = bind_transport(rpc_tc, opts.rpc_socket, service.clone()).await?;
+                    let gossip_tc = TransportConfig {
+                        channels: Channels::GossipOnly,
+                        ..tc
+                    };
+                    let gossip = bind_transport(gossip_tc, socket, service).await?;
+                    let advertise = discovery::advertise(cfg).await;
+                    let rpc_advertise = discovery::rpc_advertise(cfg, advertise, rpc.local_addr());
+                    let membership = Membership::new(
+                        &node,
+                        gossip,
+                        rpc.clone(),
+                        lease,
+                        advertise,
+                        rpc_advertise,
+                    );
+                    node.set_membership(membership);
+                    rpc
+                }
+                None => bind_transport(tc, socket, service).await?,
             };
-            if let Some(lease) = lease {
-                let advertise = discovery::advertise(&node.config).await;
-                let membership =
-                    Membership::new(&node, transport.clone(), lease, advertise, advertise);
-                node.set_membership(membership);
-            }
-            node.set_link(ClusterLink::new(transport, &node.config));
+            node.set_link(ClusterLink::new(rpc, &node.config));
             node.set_replicator(crate::replication::Replicator::new(&node));
         }
         Ok(Server {
@@ -199,8 +231,17 @@ impl Server {
         })
     }
 
-    /// The QUIC address, when the transport runs.
+    /// The QUIC address of `--cluster-listen`, when the transport runs. With gossip membership
+    /// it serves gossip only.
     pub fn cluster_addr(&self) -> Option<SocketAddr> {
+        match self.node.membership() {
+            Some(m) => Some(m.gossip_transport().local_addr()),
+            None => self.rpc_addr(),
+        }
+    }
+
+    /// The QUIC address that serves node-to-node RPC, when the transport runs.
+    pub fn rpc_addr(&self) -> Option<SocketAddr> {
         self.node.link().map(|l| l.transport.local_addr())
     }
 
@@ -255,6 +296,7 @@ impl Server {
         tracing::info!(addr = ?listener.local_addr().ok(), "serving");
         node.lag().spawn(stop_background.clone());
         if let Some(membership) = node.membership() {
+            tracing::info!(gossip = %membership.gossip_transport().local_addr(), "gossip transport");
             crate::telemetry::observe_health(discus_telemetry::global(), membership);
             membership.spawn(stop_background.clone());
         }
@@ -265,7 +307,7 @@ impl Server {
             counters.spawn(stop_background.clone());
         }
         if let Some(link) = node.link() {
-            tracing::info!(cluster = %link.transport.local_addr(), "node-to-node transport");
+            tracing::info!(rpc = %link.transport.local_addr(), "node-to-node transport");
             crate::telemetry::observe_transport(discus_telemetry::global(), &link.transport);
             // The transport events feed the peer error and QUIC failure metrics.
             let (transport, stop) = (link.transport.clone(), stop_background.clone());
@@ -276,7 +318,7 @@ impl Server {
             // Dial every peer early, so the first forward does not pay the handshake.
             let epoch = node.epochs().current().clone();
             for m in epoch.members().iter().filter(|m| m.id != node.id) {
-                let (transport, id, addr) = (link.transport.clone(), m.id, m.addr);
+                let (transport, id, addr) = (link.transport.clone(), m.id, m.rpc_addr);
                 tokio::spawn(async move {
                     if let Err(e) = transport.peer(id, addr).await {
                         tracing::warn!(peer = %id, %addr, error = %e, "cannot reach a peer");
@@ -330,6 +372,7 @@ impl Server {
         }
         if let Some(membership) = node.membership() {
             membership.depart().await;
+            membership.gossip_transport().close();
         }
         stop_background.cancel();
         if let Some(link) = node.link() {

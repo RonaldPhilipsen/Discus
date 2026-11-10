@@ -133,6 +133,14 @@ pub struct Config {
     /// is specified, else the local address toward the first seed.
     #[arg(long)]
     pub cluster_advertise: Option<SocketAddr>,
+    /// Node-to-node RPC (QUIC, UDP) listen address, with gossip membership. With static
+    /// membership RPC shares `--cluster-listen`.
+    #[arg(long, default_value = "0.0.0.0:7380")]
+    pub rpc_listen: SocketAddr,
+    /// The RPC address that other members use. Default: the IP of the cluster advertise address
+    /// with the bound `--rpc-listen` port.
+    #[arg(long)]
+    pub rpc_advertise: Option<SocketAddr>,
     /// The cluster lease provider.
     #[arg(long, value_enum, default_value_t = LeaseKind::default_kind())]
     pub lease_provider: LeaseKind,

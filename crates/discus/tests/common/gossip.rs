@@ -18,7 +18,9 @@ pub struct GossipNode {
     pub id: NodeId,
     pub addr: SocketAddr,
     pub admin: SocketAddr,
+    /// The gossip address. With static membership it also carries RPC.
     pub cluster_addr: SocketAddr,
+    pub rpc_addr: SocketAddr,
     pub node: Arc<Node>,
     pub shutdown: CancellationToken,
 }
@@ -29,6 +31,9 @@ impl GossipNode {
     pub fn kill(&self) {
         if let Some(link) = self.node.link() {
             link.transport.close();
+        }
+        if let Some(m) = self.node.membership() {
+            m.gossip_transport().close();
         }
         self.shutdown.cancel();
     }
@@ -81,6 +86,7 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("--forward-write-timeout-ms", "2000"),
     ("--replication-factor", "1"),
     ("--shutdown-timeout-secs", "1"),
+    ("--rpc-listen", "127.0.0.1:0"),
 ];
 
 pub struct Net {
@@ -145,6 +151,7 @@ impl Net {
             config,
             BindOptions {
                 cluster_socket: Some(socket),
+                rpc_socket: None,
                 lease: Some(lease),
                 hlc_clock,
                 wall,
@@ -254,6 +261,7 @@ pub fn argv(
 pub fn spawn(server: Server, cluster_addr: SocketAddr) -> GossipNode {
     let node = server.node().clone();
     let (addr, admin) = (server.local_addr(), server.admin_addr());
+    let rpc_addr = server.rpc_addr().expect("the node runs the transport");
     let shutdown = CancellationToken::new();
     tokio::spawn(server.run(shutdown.clone()));
     GossipNode {
@@ -261,6 +269,7 @@ pub fn spawn(server: Server, cluster_addr: SocketAddr) -> GossipNode {
         addr,
         admin,
         cluster_addr,
+        rpc_addr,
         node,
         shutdown,
     }

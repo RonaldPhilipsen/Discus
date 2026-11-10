@@ -347,7 +347,7 @@ impl Node {
         let epoch = self.epochs().current().clone();
         let addr = epoch
             .member(to)
-            .map(|m| m.addr)
+            .map(|m| m.rpc_addr)
             .ok_or_else(|| format!("node {to} is not a member"))?;
         Ok((link, addr, epoch))
     }
