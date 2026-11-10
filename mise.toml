@@ -56,3 +56,7 @@ run = "bash scripts/bench-flamegraph.sh"
 [tasks.build-matrix]
 description = "Check every build feature combination and the rejected ones"
 run = "bash scripts/build-matrix.sh"
+
+[tasks.bench-k8s]
+description = "Compare Discus, Redis, and Valkey setups on Kubernetes with memtier_benchmark"
+run = "python3 -I scripts/bench-k8s.py"
