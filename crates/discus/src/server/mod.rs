@@ -253,7 +253,9 @@ impl Server {
             "bootstrapped"
         );
         tracing::info!(addr = ?listener.local_addr().ok(), "serving");
+        node.lag().spawn(stop_background.clone());
         if let Some(membership) = node.membership() {
+            crate::telemetry::observe_health(discus_telemetry::global(), membership);
             membership.spawn(stop_background.clone());
         }
         if let Some(replicator) = node.replicator() {

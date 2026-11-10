@@ -19,6 +19,7 @@ use crate::cluster::writeset::{WriteSet, WriteSetBudget, WriteSetLimits};
 use crate::cluster::ClusterLink;
 use crate::command::CommandError;
 use crate::counter::Counters;
+use crate::lag::LagProbe;
 use crate::membership::Membership;
 use crate::replication::Replicator;
 use crate::security::{ConnAuth, Security};
@@ -64,6 +65,7 @@ pub struct Node {
     phase: AtomicU8,
     link: OnceLock<ClusterLink>,
     membership: OnceLock<Arc<Membership>>,
+    lag: LagProbe,
     replicator: OnceLock<Arc<Replicator>>,
     counters: OnceLock<Arc<Counters>>,
     epoch_tx: tokio::sync::watch::Sender<EpochId>,
@@ -207,6 +209,7 @@ impl Node {
             phase: AtomicU8::new(Phase::Starting as u8),
             link: OnceLock::new(),
             membership: OnceLock::new(),
+            lag: LagProbe::new(),
             replicator: OnceLock::new(),
             counters: OnceLock::new(),
             epoch_tx,
@@ -219,6 +222,11 @@ impl Node {
     /// Cancelled by `POST /admin/drain`. `Server::run` then drains as on SIGTERM (spec §15.3).
     pub fn drain_token(&self) -> tokio_util::sync::CancellationToken {
         self.drain.clone()
+    }
+
+    /// The lag probe of the data runtime.
+    pub fn lag(&self) -> &LagProbe {
+        &self.lag
     }
 
     pub fn membership(&self) -> Option<&Arc<Membership>> {

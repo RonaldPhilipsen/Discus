@@ -28,6 +28,15 @@ pub struct StoreStats {
     pub keys: u64,
 }
 
+/// A snapshot of the local health, read at each metric collection.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HealthStats {
+    pub lag_ms: u64,
+    pub score_ms: f64,
+    pub multiplier: f64,
+    pub evidence_dropped: u64,
+}
+
 /// A snapshot of the transport counters, read at each metric collection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TransportCounts {
@@ -84,6 +93,8 @@ mod imp {
         #[inline]
         pub fn observe_store(&self, source: impl Fn() -> StoreStats + Send + Sync + 'static) {}
         #[inline]
+        pub fn observe_health(&self, source: impl Fn() -> HealthStats + Send + Sync + 'static) {}
+        #[inline]
         pub fn observe_transport(
             &self,
             source: impl Fn() -> TransportCounts + Send + Sync + 'static,
@@ -138,6 +149,7 @@ mod imp {
     use crate::attrs::{check, Attribute};
 
     type Source = Box<dyn Fn() -> StoreStats + Send + Sync>;
+    type HealthSource = Box<dyn Fn() -> HealthStats + Send + Sync>;
     type TransportSource = Box<dyn Fn() -> TransportCounts + Send + Sync>;
 
     /// The metrics handle. Cheap to clone.
@@ -178,6 +190,7 @@ mod imp {
         raft_single_voter_groups: Gauge<u64>,
         store: Arc<RwLock<Option<Source>>>,
         transport: Arc<RwLock<Option<TransportSource>>>,
+        health: Arc<RwLock<Option<HealthSource>>>,
         // The observable instruments stay registered while these handles live.
         _observers: Vec<Box<dyn std::any::Any + Send + Sync>>,
     }
@@ -313,6 +326,54 @@ mod imp {
                 Box::new(crate::logging::suppressed),
             )));
 
+            let health: Arc<RwLock<Option<HealthSource>>> = Arc::new(RwLock::new(None));
+            let health_gauge = |name: &'static str,
+                                desc: &'static str,
+                                unit: &'static str,
+                                pick: fn(&HealthStats) -> f64| {
+                let health = health.clone();
+                meter
+                    .f64_observable_gauge(name)
+                    .with_description(desc)
+                    .with_unit(unit)
+                    .with_callback(move |o| {
+                        if let Some(f) = health.read().ok().as_ref().and_then(|s| s.as_ref()) {
+                            o.observe(pick(&f()), &[]);
+                        }
+                    })
+                    .build()
+            };
+            observers.push(Box::new(health_gauge(
+                "discus.local_health.lag_ms",
+                "Lag of the data runtime",
+                "ms",
+                |h| h.lag_ms as f64,
+            )));
+            observers.push(Box::new(health_gauge(
+                "discus.local_health.score_ms",
+                "Smoothed lag that scales the membership timeouts",
+                "ms",
+                |h| h.score_ms,
+            )));
+            observers.push(Box::new(health_gauge(
+                "discus.local_health.multiplier",
+                "Factor applied to the membership timeouts",
+                "1",
+                |h| h.multiplier,
+            )));
+            let evidence = health.clone();
+            observers.push(Box::new(
+                meter
+                    .u64_observable_counter("discus.membership.evidence_dropped")
+                    .with_description("Data-path evidence dropped because the queue was full")
+                    .with_callback(move |o| {
+                        if let Some(f) = evidence.read().ok().as_ref().and_then(|s| s.as_ref()) {
+                            o.observe(f().evidence_dropped, &[]);
+                        }
+                    })
+                    .build(),
+            ));
+
             let transport: Arc<RwLock<Option<TransportSource>>> = Arc::new(RwLock::new(None));
             let transport_counter =
                 |name: &'static str, desc: &'static str, pick: fn(&TransportCounts) -> u64| {
@@ -420,6 +481,7 @@ mod imp {
                 ),
                 store,
                 transport,
+                health,
                 _observers: observers,
             };
             Metrics {
@@ -456,6 +518,16 @@ mod imp {
         pub fn observe_store(&self, source: impl Fn() -> StoreStats + Send + Sync + 'static) {
             self.with(|i| {
                 if let Ok(mut slot) = i.store.write() {
+                    *slot = Some(Box::new(source));
+                }
+            });
+        }
+
+        /// Read the local health from `source` at each collection. A later call replaces the
+        /// source.
+        pub fn observe_health(&self, source: impl Fn() -> HealthStats + Send + Sync + 'static) {
+            self.with(|i| {
+                if let Ok(mut slot) = i.health.write() {
                     *slot = Some(Box::new(source));
                 }
             });

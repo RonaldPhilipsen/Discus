@@ -208,6 +208,12 @@ pub fn observe_store_on(metrics: &Metrics, node: &Arc<Node>) {
     });
 }
 
+/// Report the local health of `membership` through `metrics`.
+pub fn observe_health(metrics: &Metrics, membership: &Arc<crate::membership::Membership>) {
+    let membership = membership.clone();
+    metrics.observe_health(move || membership.health());
+}
+
 /// Report the transport counters of `transport` through `metrics`.
 pub fn observe_transport(metrics: &Metrics, transport: &discus_transport::Transport) {
     let transport = transport.clone();

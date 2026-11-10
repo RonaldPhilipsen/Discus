@@ -71,6 +71,27 @@ fn auth_results_are_counted_by_status() {
 }
 
 #[test]
+fn health_stats_are_observed() {
+    let h = MetricHarness::new();
+    h.metrics
+        .observe_health(|| discus_telemetry::metrics::HealthStats {
+            lag_ms: 12,
+            score_ms: 3.5,
+            multiplier: 1.5,
+            evidence_dropped: 4,
+        });
+    let points = h.points();
+    for (name, value) in [
+        ("discus.local_health.lag_ms", 12.0),
+        ("discus.local_health.score_ms", 3.5),
+        ("discus.local_health.multiplier", 1.5),
+        ("discus.membership.evidence_dropped", 4.0),
+    ] {
+        assert_eq!(find(&points, name, None).unwrap().value, value, "{name}");
+    }
+}
+
+#[test]
 fn store_stats_are_observed() {
     let h = MetricHarness::new();
     h.metrics.observe_store(|| StoreStats {

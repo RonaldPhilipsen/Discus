@@ -129,6 +129,17 @@ impl Membership {
         })
     }
 
+    pub fn health(&self) -> discus_telemetry::metrics::HealthStats {
+        let lag_ms = self.node.upgrade().map_or(0, |n| n.lag().lag_ms());
+        let inner = self.inner.lock();
+        discus_telemetry::metrics::HealthStats {
+            lag_ms,
+            score_ms: inner.swim.health_score_ms(),
+            multiplier: inner.swim.health_multiplier(),
+            evidence_dropped: inner.swim.evidence_dropped(),
+        }
+    }
+
     fn now(&self) -> Millis {
         self.start.elapsed().as_millis() as Millis
     }
@@ -150,9 +161,16 @@ impl Membership {
             "gossip membership starting"
         );
         let me = self.clone();
-        every(TICK, stop.clone(), move || {
-            me.tick();
-            std::future::ready(())
+        let s = stop.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(TICK);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = s.cancelled() => return,
+                    _ = ticker.tick() => me.tick(),
+                }
+            }
         });
         let me = self.clone();
         let s = stop.clone();
@@ -191,6 +209,7 @@ impl Membership {
         let now = self.now();
         let actions = self.drive(|swim, host| {
             swim.set_capacity(capacity);
+            swim.observe_lag(node.lag().lag_ms());
             swim.tick(now, host)
         });
         self.dispatch(actions);
