@@ -104,6 +104,10 @@ pub struct Faults {
     pub forwards: AtomicU64,
     /// `-MOVED` replies that this node returned.
     pub redirects: AtomicU64,
+    /// The handoff scan waits before each page while this is set.
+    pub hold_scan: std::sync::atomic::AtomicBool,
+    /// A handoff scan waited on `hold_scan`.
+    pub scan_held: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "testing")]
