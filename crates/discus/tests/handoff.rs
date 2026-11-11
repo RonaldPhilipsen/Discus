@@ -260,3 +260,56 @@ async fn old_owners_drop_the_keys_they_handed_off() {
     assert_eq!(size, keys.len() as i64);
     assert_eq!(hits(&joiner, &keys).await, keys.len());
 }
+
+/// A write that lands on an old owner after its scan passed the key, from a command that routed
+/// before the adoption, reaches the current owners before the old owner drops the key.
+#[tokio::test]
+async fn a_write_behind_the_scan_reaches_the_owners_before_the_drop() {
+    let net = Net::new();
+    let extra = ["--replication-factor", "3"];
+    let nodes = net.start_agreed(3, &extra).await;
+    let keys = fill(&nodes[0], "late", 400).await;
+    let old = &nodes[0];
+    let everywhere = || {
+        nodes.iter().all(|n| {
+            keys.iter()
+                .all(|k| n.node.store.read(k.as_bytes(), |e| e.is_some()))
+        })
+    };
+    assert!(wait_until(FORM, everywhere).await);
+    let rep = old.node.replicator().unwrap();
+    assert!(wait_until(FORM, || !rep.scanning()).await);
+    // Stamped before the scan starts, so the version is below the scan watermark.
+    let stamp = old.node.stamp().unwrap();
+    old.node.faults.hold_drop.store(true, Ordering::Relaxed);
+    let joiner = net.start(&[old.cluster_addr], &extra).await;
+    assert!(started(&joiner).await);
+    let held = || old.node.faults.drop_held.load(Ordering::Relaxed);
+    assert!(wait_until(Duration::from_secs(60), held).await);
+
+    let epoch = old.node.epochs().current().clone();
+    let key = keys
+        .iter()
+        .find(|k| !epoch.owners(k.as_bytes(), 3).contains(&old.id))
+        .unwrap();
+    let mut late = discus_store::Entry::new(discus_store::Value::Str("late".into()), None);
+    late.version = stamp;
+    assert!(old.node.store.apply(key.as_bytes(), late));
+
+    old.node.faults.hold_drop.store(false, Ordering::Relaxed);
+    assert!(wait_until(Duration::from_secs(60), || !rep.scanning()).await);
+    let all: Vec<&GossipNode> = nodes.iter().chain(std::iter::once(&joiner)).collect();
+    for n in all {
+        let value = n.node.store.entry(key.as_bytes()).map(|e| e.value);
+        if epoch.owners(key.as_bytes(), 3).contains(&n.id) {
+            assert_eq!(
+                value,
+                Some(discus_store::Value::Str("late".into())),
+                "{}",
+                n.id
+            );
+        } else {
+            assert_eq!(value, None, "{}", n.id);
+        }
+    }
+}

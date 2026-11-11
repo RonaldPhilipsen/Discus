@@ -108,6 +108,10 @@ pub struct Faults {
     pub hold_scan: std::sync::atomic::AtomicBool,
     /// A handoff scan waited on `hold_scan`.
     pub scan_held: std::sync::atomic::AtomicBool,
+    /// The drop of moved keys waits before each page while this is set.
+    pub hold_drop: std::sync::atomic::AtomicBool,
+    /// A drop of moved keys waited on `hold_drop`.
+    pub drop_held: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "testing")]

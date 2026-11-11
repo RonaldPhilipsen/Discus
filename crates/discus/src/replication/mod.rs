@@ -22,7 +22,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use discus_placement::{ClusterId, Epoch, NodeId, Version, NTP64};
+use discus_placement::{ClusterId, Epoch, NodeId, Version};
 use discus_store::{refill_bucket, Entry, Store};
 use discus_transport::{Lane, PeerInfo, TransportError};
 use discus_wire::{caps, Batch, BatchAck, Message, TraceContext};
@@ -361,7 +361,9 @@ impl Replicator {
             };
             let watermark = node.hlc.current();
             if handoff::scan(&node, &changes, to.clone(), limits).await {
-                self.drop_lost(&node, to, watermark).await;
+                let newest = &self.peer_generation;
+                let dropped = handoff::drop_lost(&node, &to, watermark, newest, limits).await;
+                tracing::info!(dropped, "dropped the keys that moved to other owners");
             }
             self.scans.fetch_add(1, Ordering::Relaxed);
             drop(changes);
@@ -373,28 +375,6 @@ impl Replicator {
             if more {
                 self.scan_wake.notify_one();
             }
-        }
-    }
-
-    /// Drop the keys that this node lost up to `to`, off the async workers.
-    async fn drop_lost(self: &Arc<Self>, node: &Node, to: Arc<Epoch>, watermark: NTP64) {
-        let current = node.epochs().current().clone();
-        let (me, rf) = (self.clone(), self.settings.rf);
-        let walk = move || {
-            let before = me.store.len();
-            handoff::drop_lost(
-                &me.store,
-                me.id,
-                (&to, &current),
-                rf,
-                watermark,
-                &me.peer_generation,
-            );
-            before.saturating_sub(me.store.len())
-        };
-        match tokio::task::spawn_blocking(walk).await {
-            Ok(dropped) => tracing::info!(dropped, "dropped the keys that moved to other owners"),
-            Err(e) => tracing::warn!(error = %e, "the drop of moved keys failed"),
         }
     }
 
@@ -877,7 +857,7 @@ impl Replicator {
     async fn discard(&self, node: &Node, from: NodeId, buckets: Vec<u8>) {
         let (epoch, store) = (node.epochs().current().clone(), self.store.clone());
         let walk = move || {
-            store.retain(|k, _| {
+            store.retain(|k| {
                 !(buckets.contains(&refill_bucket(k)) && epoch.primary(k) == Some(from))
             })
         };

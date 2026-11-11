@@ -335,6 +335,18 @@ impl Store {
         guard.map.get(key).filter(|e| !e.is_expired(now)).cloned()
     }
 
+    /// Remove the entry of `key`, tombstone or not, when `f` accepts it. `f` runs under the
+    /// shard lock, so no write to `key` lands between the check and the removal. Returns true
+    /// when the entry was removed.
+    pub fn remove_if(&self, key: &[u8], f: impl FnOnce(&Entry) -> bool) -> bool {
+        let shard = &self.shards[self.shard_index(key)];
+        let mut guard = shard.inner.write();
+        if !guard.map.get(key).is_some_and(f) {
+            return false;
+        }
+        self.take(&mut guard, key).is_some()
+    }
+
     /// The version of the entry, tombstone or not. An expired entry is absent.
     pub fn version(&self, key: &[u8]) -> Option<Version> {
         let now = self.clock.now_ms();
@@ -468,16 +480,11 @@ impl Store {
         shard.needs_refill.store(false, Ordering::Relaxed);
     }
 
-    /// Keep only the entries for which `f` is true, tombstones included.
-    pub fn retain(&self, f: impl Fn(&[u8], &Entry) -> bool) {
+    /// Keep only the keys for which `f` is true, tombstones included.
+    pub fn retain(&self, f: impl Fn(&[u8]) -> bool) {
         for shard in &self.shards {
             let mut guard = shard.inner.write();
-            let drop: Vec<Bytes> = guard
-                .map
-                .iter()
-                .filter(|(k, e)| !f(k, e))
-                .map(|(k, _)| k.clone())
-                .collect();
+            let drop: Vec<Bytes> = guard.map.keys().filter(|k| !f(k)).cloned().collect();
             for k in drop {
                 self.take(&mut guard, &k);
             }

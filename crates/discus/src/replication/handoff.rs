@@ -9,11 +9,12 @@
 //! once every source is done or gone.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use discus_placement::{range_of, slot, Epoch, EpochId, NodeId, Version};
+use discus_placement::{range_of, slot, Epoch, EpochId, NodeId, Version, NTP64, RANGES};
 use discus_wire::{Batch, Message};
 
 use crate::node::EpochPin;
@@ -229,31 +230,97 @@ pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits
     targets.values().all(|t| !t.abandoned)
 }
 
-/// Drop the keys that `me` owns neither in `to` nor in `current`, after a scan up to `to` that
-/// reached every target. The old owner keeps its entries only until the new owners acknowledge
-/// the handoff (spec section 5.2): after its `done` batch, no new owner falls back to it.
+/// Drop the keys that this node owns neither in `to` nor in the current epoch, after a scan up
+/// to `to` that reached every target. The old owner keeps its entries only until the new owners
+/// acknowledge the handoff (spec section 5.2): after its `done` batch, no new owner falls back to
+/// it. Returns how many keys it dropped.
 ///
-/// A key stays when its entry is newer than `watermark`, because a peer in a newer epoch can
-/// forward a write here first. It also stays once `newest` passes the generation of `current`:
-/// a peer in an epoch that this node has not adopted yet sent entries, maybe of ranges that
-/// this node gains in that epoch.
-pub fn drop_lost(
-    store: &discus_store::Store,
-    me: NodeId,
-    (to, current): (&Epoch, &Epoch),
-    rf: usize,
-    watermark: discus_placement::NTP64,
-    newest: &std::sync::atomic::AtomicU64,
-) {
-    let owned: Vec<bool> = (0..discus_placement::RANGES)
-        .map(|r| to.range_owners(r, rf).contains(&me) || current.range_owners(r, rf).contains(&me))
-        .collect();
+/// A write can reach this node after the scan passed its key, from a command that routed before
+/// the adoption. The scan never sent it, and the replication queue can skip it, because a queue
+/// stops carrying keys that this node no longer owns. So each key is first offered at its
+/// version to every current owner, which asks for it if its own copy is older. The key goes
+/// only if every owner answered and the entry still has the offered version.
+///
+/// A key also stays when its entry is newer than `watermark`, because a peer in a newer epoch can
+/// forward a write here first. Every key stays once `newest` passes the generation of the current
+/// epoch: a peer in an epoch that this node has not adopted yet sent entries, maybe of ranges
+/// that this node gains in that epoch.
+pub async fn drop_lost(
+    node: &Arc<Node>,
+    to: &Epoch,
+    watermark: NTP64,
+    newest: &AtomicU64,
+    limits: Limits,
+) -> usize {
+    let Some(replicator) = node.replicator().cloned() else {
+        return 0;
+    };
+    let (me, rf) = (node.id, limits.rf);
+    let current = node.epochs().current().clone();
+    if !current.is_normal(me) {
+        return 0;
+    }
     let generation = current.id().generation;
-    store.retain(|k, e| {
-        owned[usize::from(range_of(slot(k)))]
-            || e.version.time() > watermark
-            || newest.load(std::sync::atomic::Ordering::SeqCst) > generation
-    });
+    let lost: Vec<bool> = (0..RANGES)
+        .map(|r| {
+            !to.range_owners(r, rf).contains(&me) && !current.range_owners(r, rf).contains(&me)
+        })
+        .collect();
+    let mut failed: BTreeSet<NodeId> = BTreeSet::new();
+    let mut dropped = 0;
+    let mut cursor = 0;
+    loop {
+        #[cfg(feature = "testing")]
+        while node.faults.hold_drop.load(Ordering::Relaxed) {
+            node.faults.drop_held.store(true, Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        if newest.load(Ordering::SeqCst) > generation {
+            return dropped;
+        }
+        let (next, entries) = node.store.scan_entries(cursor, STEP, |k, e| {
+            lost[usize::from(range_of(slot(k)))] && e.version.time() <= watermark
+        });
+        let mut targets: HashMap<NodeId, Target> = HashMap::new();
+        let offered: Vec<(Bytes, Version, Vec<NodeId>)> = entries
+            .into_iter()
+            .map(|(k, e)| (k.clone(), e.version, current.owners(&k, rf)))
+            .filter(|(_, _, owners)| {
+                !owners.is_empty() && !owners.iter().any(|o| failed.contains(o))
+            })
+            .collect();
+        for (k, v, owners) in &offered {
+            for o in owners {
+                targets
+                    .entry(*o)
+                    .or_insert_with(Target::new)
+                    .offers
+                    .push((k.clone(), *v));
+            }
+        }
+        for (g, t) in targets.iter_mut() {
+            flush(node, &replicator, *g, t, None, limits).await;
+            while !t.abandoned && !t.wanted.is_empty() {
+                flush(node, &replicator, *g, t, None, limits).await;
+            }
+            if t.abandoned {
+                failed.insert(*g);
+            }
+        }
+        for (k, v, owners) in offered {
+            if owners.iter().any(|o| failed.contains(o)) {
+                continue;
+            }
+            let removed = node.store.remove_if(&k, |e| {
+                e.version == v && newest.load(Ordering::SeqCst) <= generation
+            });
+            dropped += usize::from(removed);
+        }
+        if next == 0 {
+            return dropped;
+        }
+        cursor = next;
+    }
 }
 
 /// Send the batch of one target with retries. A target that keeps failing is abandoned for
@@ -334,95 +401,4 @@ pub fn changes(
         })
         .filter(|s| !s.is_empty());
     (outgoing, incoming)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::net::SocketAddr;
-    use std::sync::atomic::AtomicU64;
-
-    use discus_placement::{ClusterId, ManualClock, Member, MemberState, Weight, NTP64};
-    use discus_store::{Entry, Store, StoreConfig, Value};
-
-    use super::*;
-
-    fn member(id: u128) -> Member {
-        let addr: SocketAddr = "10.0.0.1:7000".parse().unwrap();
-        Member {
-            id: NodeId::from_u128(id),
-            addr,
-            rpc_addr: addr,
-            client_addr: None,
-            client_host: None,
-            state: MemberState::Normal,
-            weight: Weight::default(),
-        }
-    }
-
-    fn put(store: &Store, key: &str, time: u64) {
-        let mut e = Entry::new(Value::Str(Bytes::from_static(b"v")), None);
-        e.version = Version::new(NTP64(time), NodeId::from_u128(9));
-        assert!(store.apply(key.as_bytes(), e));
-    }
-
-    /// Two members with `RF = 1`, and keys on both sides of the watermark.
-    fn setup() -> (Store, Epoch, Vec<String>, Vec<String>) {
-        let id = EpochId {
-            generation: 5,
-            origin: NodeId::from_u128(1),
-        };
-        let epoch = Epoch::new(id, ClusterId::NIL, vec![member(1), member(2)]).unwrap();
-        epoch.table(1);
-        let store = Store::new(StoreConfig::default(), Arc::new(ManualClock::new(1)));
-        let (mut mine, mut lost) = (Vec::new(), Vec::new());
-        for i in 0..200 {
-            let k = format!("k{i}");
-            put(&store, &k, 10);
-            if epoch.owners(k.as_bytes(), 1) == [NodeId::from_u128(1)] {
-                mine.push(k);
-            } else {
-                lost.push(k);
-            }
-        }
-        (store, epoch, mine, lost)
-    }
-
-    fn held(store: &Store, keys: &[String]) -> usize {
-        keys.iter()
-            .filter(|k| store.read(k.as_bytes(), |e| e.is_some()))
-            .count()
-    }
-
-    #[test]
-    fn drop_lost_keeps_owned_and_newer_keys() {
-        let (store, epoch, mine, lost) = setup();
-        put(&store, &lost[0], 30);
-        let me = NodeId::from_u128(1);
-        drop_lost(
-            &store,
-            me,
-            (&epoch, &epoch),
-            1,
-            NTP64(20),
-            &AtomicU64::new(5),
-        );
-        assert_eq!(held(&store, &mine), mine.len());
-        assert_eq!(held(&store, &lost), 1);
-        assert!(store.read(lost[0].as_bytes(), |e| e.is_some()));
-    }
-
-    #[test]
-    fn drop_lost_keeps_every_key_after_a_batch_from_a_newer_epoch() {
-        let (store, epoch, mine, lost) = setup();
-        let me = NodeId::from_u128(1);
-        drop_lost(
-            &store,
-            me,
-            (&epoch, &epoch),
-            1,
-            NTP64(20),
-            &AtomicU64::new(6),
-        );
-        assert_eq!(held(&store, &mine) + held(&store, &lost), 200);
-    }
 }

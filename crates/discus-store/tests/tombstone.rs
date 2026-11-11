@@ -258,7 +258,7 @@ fn retain_and_clear_drop_tombstones_too() {
     put(&s, "a", v(1));
     put(&s, "b", v(1));
     del(&s, "b", v(2));
-    s.retain(|k, _| k != b"a");
+    s.retain(|k| k != b"a");
     assert!(s.entry(b"a").is_none());
     assert!(s.entry(b"b").is_some());
     s.clear();
@@ -322,4 +322,18 @@ fn a_newer_apply_makes_room_under_memory_pressure() {
     assert!(s.evictions() > evicted);
     assert!(s.used_memory() <= 4_000);
     assert_eq!(s.entry(key.as_bytes()).unwrap().version, v(20));
+}
+
+#[test]
+fn remove_if_checks_the_entry_and_keeps_the_accounting() {
+    let (s, _) = store(1 << 20, 1 << 20);
+    put(&s, "a", v(1));
+    put(&s, "b", v(1));
+    del(&s, "b", v(2));
+    assert!(!s.remove_if(b"a", |e| e.version == v(9)));
+    assert!(s.entry(b"a").is_some());
+    assert!(s.remove_if(b"a", |e| e.version == v(1)));
+    assert!(s.remove_if(b"b", |e| e.version == v(2)));
+    assert!(!s.remove_if(b"missing", |_| true));
+    assert_eq!((s.len(), s.tombstones(), s.used_memory()), (0, 0, 0));
 }
