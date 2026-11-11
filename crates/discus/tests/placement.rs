@@ -135,10 +135,19 @@ async fn members_advertise_their_redirect_port() {
     let c = common::cluster::start_cluster_clients(
         3,
         |i| Some(ports[i]),
-        |i| vec!["--redirect-listen".into(), ports[i].to_string()],
+        |i| {
+            vec![
+                "--redirect-listen".into(),
+                ports[i].to_string(),
+                "--client-advertise".into(),
+                ports[i].to_string(),
+            ]
+        },
     )
     .await;
+    let first = c.nodes[0].node.epochs().current().clone();
     for n in &c.nodes {
+        assert_eq!(**n.node.epochs().current(), *first);
         let epoch = n.node.epochs().current().clone();
         for (i, other) in c.nodes.iter().enumerate() {
             let m = epoch.member(other.id).unwrap();
@@ -180,21 +189,32 @@ async fn gossip_members_advertise_their_redirect_port() {
 
 #[tokio::test]
 async fn an_empty_client_hostname_leaves_the_member_without_a_host() {
-    let c = common::cluster::start_cluster(
+    let ports: Vec<std::net::SocketAddr> = ["127.0.0.1:6380", "127.0.0.1:6381"]
+        .map(|a| a.parse().unwrap())
+        .to_vec();
+    let c = common::cluster::start_cluster_clients(
         2,
-        &[
-            "--client-advertise",
-            "127.0.0.1:6380",
-            "--client-hostname",
-            "",
-        ],
+        |i| Some(ports[i]),
+        |i| {
+            vec![
+                "--client-advertise".into(),
+                ports[i].to_string(),
+                "--client-hostname".into(),
+                "".into(),
+            ]
+        },
     )
     .await;
-    let epoch = c.nodes[0].node.epochs().current().clone();
-    let me = epoch.member(c.nodes[0].id).unwrap();
-    assert_eq!(me.client_addr, Some("127.0.0.1:6380".parse().unwrap()));
-    assert_eq!(me.client_host, None);
-    assert_eq!(c.nodes[0].node.client_host(), None);
+    let first = c.nodes[0].node.epochs().current().clone();
+    for n in &c.nodes {
+        assert_eq!(**n.node.epochs().current(), *first);
+        assert_eq!(n.node.client_host(), None);
+    }
+    for (i, n) in c.nodes.iter().enumerate() {
+        let m = first.member(n.id).unwrap();
+        assert_eq!(m.client_addr, Some(ports[i]));
+        assert_eq!(m.client_host, None);
+    }
 }
 
 fn cluster_args(extra: &[&str]) -> Vec<String> {
