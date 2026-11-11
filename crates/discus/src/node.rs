@@ -779,3 +779,17 @@ impl Drop for ConnectionGuard {
         self.0.connected.fetch_sub(1, Ordering::Relaxed);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_client_hostname_means_none() {
+        let addr = Some("10.1.2.3:6380".parse().unwrap());
+        let empty = Config::parse_from(["discus", "--client-hostname", ""]).unwrap();
+        assert_eq!(host_of(&empty, addr), None);
+        let set = Config::parse_from(["discus", "--client-hostname", "{ip}.peers"]).unwrap();
+        assert_eq!(host_of(&set, addr).as_deref(), Some("10-1-2-3.peers"));
+    }
+}
