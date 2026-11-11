@@ -337,3 +337,17 @@ fn remove_if_checks_the_entry_and_keeps_the_accounting() {
     assert!(!s.remove_if(b"missing", |_| true));
     assert_eq!((s.len(), s.tombstones(), s.used_memory()), (0, 0, 0));
 }
+
+#[test]
+fn an_expired_entry_still_refuses_an_older_version() {
+    let (s, clock) = store(1 << 20, 1 << 20);
+    let mut newer = value("new", v(20));
+    newer.expires_at_ms = Some(s.now_ms() + 10);
+    assert!(s.apply(b"k", newer));
+    clock.advance(20);
+    assert!(s.entry(b"k").is_none());
+    assert_eq!(s.stored_version(b"k"), Some(v(20)));
+    assert!(!s.apply(b"k", value("old", v(10))));
+    assert!(s.entry(b"k").is_none());
+    assert!(s.apply(b"k", value("newest", v(30))));
+}

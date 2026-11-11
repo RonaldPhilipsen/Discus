@@ -367,20 +367,38 @@ async fn a_write_queued_during_the_epoch_change_reaches_the_new_owners() {
 }
 
 /// Three nodes with `RF = 3`, filled and settled, then a joiner while the drop of `nodes[0]`
-/// holds. Returns the nodes, the joiner, and the keys that `nodes[0]` lost.
-async fn held_drop(net: &Net, prefix: &str) -> (Vec<GossipNode>, GossipNode, Vec<String>) {
-    let extra = ["--replication-factor", "3"];
+/// holds.
+async fn held_drop(net: &Net, prefix: &str) -> Held {
+    held_drop_rf(net, prefix, 3).await
+}
+
+struct Held {
+    nodes: Vec<GossipNode>,
+    joiner: GossipNode,
+    /// The keys that `nodes[0]` lost.
+    lost: Vec<String>,
+    /// A stamp of `nodes[0]` from before the join, so below the watermark of its scan.
+    early: discus_placement::Version,
+}
+
+/// [`held_drop`] with `rf` copies of each key.
+async fn held_drop_rf(net: &Net, prefix: &str, rf: usize) -> Held {
+    let rf_arg = rf.to_string();
+    let extra = ["--replication-factor", rf_arg.as_str()];
     let nodes = net.start_agreed(3, &extra).await;
     let keys = fill(&nodes[0], prefix, 300).await;
-    let everywhere = || {
-        nodes.iter().all(|n| {
-            keys.iter()
-                .all(|k| n.node.store.read(k.as_bytes(), |e| e.is_some()))
+    let replicated = || {
+        keys.iter().all(|k| {
+            let copies = nodes
+                .iter()
+                .filter(|n| n.node.store.read(k.as_bytes(), |e| e.is_some()));
+            copies.count() == rf
         })
     };
-    assert!(wait_until(FORM, everywhere).await);
+    assert!(wait_until(FORM, replicated).await);
     let rep = nodes[0].node.replicator().unwrap();
     assert!(wait_until(FORM, || !rep.scanning()).await);
+    let early = nodes[0].node.stamp().unwrap();
     nodes[0]
         .node
         .faults
@@ -393,15 +411,26 @@ async fn held_drop(net: &Net, prefix: &str) -> (Vec<GossipNode>, GossipNode, Vec
     let epoch = nodes[0].node.epochs().current().clone();
     let lost = keys
         .into_iter()
-        .filter(|k| !epoch.owners(k.as_bytes(), 3).contains(&nodes[0].id))
+        .filter(|k| !epoch.owners(k.as_bytes(), rf).contains(&nodes[0].id))
+        .filter(|k| nodes[0].node.store.read(k.as_bytes(), |e| e.is_some()))
         .collect();
-    (nodes, joiner, lost)
+    Held {
+        nodes,
+        joiner,
+        lost,
+        early,
+    }
 }
 
 #[tokio::test]
 async fn the_drop_keeps_an_entry_newer_than_the_scan_start() {
     let net = Net::new();
-    let (nodes, _joiner, lost) = held_drop(&net, "newer").await;
+    let Held {
+        nodes,
+        joiner: _joiner,
+        lost,
+        ..
+    } = held_drop(&net, "newer").await;
     let old = &nodes[0];
     // Stamped after the scan started. `apply` queues nothing, so only the guard keeps it.
     let mut newer = discus_store::Entry::new(discus_store::Value::Str("newer".into()), None);
@@ -420,7 +449,12 @@ async fn the_drop_keeps_an_entry_newer_than_the_scan_start() {
 #[tokio::test]
 async fn the_drop_keeps_every_key_after_a_batch_from_a_newer_epoch() {
     let net = Net::new();
-    let (nodes, joiner, lost) = held_drop(&net, "ahead").await;
+    let Held {
+        nodes,
+        joiner,
+        lost,
+        ..
+    } = held_drop(&net, "ahead").await;
     let old = &nodes[0];
     let rep = old.node.replicator().unwrap();
     let mut ahead = old.node.epoch_id();
@@ -435,4 +469,169 @@ async fn the_drop_keeps_every_key_after_a_batch_from_a_newer_epoch() {
     assert!(lost
         .iter()
         .all(|k| old.node.store.read(k.as_bytes(), |e| e.is_some())));
+}
+
+/// Release the held drop of `old` and wait until its pass ended.
+async fn release(old: &GossipNode) {
+    old.node.faults.hold_drop.store(false, Ordering::Relaxed);
+    let rep = old.node.replicator().unwrap();
+    assert!(wait_until(Duration::from_secs(120), || !rep.scanning()).await);
+}
+
+fn held(n: &GossipNode, keys: &[String]) -> usize {
+    keys.iter()
+        .filter(|k| n.node.store.read(k.as_bytes(), |e| e.is_some()))
+        .count()
+}
+
+#[tokio::test]
+async fn the_drop_stops_when_this_node_adopts_another_epoch() {
+    let net = Net::new();
+    let Held {
+        nodes,
+        joiner: _joiner,
+        lost,
+        ..
+    } = held_drop(&net, "adopt").await;
+    let old = &nodes[0];
+    let current = old.node.epochs().current().clone();
+    let id = discus_placement::EpochId {
+        generation: current.id().generation + 1,
+        origin: old.id,
+    };
+    let next = discus_placement::Epoch::new(id, current.cluster_id(), current.members().to_vec());
+    old.node.adopt_epoch(next.unwrap()).unwrap();
+    release(old).await;
+    assert_eq!(
+        *old.node.faults.drop_stopped.lock(),
+        Some("this node moved on to another epoch")
+    );
+    assert_eq!(held(old, &lost), lost.len());
+}
+
+#[tokio::test]
+async fn the_drop_keeps_the_keys_of_an_owner_that_does_not_answer() {
+    let net = Net::new();
+    let Held {
+        nodes,
+        joiner: _joiner,
+        lost,
+        ..
+    } = held_drop_rf(&net, "silent", 2).await;
+    let old = &nodes[0];
+    let silent = &nodes[1];
+    silent
+        .node
+        .faults
+        .stall_bulk_ms
+        .store(600_000, Ordering::Relaxed);
+    release(old).await;
+    silent.node.faults.stall_bulk_ms.store(0, Ordering::Relaxed);
+    let epoch = old.node.epochs().current().clone();
+    let (theirs, others): (Vec<String>, Vec<String>) = lost
+        .into_iter()
+        .partition(|k| epoch.owners(k.as_bytes(), 2).contains(&silent.id));
+    assert!(!theirs.is_empty() && !others.is_empty());
+    assert_eq!(held(old, &theirs), theirs.len());
+    assert_eq!(held(old, &others), 0);
+}
+
+#[tokio::test]
+async fn the_drop_keeps_the_keys_while_an_owner_lags() {
+    let net = Net::new();
+    let Held {
+        nodes,
+        joiner,
+        lost,
+        ..
+    } = held_drop(&net, "lag").await;
+    let old = &nodes[0];
+    let previous = old.node.epochs().previous().unwrap().id();
+    for n in nodes[1..].iter().chain(std::iter::once(&joiner)) {
+        *n.node.faults.ack_epoch.lock() = Some(previous);
+    }
+    release(old).await;
+    assert_eq!(*old.node.faults.drop_stopped.lock(), None);
+    assert_eq!(held(old, &lost), lost.len());
+}
+
+#[tokio::test]
+async fn the_drop_stops_when_an_owner_runs_ahead() {
+    let net = Net::new();
+    let Held {
+        nodes,
+        joiner,
+        lost,
+        ..
+    } = held_drop(&net, "ahead-owner").await;
+    let old = &nodes[0];
+    let mut ahead = old.node.epoch_id();
+    ahead.generation += 1;
+    *joiner.node.faults.ack_epoch.lock() = Some(ahead);
+    release(old).await;
+    assert_eq!(
+        *old.node.faults.drop_stopped.lock(),
+        Some("an owner runs ahead of this node")
+    );
+    assert_eq!(held(old, &lost), lost.len());
+}
+
+/// An owner that refuses the late entry asks for it again, so the old owner keeps it.
+#[tokio::test]
+async fn the_drop_keeps_a_key_that_an_owner_refused() {
+    let net = Net::new();
+    let Held {
+        nodes,
+        joiner,
+        lost,
+        early,
+    } = held_drop(&net, "refused").await;
+    let old = &nodes[0];
+    let mut late = discus_store::Entry::new(discus_store::Value::Str("late".into()), None);
+    late.version = early;
+    assert!(old.node.store.apply(lost[0].as_bytes(), late));
+    let owners: Vec<&GossipNode> = nodes[1..].iter().chain(std::iter::once(&joiner)).collect();
+    for n in &owners {
+        n.node.faults.refuse_apply.store(true, Ordering::Relaxed);
+    }
+    release(old).await;
+    for n in &owners {
+        n.node.faults.refuse_apply.store(false, Ordering::Relaxed);
+    }
+    assert_eq!(held(old, &lost), 1);
+    assert!(old.node.store.read(lost[0].as_bytes(), |e| e.is_some()));
+}
+
+/// An owner whose newer copy expired does not take the older copy of the old owner back.
+#[tokio::test]
+async fn the_drop_never_brings_back_an_expired_key() {
+    let net = Net::new();
+    let Held {
+        nodes,
+        joiner,
+        lost,
+        ..
+    } = held_drop(&net, "expired").await;
+    let old = &nodes[0];
+    let key = lost[0].as_bytes();
+    let owners: Vec<&GossipNode> = nodes[1..].iter().chain(std::iter::once(&joiner)).collect();
+    for n in &owners {
+        n.node.faults.hold_sweep.store(true, Ordering::Relaxed);
+        loop {
+            let mut newer =
+                discus_store::Entry::new(discus_store::Value::Str("newer".into()), None);
+            newer.version = n.node.stamp().unwrap();
+            newer.expires_at_ms = Some(n.node.store.now_ms() + 200);
+            if n.node.store.apply(key, newer) {
+                break;
+            }
+        }
+    }
+    let expired = || owners.iter().all(|n| n.node.store.entry(key).is_none());
+    assert!(wait_until(Duration::from_secs(10), expired).await);
+    release(old).await;
+    for n in &owners {
+        assert!(n.node.store.entry(key).is_none(), "{}", n.id);
+    }
+    assert!(old.node.store.entry(key).is_none());
 }

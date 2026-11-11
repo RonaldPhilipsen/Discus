@@ -678,8 +678,8 @@ A bound evicts the oldest hints. An evicted hint is lost. The first replay then 
 the key space of each lost hint. The secondary drops its copies of those keys, and they refill
 from the primary as misses.
 
-The primary drops the hints of a secondary that becomes `DEAD` or no longer owns the key. Hints
-live only in the memory of the primary.
+The primary drops the hints of a secondary that becomes `DEAD` or no longer owns the key, and
+queues those keys for their current owners. Hints live only in the memory of the primary.
 
 ## Failover
 
@@ -727,7 +727,15 @@ start a handoff, so a new owner does not start empty.
   leave, or `--handoff-timeout-ms` (default 5 minutes) ends. After that, a miss is a miss.
 - After a scan reached every new owner, the old owner drops the keys it no longer owns. First it
   offers each key at its version to every current owner, which asks for the key if its own copy
-  is older. A key stays when an owner did not answer or a newer write changed it in the meantime.
+  is older, and sends what they ask for. A key stays when an owner did not answer, did not store
+  the key, runs another epoch, or a newer write changed the key in the meantime.
+- After an epoch change, keys that wait in a replication queue or a hint for a node that no
+  longer owns them, or that left, go to the queues of their current owners.
+- A receiver keeps an expired entry until the sweep removes it, and an older copy never replaces
+  it. After the sweep, or after a tombstone outlived `--tombstone-ttl-ms`, the receiver has no
+  record of the key, so an older copy from a handoff can bring the key back. The drop of moved
+  keys offers its copies to every current owner, so a key that expired and was swept while the
+  scan ran can come back once.
 
 `/startupz` passes only after the node received its handoff. A rolling restart therefore waits for
 each new pod to fill before it replaces the next one.

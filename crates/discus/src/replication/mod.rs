@@ -537,7 +537,7 @@ impl Replicator {
             let mut hints = self.hints.lock();
             for target in hints.targets() {
                 if current.member(target).is_none() {
-                    hints.drop_target(target);
+                    moved.extend(hints.drop_target(target));
                 }
             }
             hints.retain(|target, k| {
@@ -818,13 +818,16 @@ impl Replicator {
             }
             Message::Handoff(b) => {
                 self.saw_generation(&b);
+                // The entries apply first, so an offer of a key that the same batch carries
+                // confirms that this node stored it. An expired entry still counts: it was newer
+                // than the offer, so the offered copy must not come back.
+                let applied = self.apply_entries(&node, b.entries);
                 let want: Vec<Bytes> = b
                     .offers
                     .into_iter()
-                    .filter(|(k, v)| self.store.version(k).is_none_or(|local| local < *v))
+                    .filter(|(k, v)| self.store.stored_version(k).is_none_or(|local| local < *v))
                     .map(|(k, _)| k)
                     .collect();
-                let applied = self.apply_entries(&node, b.entries);
                 if let Some((_, to)) = b.done {
                     let finished = self.handoff.lock().done(from, to);
                     if !finished.is_empty() {
@@ -901,6 +904,10 @@ impl Replicator {
     /// Apply entries that are newer than the local ones. An entry with a version too far ahead
     /// of the local clock is dropped (spec section 8.1).
     pub fn apply_entries(&self, node: &Node, entries: Vec<(Bytes, Entry)>) -> u32 {
+        #[cfg(feature = "testing")]
+        if node.faults.refuse_apply.load(Ordering::Relaxed) {
+            return 0;
+        }
         let mut applied = 0;
         for (k, e) in entries {
             if node.hlc.observe(e.version).is_err() {
@@ -935,10 +942,18 @@ fn fill(store: &Store, q: &PeerQueue, keys: Vec<Bytes>) -> Vec<(Bytes, Entry)> {
 }
 
 fn ack(node: &Node, applied: u32, want: Vec<Bytes>) -> Message {
+    #[cfg(feature = "testing")]
+    let epoch = node
+        .faults
+        .ack_epoch
+        .lock()
+        .unwrap_or_else(|| node.epoch_id());
+    #[cfg(not(feature = "testing"))]
+    let epoch = node.epoch_id();
     Message::BatchAck(BatchAck {
         applied,
         want,
-        epoch: node.epoch_id(),
+        epoch,
         idle: false,
     })
 }

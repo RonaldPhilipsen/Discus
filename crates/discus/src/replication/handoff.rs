@@ -27,6 +27,10 @@ const BATCH_BYTES: u64 = 1 << 20;
 /// Attempts per batch before the source gives up on a target for this scan.
 const ATTEMPTS: u32 = 4;
 const FIRST_BACKOFF: Duration = Duration::from_millis(200);
+const MAX_BACKOFF: Duration = Duration::from_secs(2);
+/// Tries per page of the drop of moved keys while an owner runs an older epoch. With the backoff
+/// this waits about 20 seconds before the pass keeps the keys of that owner.
+const BEHIND_TRIES: u32 = 12;
 
 /// One ownership change that this node sends entries for.
 pub struct Outgoing {
@@ -237,9 +241,12 @@ pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits
 ///
 /// A write can reach this node after the scan passed its key, from a command that routed before
 /// the adoption. The scan never sent it, and its replication can still be queued. So each key is
-/// first offered at its version to every current owner, which asks for it if its own copy is
-/// older. The key goes only if every owner answered, no queue or hint holds it, and the entry
-/// still has the offered version.
+/// first offered at its version to every current owner, which asks for it if its stored copy,
+/// expired or not, is older. Asked-for keys are sent and offered again, so an owner that refused
+/// them asks again and the keys stay. A key goes only if every owner answered in the epoch of
+/// this node, holds the key at the offered version or newer, no queue or hint holds it, and the
+/// entry still has the offered version. An owner in an older epoch can still forward a command
+/// on the key here, so its keys stay; an owner in a newer epoch ends the pass.
 ///
 /// A key also stays when its entry is newer than `watermark`, because a peer in a newer epoch can
 /// forward a write here first. Every key stays once this node adopts another epoch during the
@@ -255,12 +262,16 @@ pub async fn drop_lost(node: &Arc<Node>, to: &Epoch, watermark: NTP64, limits: L
     if !current.is_normal(me) {
         return 0;
     }
-    let generation = current.id().generation;
+    let epoch = current.id();
     let lost: Vec<bool> = (0..RANGES)
         .map(|r| {
             !to.range_owners(r, rf).contains(&me) && !current.range_owners(r, rf).contains(&me)
         })
         .collect();
+    let moved_on = || {
+        replicator.peer_generation.load(Ordering::SeqCst) > epoch.generation
+            || replicator.adoptions.load(Ordering::SeqCst) != adoptions
+    };
     let mut failed: BTreeSet<NodeId> = BTreeSet::new();
     let mut dropped = 0;
     let mut cursor = 0;
@@ -270,17 +281,13 @@ pub async fn drop_lost(node: &Arc<Node>, to: &Epoch, watermark: NTP64, limits: L
             node.faults.drop_held.store(true, Ordering::Relaxed);
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let moved_on = || {
-            replicator.peer_generation.load(Ordering::SeqCst) > generation
-                || replicator.adoptions.load(Ordering::SeqCst) != adoptions
-        };
         if moved_on() {
+            stopped(node, "this node moved on to another epoch");
             return dropped;
         }
         let (next, entries) = node.store.scan_entries(cursor, STEP, |k, e| {
             lost[usize::from(range_of(slot(k)))] && e.version.time() <= watermark
         });
-        let mut targets: HashMap<NodeId, Target> = HashMap::new();
         let offered: Vec<(Bytes, Version, Vec<NodeId>)> = entries
             .into_iter()
             .map(|(k, e)| (k.clone(), e.version, current.owners(&k, rf)))
@@ -288,26 +295,43 @@ pub async fn drop_lost(node: &Arc<Node>, to: &Epoch, watermark: NTP64, limits: L
                 !owners.is_empty() && !owners.iter().any(|o| failed.contains(o))
             })
             .collect();
+        let mut offers: HashMap<NodeId, Vec<(Bytes, Version)>> = HashMap::new();
         for (k, v, owners) in &offered {
             for o in owners {
-                targets
-                    .entry(*o)
-                    .or_insert_with(Target::new)
-                    .offers
-                    .push((k.clone(), *v));
+                offers.entry(*o).or_default().push((k.clone(), *v));
             }
         }
-        for (g, t) in targets.iter_mut() {
-            flush(node, &replicator, *g, t, None, limits).await;
-            while !t.abandoned && !t.wanted.is_empty() {
-                flush(node, &replicator, *g, t, None, limits).await;
+        let mut answers: HashMap<NodeId, Answer> = HashMap::new();
+        for (owner, offers) in offers {
+            let mut answer = confirm(node, &replicator, owner, offers.clone(), epoch).await;
+            // An owner that lags behind adopts the epoch soon, as a rule.
+            let mut wait = FIRST_BACKOFF;
+            for _ in 0..BEHIND_TRIES {
+                if !matches!(answer, Answer::Behind) || moved_on() {
+                    break;
+                }
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(MAX_BACKOFF);
+                answer = confirm(node, &replicator, owner, offers.clone(), epoch).await;
             }
-            if t.abandoned {
-                failed.insert(*g);
+            match answer {
+                Answer::Ahead => {
+                    stopped(node, "an owner runs ahead of this node");
+                    return dropped;
+                }
+                Answer::Failed | Answer::Behind => {
+                    failed.insert(owner);
+                }
+                Answer::Holds(_) => {}
             }
+            answers.insert(owner, answer);
         }
         for (k, v, owners) in offered {
-            if owners.iter().any(|o| failed.contains(o)) || !replicator.settled(&k) {
+            let held = owners.iter().all(|o| match answers.get(o) {
+                Some(Answer::Holds(missing)) => !missing.contains(&k),
+                _ => false,
+            });
+            if !held || !replicator.settled(&k) {
                 continue;
             }
             let removed = node.store.remove_if(&k, |e| e.version == v && !moved_on());
@@ -319,6 +343,74 @@ pub async fn drop_lost(node: &Arc<Node>, to: &Epoch, watermark: NTP64, limits: L
         cursor = next;
     }
 }
+
+/// What one owner answered to the offers of a page.
+enum Answer {
+    /// The owner is in the epoch of the drop and holds every offered key at the offered version
+    /// or newer, but these.
+    Holds(BTreeSet<Bytes>),
+    /// The owner still runs an older epoch, where this node can own the keys. It can forward a
+    /// command on them here, so they stay.
+    Behind,
+    /// The owner runs a newer epoch that this node has not adopted.
+    Ahead,
+    /// The owner did not answer.
+    Failed,
+}
+
+/// Offer `offers` to `owner`, send the keys it asks for, and offer those again at the versions
+/// sent. A key that the owner still asks for after that was refused, for example for clock
+/// drift or size.
+async fn confirm(
+    node: &Arc<Node>,
+    replicator: &crate::replication::Replicator,
+    owner: NodeId,
+    offers: Vec<(Bytes, Version)>,
+    epoch: EpochId,
+) -> Answer {
+    let mut batch = Batch::new(epoch);
+    batch.offers = offers;
+    for round in 0..2 {
+        let Some(ack) = send(node, replicator, owner, &batch).await else {
+            return Answer::Failed;
+        };
+        if ack.epoch != epoch {
+            return if ack.epoch.generation > epoch.generation {
+                Answer::Ahead
+            } else {
+                Answer::Behind
+            };
+        }
+        if ack.want.is_empty() || round == 1 {
+            return Answer::Holds(ack.want.into_iter().collect());
+        }
+        let mut missing = BTreeSet::new();
+        batch = Batch::new(epoch);
+        for k in ack.want {
+            match node.store.entry(&k) {
+                Some(e) => {
+                    batch.offers.push((k.clone(), e.version));
+                    batch.entries.push((k, e));
+                }
+                None => {
+                    missing.insert(k);
+                }
+            }
+        }
+        if batch.offers.is_empty() {
+            return Answer::Holds(missing);
+        }
+    }
+    unreachable!("the second round returns")
+}
+
+#[cfg(feature = "testing")]
+fn stopped(node: &Node, why: &'static str) {
+    *node.faults.drop_stopped.lock() = Some(why);
+}
+
+#[cfg(not(feature = "testing"))]
+fn stopped(_: &Node, _: &'static str) {}
 
 /// Send the batch of one target with retries. A target that keeps failing is abandoned for
 /// this scan. Wanted keys from the acknowledgement go into the next batch.
@@ -340,18 +432,33 @@ async fn flush(
     batch.offers = std::mem::take(&mut t.offers);
     batch.done = done;
     let bytes = std::mem::take(&mut t.bytes);
+    match send(node, replicator, target, &batch).await {
+        Some(ack) => {
+            t.wanted = ack.want;
+            pace(bytes, limits.rate_bytes).await;
+        }
+        None => {
+            tracing::warn!(%target, "abandoned a handoff target after its retries");
+            t.abandoned = true;
+        }
+    }
+}
+
+/// Send one handoff batch with retries. `None` when every attempt failed.
+async fn send(
+    node: &Arc<Node>,
+    replicator: &crate::replication::Replicator,
+    target: NodeId,
+    batch: &Batch,
+) -> Option<discus_wire::BatchAck> {
     let mut backoff = FIRST_BACKOFF;
     for attempt in 0..ATTEMPTS {
         match replicator
             .send(node, target, Message::Handoff(batch.clone()))
             .await
         {
-            Ok(Message::BatchAck(ack)) => {
-                t.wanted = ack.want;
-                pace(bytes, limits.rate_bytes).await;
-                return;
-            }
-            Ok(_) => break,
+            Ok(Message::BatchAck(ack)) => return Some(ack),
+            Ok(_) => return None,
             Err(e) => {
                 tracing::debug!(%target, attempt, error = %e, "a handoff batch failed");
                 if attempt + 1 < ATTEMPTS {
@@ -361,8 +468,7 @@ async fn flush(
             }
         }
     }
-    tracing::warn!(%target, "abandoned a handoff target after its retries");
-    t.abandoned = true;
+    None
 }
 
 /// Wait long enough that the scan stays under `rate` bytes per second.
