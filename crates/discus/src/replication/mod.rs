@@ -954,9 +954,14 @@ impl Replicator {
         if node.faults.refuse_apply.load(Ordering::Relaxed) {
             return 0;
         }
+        // A batch whose newest version is within the drift bound observes the clock once: every
+        // older version is within the bound too, and the clock ends at the same maximum. Only a
+        // batch with a version too far ahead checks each entry, to drop just those.
+        let newest = entries.iter().map(|(_, e)| e.version).max();
+        let checked = newest.is_some_and(|v| node.hlc.observe(v).is_ok());
         let mut applied = 0;
         for (k, e) in entries {
-            if node.hlc.observe(e.version).is_err() {
+            if !checked && node.hlc.observe(e.version).is_err() {
                 tracing::warn!("dropped a replicated entry too far ahead of the local clock");
                 continue;
             }
