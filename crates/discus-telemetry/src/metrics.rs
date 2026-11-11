@@ -10,7 +10,8 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::attrs::{
-    CommandLabel, CounterMode, CounterRole, MemberState, NodeLabel, Status, TransportChannel,
+    CommandLabel, CounterMode, CounterRole, MemberState, MisrouteReason, NodeLabel, Status,
+    TopologyCommand, TransportChannel,
 };
 
 /// Latency histogram bucket bounds in milliseconds.
@@ -124,6 +125,12 @@ mod imp {
         #[inline]
         pub fn forward(&self, cmd: CommandLabel, status: Status, hops: u8) {}
         #[inline]
+        pub fn redirect(&self) {}
+        #[inline]
+        pub fn misrouted(&self, reason: MisrouteReason) {}
+        #[inline]
+        pub fn topology_request(&self, command: TopologyCommand) {}
+        #[inline]
         pub fn quic_failure(&self, peer: &NodeLabel, kind: Status, channel: TransportChannel) {}
         #[inline]
         pub fn tombstones(&self, count: u64) {}
@@ -187,6 +194,9 @@ mod imp {
         peer_errors: Counter<u64>,
         forwards: Counter<u64>,
         forward_hops: Histogram<u64>,
+        redirects: Counter<u64>,
+        misrouted: Counter<u64>,
+        topology_requests: Counter<u64>,
         quic_failures: Counter<u64>,
         tombstones: Gauge<u64>,
         counter_roles: Gauge<u64>,
@@ -211,6 +221,8 @@ mod imp {
             Attribute::Role(r) => r.as_str().into(),
             Attribute::Mode(m) => m.as_str().into(),
             Attribute::Channel(c) => c.as_str().into(),
+            Attribute::Reason(r) => r.as_str().into(),
+            Attribute::Topology(t) => t.as_str().into(),
             Attribute::Node(n) | Attribute::Peer(n) => n.shared().into(),
         };
         KeyValue::new(key, Value::String(value))
@@ -465,6 +477,15 @@ mod imp {
                     .with_description("Hops that a forwarded command took")
                     .with_boundaries(HOP_BUCKETS.to_vec())
                     .build(),
+                redirects: counter("discus.client.redirects", "MOVED replies"),
+                misrouted: counter(
+                    "discus.client.misrouted",
+                    "Commands forwarded where a MOVED reply was due",
+                ),
+                topology_requests: counter(
+                    "discus.client.topology_requests",
+                    "CLUSTER topology requests",
+                ),
                 quic_failures: counter("discus.quic.failures", "QUIC connection failures"),
                 tombstones: gauge("discus.tombstones", "Stored tombstones"),
                 counter_roles: gauge(
@@ -625,6 +646,21 @@ mod imp {
                     &[kv(Attribute::Command(cmd)), kv(Attribute::Status(status))],
                 );
                 i.forward_hops.record(u64::from(hops), &[]);
+            });
+        }
+
+        pub fn redirect(&self) {
+            self.with(|i| i.redirects.add(1, &[]));
+        }
+
+        pub fn misrouted(&self, reason: MisrouteReason) {
+            self.with(|i| i.misrouted.add(1, &[kv(Attribute::Reason(reason))]));
+        }
+
+        pub fn topology_request(&self, command: TopologyCommand) {
+            self.with(|i| {
+                i.topology_requests
+                    .add(1, &[kv(Attribute::Topology(command))])
             });
         }
 

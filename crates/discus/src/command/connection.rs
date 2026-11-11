@@ -391,6 +391,7 @@ fn cluster(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
         return Err(CommandError::WrongArity(format!("CLUSTER|{sub}")));
     }
     if let Some(kind) = kind {
+        discus_telemetry::global().topology_request(kind.into());
         return match standalone_topology(node, conn, kind) {
             Some(reply) => reply,
             None => node

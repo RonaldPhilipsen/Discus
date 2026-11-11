@@ -143,6 +143,9 @@ and 100.
 | `discus.members` | gauge | `state` | Members of the current epoch in each state. |
 | `discus.forwards` | counter | `command`, `status` | Forwards to other nodes, with `status` `ok`, `timeout`, or `error`. |
 | `discus.forward.hops` | histogram | none | The hop count of each forward, 1 or 2. |
+| `discus.client.redirects` | counter | none | `-MOVED` replies that the redirect listener sent. |
+| `discus.client.misrouted` | counter | `reason` | Commands that a redirect connection forwarded instead of a `-MOVED` reply. The `reason` is `epoch`, `down`, or `no_address`. |
+| `discus.client.topology_requests` | counter | `command` | `CLUSTER` topology requests, with `command` `slots`, `shards`, `nodes`, or `info`. |
 | `discus.peer.errors` | counter | `peer`, `status`, `channel` | Requests to a peer without a reply in time, with `status` `timeout`. |
 | `discus.quic.failures` | counter | `peer`, `status`, `channel` | Failed handshakes (`handshake`) and lost connections (`reset`). |
 | `discus.transport.frames.rejected` | counter | `channel` | Node-to-node frames that failed the verifier. |
