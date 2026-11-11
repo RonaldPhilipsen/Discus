@@ -126,7 +126,9 @@ impl Epoch {
     }
 
     /// The slot table of this epoch. The first call builds it with `rf`. Later calls return that
-    /// table whatever `rf` they pass.
+    /// table whatever `rf` they pass. Invariant: production code prebuilds the table with the
+    /// configured replication factor before any lookup (`Node::new`, `Node::adopt_epoch`, and
+    /// `Node::reset_cluster`), so a lookup with a smaller `rf` never fixes a short table.
     pub fn table(&self, rf: usize) -> &SlotTable {
         self.table
             .get_or_init(|| SlotTable::build(&self.members, rf))
@@ -142,6 +144,7 @@ impl Epoch {
         self.range_owners(range_of(slot(key)), 1).first().copied()
     }
 
+    /// The owners of `slot`, primary first. Every slot of a range has the owners of that range.
     pub fn slot_owners(&self, slot: u16, rf: usize) -> Vec<NodeId> {
         self.range_owners(range_of(slot), rf)
     }

@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 
 use discus_placement::{hrw, range_of, slot, ClusterId, Epoch, EpochId, Member, MemberState};
-use discus_placement::{NodeId, Weight, RANGES};
+use discus_placement::{NodeId, SlotTable, Weight, RANGES};
 use proptest::prelude::*;
 
 fn member(id: u128, state: MemberState) -> Member {
@@ -216,7 +216,7 @@ fn smaller_rf_reads_the_cached_table_prefix() {
 }
 
 #[test]
-fn primary_first_does_not_pin_the_table_to_rf_one() {
+fn the_first_table_call_fixes_the_rf() {
     let e = epoch((1..=5).map(|i| member(i, MemberState::Normal)).collect());
     let _ = e.table(3);
     let _ = e.primary(b"k");
@@ -233,4 +233,17 @@ fn a_table_listing_every_member_answers_a_larger_rf() {
         e.range_owners(r, 5),
         hrw::owners(&r.to_be_bytes(), e.members(), 5)
     );
+}
+
+#[test]
+fn the_table_ignores_the_member_order() {
+    let sorted: Vec<Member> = (1..=6).map(|i| member(i, MemberState::Normal)).collect();
+    let mut unsorted = sorted.clone();
+    unsorted.reverse();
+    unsorted.swap(1, 4);
+    let (a, b) = (SlotTable::build(&sorted, 3), SlotTable::build(&unsorted, 3));
+    for r in 0..RANGES {
+        let ids = |t: &SlotTable| t.owners(r).map(|m| m.id).collect::<Vec<_>>();
+        assert_eq!(ids(&a), ids(&b), "range {r}");
+    }
 }
