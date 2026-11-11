@@ -92,12 +92,13 @@ impl Membership {
         rpc_advertise: SocketAddr,
     ) -> Arc<Membership> {
         let config = &node.config;
+        let client_addr = node.resolve_client_addr(advertise.ip());
         let me = MemberInfo {
             id: node.id,
             addr: advertise,
             rpc_addr: rpc_advertise,
-            client_addr: None,
-            client_host: None,
+            client_addr: Some(client_addr),
+            client_host: node.client_host(),
             state: MemberState::Joining,
             incarnation: 0,
             weight: Weight::new(config.weight).unwrap_or_default(),

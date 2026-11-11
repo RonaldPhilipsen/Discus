@@ -112,6 +112,7 @@ mod order;
 /// A node with both listeners bound.
 pub struct Server {
     listener: TcpListener,
+    redirect: Option<TcpListener>,
     admin: std::net::TcpListener,
     node: Arc<Node>,
     lane: ControlLane,
@@ -137,7 +138,7 @@ impl Server {
         Server::bind_with(config, opts).await
     }
 
-    pub async fn bind_with(config: Config, opts: BindOptions) -> io::Result<Server> {
+    pub async fn bind_with(mut config: Config, opts: BindOptions) -> io::Result<Server> {
         let socket = opts.cluster_socket;
         let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidInput, msg);
         config.validate().map_err(invalid)?;
@@ -168,6 +169,16 @@ impl Server {
         let security =
             Arc::new(Security::from_config(&config).map_err(|e| invalid(e.to_string()))?);
         let listener = TcpListener::bind(config.listen).await?;
+        let redirect = match config.redirect_listen {
+            Some(addr) => Some(TcpListener::bind(addr).await?),
+            None => None,
+        };
+        // The advertised client address needs the bound ports, which differ from the flags
+        // when a flag asks for port 0.
+        config.listen = listener.local_addr()?;
+        if let Some(redirect) = &redirect {
+            config.redirect_listen = Some(redirect.local_addr()?);
+        }
         let admin = std::net::TcpListener::bind(config.admin_listen)?;
         admin.set_nonblocking(true)?;
         let lease = match (config.gossip_enabled(), opts.lease) {
@@ -236,6 +247,7 @@ impl Server {
         }
         Ok(Server {
             listener,
+            redirect,
             admin,
             node,
             lane,
@@ -280,6 +292,8 @@ impl Server {
     pub async fn run(self, shutdown: CancellationToken) -> io::Result<()> {
         let Server {
             listener,
+            // Bound so that the port is held and the address is advertised. Nothing accepts yet.
+            redirect: _redirect,
             admin,
             node,
             lane,

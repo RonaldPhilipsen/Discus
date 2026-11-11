@@ -1,5 +1,7 @@
 //! In-process static clusters (`--membership static`) over real QUIC on localhost with a test CA.
 
+use std::net::SocketAddr;
+
 use discus::{Config, Server};
 use discus_placement::{ClusterId, NodeId};
 use discus_transport::testing::TestCa;
@@ -39,6 +41,16 @@ const DEFAULTS: &[(&str, &str)] = &[
 
 /// Start `n` nodes that list each other as static peers. `extra(i)` adds flags for node `i`.
 pub async fn start_cluster_with(n: usize, extra: impl Fn(usize) -> Vec<String>) -> Cluster {
+    start_cluster_clients(n, |_| None, extra).await
+}
+
+/// [`start_cluster_with`], where `client(i)` is the client address that the other nodes list for
+/// node `i` after the slash of `--peer`.
+pub async fn start_cluster_clients(
+    n: usize,
+    client: impl Fn(usize) -> Option<SocketAddr>,
+    extra: impl Fn(usize) -> Vec<String>,
+) -> Cluster {
     let (ca, dir) = ca_files();
     let cluster_id = ClusterId::mint();
     let sockets: Vec<_> = (0..n).map(|_| socket()).collect();
@@ -46,9 +58,10 @@ pub async fn start_cluster_with(n: usize, extra: impl Fn(usize) -> Vec<String>) 
     let ids: Vec<NodeId> = (0..n).map(|_| NodeId::random()).collect();
     let mut nodes = Vec::new();
     for (i, (socket, addr)) in sockets.into_iter().enumerate() {
-        let peers = (0..n)
-            .filter(|&j| j != i)
-            .map(|j| format!("{}@{}", ids[j], addrs[j]));
+        let peers = (0..n).filter(|&j| j != i).map(|j| match client(j) {
+            Some(c) => format!("{}@{}/{c}", ids[j], addrs[j]),
+            None => format!("{}@{}", ids[j], addrs[j]),
+        });
         let mut flags: Vec<String> = ["--membership", "static", "--node-id"]
             .map(String::from)
             .to_vec();

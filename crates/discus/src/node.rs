@@ -1,7 +1,7 @@
 //! State shared by every connection on a node.
 
 use std::cell::Cell;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -18,6 +18,7 @@ use parking_lot::{RwLock, RwLockReadGuard};
 use crate::cluster::writeset::{WriteSet, WriteSetBudget, WriteSetLimits};
 use crate::cluster::ClusterLink;
 use crate::command::CommandError;
+use crate::config::{client_host, default_client_addr};
 use crate::counter::Counters;
 use crate::lag::LagProbe;
 use crate::membership::Membership;
@@ -65,6 +66,9 @@ pub struct Node {
     phase: AtomicU8,
     link: OnceLock<ClusterLink>,
     membership: OnceLock<Arc<Membership>>,
+    /// The client address that this node advertises. Set at construction when the flags and the
+    /// static member list settle it, else by `Membership::new` once the cluster address is known.
+    client_addr: OnceLock<SocketAddr>,
     lag: LagProbe,
     data: OnceLock<tokio::runtime::Handle>,
     /// The ordered consumer of [`Node::apply_epoch`] work on the data runtime.
@@ -179,12 +183,22 @@ impl Node {
         );
         let id = config.node_id.unwrap_or_else(NodeId::random);
         let cluster_id = config.cluster_id.unwrap_or_else(ClusterId::mint);
+        let client_addr = config.client_advertise.or_else(|| {
+            let ip = config.cluster_listen.ip();
+            // Static members learn each other's client address only from `--peer`, so a node
+            // that did not ask for cluster clients keeps the record that its peers list.
+            let static_clients = config.cluster_enabled()
+                && !config.gossip_enabled()
+                && config.redirect_listen.is_some();
+            (static_clients && !ip.is_unspecified())
+                .then(|| default_client_addr(ip, config.redirect_listen, config.listen))
+        });
         let me = Member {
             id,
             addr: config.cluster_listen,
             rpc_addr: config.cluster_listen,
-            client_addr: None,
-            client_host: None,
+            client_addr,
+            client_host: host_of(&config, client_addr),
             state: MemberState::Normal,
             weight: Weight::new(config.weight).unwrap_or_default(),
         };
@@ -217,6 +231,7 @@ impl Node {
             phase: AtomicU8::new(Phase::Starting as u8),
             link: OnceLock::new(),
             membership: OnceLock::new(),
+            client_addr: client_addr.map(OnceLock::from).unwrap_or_default(),
             lag: LagProbe::new(),
             data: OnceLock::new(),
             epoch_work: OnceLock::new(),
@@ -257,6 +272,23 @@ impl Node {
 
     pub fn membership(&self) -> Option<&Arc<Membership>> {
         self.membership.get()
+    }
+
+    /// The client address that this node advertises, when it is known.
+    pub fn client_addr(&self) -> Option<SocketAddr> {
+        self.client_addr.get().copied()
+    }
+
+    /// The host name that this node advertises: `--client-hostname` for the client address.
+    pub fn client_host(&self) -> Option<String> {
+        host_of(&self.config, self.client_addr())
+    }
+
+    /// Settle the client address from the resolved cluster IP, unless a flag already did.
+    pub(crate) fn resolve_client_addr(&self, cluster_ip: IpAddr) -> SocketAddr {
+        *self.client_addr.get_or_init(|| {
+            default_client_addr(cluster_ip, self.config.redirect_listen, self.config.listen)
+        })
     }
 
     /// Attach the gossip membership. Only the first call has an effect.
@@ -576,6 +608,14 @@ impl Node {
     }
 }
 
+fn host_of(config: &Config, client_addr: Option<SocketAddr>) -> Option<String> {
+    let template = config
+        .client_hostname
+        .as_deref()
+        .filter(|t| !t.is_empty())?;
+    Some(client_host(template, client_addr?.ip()))
+}
+
 /// The first epoch. With static peers, every member is `NORMAL` with weight 1 and the epoch is
 /// `(1, lowest NodeId)`, so every node forms the same epoch. Alone, the node bootstraps `(1, self)`.
 fn static_epoch(me: Member, config: &Config, cluster_id: ClusterId) -> Epoch {
@@ -589,8 +629,8 @@ fn static_epoch(me: Member, config: &Config, cluster_id: ClusterId) -> Epoch {
         id: p.id.unwrap_or(NodeId::NIL),
         addr: p.addr,
         rpc_addr: p.addr,
-        client_addr: None,
-        client_host: None,
+        client_addr: p.client_addr,
+        client_host: host_of(config, p.client_addr),
         state: MemberState::Normal,
         weight: Weight::default(),
     }));

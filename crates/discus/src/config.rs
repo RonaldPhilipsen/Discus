@@ -1,18 +1,31 @@
 //! Node configuration, parsed from command-line flags.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 use discus_placement::{ClusterId, NodeId};
 
-/// A peer: `<addr>` or `<node-id>@<addr>`. With gossip it is a discovery seed, and the ID is only
-/// an expectation. With static membership the ID is required.
+/// A peer: `<addr>` or `<node-id>@<addr>`, with an optional `/<client-addr>` after the address.
+/// With gossip it is a discovery seed, and the ID is only an expectation. With static membership
+/// the ID is required, and the client address is the one that the member advertises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Peer {
     pub id: Option<NodeId>,
     pub addr: SocketAddr,
+    pub client_addr: Option<SocketAddr>,
+}
+
+/// Whether the node answers the cluster topology commands (spec section "Client listeners").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TopologyMode {
+    /// Answer when the node has a redirect listener.
+    Auto,
+    /// Always answer. Without a redirect listener the replies name the `--listen` addresses.
+    On,
+    /// Never answer.
+    Off,
 }
 
 /// How the node learns the member list (spec section 6).
@@ -63,6 +76,21 @@ pub struct Config {
     /// Client (RESP) listen address.
     #[arg(long, default_value = "0.0.0.0:6379")]
     pub listen: SocketAddr,
+    /// Redirect listener address: a second RESP listener that answers `-MOVED` for keys that
+    /// another node serves. Off by default.
+    #[arg(long)]
+    pub redirect_listen: Option<SocketAddr>,
+    /// The client address that topology replies and `-MOVED` name. Default: the IP of the
+    /// cluster address with the bound `--redirect-listen` port, else the bound `--listen` port.
+    #[arg(long)]
+    pub client_advertise: Option<SocketAddr>,
+    /// A host name template for topology replies and `-MOVED`. `{ip}` becomes the advertised IP
+    /// with dashes. An empty value means no host name.
+    #[arg(long)]
+    pub client_hostname: Option<String>,
+    /// Whether the topology commands answer: `auto` (with a redirect listener), `on`, or `off`.
+    #[arg(long, value_enum, default_value_t = TopologyMode::Auto)]
+    pub cluster_topology: TopologyMode,
     /// Admin (probes) listen address.
     #[arg(long, default_value = "0.0.0.0:9100")]
     pub admin_listen: SocketAddr,
@@ -345,7 +373,18 @@ impl Config {
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
     {
-        <Config as Parser>::try_parse_from(args)
+        let mut config = <Config as Parser>::try_parse_from(args)?;
+        config.client_hostname = config.client_hostname.filter(|h| !h.is_empty());
+        Ok(config)
+    }
+
+    /// True when the topology commands answer.
+    pub fn topology_enabled(&self) -> bool {
+        match self.cluster_topology {
+            TopologyMode::On => true,
+            TopologyMode::Auto => self.redirect_listen.is_some(),
+            TopologyMode::Off => false,
+        }
     }
 
     /// The name of the lease of counter group `g`.
@@ -395,6 +434,12 @@ impl Config {
         let set = certs.iter().filter(|(_, s)| *s).count();
         if !(0..=19).contains(&self.data_nice) {
             return Err("--data-nice must be from 0 to 19".into());
+        }
+        if self.redirect_listen.is_some() && self.security.tls_mode == crate::security::TlsMode::Lb
+        {
+            return Err("--redirect-listen cannot be used with --tls-mode lb. \
+                Clients reach the nodes only through the load balancer, so they cannot route"
+                .into());
         }
         if self.gossip_enabled() {
             self.swim().validate()?;
@@ -486,10 +531,36 @@ fn parse_peer(s: &str) -> Result<Peer, String> {
         .map(|id| id.parse::<NodeId>())
         .transpose()
         .map_err(|_| "a peer node ID is 32 hex digits".to_string())?;
-    let addr = addr
-        .parse::<SocketAddr>()
-        .map_err(|_| "a peer is <ip>:<port> or <node-id>@<ip>:<port>".to_string())?;
-    Ok(Peer { id, addr })
+    let bad = || {
+        "a peer is <ip>:<port>, <node-id>@<ip>:<port>, or <node-id>@<ip>:<port>/<client-ip>:<client-port>"
+            .to_string()
+    };
+    let (addr, client_addr) = match addr.split_once('/') {
+        Some((addr, client)) => (addr, Some(client.parse::<SocketAddr>().map_err(|_| bad())?)),
+        None => (addr, None),
+    };
+    let addr = addr.parse::<SocketAddr>().map_err(|_| bad())?;
+    Ok(Peer {
+        id,
+        addr,
+        client_addr,
+    })
+}
+
+/// The host name for `ip` from a `--client-hostname` template: `{ip}` becomes the IP with `.`
+/// and `:` replaced by `-`.
+pub fn client_host(template: &str, ip: IpAddr) -> String {
+    template.replace("{ip}", &ip.to_string().replace(['.', ':'], "-"))
+}
+
+/// The client address that a node advertises when `--client-advertise` is not set: the cluster
+/// IP with the port of the bound redirect listener, else of the bound `--listen`.
+pub fn default_client_addr(
+    cluster_ip: IpAddr,
+    redirect: Option<SocketAddr>,
+    listen: SocketAddr,
+) -> SocketAddr {
+    SocketAddr::new(cluster_ip, redirect.unwrap_or(listen).port())
 }
 
 fn parse_rf(s: &str) -> Result<usize, String> {
@@ -580,5 +651,78 @@ mod tests {
         let config = Config::parse_from(["discus"]).unwrap();
         assert_eq!(config.forward_read_timeout_ms, 500);
         assert_eq!(config.forward_write_timeout_ms, 2000);
+    }
+
+    #[test]
+    fn redirect_listen_with_lb_tls_is_refused() {
+        let config = Config::parse_from([
+            "discus",
+            "--redirect-listen",
+            "0.0.0.0:6380",
+            "--tls-mode",
+            "lb",
+        ])
+        .unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("--redirect-listen") && err.contains("--tls-mode lb"));
+    }
+
+    #[test]
+    fn peer_takes_a_client_address() {
+        let id = NodeId::random();
+        let peer = parse_peer(&format!("{id}@10.0.0.1:7379/10.0.0.1:6380")).unwrap();
+        assert_eq!(peer.id, Some(id));
+        assert_eq!(peer.addr, "10.0.0.1:7379".parse().unwrap());
+        assert_eq!(peer.client_addr, Some("10.0.0.1:6380".parse().unwrap()));
+        assert_eq!(parse_peer("10.0.0.1:7379").unwrap().client_addr, None);
+        assert!(parse_peer("10.0.0.1:7379/nope").is_err());
+    }
+
+    #[test]
+    fn client_host_dashes_the_ip() {
+        let ip = "10.1.2.3".parse().unwrap();
+        assert_eq!(client_host("{ip}.peers", ip), "10-1-2-3.peers");
+        let v6 = "fd00::1".parse().unwrap();
+        assert_eq!(client_host("{ip}.peers", v6), "fd00--1.peers");
+    }
+
+    #[test]
+    fn an_empty_client_hostname_means_none() {
+        let config = Config::parse_from(["discus", "--client-hostname", ""]).unwrap();
+        assert_eq!(config.client_hostname, None);
+    }
+
+    #[test]
+    fn topology_is_on_for_auto_with_a_redirect_listener() {
+        let off = Config::parse_from(["discus"]).unwrap();
+        assert!(!off.topology_enabled());
+        let auto = Config::parse_from(["discus", "--redirect-listen", "0.0.0.0:6380"]).unwrap();
+        assert!(auto.topology_enabled());
+        let on = Config::parse_from(["discus", "--cluster-topology", "on"]).unwrap();
+        assert!(on.topology_enabled());
+        let forced = Config::parse_from([
+            "discus",
+            "--redirect-listen",
+            "0.0.0.0:6380",
+            "--cluster-topology",
+            "off",
+        ])
+        .unwrap();
+        assert!(!forced.topology_enabled());
+    }
+
+    #[test]
+    fn default_client_addr_uses_the_cluster_ip_and_bound_port() {
+        let ip = "10.0.0.5".parse().unwrap();
+        let listen = "0.0.0.0:6379".parse().unwrap();
+        let redirect = Some("0.0.0.0:41000".parse().unwrap());
+        assert_eq!(
+            default_client_addr(ip, redirect, listen),
+            "10.0.0.5:41000".parse().unwrap()
+        );
+        assert_eq!(
+            default_client_addr(ip, None, listen),
+            "10.0.0.5:6379".parse().unwrap()
+        );
     }
 }
