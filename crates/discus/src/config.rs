@@ -373,9 +373,7 @@ impl Config {
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
     {
-        let mut config = <Config as Parser>::try_parse_from(args)?;
-        config.client_hostname = config.client_hostname.filter(|h| !h.is_empty());
-        Ok(config)
+        <Config as Parser>::try_parse_from(args)
     }
 
     /// True when the topology commands answer.
@@ -450,6 +448,13 @@ impl Config {
             }
         }
         if !self.peers.is_empty() && self.membership == MembershipMode::Gossip {
+            if self.peers.iter().any(|p| p.client_addr.is_some()) {
+                return Err(
+                    "a /<client-ip>:<client-port> suffix on --peer needs --membership \
+                    static. Gossip members announce their own client address"
+                        .into(),
+                );
+            }
             let missing: Vec<&str> = certs.iter().filter(|(_, s)| !*s).map(|(f, _)| *f).collect();
             if !missing.is_empty() {
                 return Err(format!(
@@ -488,6 +493,16 @@ impl Config {
                     has a suffix and --client-advertise is unset. Every node must build the same \
                     member list"
                     .into());
+            }
+            let routes =
+                self.redirect_listen.is_some() || self.cluster_topology == TopologyMode::On;
+            if routes && suffixed == 0 {
+                return Err(
+                    "--redirect-listen and --cluster-topology on need client addresses \
+                    with --membership static. Set --client-advertise and give every --peer a \
+                    /<client-ip>:<client-port> suffix"
+                        .into(),
+                );
             }
             if self.weight != 1.0 {
                 return Err(
@@ -704,12 +719,6 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_client_hostname_means_none() {
-        let config = Config::parse_from(["discus", "--client-hostname", ""]).unwrap();
-        assert_eq!(config.client_hostname, None);
-    }
-
-    #[test]
     fn topology_is_on_for_auto_with_a_redirect_listener() {
         let off = Config::parse_from(["discus"]).unwrap();
         assert!(!off.topology_enabled());
@@ -794,6 +803,48 @@ mod tests {
         ] {
             let err = bad.unwrap_err();
             assert!(err.contains("--peer") && err.contains("--client-advertise"));
+        }
+    }
+
+    #[test]
+    fn a_gossip_peer_takes_no_client_address() {
+        let a = NodeId::random();
+        let peer = format!("{a}@10.0.0.1:7379/10.0.0.1:6380");
+        let argv = [
+            "discus",
+            "--cluster-ca",
+            "ca",
+            "--cluster-cert",
+            "cert",
+            "--cluster-key",
+            "key",
+            "--peer",
+            &peer,
+        ];
+        let err = Config::parse_from(argv).unwrap().validate().unwrap_err();
+        assert!(err.contains("--membership static"), "{err}");
+        let plain = argv.map(|s| s.split_once('/').map_or(s, |(p, _)| p));
+        Config::parse_from(plain).unwrap().validate().unwrap();
+    }
+
+    #[test]
+    fn static_routing_needs_client_addresses() {
+        let (a, b) = (NodeId::random(), NodeId::random());
+        let (pa, pb) = (format!("{a}@10.0.0.1:7379"), format!("{b}@10.0.0.2:7379"));
+        let peers = ["--peer", pa.as_str(), "--peer", pb.as_str()];
+        let check = |extra: &[&str]| {
+            let mut argv = peers.to_vec();
+            argv.extend(extra);
+            Config::parse_from(static_args(&argv)).unwrap().validate()
+        };
+        check(&[]).unwrap();
+        check(&["--cluster-topology", "off"]).unwrap();
+        for bad in [
+            check(&["--redirect-listen", "0.0.0.0:6380"]),
+            check(&["--cluster-topology", "on"]),
+        ] {
+            let err = bad.unwrap_err();
+            assert!(err.contains("--client-advertise"), "{err}");
         }
     }
 }

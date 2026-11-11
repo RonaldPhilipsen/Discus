@@ -130,6 +130,11 @@ fn version_of(v: &fb::Version) -> Version {
     Version::new(NTP64(v.time()), origin)
 }
 
+/// An empty host name means none, so a peer that encodes `Some("")` cannot name an empty host.
+fn client_host_of(s: Option<&str>) -> Option<String> {
+    s.filter(|h| !h.is_empty()).map(str::to_owned)
+}
+
 fn client_addr_of(s: Option<&str>) -> Result<Option<SocketAddr>, DecodeError> {
     s.map(|a| a.parse().map_err(|_| invalid("a bad client address")))
         .transpose()
@@ -190,7 +195,7 @@ fn epoch_of(e: fb::Epoch<'_>) -> Result<Epoch, DecodeError> {
             addr,
             rpc_addr,
             client_addr: client_addr_of(m.client_addr())?,
-            client_host: m.client_host().map(str::to_owned),
+            client_host: client_host_of(m.client_host()),
             state: state_of(m.state())?,
             weight: Weight::new(m.weight()).ok_or_else(|| invalid("member with a bad weight"))?,
         });
@@ -245,7 +250,7 @@ fn info_of(m: fb::MemberInfo<'_>) -> Result<MemberInfo, DecodeError> {
             .and_then(|a| a.parse().ok())
             .ok_or_else(|| invalid("member info without a valid RPC address"))?,
         client_addr: client_addr_of(m.client_addr())?,
-        client_host: m.client_host().map(str::to_owned),
+        client_host: client_host_of(m.client_host()),
         state: state_of(m.state())?,
         incarnation: m.incarnation(),
         weight: Weight::new(m.weight()).ok_or_else(|| invalid("member info with a bad weight"))?,

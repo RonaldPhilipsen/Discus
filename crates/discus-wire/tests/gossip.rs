@@ -274,3 +274,20 @@ fn member_info_round_trips_client_addresses() {
         assert_eq!(decoded, frame);
     }
 }
+
+#[test]
+fn an_empty_client_host_decodes_as_none() {
+    let mut m = info(1, 7379, MemberState::Normal);
+    m.client_addr = Some(addr(6379));
+    m.client_host = Some(String::new());
+    let frame = Frame {
+        request_id: 1,
+        trace: TraceContext::default(),
+        message: Message::Gossip(Gossip::new(GossipKind::Ping, m)),
+    };
+    let decoded = decode_frame(&encode_frame(&frame), &Limits::default()).unwrap();
+    let Message::Gossip(g) = decoded.message else {
+        panic!("not a gossip message");
+    };
+    assert_eq!(g.from.client_host, None);
+}
