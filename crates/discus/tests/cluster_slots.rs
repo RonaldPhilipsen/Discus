@@ -748,3 +748,248 @@ async fn replication_acks_teach_peer_epochs() {
         moved(&key, redirect_of(&nodes[1]))
     );
 }
+
+async fn cluster_client(
+    urls: Vec<String>,
+    tls: Option<redis::TlsCertificates>,
+) -> redis::cluster_async::ClusterConnection {
+    let mut builder =
+        redis::cluster::ClusterClientBuilder::new(urls).response_timeout(Duration::from_secs(30));
+    if let Some(certs) = tls {
+        builder = builder.tls(redis::TlsMode::Secure).certs(certs);
+    }
+    builder
+        .build()
+        .unwrap()
+        .get_async_connection()
+        .await
+        .unwrap()
+}
+
+fn cluster_urls(nodes: &[GossipNode]) -> Vec<String> {
+    nodes
+        .iter()
+        .map(|n| format!("redis://{}", redirect_of(n)))
+        .collect()
+}
+
+/// The writes of one key: the value of the last write that returned OK, and the values of the
+/// later writes that returned `-TRYAGAIN`, which can have applied too.
+#[derive(Clone, Default)]
+struct Last {
+    ok: Option<u64>,
+    maybe: Vec<u64>,
+}
+
+/// What a writer saw: the outcome per key, every error that was not `-TRYAGAIN`, and the count of
+/// full passes over the keys without any error.
+#[derive(Default)]
+struct Writes {
+    last: std::sync::Mutex<Vec<Last>>,
+    errors: std::sync::Mutex<Vec<String>>,
+    clean_passes: std::sync::atomic::AtomicU64,
+}
+
+const KEYS: usize = 200;
+
+fn churn_key(i: usize) -> String {
+    format!("churn{i}")
+}
+
+/// Write the value `round` to each of the [`KEYS`] keys, round after round, until `stop`.
+async fn write_rounds(
+    mut c: redis::cluster_async::ClusterConnection,
+    w: std::sync::Arc<Writes>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+    *w.last.lock().unwrap() = vec![Last::default(); KEYS];
+    let mut round = 0u64;
+    while !stop.load(Ordering::Relaxed) {
+        let mut clean = true;
+        for i in 0..KEYS {
+            let r: redis::RedisResult<()> =
+                redis::AsyncCommands::set(&mut c, churn_key(i), round).await;
+            let mut last = w.last.lock().unwrap();
+            match r {
+                Ok(()) => {
+                    last[i] = Last {
+                        ok: Some(round),
+                        maybe: Vec::new(),
+                    };
+                }
+                Err(e) => {
+                    clean = false;
+                    last[i].maybe.push(round);
+                    if e.code() != Some("TRYAGAIN") {
+                        w.errors
+                            .lock()
+                            .unwrap()
+                            .push(format!("{}: {e}", churn_key(i)));
+                    }
+                }
+            }
+        }
+        if clean {
+            w.clean_passes.fetch_add(1, Ordering::Relaxed);
+        }
+        round += 1;
+    }
+}
+
+struct Writer {
+    writes: std::sync::Arc<Writes>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Writer {
+    async fn start(urls: Vec<String>) -> Writer {
+        let writes = std::sync::Arc::new(Writes::default());
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let c = cluster_client(urls, None).await;
+        let task = tokio::spawn(write_rounds(c, writes.clone(), stop.clone()));
+        Writer { writes, stop, task }
+    }
+
+    fn clean_passes(&self) -> u64 {
+        self.writes
+            .clean_passes
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Wait until the writer completes `n` more full passes without an error.
+    async fn wait_clean(&self, n: u64, timeout: Duration) -> bool {
+        let want = self.clean_passes() + n;
+        wait_until(timeout, || self.clean_passes() >= want).await
+    }
+
+    async fn stop(self) -> std::sync::Arc<Writes> {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.task.await.unwrap();
+        self.writes
+    }
+}
+
+/// The keys of [`write_rounds`] that do not read back their last value from their primary, each
+/// with what the primary returned.
+async fn wrong_on_primaries(nodes: &[&GossipNode], last: &[Last]) -> Vec<String> {
+    let mut wrong = Vec::new();
+    for (i, l) in last.iter().enumerate() {
+        let key = churn_key(i);
+        let primary = nodes[0].primary(key.as_bytes());
+        let p = nodes.iter().find(|n| n.id == primary).unwrap();
+        let got = Raw::connect(redirect_of(p)).await.cmd(&["GET", &key]).await;
+        let fits =
+            l.ok.iter()
+                .chain(&l.maybe)
+                .any(|v| got == format!("${}\r\n{v}", v.to_string().len()));
+        if !fits {
+            wrong.push(format!(
+                "{key}: {got:?}, wrote {:?} then maybe {:?}",
+                l.ok, l.maybe
+            ));
+        }
+    }
+    wrong
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn writes_survive_a_join_and_a_drain() {
+    let net = Net::new();
+    let mut nodes = net.start_agreed(3, GOSSIP).await;
+    let writer = Writer::start(cluster_urls(&nodes)).await;
+    assert!(writer.wait_clean(1, Duration::from_secs(20)).await);
+
+    let seeds: Vec<SocketAddr> = nodes.iter().map(|n| n.cluster_addr).collect();
+    nodes.push(net.start(&seeds, GOSSIP).await);
+    wait_agreed(&refs(&nodes), Duration::from_secs(20)).await;
+    assert!(writer.wait_clean(2, Duration::from_secs(30)).await);
+
+    let leaving = nodes.remove(1);
+    leaving.node.drain_token().cancel();
+    wait_agreed(&refs(&nodes), Duration::from_secs(20)).await;
+    assert!(writer.wait_clean(2, Duration::from_secs(30)).await);
+
+    let writes = writer.stop().await;
+    let errors = writes.errors.lock().unwrap().clone();
+    assert!(errors.is_empty(), "writes failed: {errors:?}");
+    let last = writes.last.lock().unwrap().clone();
+    assert!(last.iter().all(|l| l.ok.is_some()));
+    let rest = refs(&nodes);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let wrong = wrong_on_primaries(&rest, &last).await;
+        if wrong.is_empty() {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{wrong:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn writes_resume_after_a_failover() {
+    let net = Net::new();
+    let nodes = net.start_agreed(3, GOSSIP).await;
+    let writer = Writer::start(cluster_urls(&nodes)).await;
+    assert!(writer.wait_clean(1, Duration::from_secs(20)).await);
+    let dead = &nodes[2];
+    assert!((0..KEYS).any(|i| nodes[0].primary(churn_key(i).as_bytes()) == dead.id));
+
+    dead.kill();
+    wait_agreed(&[&nodes[0], &nodes[1]], Duration::from_secs(20)).await;
+    assert!(
+        writer.wait_clean(2, Duration::from_secs(30)).await,
+        "the writes did not resume"
+    );
+    writer.stop().await;
+}
+
+#[tokio::test]
+async fn cluster_client_over_tls() {
+    use security_support::TestCa;
+
+    discus::security::tls::install_default();
+    let ca = TestCa::new();
+    let server = ca.ip_cert([127, 0, 0, 1].into());
+    let client = ca.client_cert("spiffe://test/app");
+    let (c, ports) = start_redirect_cluster(3, |_| {
+        [
+            "--tls-mode",
+            "node",
+            "--tls-cert",
+            server.cert_str(),
+            "--tls-key",
+            server.key_str(),
+            "--tls-client-ca",
+            ca.ca_str(),
+            "--auth-policy",
+            "any:mtls",
+        ]
+        .map(String::from)
+        .to_vec()
+    })
+    .await;
+    let certs = || redis::TlsCertificates {
+        client_tls: Some(redis::ClientTlsConfig {
+            client_cert: std::fs::read(&client.cert).unwrap(),
+            client_key: std::fs::read(&client.key).unwrap(),
+        }),
+        root_cert: Some(std::fs::read(&ca.ca_path).unwrap()),
+    };
+    let before = forwards(&c);
+    for (n, port) in ports.iter().enumerate() {
+        let mut cluster = cluster_client(vec![format!("rediss://{port}")], Some(certs())).await;
+        for i in 0..100 {
+            let key = format!("tls{n}:{i}");
+            let _: () = redis::AsyncCommands::set(&mut cluster, &key, i)
+                .await
+                .unwrap();
+            let got: i64 = redis::AsyncCommands::get(&mut cluster, &key).await.unwrap();
+            assert_eq!(got, i);
+        }
+    }
+    // Each node served the keys of its own slots, so the client reached every node over TLS.
+    assert_eq!(forwards(&c), before);
+}

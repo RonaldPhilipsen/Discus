@@ -99,6 +99,13 @@ impl TestCa {
         self.issue(params)
     }
 
+    /// A server certificate whose only SAN is the IP address `ip`.
+    pub fn ip_cert(&self, ip: std::net::IpAddr) -> CertFiles {
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.subject_alt_names.push(SanType::IpAddress(ip));
+        self.issue(params)
+    }
+
     /// A client certificate with one URI SAN.
     pub fn client_cert(&self, uri: &str) -> CertFiles {
         let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
