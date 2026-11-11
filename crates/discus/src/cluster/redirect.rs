@@ -111,6 +111,16 @@ pub(crate) fn moved(node: &Node, key: &[u8], target: NodeId) -> Result<CommandEr
     })
 }
 
+/// Count a `-MOVED` reply.
+#[cfg_attr(not(feature = "testing"), allow(unused_variables))]
+pub(crate) fn note_moved(node: &Node) {
+    discus_telemetry::global().redirect();
+    #[cfg(feature = "testing")]
+    node.faults
+        .redirects
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// `-MOVED` for a multi-key command whose keys all fall in one slot that another healthy node
 /// serves. `None` when the command runs as on the forward listener: its keys span several
 /// slots, the write set splits the targets, the target is this node, or step 4 fails.
@@ -136,11 +146,17 @@ pub(crate) fn multi_moved(
         to = Some(t);
     }
     let to = to.filter(|t| *t != node.id)?;
-    moved(node, first, to)
-        .inspect_err(|misroute| {
+    match moved(node, first, to) {
+        Ok(moved) => {
+            note_moved(node);
+            Some(moved)
+        }
+        Err(misroute) => {
+            discus_telemetry::global().misrouted(misroute.into());
             tracing::trace!(?misroute, target = %to, "forwarding instead of MOVED");
-        })
-        .ok()
+            None
+        }
+    }
 }
 
 #[cfg(test)]

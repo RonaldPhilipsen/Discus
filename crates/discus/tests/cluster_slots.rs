@@ -585,10 +585,23 @@ fn forwards(c: &Cluster) -> Vec<u64> {
     c.nodes.iter().map(forwards_of).collect()
 }
 
+fn redirects(c: &Cluster) -> u64 {
+    c.nodes
+        .iter()
+        .map(|n| {
+            n.node
+                .faults
+                .redirects
+                .load(std::sync::atomic::Ordering::Relaxed)
+        })
+        .sum()
+}
+
 #[tokio::test]
 async fn cluster_client_routes_directly() {
     let (c, ports) = start(|_| vec![]).await;
     let before = forwards(&c);
+    let moved = redirects(&c);
     let urls: Vec<String> = ports.iter().map(|p| format!("redis://{p}")).collect();
     let client = redis::cluster::ClusterClientBuilder::new(urls)
         .response_timeout(Duration::from_secs(30))
@@ -608,6 +621,7 @@ async fn cluster_client_routes_directly() {
         assert_eq!(got, i);
     }
     assert_eq!(forwards(&c), before);
+    assert_eq!(redirects(&c), moved, "a cluster client got -MOVED");
 }
 
 #[tokio::test]
