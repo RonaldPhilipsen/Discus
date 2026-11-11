@@ -13,7 +13,8 @@ CTX = "home-ops"
 NS = "discus-bench"
 NODE = "k8s-neo-alpha"
 DISCUS_TAG = "0.2.2"
-CHART = str(pathlib.Path(__file__).resolve().parent.parent / "charts" / "discus")
+# The published chart of the same version as the image.
+CHART = "oci://ghcr.io/ronaldphilipsen/charts/discus"
 IMAGES = {"redis": "docker.io/library/redis:8", "valkey": "docker.io/valkey/valkey:9"}
 MEMTIER = "docker.io/redislabs/memtier_benchmark:2.2.1"
 KEYS = 1_000_000
@@ -26,8 +27,37 @@ WORKLOADS = {
     "mixed-1w9r-p16": ("1:9", 16),
 }
 
-# name -> (kind, engine, nodes)
+# name -> (kind, engine, nodes). A Discus setup can name its image tag as a fourth item.
 SYSTEMS = {
+    "discus-6": ("discus", "discus", 6, "0.2.3-rc.1"),
+    "discus-6-rc2": ("discus", "discus", 6, "0.2.3-rc.2"),
+    "discus-6-0.2.2": ("discus", "discus", 6, "0.2.2"),
+    "discus-6-0.3.0-rc.2": ("discus", "discus", 6, "0.3.0-rc.2"),
+    "discus-3-0.3.0-rc.2": ("discus", "discus", 3, "0.3.0-rc.2"),
+    "discus-1-0.3.0-rc.2": ("discus", "discus", 1, "0.3.0-rc.2"),
+    "discus-6-0.4.1-rc.1": ("discus", "discus", 6, "0.4.1-rc.1"),
+    "discus-3-0.4.1-rc.1": ("discus", "discus", 3, "0.4.1-rc.1"),
+    "discus-1-0.4.1-rc.1": ("discus", "discus", 1, "0.4.1-rc.1"),
+    "discus-6-0.5.0-rc.1": ("discus", "discus", 6, "0.5.0-rc.1"),
+    "discus-3-0.5.0-rc.1": ("discus", "discus", 3, "0.5.0-rc.1"),
+    "discus-1-0.5.0-rc.1": ("discus", "discus", 1, "0.5.0-rc.1"),
+    "discus-cluster-6-0.5.0-rc.1": ("discus-cluster", "discus", 6, "0.5.0-rc.1"),
+    "discus-cluster-3-0.5.0-rc.1": ("discus-cluster", "discus", 3, "0.5.0-rc.1"),
+    "discus-cluster-1-0.5.0-rc.1": ("discus-cluster", "discus", 1, "0.5.0-rc.1"),
+    "discus-6-0.5.0-rc.2": ("discus", "discus", 6, "0.5.0-rc.2"),
+    "discus-3-0.5.0-rc.2": ("discus", "discus", 3, "0.5.0-rc.2"),
+    "discus-1-0.5.0-rc.2": ("discus", "discus", 1, "0.5.0-rc.2"),
+    "discus-cluster-6-0.5.0-rc.2": ("discus-cluster", "discus", 6, "0.5.0-rc.2"),
+    "discus-cluster-3-0.5.0-rc.2": ("discus-cluster", "discus", 3, "0.5.0-rc.2"),
+    "discus-cluster-1-0.5.0-rc.2": ("discus-cluster", "discus", 1, "0.5.0-rc.2"),
+    "redis-sentinel-6": ("sentinel", "redis", 6),
+    "valkey-sentinel-6": ("sentinel", "valkey", 6),
+    "redis-cluster-noreplica-6": ("cluster0", "redis", 6),
+    "valkey-cluster-noreplica-6": ("cluster0", "valkey", 6),
+    "redis-cluster-replica-6": ("cluster1", "redis", 6),
+    "valkey-cluster-replica-6": ("cluster1", "valkey", 6),
+    "redis-cluster-replica2-6": ("cluster2", "redis", 6),
+    "valkey-cluster-replica2-6": ("cluster2", "valkey", 6),
     "discus-3": ("discus", "discus", 3),
     "redis-sentinel-3": ("sentinel", "redis", 3),
     "valkey-sentinel-3": ("sentinel", "valkey", 3),
@@ -35,6 +65,8 @@ SYSTEMS = {
     "valkey-cluster-noreplica-3": ("cluster0", "valkey", 3),
     "redis-cluster-replica-3": ("cluster1", "redis", 3),
     "valkey-cluster-replica-3": ("cluster1", "valkey", 3),
+    "redis-cluster-replica2-3": ("cluster2", "redis", 3),
+    "valkey-cluster-replica2-3": ("cluster2", "valkey", 3),
     "discus-1": ("discus", "discus", 1),
     "redis-1": ("standalone", "redis", 1),
     "valkey-1": ("standalone", "valkey", 1),
@@ -150,7 +182,7 @@ def deploy_standalone(name, engine):
     return {"targets": [(ip, 6379)], "cluster": False, "ips": [ip]}
 
 
-def deploy_sentinel(name, engine):
+def deploy_sentinel(name, engine, n):
     host0 = f"{name}-0.{name}.{NS}.svc.cluster.local"
     s = f"""
 ORD=${{HOSTNAME##*-}}
@@ -172,60 +204,65 @@ EOF
 {engine}-server /tmp/s.conf --sentinel &
 wait
 """
-    for o in server_sts(name, engine, 3, s):
+    for o in server_sts(name, engine, n, s):
         apply(o)
-    ps = wait_pods(name, 3)
+    ps = wait_pods(name, n)
     ips = [ip for _, ip in ps]
 
     def healthy():
         info = cli(ips[0], "INFO", "replication")
-        if "connected_slaves:2" not in info or "state=online" not in info:
+        if f"connected_slaves:{n - 1}" not in info or info.count("state=online") != n - 1:
             return False
         out = cli(ips[0], "SENTINEL", "master", "m", port=26379)
         f = out.split()
         d = dict(zip(f[::2], f[1::2]))
-        return d.get("num-slaves") == "2" and d.get("num-other-sentinels") == "2"
+        return d.get("num-slaves") == str(n - 1) and d.get("num-other-sentinels") == str(n - 1)
     until(healthy, "sentinel healthy")
     return {"targets": [(ips[0], 6379)], "cluster": False, "ips": ips,
             "replica_targets": [(ip, 6379) for ip in ips]}
 
 
-def deploy_cluster(name, engine, replicas):
-    mem = "1536mb" if not replicas else "700mb"
+def deploy_cluster(name, engine, replicas, n):
+    """Each pod runs one primary on 6379 and `replicas` replica processes on 6380 and up. Replica k
+    of the primary on pod i runs on pod i + k + 1, so the copies of a slot are on different pods."""
+    mem = {0: "1536mb", 1: "700mb", 2: "500mb"}[replicas]
     srv = (f"{engine}-server {common(mem)} --cluster-enabled yes --cluster-node-timeout 5000 "
            f"--cluster-announce-ip $POD_IP")
     if replicas:
-        s = (f"{srv} --port 6379 --cluster-config-file /tmp/a.conf & "
-             f"{srv} --port 6380 --cluster-config-file /tmp/b.conf & wait")
+        s = " & ".join(f"{srv} --port {6379 + k} --cluster-config-file /tmp/n{k}.conf"
+                       for k in range(replicas + 1)) + " & wait"
     else:
-        s = f"exec {srv} --port 6379 --cluster-config-file /tmp/a.conf"
-    for o in server_sts(name, engine, 3, s):
+        s = f"exec {srv} --port 6379 --cluster-config-file /tmp/n0.conf"
+    for o in server_sts(name, engine, n, s):
         apply(o)
-    ps = wait_pods(name, 3)
+    ps = wait_pods(name, n)
     ips = [ip for _, ip in ps]
     pod0 = ps[0][0]
     ex = lambda *a: kc("exec", pod0, "--", f"{engine}-cli", *a, timeout=120)
-    until(lambda: cli(ips[2], "PING").strip() == "PONG", "cluster node up")
+    until(lambda: all(cli(ip, "PING").strip() == "PONG" for ip in ips), "cluster nodes up")
     ex("--cluster", "create", *[f"{ip}:6379" for ip in ips], "--cluster-yes")
     until(lambda: "cluster_state:ok" in cli(ips[0], "CLUSTER", "INFO"), "cluster ok")
     if replicas:
         ids = [cli(ip, "CLUSTER", "MYID").strip() for ip in ips]
-        for i, ip in enumerate(ips):
-            nxt = ips[(i + 1) % 3]
-            ex("--cluster", "add-node", f"{nxt}:6380", f"{ip}:6379",
-               "--cluster-slave", "--cluster-master-id", ids[i])
+        for k in range(1, replicas + 1):
+            for i, ip in enumerate(ips):
+                host = ips[(i + k) % n]
+                ex("--cluster", "add-node", f"{host}:{6379 + k}", f"{ip}:6379",
+                   "--cluster-slave", "--cluster-master-id", ids[i])
 
         def linked():
             for ip in ips:
                 info = cli(ip, "INFO", "replication")
-                if "connected_slaves:1" not in info or "state=online" not in info:
+                online = info.count("state=online")
+                if f"connected_slaves:{replicas}" not in info or online < replicas:
                     return False
             return "cluster_state:ok" in cli(ips[0], "CLUSTER", "INFO")
         until(linked, "cluster replicas online")
     return {"targets": [(ips[0], 6379)], "cluster": True, "ips": ips}
 
 
-def deploy_discus(name, n, tmp):
+def deploy_discus(name, n, tag, tmp, cluster_mode=False):
+    """With cluster_mode, memtier runs as a Redis Cluster client against the redirect listener."""
     release = "discus"
     run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
          "-days", "2", "-subj", "/CN=bench CA", "-keyout", f"{tmp}/ca.key", "-out", f"{tmp}/ca.crt"])
@@ -237,14 +274,15 @@ def deploy_discus(name, n, tmp):
     kc("delete", "secret", "discus-tls", "--ignore-not-found")
     kc("create", "secret", "generic", "discus-tls", f"--from-file=ca.crt={tmp}/ca.crt",
        f"--from-file=tls.crt={tmp}/tls.crt", f"--from-file=tls.key={tmp}/tls.key")
-    run(["helm", "--kube-context", CTX, "-n", NS, "upgrade", "--install", release, CHART,
+    run(["helm", "--kube-context", CTX, "-n", NS, "upgrade", "--install", release, CHART, "--version", tag,
          "--wait", "--timeout", "5m",
-         "--set", f"replicaCount={n}", "--set", f"image.tag={DISCUS_TAG}",
+         "--set", f"replicaCount={n}", "--set", f"image.tag={tag}",
          "--set", "cluster.tls.secretName=discus-tls",
          "--set", "resources.requests.cpu=1", "--set", "resources.limits.cpu=1",
          "--set", "resources.requests.memory=2Gi", "--set", "resources.limits.memory=2Gi",
          "--set-string", f"nodeSelector.kubernetes\\.io/hostname={NODE}",
-         "--set", "podDisruptionBudget.enabled=false"], timeout=400)
+         "--set", "podDisruptionBudget.enabled=false",
+         "--set", f"clusterClients.enabled={'true' if cluster_mode else 'false'}"], timeout=400)
     out = json.loads(kc("get", "pods", "-l", "app.kubernetes.io/name=discus", "-o", "json"))
     ips = [p["status"]["podIP"] for p in out["items"] if p["metadata"].get("deletionTimestamp") is None]
 
@@ -260,7 +298,12 @@ def deploy_discus(name, n, tmp):
     # Counters switch to Raft after the 30 s dwell. Waiting avoids that change during a run.
     if n >= 3:
         time.sleep(40)
-    return {"targets": [(svc, 6379)], "cluster": False, "ips": ips}
+    if cluster_mode:
+        until(lambda: cli(ips[0], "CLUSTER", "SLOTS", port=6380).strip(), "cluster slots")
+        return {"targets": [(ips[0], 6380)], "cluster": True, "ips": ips, "service": (svc, 6379)}
+    # The client connects to every pod, so each node gets the same share of the connections. Through
+    # the Service, the connections spread at random over the pods.
+    return {"targets": [(ip, 6379) for ip in ips], "cluster": False, "ips": ips, "service": (svc, 6379)}
 
 
 def teardown():
@@ -306,7 +349,7 @@ def one(info, targets, ratio, pipeline, duration, threads, clients):
 def summarize(parts):
     ops = lat = 0.0
     p50 = p99 = p999 = 0.0
-    hits = misses = sets = gets = 0.0
+    hits = misses = sets = gets = moved = ask = 0.0
     for j in parts:
         t = j["ALL STATS"]["Totals"]
         o = t["Ops/sec"]
@@ -321,13 +364,16 @@ def summarize(parts):
         misses += g.get("Misses/sec", 0)
         sets += j["ALL STATS"].get("Sets", {}).get("Ops/sec", 0)
         gets += g.get("Ops/sec", 0)
+        moved += t.get("MOVED/sec", 0)
+        ask += t.get("ASK/sec", 0)
     return {"ops": ops, "avg_ms": lat / ops if ops else None, "p50_ms": p50, "p99_ms": p99,
-            "p999_ms": p999, "hits": hits, "misses": misses, "sets_s": sets, "gets_s": gets}
+            "p999_ms": p999, "hits": hits, "misses": misses, "sets_s": sets, "gets_s": gets,
+            "moved_s": moved, "ask_s": ask}
 
 
 def verify(name, kind, info, phase, out):
     rec = {"system": name, "verify": phase, "nodes": []}
-    ports = [6379, 6380] if kind == "cluster1" else [6379]
+    ports = [6379 + k for k in range({"cluster1": 2, "cluster2": 3}.get(kind, 1))]
     for ip in info["ips"]:
         for port in ports:
             r = {"ip": ip, "port": port, "dbsize": cli(ip, "DBSIZE", port=port, check=False).strip()}
@@ -339,13 +385,40 @@ def verify(name, kind, info, phase, out):
                         r[k] = m[0]
             rec["nodes"].append(r)
     throttles = {}
-    if kind != "discus":
+    if not kind.startswith("discus"):
         for pod_name, _ in pods(rec["system"].replace("-noreplica", "n").replace("-replica", "r").replace("-sentinel", "s")[:40]):
             throttles[pod_name] = kc("exec", pod_name, "--", "cat", "/sys/fs/cgroup/cpu.stat", "/sys/fs/cgroup/cpu.max", check=False, timeout=30)
     rec["cpu_stat"] = throttles
     with open(out, "a") as f:
         f.write(json.dumps(rec) + "\n")
     log(f"verify {phase}: " + json.dumps(rec["nodes"]))
+
+
+CFS = ("container_cpu_cfs_periods_total", "container_cpu_cfs_throttled_periods_total",
+       "container_cpu_cfs_throttled_seconds_total", "container_cpu_usage_seconds_total")
+
+
+def cfs():
+    """The CFS counters of each pod in the namespace, from the kubelet cAdvisor metrics.
+    Some images have no shell, so the pod cgroup cannot be read with exec."""
+    txt = run(["kubectl", "--context", CTX, "get", "--raw",
+               f"/api/v1/nodes/{NODE}/proxy/metrics/cadvisor"], check=False, timeout=60)
+    out = {}
+    for line in txt.splitlines():
+        name = line.split("{", 1)[0]
+        # The pod cgroup has an empty image. The pause container has container="" too.
+        if (name not in CFS or f'namespace="{NS}"' not in line or 'container=""' not in line
+                or 'image=""' not in line):
+            continue
+        pod = line.split('pod="', 1)[1].split('"', 1)[0]
+        out.setdefault(pod, {})[name.removeprefix("container_cpu_").removesuffix("_total")] = \
+            float(line.split("} ", 1)[1].split()[0])
+    return out
+
+
+def cfs_delta(before, after):
+    return {pod: {k: round(v - before.get(pod, {}).get(k, 0.0), 3) for k, v in m.items()}
+            for pod, m in after.items() if pod != "toolbox"}
 
 
 def top_sample(delay, into):
@@ -358,35 +431,49 @@ def top_sample(delay, into):
 
 
 def run_system(name, args, tmp, out):
-    kind, engine, n = SYSTEMS[name]
+    kind, engine, n, *rest = SYSTEMS[name]
     log(f"=== {name}: deploy")
     teardown()
     short = name.replace("-noreplica", "n").replace("-replica", "r").replace("-sentinel", "s")[:40]
     if kind == "standalone":
         info = deploy_standalone(short, engine)
     elif kind == "sentinel":
-        info = deploy_sentinel(short, engine)
-    elif kind == "cluster0":
-        info = deploy_cluster(short, engine, False)
-    elif kind == "cluster1":
-        info = deploy_cluster(short, engine, True)
+        info = deploy_sentinel(short, engine, n)
+    elif kind in ("cluster0", "cluster1", "cluster2"):
+        info = deploy_cluster(short, engine, int(kind[-1]), n)
     else:
-        info = deploy_discus(short, n, tmp)
+        info = deploy_discus(short, n, rest[0] if rest else DISCUS_TAG, tmp, kind == "discus-cluster")
     prefill(info)
     verify(name, kind, info, "after-prefill", out)
     for rep in range(args.reps):
         for w, (ratio, pipe) in WORKLOADS.items():
-            variants = [("primary", info["targets"], 4, 25)]
+            # Every setup gets args.connections per node, so all setups have the same total.
+            # memtier in Cluster mode opens its connections to every primary. A Discus setup has
+            # one memtier process per pod. A Sentinel primary takes the total of all nodes.
+            targets = info["targets"]
+            if info["cluster"]:
+                t, c = args.threads, args.connections / args.threads
+            elif len(targets) > 1:
+                t = max(1, args.threads // len(targets))
+                c = args.connections / t
+            else:
+                t, c = args.threads, args.connections * n / args.threads
+            variants = [("primary", targets, t, max(1, round(c)))]
             if w == "get" and info.get("replica_targets"):
-                variants.append(("all-nodes", info["replica_targets"], 2, 17))
+                spread = info["replica_targets"]
+                t = max(1, args.threads // len(spread))
+                variants.append(("all-nodes", spread, t, max(1, round(args.connections / t))))
             for variant, targets, t, c in variants:
                 samples = []
                 th = top_sample(args.duration * 0.6, samples)
+                before = cfs()
                 parts = one(info, targets, ratio, pipe, args.duration, t, c)
+                throttle = cfs_delta(before, cfs())
                 th.join()
-                rec = {"system": name, "workload": w, "variant": variant, "rep": rep,
+                rec = {"system": name, "workload": w, "variant": variant, "rep": rep, "threads": t,
+                       "clients": c,
                        "duration": args.duration, "top": samples[0] if samples else "",
-                       **summarize(parts)}
+                       "cfs": throttle, **summarize(parts)}
                 with open(out, "a") as f:
                     f.write(json.dumps(rec) + "\n")
                 log(f"{name} {w}/{variant} rep{rep}: {rec['ops']:.0f} ops/s "
@@ -402,6 +489,10 @@ def main():
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--systems", default=",".join(SYSTEMS))
     ap.add_argument("--out", required=True)
+    ap.add_argument("--threads", type=int, default=8,
+                    help="memtier threads in all. With several targets, each target gets an equal part.")
+    ap.add_argument("--connections", type=int, default=96,
+                    help="client connections per node. Every setup gets this number times its node count.")
     args = ap.parse_args()
     ensure_tools()
     with tempfile.TemporaryDirectory() as tmp:

@@ -1,5 +1,7 @@
 import json, statistics, sys
-order = ["discus-3","redis-sentinel-3","valkey-sentinel-3","redis-cluster-noreplica-3","valkey-cluster-noreplica-3",
+order = ["discus-6-rc2","discus-6","discus-6-0.2.2","redis-sentinel-6","valkey-sentinel-6","redis-cluster-noreplica-6",
+         "valkey-cluster-noreplica-6","redis-cluster-replica-6","valkey-cluster-replica-6",
+         "discus-3","redis-sentinel-3","valkey-sentinel-3","redis-cluster-noreplica-3","valkey-cluster-noreplica-3",
          "redis-cluster-replica-3","valkey-cluster-replica-3","discus-1","redis-1","valkey-1"]
 wl = ["get","set","mixed-1w9r","mixed-1w9r-p16"]
 rows = {}
@@ -19,7 +21,8 @@ for w in wl:
             if not r: continue
             ops = [x["ops"] for x in r]
             med = lambda k: statistics.median(x[k] for x in r)
-            name = s + (" (reads on all 3 nodes)" if v == "all-nodes" else "")
+            nodes = s.rsplit("-", 1)[-1] if s.rsplit("-", 1)[-1].isdigit() else s.split("-")[1]
+            name = s + (f" (reads on all {nodes} nodes)" if v == "all-nodes" else "")
             print(f"| {name} | {statistics.median(ops):,.0f} | {min(ops):,.0f} to {max(ops):,.0f} | {med('p50_ms'):.2f} | {med('p99_ms'):.2f} | {med('p999_ms'):.2f} | {len(r)} |")
     miss = sum(x["misses"] for (s,ww,v),rr in rows.items() if ww==w for x in rr)
     print(f"\nGET misses per second summed over all runs: {miss:.1f}")
