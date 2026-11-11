@@ -9,7 +9,7 @@
 //! once every source is done or gone.
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -236,25 +236,20 @@ pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits
 /// it. Returns how many keys it dropped.
 ///
 /// A write can reach this node after the scan passed its key, from a command that routed before
-/// the adoption. The scan never sent it, and the replication queue can skip it, because a queue
-/// stops carrying keys that this node no longer owns. So each key is first offered at its
-/// version to every current owner, which asks for it if its own copy is older. The key goes
-/// only if every owner answered and the entry still has the offered version.
+/// the adoption. The scan never sent it, and its replication can still be queued. So each key is
+/// first offered at its version to every current owner, which asks for it if its own copy is
+/// older. The key goes only if every owner answered, no queue or hint holds it, and the entry
+/// still has the offered version.
 ///
 /// A key also stays when its entry is newer than `watermark`, because a peer in a newer epoch can
-/// forward a write here first. Every key stays once `newest` passes the generation of the current
-/// epoch: a peer in an epoch that this node has not adopted yet sent entries, maybe of ranges
-/// that this node gains in that epoch.
-pub async fn drop_lost(
-    node: &Arc<Node>,
-    to: &Epoch,
-    watermark: NTP64,
-    newest: &AtomicU64,
-    limits: Limits,
-) -> usize {
+/// forward a write here first. Every key stays once this node adopts another epoch during the
+/// pass, or once a peer sent a batch from an epoch newer than the current one: such a batch can
+/// carry entries of ranges that this node gains in that epoch.
+pub async fn drop_lost(node: &Arc<Node>, to: &Epoch, watermark: NTP64, limits: Limits) -> usize {
     let Some(replicator) = node.replicator().cloned() else {
         return 0;
     };
+    let adoptions = replicator.adoptions.load(Ordering::SeqCst);
     let (me, rf) = (node.id, limits.rf);
     let current = node.epochs().current().clone();
     if !current.is_normal(me) {
@@ -275,7 +270,11 @@ pub async fn drop_lost(
             node.faults.drop_held.store(true, Ordering::Relaxed);
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        if newest.load(Ordering::SeqCst) > generation {
+        let moved_on = || {
+            replicator.peer_generation.load(Ordering::SeqCst) > generation
+                || replicator.adoptions.load(Ordering::SeqCst) != adoptions
+        };
+        if moved_on() {
             return dropped;
         }
         let (next, entries) = node.store.scan_entries(cursor, STEP, |k, e| {
@@ -308,12 +307,10 @@ pub async fn drop_lost(
             }
         }
         for (k, v, owners) in offered {
-            if owners.iter().any(|o| failed.contains(o)) {
+            if owners.iter().any(|o| failed.contains(o)) || !replicator.settled(&k) {
                 continue;
             }
-            let removed = node.store.remove_if(&k, |e| {
-                e.version == v && newest.load(Ordering::SeqCst) <= generation
-            });
+            let removed = node.store.remove_if(&k, |e| e.version == v && !moved_on());
             dropped += usize::from(removed);
         }
         if next == 0 {

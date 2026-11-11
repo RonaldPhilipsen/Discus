@@ -313,3 +313,55 @@ async fn a_write_behind_the_scan_reaches_the_owners_before_the_drop() {
         }
     }
 }
+
+/// A write acknowledged on an old owner while the epoch changes reaches the current owners, also
+/// when the deferred epoch work runs after the write queued the key.
+#[tokio::test]
+async fn a_write_queued_during_the_epoch_change_reaches_the_new_owners() {
+    let net = Net::new();
+    let extra = ["--replication-factor", "3"];
+    let nodes = net.start_agreed(3, &extra).await;
+    let keys = fill(&nodes[0], "queued", 200).await;
+    let joiner = net.start(&[nodes[0].cluster_addr], &extra).await;
+    assert!(started(&joiner).await);
+    let all: Vec<&GossipNode> = nodes.iter().chain(std::iter::once(&joiner)).collect();
+    wait_agreed(&all, FORM).await;
+    let old = &nodes[0];
+    let rep = old.node.replicator().unwrap();
+    assert!(wait_until(Duration::from_secs(60), || !rep.scanning()).await);
+    let (prev, new) = {
+        let epochs = old.node.epochs();
+        (epochs.previous().unwrap().clone(), epochs.current().clone())
+    };
+    let key = keys
+        .iter()
+        .find(|k| {
+            let owners = new.owners(k.as_bytes(), 3);
+            !owners.contains(&old.id) && owners.contains(&joiner.id)
+        })
+        .unwrap();
+    let key = bytes::Bytes::from(key.clone());
+
+    old.node
+        .faults
+        .hold_replication
+        .store(true, Ordering::Relaxed);
+    let value = discus_store::Value::Str("queued".into());
+    old.node.write(&key, old.node.stamp().unwrap(), |slot| {
+        slot.set(Some(discus_store::Entry::new(value.clone(), None)));
+    });
+    // The deferred work of the adoption runs after the write queued the key.
+    rep.on_epoch(&prev, &new, &new);
+    old.node
+        .faults
+        .hold_replication
+        .store(false, Ordering::Relaxed);
+
+    assert!(wait_until(FORM, || rep.settled(&key)).await);
+    for n in &all {
+        if new.owners(&key, 3).contains(&n.id) {
+            let got = n.node.store.entry(&key).map(|e| e.value);
+            assert_eq!(got, Some(value.clone()), "{}", n.id);
+        }
+    }
+}

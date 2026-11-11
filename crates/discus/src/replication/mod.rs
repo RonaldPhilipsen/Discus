@@ -105,7 +105,10 @@ pub struct Replicator {
     probing: AtomicBool,
     /// The newest epoch generation of a batch that a peer sent, recorded before its entries
     /// apply. `handoff::drop_lost` keeps every key once it passes the current generation.
-    peer_generation: AtomicU64,
+    pub(crate) peer_generation: AtomicU64,
+    /// Adoptions since start, counted under the epoch lock in `register`. The drop of moved
+    /// keys keeps every key once this changes during its pass.
+    pub(crate) adoptions: AtomicU64,
 }
 
 impl Replicator {
@@ -129,6 +132,7 @@ impl Replicator {
             ready: AtomicBool::new(false),
             probing: AtomicBool::new(false),
             peer_generation: AtomicU64::new(0),
+            adoptions: AtomicU64::new(0),
         });
         // Under memory pressure the store frees the oldest hints after its normal entries
         // (spec section 11).
@@ -238,6 +242,7 @@ impl Replicator {
         new: &Arc<Epoch>,
         mut pin: impl FnMut() -> Option<crate::node::EpochPin>,
     ) {
+        self.adoptions.fetch_add(1, Ordering::SeqCst);
         if !self.settings.handoff {
             return;
         }
@@ -361,8 +366,7 @@ impl Replicator {
             };
             let watermark = node.hlc.current();
             if handoff::scan(&node, &changes, to.clone(), limits).await {
-                let newest = &self.peer_generation;
-                let dropped = handoff::drop_lost(&node, &to, watermark, newest, limits).await;
+                let dropped = handoff::drop_lost(&node, &to, watermark, limits).await;
                 tracing::info!(dropped, "dropped the keys that moved to other owners");
             }
             self.scans.fetch_add(1, Ordering::Relaxed);
@@ -456,7 +460,12 @@ impl Replicator {
 
     /// Queue `key`, which a local write just changed, for every other current owner.
     pub fn written(&self, node: &Node, key: &Bytes) {
-        for owner in node.owners(key) {
+        self.queue_for(node.owners(key), key);
+    }
+
+    /// Queue `key` for every owner in `owners` but this node.
+    fn queue_for(&self, owners: Vec<NodeId>, key: &Bytes) {
+        for owner in owners {
             if owner == self.id {
                 continue;
             }
@@ -501,22 +510,28 @@ impl Replicator {
     }
 
     /// The node adopted `new` after `old`, and `current` is its epoch now. Queues and hints stop
-    /// carrying keys that the target no longer owns in `current`, and queues stop carrying keys
-    /// that this node no longer owns (spec sections 5.1 and 9). A peer that left `current` is
-    /// `DEAD` or departed, so it loses its queue and hints. Only the promotion reconciliation
-    /// uses the `old` to `new` step.
+    /// carrying keys that the target no longer owns in `current`, and those keys go to the queues
+    /// of their current owners instead (spec sections 5.1 and 9). A write that this node
+    /// acknowledged while the epoch changed can be in no handoff scan, so it must not stay
+    /// behind on this node, also when this node no longer owns the key. A peer that left
+    /// `current` is `DEAD` or departed, so it loses its queue and hints. Only the promotion
+    /// reconciliation uses the `old` to `new` step.
     pub fn on_epoch(&self, old: &Arc<Epoch>, new: &Arc<Epoch>, current: &Epoch) {
         let rf = self.settings.rf;
+        let mut moved: Vec<Bytes> = Vec::new();
         self.peers.write().retain(|peer, q| {
-            if current.member(*peer).is_none() {
-                q.close();
-                return false;
-            }
+            let member = current.member(*peer).is_some();
             q.retain(|k| {
-                let owners = current.owners(k, rf);
-                owners.contains(peer) && owners.contains(&self.id)
+                let keep = member && current.owners(k, rf).contains(peer);
+                if !keep {
+                    moved.push(k.clone());
+                }
+                keep
             });
-            true
+            if !member {
+                q.close();
+            }
+            member
         });
         {
             let mut hints = self.hints.lock();
@@ -525,7 +540,18 @@ impl Replicator {
                     hints.drop_target(target);
                 }
             }
-            hints.retain(|target, k| current.owners(k, rf).contains(&target));
+            hints.retain(|target, k| {
+                let keep = current.owners(k, rf).contains(&target);
+                if !keep {
+                    moved.push(k.clone());
+                }
+                keep
+            });
+        }
+        moved.sort_unstable();
+        moved.dedup();
+        for k in &moved {
+            self.queue_for(current.owners(k, rf), k);
         }
         self.sync_charge();
         self.prune_handoffs(current);
@@ -611,6 +637,12 @@ impl Replicator {
                 if self.probe(&node, &q).await && self.replay(&node, q.peer).await {
                     q.set_up();
                 }
+                continue;
+            }
+            #[cfg(feature = "testing")]
+            if node.faults.hold_replication.load(Ordering::Relaxed) {
+                drop(node);
+                tokio::time::sleep(Duration::from_millis(10)).await;
                 continue;
             }
             let keys = q.take(self.settings.batch_keys);

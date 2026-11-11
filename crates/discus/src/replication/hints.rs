@@ -250,7 +250,7 @@ impl HintStore {
 
     /// Keep only the hints for which `keep(target, key)` holds. Dropped hints are not lost:
     /// the target no longer owns the key.
-    pub fn retain(&mut self, keep: impl Fn(NodeId, &Bytes) -> bool) {
+    pub fn retain(&mut self, mut keep: impl FnMut(NodeId, &Bytes) -> bool) {
         for (id, t) in &mut self.targets {
             let drop: Vec<Bytes> = t
                 .hints

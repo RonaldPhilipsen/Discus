@@ -112,6 +112,8 @@ pub struct Faults {
     pub hold_drop: std::sync::atomic::AtomicBool,
     /// A drop of moved keys waited on `hold_drop`.
     pub drop_held: std::sync::atomic::AtomicBool,
+    /// The replication senders keep their queued keys while this is set.
+    pub hold_replication: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "testing")]
