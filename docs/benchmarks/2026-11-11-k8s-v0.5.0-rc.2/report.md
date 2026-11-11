@@ -264,8 +264,14 @@ No server pod and no client pod was throttled in any run. In cluster mode, the s
 about 0.5 to 0.6 of their 1 CPU during SET. Each connection waits for one reply before it sends the
 next request. Thus the latency sets the rate, not the CPU. The change cuts CPU time, but not the
 latency. In cluster mode with 3 and 6 nodes, the SET p50 stayed 0.6 ms to 0.9 ms above Valkey
-Cluster. To close the SET gap, a change must cut the time of one write, for example in the
-replication round trip.
+Cluster.
+
+A SET does not wait for the replicas. The primary replies after it applies the write, and a separate
+task sends the write to the replicas. That task and the inbound batches from other primaries run on
+the same worker thread as the client connections. In a local profile of cluster-mode SET,
+replication took about half of the node CPU. A client reply that waits behind this work gets a
+higher latency. To close the SET gap, a change must make that work cheaper or move it out of the way
+of the client connections.
 
 ## Limits of this benchmark
 
