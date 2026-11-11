@@ -103,9 +103,6 @@ impl Membership {
             incarnation: 0,
             weight: Weight::new(config.weight).unwrap_or_default(),
             epoch: node.epoch_id(),
-            #[cfg(feature = "testing")]
-            capabilities: config.cluster_capabilities,
-            #[cfg(not(feature = "testing"))]
             capabilities: discus_wire::caps::KNOWN,
             capacity: Capacity::default(),
             leader_hints: Bytes::new(),

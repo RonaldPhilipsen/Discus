@@ -5,7 +5,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::cluster::{start_cluster, start_cluster_with, Cluster};
+use common::cluster::{start_cluster, Cluster};
 use discus_placement::{Epoch, EpochId, Member, MemberState, NodeId};
 use discus_resp::Value;
 use discus_transport::testing::TEST_SAN;
@@ -102,32 +102,6 @@ async fn a_higher_epoch_is_adopted_before_acting() {
     let mut a = c.nodes[0].redis().await;
     let _: () = a.set(&key, "v").await.unwrap();
     assert_eq!(generation(&c, 1), 2);
-}
-
-#[tokio::test]
-async fn without_epoch_push_the_receiver_keeps_its_epoch() {
-    let c = start_cluster_with(2, |i| {
-        if i == 0 {
-            vec![
-                "--cluster-capabilities".into(),
-                (discus_wire::caps::KNOWN & !discus_wire::caps::EPOCH_PUSH).to_string(),
-            ]
-        } else {
-            vec![]
-        }
-    })
-    .await;
-    let key = c.key_on(1, "nopush");
-    let members = c.nodes[0].node.epochs().current().members().to_vec();
-    let next = c.nodes[0]
-        .node
-        .epochs()
-        .propose(c.nodes[0].id, members)
-        .unwrap();
-    c.nodes[0].node.adopt_epoch(next).unwrap();
-    let mut a = c.nodes[0].redis().await;
-    let _: () = a.set(&key, "v").await.unwrap();
-    assert_eq!(generation(&c, 1), 1);
 }
 
 #[tokio::test]

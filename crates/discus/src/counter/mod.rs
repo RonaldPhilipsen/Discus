@@ -684,21 +684,10 @@ impl Counters {
         timeout: Duration,
     ) -> Result<Message, String> {
         let node = self.node().ok_or("the node is gone")?;
-        let (link, addr, _) = node.peer(to)?;
-        let frame = link
-            .transport
-            .request_on(
-                discus_transport::Lane::Bulk,
-                to,
-                addr,
-                message,
-                discus_wire::TraceContext::default(),
-                timeout,
-                true,
-            )
+        let build = |_: &_| Ok(message);
+        node.request(to, discus_transport::Lane::Bulk, build, timeout, true)
             .await
-            .map_err(|e| e.to_string())?;
-        Ok(frame.message)
+            .map_err(|e| e.to_string())
     }
 
     /// The hints of every group that this node leads.

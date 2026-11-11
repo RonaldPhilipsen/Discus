@@ -3,7 +3,7 @@
 
 use discus_placement::{slot, EpochId, Member, MemberState, NodeId, Version};
 
-use super::{candidates, Hop};
+use super::{candidates, replica_reads, Hop};
 use crate::command::CommandError;
 use crate::node::Node;
 
@@ -91,34 +91,37 @@ pub(crate) fn target(
             .first()
             .copied();
     }
-    let replicas = node.link().is_some_and(|l| l.read_from_replicas);
-    if !write && readonly && replicas && owners.contains(&node.id) {
+    if readonly && replica_reads(node, write) && owners.contains(&node.id) {
         return Some(node.id);
     }
     owners.first().copied()
 }
 
-/// `-MOVED` to `target` for the slot of `key`, or why the node forwards instead.
-pub(crate) fn moved(node: &Node, key: &[u8], target: NodeId) -> Result<CommandError, Misroute> {
+/// `-MOVED` to `target` for the slot of `key`, or `None` when the node forwards instead. Either
+/// outcome is counted.
+pub(crate) fn moved(node: &Node, key: &[u8], target: NodeId) -> Option<CommandError> {
     // Health reads other locks, so it runs before the epoch lock is taken.
     let alive = node.target_up(target);
     let epoch = node.epochs().current().clone();
     let peer_epoch = node.link().and_then(|l| l.peer_epoch(target));
-    let to = decide(epoch.member(target), alive, peer_epoch, epoch.id())?;
-    Ok(CommandError::Moved {
-        slot: slot(key),
-        to,
-    })
-}
-
-/// Count a `-MOVED` reply.
-#[cfg_attr(not(feature = "testing"), allow(unused_variables))]
-pub(crate) fn note_moved(node: &Node) {
-    discus_telemetry::global().redirect();
-    #[cfg(feature = "testing")]
-    node.faults
-        .redirects
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    match decide(epoch.member(target), alive, peer_epoch, epoch.id()) {
+        Ok(to) => {
+            discus_telemetry::global().redirect();
+            #[cfg(feature = "testing")]
+            node.faults
+                .redirects
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(CommandError::Moved {
+                slot: slot(key),
+                to,
+            })
+        }
+        Err(misroute) => {
+            discus_telemetry::global().misrouted(misroute.into());
+            tracing::trace!(?misroute, %target, "forwarding instead of MOVED");
+            None
+        }
+    }
 }
 
 /// `-MOVED` for a multi-key command whose keys all fall in one slot that another healthy node
@@ -146,17 +149,7 @@ pub(crate) fn multi_moved(
         to = Some(t);
     }
     let to = to.filter(|t| *t != node.id)?;
-    match moved(node, first, to) {
-        Ok(moved) => {
-            note_moved(node);
-            Some(moved)
-        }
-        Err(misroute) => {
-            discus_telemetry::global().misrouted(misroute.into());
-            tracing::trace!(?misroute, target = %to, "forwarding instead of MOVED");
-            None
-        }
-    }
+    moved(node, first, to)
 }
 
 #[cfg(test)]

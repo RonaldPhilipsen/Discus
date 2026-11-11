@@ -38,32 +38,8 @@ pub struct ClusterLink {
     pub read_from_replicas: bool,
     /// The epoch that each peer last reported.
     peer_epochs: Mutex<HashMap<NodeId, EpochId>>,
-    health: ForwardHealth,
-}
-
-/// The peers whose last forward failed (spec "Target health").
-#[derive(Debug, Default)]
-struct ForwardHealth {
+    /// The peers whose last forward failed (spec "Target health").
     down: RwLock<HashSet<NodeId>>,
-}
-
-impl ForwardHealth {
-    fn note(&self, peer: NodeId, ok: bool) {
-        // Most forwards succeed to a peer that is up, so they take only the read lock.
-        if ok == !self.down.read().contains(&peer) {
-            return;
-        }
-        let mut down = self.down.write();
-        if ok {
-            down.remove(&peer);
-        } else {
-            down.insert(peer);
-        }
-    }
-
-    fn is_down(&self, peer: NodeId) -> bool {
-        self.down.read().contains(&peer)
-    }
 }
 
 impl ClusterLink {
@@ -74,19 +50,28 @@ impl ClusterLink {
             write_timeout: config.forward_write_timeout(),
             read_from_replicas: config.read_from_replicas,
             peer_epochs: Mutex::new(HashMap::new()),
-            health: ForwardHealth::default(),
+            down: RwLock::default(),
         }
     }
 
     /// Record the result of a forward or a replication batch to `peer`. A timeout or a transport
     /// error is `false`.
     pub fn note_forward(&self, peer: NodeId, ok: bool) {
-        self.health.note(peer, ok);
+        // Most forwards succeed to a peer that is up, so they take only the read lock.
+        if ok != self.forward_down(peer) {
+            return;
+        }
+        let mut down = self.down.write();
+        if ok {
+            down.remove(&peer);
+        } else {
+            down.insert(peer);
+        }
     }
 
     /// True while the last forward to `peer` failed.
     pub fn forward_down(&self, peer: NodeId) -> bool {
-        self.health.is_down(peer)
+        self.down.read().contains(&peer)
     }
 
     pub fn peer_epoch(&self, peer: NodeId) -> Option<EpochId> {
@@ -98,17 +83,14 @@ impl ClusterLink {
         self.peer_epochs
             .lock()
             .retain(|p, _| epoch.member(*p).is_some());
-        self.health
-            .down
-            .write()
-            .retain(|p| epoch.member(*p).is_some());
+        self.down.write().retain(|p| epoch.member(*p).is_some());
     }
 
     /// Forget every peer epoch and every failed forward. A new cluster history starts its
     /// generations again, so records of the old history are not comparable (spec "Epoch changes").
     pub fn reset(&self) {
         self.peer_epochs.lock().clear();
-        self.health.down.write().clear();
+        self.down.write().clear();
     }
 
     /// Record the epoch a peer reported on a connection of cluster `cluster`. Only a newer one
@@ -211,6 +193,18 @@ pub struct Job {
 pub type Writes = Arc<Mutex<writeset::WriteSet>>;
 
 impl Job {
+    /// A job without a client connection: a forwarded command or a held retry.
+    pub fn plain(cmd: Command, spec: &'static CommandSpec) -> Job {
+        Job {
+            cmd,
+            spec,
+            rr: 0,
+            writes: None,
+            redirect: false,
+            readonly: false,
+        }
+    }
+
     pub fn keys(&self) -> Keys {
         keys_of(self.spec.route, &self.cmd)
     }
@@ -275,11 +269,8 @@ pub fn local(node: &Node, spec: &CommandSpec, cmd: &Command) -> Reply {
     Node::take_applied();
     let value = command::execute_local(node, spec, cmd);
     Reply {
-        value,
         applied: Node::take_applied(),
-        observed: None,
-        settled: false,
-        failed: None,
+        ..Reply::value(value)
     }
 }
 
@@ -335,22 +326,7 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
     }
     match job.spec.route {
         Route::Single { write } => single(node, job, hop, write, route),
-        Route::MultiRead { sum } => {
-            let merge = if sum {
-                multi::Merge::Sum
-            } else {
-                multi::Merge::InOrder
-            };
-            multi::multi(node, job, hop, merge, false, route)
-        }
-        Route::MultiWrite { pairs } => {
-            let merge = if pairs {
-                multi::Merge::AllOk
-            } else {
-                multi::Merge::Sum
-            };
-            multi::multi(node, job, hop, merge, true, route)
-        }
+        Route::MultiRead { .. } | Route::MultiWrite { .. } => multi::multi(node, job, hop, route),
         // Only the entry node fans out. A forwarded copy runs locally. These routes need no
         // owner, so the route span ends at once.
         Route::Fanout if redirect::applies(job.redirect, &hop) && job.spec.name == "DBSIZE" => {
@@ -391,8 +367,7 @@ pub fn candidates(
         }
         return owners.iter().take(1).copied().collect();
     }
-    let replicas = !write && node.link().is_some_and(|l| l.read_from_replicas);
-    if !replicas {
+    if !replica_reads(node, write) {
         return owners.iter().take(1).copied().collect();
     }
     if owners.contains(&node.id) {
@@ -406,10 +381,15 @@ pub fn candidates(
     owners
 }
 
+/// A read may go to any owner, with `--read-from-replicas`.
+pub(crate) fn replica_reads(node: &Node, write: bool) -> bool {
+    !write && node.link().is_some_and(|l| l.read_from_replicas)
+}
+
 /// The budget is spent or every target is on the path. Serve locally if this node was the
 /// required owner in the previous epoch, else `-TRYAGAIN`.
 fn spent(node: &Node, spec: &CommandSpec, cmd: &Command, keys: &[&[u8]], write: bool) -> Reply {
-    let replicas = !write && node.link().is_some_and(|l| l.read_from_replicas);
+    let replicas = replica_reads(node, write);
     let owned_before = keys.iter().all(|key| match node.previous_owners(key) {
         Some(owners) if replicas => owners.contains(&node.id),
         Some(owners) => owners.first() == Some(&node.id),
@@ -509,15 +489,8 @@ fn single_planned(
             Some(None) => Plan::Retry,
             Some(Some(t)) if t == node.id => Plan::Local,
             Some(Some(t)) => match redirect::moved(node, &key, t) {
-                Ok(moved) => {
-                    redirect::note_moved(node);
-                    Plan::Moved(moved)
-                }
-                Err(misroute) => {
-                    discus_telemetry::global().misrouted(misroute.into());
-                    tracing::trace!(?misroute, target = %t, "forwarding instead of MOVED");
-                    forward()
-                }
+                Some(moved) => Plan::Moved(moved),
+                None => forward(),
             },
         };
         (plan, owners)
@@ -547,20 +520,4 @@ fn single_planned(
         }
         Reply::try_again()
     }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn forward_down_follows_the_last_result() {
-        let health = ForwardHealth::default();
-        let p = NodeId::random();
-        assert!(!health.is_down(p));
-        health.note(p, false);
-        assert!(health.is_down(p));
-        health.note(p, true);
-        assert!(!health.is_down(p));
-    }
 }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use discus_placement::{ClusterId, NodeId};
 use discus_resp::Command;
 use discus_transport::{Lane, PeerInfo, TransportError};
-use discus_wire::{caps, encode_command, Forward, ForwardMode, Message};
+use discus_wire::{encode_command, Forward, ForwardMode, Message};
 
 use tracing::Instrument;
 
@@ -14,7 +14,7 @@ use crate::node::Node;
 use crate::telemetry;
 
 /// Forward `cmd` to `target`. The forward carries the current epoch, the full epoch when the
-/// peer has `EPOCH_PUSH` and last reported an older one, the hop count, the path, and the trace
+/// peer last reported an older one, the hop count, the path, and the trace
 /// context of the `forward` span. The entry node observes the applied HLC of the reply.
 /// `timeout` replaces the forward timeout of the route. Counter commands wait for a quorum on
 /// the leader, so they need longer than a store write.
@@ -56,15 +56,13 @@ async fn send_in_span(
     timeout: Option<std::time::Duration>,
 ) -> Result<Reply, TransportError> {
     let (link, addr, epoch) = node.peer(target).map_err(TransportError::Connect)?;
-    // The full epoch rides along when the peer can take it and is behind (spec section 7.2).
-    let mut peer_caps = 0;
+    // The full epoch rides along when the peer is behind (spec section 7.2).
     let mut cluster = ClusterId::NIL;
     let build = |info: &PeerInfo| {
-        peer_caps = info.capabilities;
         cluster = info.cluster_id;
         link.saw_peer_epoch(target, info.cluster_id, info.epoch);
         let known = link.peer_epoch(target).unwrap_or(info.epoch);
-        let push = info.capabilities & caps::EPOCH_PUSH != 0 && epoch.id() > known;
+        let push = epoch.id() > known;
         let mut path = hop.path.clone();
         path.push(node.id);
         Ok(Message::Forward(Forward {
@@ -94,13 +92,11 @@ async fn send_in_span(
                 // A timestamp too far ahead is dropped by the HLC. The reply still counts.
                 let _ = node.hlc.observe(applied);
             }
-            // A peer without replication cannot know whether its replicas caught up.
-            let replicates = peer_caps & caps::REPLICATION != 0;
             Ok(Reply {
                 value: reply.value,
                 applied: reply.applied,
                 observed: reply.observed,
-                settled: reply.settled && replicates,
+                settled: reply.settled,
                 failed: None,
             })
         }

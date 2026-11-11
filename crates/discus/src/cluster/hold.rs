@@ -96,14 +96,7 @@ pub async fn held(
         if Instant::now() >= deadline {
             return Reply::try_again();
         }
-        let job = Job {
-            cmd: cmd.clone(),
-            spec,
-            rr: 0,
-            writes: None,
-            redirect: false,
-            readonly: false,
-        };
+        let job = Job::plain(cmd.clone(), spec);
         let reply = run_hop(node, job, retry.clone(), tracing::Span::none())
             .finish()
             .await;

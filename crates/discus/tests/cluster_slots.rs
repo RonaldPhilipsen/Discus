@@ -775,6 +775,11 @@ async fn a_new_cluster_history_forgets_peer_epochs() {
     let link = a.node.link().unwrap();
     let old = a.node.epochs().current().clone();
     assert!(link.peer_epoch(b).is_some());
+    assert!(!link.forward_down(b));
+    link.note_forward(b, false);
+    assert!(link.forward_down(b));
+    link.note_forward(b, true);
+    assert!(!link.forward_down(b));
     link.note_forward(b, false);
     assert!(!a.node.target_up(b));
 

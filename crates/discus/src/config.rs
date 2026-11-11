@@ -354,10 +354,6 @@ pub struct Config {
     /// Time between probes of a peer that missed a batch, in milliseconds.
     #[arg(long, default_value_t = 1_000)]
     pub replication_retry_ms: u64,
-    /// Capability bits offered in HELLO. For tests of mixed builds.
-    #[cfg(feature = "testing")]
-    #[arg(long, hide = true, default_value_t = discus_wire::caps::KNOWN)]
-    pub cluster_capabilities: u64,
     /// Security flags (spec §14).
     #[command(flatten)]
     pub security: crate::security::SecurityArgs,
