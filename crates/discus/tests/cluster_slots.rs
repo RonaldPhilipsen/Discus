@@ -9,9 +9,9 @@ mod security_support;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use discus_placement::slot;
+use discus_placement::{slot, NodeId};
 use security_support::common::cluster::{free_port, start_redirect_cluster, Cluster};
-use security_support::common::gossip::wait_until;
+use security_support::common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -574,16 +574,15 @@ async fn unknown_subcommand_is_refused() {
     );
 }
 
+fn forwards_of(n: &GossipNode) -> u64 {
+    n.node
+        .faults
+        .forwards
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn forwards(c: &Cluster) -> Vec<u64> {
-    c.nodes
-        .iter()
-        .map(|n| {
-            n.node
-                .faults
-                .forwards
-                .load(std::sync::atomic::Ordering::Relaxed)
-        })
-        .collect()
+    c.nodes.iter().map(forwards_of).collect()
 }
 
 #[tokio::test]
@@ -686,4 +685,66 @@ async fn info_has_a_cluster_section() {
     let mut p = conn(plain, false).await;
     let info = text(&query(&mut p, &["INFO", "cluster"]).await);
     assert!(info.contains("cluster_enabled:0\r\n"), "{info}");
+}
+
+/// Gossip settings for the cluster-client tests: a redirect listener on a free port and two
+/// copies of each key.
+const GOSSIP: &[&str] = &[
+    "--redirect-listen",
+    "127.0.0.1:0",
+    "--replication-factor",
+    "2",
+];
+
+fn redirect_of(n: &GossipNode) -> SocketAddr {
+    n.node.config.redirect_listen.unwrap()
+}
+
+/// A key whose owners in the epoch of `on` are `primary` and then `secondary`.
+fn key_owned(on: &GossipNode, primary: NodeId, secondary: NodeId, prefix: &str) -> String {
+    let epoch = on.node.epochs().current().clone();
+    (0..)
+        .map(|i| format!("{prefix}{i}"))
+        .find(|k| epoch.owners(k.as_bytes(), 2) == [primary, secondary])
+        .unwrap()
+}
+
+#[tokio::test]
+async fn replication_acks_teach_peer_epochs() {
+    let net = Net::new();
+    let mut nodes = net.start_agreed(3, GOSSIP).await;
+    let (a, b) = (nodes[0].id, nodes[1].id);
+    let mut forward = Raw::connect(nodes[0].addr).await;
+    let warm = key_owned(&nodes[0], b, a, "warm");
+    assert_eq!(forward.cmd(&["SET", &warm, "w"]).await, "+OK");
+    let before = nodes[0].node.epoch_id();
+    assert_eq!(nodes[0].node.link().unwrap().peer_epoch(b), Some(before));
+
+    let seeds: Vec<SocketAddr> = nodes.iter().map(|n| n.cluster_addr).collect();
+    nodes.push(net.start(&seeds, GOSSIP).await);
+    wait_agreed(&refs(&nodes), Duration::from_secs(20)).await;
+    let now = nodes[0].node.epoch_id();
+    assert!(now > before);
+
+    let sent = forwards_of(&nodes[0]);
+    let link = nodes[0].node.link().unwrap();
+    let mut i = 0;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while link.peer_epoch(b) < Some(now) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "replication never reported the epoch of B"
+        );
+        let local = key_owned(&nodes[0], a, b, &format!("ack{i}:"));
+        assert_eq!(forward.cmd(&["SET", &local, "v"]).await, "+OK");
+        i += 1;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(forwards_of(&nodes[0]), sent, "a forward taught the epoch");
+    let key = key_owned(&nodes[0], b, a, "moved");
+    let mut redirect = Raw::connect(redirect_of(&nodes[0])).await;
+    assert_eq!(
+        redirect.cmd(&["SET", &key, "v"]).await,
+        moved(&key, redirect_of(&nodes[1]))
+    );
 }
