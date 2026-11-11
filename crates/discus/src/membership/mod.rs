@@ -466,6 +466,10 @@ impl Membership {
         self.inner.lock().swim.members()
     }
 
+    pub fn liveness(&self, id: NodeId) -> Option<Liveness> {
+        self.inner.lock().swim.liveness(id)
+    }
+
     /// Publish the counter leader hints of this node (spec section 6.1). They spread with a new
     /// incarnation.
     pub fn set_leader_hints(&self, hints: Vec<u8>) {

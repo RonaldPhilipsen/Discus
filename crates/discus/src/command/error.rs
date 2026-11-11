@@ -2,6 +2,8 @@
 
 use discus_resp::Value;
 
+use crate::cluster::redirect::Endpoint;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandError {
     UnknownCommand(String),
@@ -21,6 +23,11 @@ pub enum CommandError {
     ClusterTryAgain,
     /// The scopes of the connection do not allow the command (lower-case name).
     NoPerm(String),
+    /// Another node serves the slot: the client sends the command there (spec "The redirect rule").
+    Moved {
+        slot: u16,
+        to: Endpoint,
+    },
     /// Raw error text, including its prefix such as `ERR` or `OOM`.
     Custom(String),
 }
@@ -55,6 +62,7 @@ impl CommandError {
             CommandError::NoPerm(n) => {
                 format!("NOPERM this user has no permissions to run the '{n}' command")
             }
+            CommandError::Moved { slot, to } => format!("MOVED {slot} {}:{}", to.host, to.port),
             CommandError::Custom(s) => s.clone(),
         }
     }

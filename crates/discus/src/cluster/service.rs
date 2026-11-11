@@ -192,6 +192,8 @@ async fn run_forwarded(
         spec,
         rr: 0,
         writes: None,
+        redirect: false,
+        readonly: false,
     };
     run_hop(node, job, hop, telemetry::route_span())
         .finish()

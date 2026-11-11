@@ -140,7 +140,8 @@ pub fn multi(
         spec,
         rr,
         writes,
-        ..
+        redirect,
+        readonly,
     } = job;
     let width = if merge == Merge::AllOk { 2 } else { 1 };
     if width == 2 {
@@ -154,14 +155,22 @@ pub fn multi(
         }
     }
     let now = Instant::now();
+    let need = |key: &[u8]| match &writes {
+        Some(w) if !write => w.lock().required(key, now),
+        _ => None,
+    };
+    if super::redirect::applies(redirect, &hop) {
+        let keys: Vec<&[u8]> = cmd[1..].chunks(width).map(|item| &item[0][..]).collect();
+        let moved =
+            route.in_scope(|| super::redirect::multi_moved(node, &keys, write, need, readonly));
+        if let Some(moved) = moved {
+            return Dispatch::Ready(Reply::error(moved));
+        }
+    }
     let groups = route.in_scope(|| {
         split(&cmd, width, |key| {
-            let need = match &writes {
-                Some(w) if !write => w.lock().required(key, now),
-                _ => None,
-            };
             let owners = node.owners(key);
-            candidates(node, key, &owners, write, rr, need)
+            candidates(node, key, &owners, write, rr, need(key))
                 .first()
                 .copied()
         })

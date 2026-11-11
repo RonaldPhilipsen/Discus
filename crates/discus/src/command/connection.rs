@@ -27,6 +27,9 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::connection("INFO", -1, info).with_access(Access::Read),
     CommandSpec::connection("CONFIG", -2, config).with_access(Access::Read),
     CommandSpec::connection("CLUSTER", -1, cluster),
+    CommandSpec::connection("READONLY", 1, readonly),
+    CommandSpec::connection("READWRITE", 1, readwrite),
+    CommandSpec::connection("ASKING", 1, asking),
 ];
 
 type Reply = Result<Value, CommandError>;
@@ -37,6 +40,21 @@ fn ping(_: &Node, _: &mut ConnState, cmd: &Command) -> Result<Value, CommandErro
         2 => Ok(Value::Bulk(cmd[1].clone())),
         _ => Err(CommandError::WrongArity("PING".into())),
     }
+}
+
+fn readonly(_: &Node, conn: &mut ConnState, _: &Command) -> Reply {
+    conn.readonly = true;
+    Ok(Value::ok())
+}
+
+fn readwrite(_: &Node, conn: &mut ConnState, _: &Command) -> Reply {
+    conn.readonly = false;
+    Ok(Value::ok())
+}
+
+/// Discus never sends `-ASK`, so `ASKING` has no effect.
+fn asking(_: &Node, _: &mut ConnState, _: &Command) -> Reply {
+    Ok(Value::ok())
 }
 
 fn echo(_: &Node, _: &mut ConnState, cmd: &Command) -> Result<Value, CommandError> {
