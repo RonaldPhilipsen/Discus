@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use discus_placement::{ClusterId, EpochId, NodeId, Version};
+use discus_placement::{ClusterId, EpochId, NodeId, Owners, Version};
 use discus_resp::{Command, Value};
 use discus_transport::Transport;
 use discus_wire::TraceContext;
@@ -28,6 +28,7 @@ use crate::node::{ConnState, Node};
 use crate::telemetry;
 use crate::Config;
 use route::Route;
+use writeset::SetKey;
 
 /// A forward may hop at most this many times (spec section 7.2).
 pub const MAX_HOPS: u8 = 2;
@@ -332,6 +333,8 @@ pub fn serve_here(
 /// Run a data command from the entry node. `route` is the `route` span: the owner choice runs
 /// in it, and it ends before the command runs or forwards.
 pub fn run(node: &Arc<Node>, job: Job, writes: Option<&Writes>, route: Span) -> Dispatch {
+    // With one owner per key, a read reaches that owner whatever the write set requires.
+    let writes = writes.filter(|_| node.config.replication_factor > 1);
     run_hop(node, job, Hop::default(), writes, route)
 }
 
@@ -479,17 +482,22 @@ fn single(
     writes: Option<&Writes>,
     route: Span,
 ) -> Dispatch {
+    let owners = route.in_scope(|| node.owners(&job.cmd[1]));
     // A primary-read key keeps no write-set entry: every read of it goes to the primary.
     let tracked = writes.is_some() && !node.is_primary_read_key(&job.cmd[1]);
+    // With one owner, every read goes to that owner whatever the write set requires, so the
+    // write set is not asked.
     let need = match (writes, write) {
-        (Some(w), false) if tracked => w.lock().required(&job.cmd[1], std::time::Instant::now()),
+        (Some(w), false) if tracked && owners.len() > 1 => w
+            .lock()
+            .required(SetKey::of(&job.cmd[1]), std::time::Instant::now),
         _ => None,
     };
     let readonly = redirect::applies(job.redirect, &hop).then_some(job.readonly);
     // Only a write, or a read that must see an earlier write, changes the write set.
-    let key = (tracked && (write || need.is_some())).then(|| job.cmd[1].clone());
+    let key = (tracked && (write || need.is_some())).then(|| SetKey::of(&job.cmd[1]));
     let dispatch = single_planned(
-        node, job.spec, job.cmd, hop, write, job.rr, need, readonly, route,
+        node, job.spec, job.cmd, owners, hop, write, job.rr, need, readonly, route,
     );
     let (Some(writes), Some(key)) = (writes, key) else {
         return dispatch;
@@ -499,9 +507,9 @@ fn single(
         let mut w = writes.lock();
         match (write, reply.applied) {
             (true, Some(v)) if !matches!(reply.value, Value::Error(_)) => {
-                w.record(&key, v, std::time::Instant::now())
+                w.record(key, v, std::time::Instant::now())
             }
-            (false, _) if need.is_some() => w.observed(&key, reply.observed, reply.settled),
+            (false, _) if need.is_some() => w.observed(key, reply.observed, reply.settled),
             _ => {}
         }
     };
@@ -526,6 +534,7 @@ fn single_planned(
     node: &Arc<Node>,
     spec: &'static CommandSpec,
     cmd: Command,
+    owners: Owners,
     mut hop: Hop,
     write: bool,
     rr: u64,
@@ -534,8 +543,7 @@ fn single_planned(
     route: Span,
 ) -> Dispatch {
     let key: &[u8] = &cmd[1];
-    let (plan, owners) = route.in_scope(|| {
-        let owners = node.owners(key);
+    let plan = route.in_scope(|| {
         let forward = || {
             let targets = candidates(node, key, &owners, write, rr, need);
             match targets.first() {
@@ -544,7 +552,7 @@ fn single_planned(
                 Some(_) => Plan::Forward(allowed(node, &hop, targets)),
             }
         };
-        let plan = match redirect.map(|ro| redirect::target(node, key, &owners, write, need, ro)) {
+        match redirect.map(|ro| redirect::target(node, key, &owners, write, need, ro)) {
             None => forward(),
             Some(None) => Plan::Retry,
             Some(Some(t)) if t == node.id => Plan::Local,
@@ -552,8 +560,7 @@ fn single_planned(
                 Some(moved) => Plan::Moved(moved),
                 None => forward(),
             },
-        };
-        (plan, owners)
+        }
     });
     drop(route);
     let targets = match plan {

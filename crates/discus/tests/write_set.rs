@@ -149,3 +149,16 @@ async fn the_write_set_lets_go_once_replicas_catch_up() {
     assert_eq!(v, "v1");
     assert_eq!(entry.node.write_set_bytes(), 0);
 }
+
+#[tokio::test]
+async fn a_single_owner_cluster_records_no_write_set() {
+    let c = start_cluster(3, &["--replication-factor", "1"]).await;
+    let mut conn = c.nodes[0].redis().await;
+    for i in 0..20 {
+        let k = format!("solo:{i}");
+        let _: () = conn.set(&k, "v").await.unwrap();
+        let v: String = conn.get(&k).await.unwrap();
+        assert_eq!(v, "v");
+    }
+    assert_eq!(c.nodes[0].node.write_set_bytes(), 0);
+}

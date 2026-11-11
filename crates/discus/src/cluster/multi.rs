@@ -8,6 +8,7 @@ use discus_wire::ForwardMode;
 use futures::future::join_all;
 
 use super::route::{keys_of, Keys, Route};
+use super::writeset::SetKey;
 use super::{
     allowed, candidates, forward, hold, local, local_acked, spent, Dispatch, Failure, Hop, Job,
     Reply,
@@ -173,7 +174,7 @@ pub fn multi(
     }
     let now = Instant::now();
     let need = |key: &[u8]| match writes {
-        Some(w) if !write => w.lock().required(key, now),
+        Some(w) if !write => w.lock().required(SetKey::of(key), || now),
         _ => None,
     };
     if super::redirect::applies(redirect, &hop) {
@@ -208,7 +209,7 @@ pub fn multi(
                     .step_by(width)
                     .filter(|k| !owner.is_primary_read_key(k))
                 {
-                    w.record(k, v, Instant::now());
+                    w.record(SetKey::of(k), v, Instant::now());
                 }
             }
         }
