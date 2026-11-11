@@ -12,6 +12,11 @@ spec:
     - name: resp
       port: {{ .Values.service.port }}
       targetPort: resp
+    {{- if .Values.clusterClients.enabled }}
+    - name: resp-cluster
+      port: {{ int .Values.clusterClients.port }}
+      targetPort: resp-cluster
+    {{- end }}
 ---
 # A joining node is not ready, and the other nodes must still find it.
 apiVersion: v1

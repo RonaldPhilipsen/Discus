@@ -24,6 +24,16 @@ service:
   type: ClusterIP
   port: 6379
 
+# A second client listener. A cluster client reads the slot table from it and sends each command
+# to the owner of the key. The nodes advertise their pod IPs, so only a client that can reach the
+# pod network can use it. Other clients keep using the Service port above.
+clusterClients:
+  enabled: true
+  port: 6380
+  # A host name template for the topology replies. {ip} becomes the pod IP with dashes. For
+  # example: "{ip}.<release>-peers.<namespace>.svc.cluster.local". Empty means no host name.
+  hostname: ""
+
 cluster:
   tls:
     # Required. A Secret with the keys ca.crt, tls.crt, and tls.key.
