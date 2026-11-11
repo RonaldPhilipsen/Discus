@@ -8,7 +8,7 @@
 
 use std::cmp::Ordering;
 
-use xxhash_rust::xxh3::Xxh3;
+use xxhash_rust::xxh3::{xxh3_64_with_seed, Xxh3};
 
 use crate::{Member, MemberState, NodeId};
 
@@ -22,12 +22,26 @@ const TWO_POW_52: f64 = 4_503_599_627_370_496.0;
 
 /// The uniform value `u(k, n)` in `(0, 1)`.
 pub fn unit(key: &[u8], node: NodeId) -> f64 {
-    let mut hasher = Xxh3::with_seed(PLACEMENT_SEED);
-    hasher.update(key);
-    hasher.update(&node.to_be_bytes());
-    let m = hasher.digest() >> 12;
+    let id = node.to_be_bytes();
+    // The one-shot hash of the joined input equals the streaming hash, and it skips the large
+    // state that `Xxh3::with_seed` sets up for every member of every lookup.
+    let digest = if key.len() <= STACK_KEY {
+        let mut buf = [0u8; STACK_KEY + 16];
+        buf[..key.len()].copy_from_slice(key);
+        buf[key.len()..key.len() + 16].copy_from_slice(&id);
+        xxh3_64_with_seed(&buf[..key.len() + 16], PLACEMENT_SEED)
+    } else {
+        let mut hasher = Xxh3::with_seed(PLACEMENT_SEED);
+        hasher.update(key);
+        hasher.update(&id);
+        hasher.digest()
+    };
+    let m = digest >> 12;
     (m as f64 + 0.5) / TWO_POW_52
 }
+
+/// Keys up to this length hash from a stack buffer.
+const STACK_KEY: usize = 240;
 
 /// The weighted rendezvous score of `member` for `key`. Higher wins.
 pub fn score(key: &[u8], member: &Member) -> f64 {
