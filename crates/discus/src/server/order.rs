@@ -3,15 +3,48 @@
 //! A command waits while an earlier command on any of its keys is in flight. Commands on disjoint
 //! keys run concurrently. A keyless data command is a barrier: it waits for every earlier command,
 //! and every later command waits for it.
+//!
+//! A key is tracked by its hash, so ordering copies no key. Two keys with one hash order as one
+//! key: that adds a wait and never drops one.
 
 use std::collections::HashMap;
+use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use bytes::Bytes;
+use discus_resp::Command;
 use tokio::sync::Notify;
+use xxhash_rust::xxh3::xxh3_64;
 
-pub use crate::cluster::route::Keys;
+use crate::cluster::route::{key_args, Route};
+
+/// What a command orders on: the hashes of its keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Keys {
+    None,
+    One(u64),
+    Many(Vec<u64>),
+    /// Waits for every earlier command, and every later command waits for it.
+    Barrier,
+}
+
+impl Keys {
+    /// The ordering keys of `cmd` for its route. The arity is already checked.
+    pub fn of(route: Route, cmd: &Command) -> Keys {
+        match route {
+            Route::Connection => Keys::None,
+            Route::Local | Route::Fanout | Route::Broadcast => Keys::Barrier,
+            Route::Single { .. } => Keys::One(xxh3_64(&cmd[1])),
+            Route::MultiRead { .. } | Route::MultiWrite { .. } => Keys::Many(
+                key_args(route, cmd)
+                    .into_iter()
+                    .flatten()
+                    .map(|k| xxh3_64(k))
+                    .collect(),
+            ),
+        }
+    }
+}
 
 /// Completion of one command.
 #[derive(Debug, Default)]
@@ -69,7 +102,7 @@ impl WaitFor {
 /// The ordering state of one connection.
 #[derive(Debug, Default)]
 pub struct KeyOrder {
-    last: HashMap<Bytes, Arc<Gate>>,
+    last: HashMap<u64, Arc<Gate>>,
     barrier: Option<Arc<Gate>>,
     prune_at: usize,
 }
@@ -94,9 +127,14 @@ impl KeyOrder {
         }
         match keys {
             Keys::None => {}
-            Keys::Some(list) => {
-                for key in list {
-                    if let Some(prev) = self.last.insert(key.clone(), gate.clone()) {
+            Keys::One(_) | Keys::Many(_) => {
+                let list = match keys {
+                    Keys::One(h) => slice::from_ref(h),
+                    Keys::Many(list) => list,
+                    _ => &[],
+                };
+                for &key in list {
+                    if let Some(prev) = self.last.insert(key, gate.clone()) {
                         // A key named twice in one command must not wait for itself.
                         let own = Arc::ptr_eq(&prev, &gate);
                         if !own && !prev.is_done() && !deps.iter().any(|d| Arc::ptr_eq(d, &prev)) {
@@ -130,13 +168,44 @@ mod tests {
     use bytes::Bytes;
     use std::time::Duration;
 
+    fn cmd(args: &[&'static str]) -> Command {
+        args.iter()
+            .map(|a| Bytes::from_static(a.as_bytes()))
+            .collect()
+    }
+
     fn keys(names: &[&'static str]) -> Keys {
-        Keys::Some(
-            names
-                .iter()
-                .map(|n| Bytes::from_static(n.as_bytes()))
-                .collect(),
-        )
+        Keys::Many(names.iter().map(|n| xxh3_64(n.as_bytes())).collect())
+    }
+
+    #[test]
+    fn ordering_keys_follow_the_route_shape() {
+        let single = Route::Single { write: true };
+        assert_eq!(
+            Keys::of(single, &cmd(&["SET", "k", "v"])),
+            Keys::One(xxh3_64(b"k"))
+        );
+        let mset = Keys::of(
+            Route::MultiWrite { pairs: true },
+            &cmd(&["MSET", "a", "1", "b", "2"]),
+        );
+        assert_eq!(mset, keys(&["a", "b"]));
+        let mget = Keys::of(Route::MultiRead { sum: false }, &cmd(&["MGET", "a", "b"]));
+        assert_eq!(mget, keys(&["a", "b"]));
+        assert_eq!(Keys::of(Route::Connection, &cmd(&["PING"])), Keys::None);
+        assert_eq!(Keys::of(Route::Fanout, &cmd(&["DBSIZE"])), Keys::Barrier);
+    }
+
+    #[tokio::test]
+    async fn a_multi_key_command_waits_for_a_single_key_command() {
+        let mut order = KeyOrder::new();
+        let set = Keys::of(Route::Single { write: true }, &cmd(&["SET", "b", "v"]));
+        let (_, d1) = order.admit(&set);
+        let mget = Keys::of(Route::MultiRead { sum: false }, &cmd(&["MGET", "a", "b"]));
+        let (w2, _d2) = order.admit(&mget);
+        assert!(!w2.is_ready());
+        drop(d1);
+        assert!(w2.is_ready());
     }
 
     async fn pending(wait: WaitFor) -> bool {
@@ -207,7 +276,7 @@ mod tests {
     async fn finished_entries_are_pruned() {
         let mut order = KeyOrder::new();
         for i in 0..10_000u32 {
-            let k = Keys::Some(vec![Bytes::from(i.to_string())]);
+            let k = Keys::One(xxh3_64(i.to_string().as_bytes()));
             let (_, done) = order.admit(&k);
             drop(done);
         }

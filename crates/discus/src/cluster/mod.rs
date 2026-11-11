@@ -27,7 +27,7 @@ use crate::command::{self, CommandError, CommandSpec};
 use crate::node::{ConnState, Node};
 use crate::telemetry;
 use crate::Config;
-use route::{keys_of, Keys, Route};
+use route::Route;
 
 /// A forward may hop at most this many times (spec section 7.2).
 pub const MAX_HOPS: u8 = 2;
@@ -205,10 +205,6 @@ impl Job {
             redirect: false,
             readonly: false,
         }
-    }
-
-    pub fn keys(&self) -> Keys {
-        keys_of(self.spec.route, &self.cmd)
     }
 }
 
