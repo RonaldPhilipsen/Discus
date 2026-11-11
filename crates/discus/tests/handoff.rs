@@ -365,3 +365,74 @@ async fn a_write_queued_during_the_epoch_change_reaches_the_new_owners() {
         }
     }
 }
+
+/// Three nodes with `RF = 3`, filled and settled, then a joiner while the drop of `nodes[0]`
+/// holds. Returns the nodes, the joiner, and the keys that `nodes[0]` lost.
+async fn held_drop(net: &Net, prefix: &str) -> (Vec<GossipNode>, GossipNode, Vec<String>) {
+    let extra = ["--replication-factor", "3"];
+    let nodes = net.start_agreed(3, &extra).await;
+    let keys = fill(&nodes[0], prefix, 300).await;
+    let everywhere = || {
+        nodes.iter().all(|n| {
+            keys.iter()
+                .all(|k| n.node.store.read(k.as_bytes(), |e| e.is_some()))
+        })
+    };
+    assert!(wait_until(FORM, everywhere).await);
+    let rep = nodes[0].node.replicator().unwrap();
+    assert!(wait_until(FORM, || !rep.scanning()).await);
+    nodes[0]
+        .node
+        .faults
+        .hold_drop
+        .store(true, Ordering::Relaxed);
+    let joiner = net.start(&[nodes[0].cluster_addr], &extra).await;
+    assert!(started(&joiner).await);
+    let held = || nodes[0].node.faults.drop_held.load(Ordering::Relaxed);
+    assert!(wait_until(Duration::from_secs(60), held).await);
+    let epoch = nodes[0].node.epochs().current().clone();
+    let lost = keys
+        .into_iter()
+        .filter(|k| !epoch.owners(k.as_bytes(), 3).contains(&nodes[0].id))
+        .collect();
+    (nodes, joiner, lost)
+}
+
+#[tokio::test]
+async fn the_drop_keeps_an_entry_newer_than_the_scan_start() {
+    let net = Net::new();
+    let (nodes, _joiner, lost) = held_drop(&net, "newer").await;
+    let old = &nodes[0];
+    // Stamped after the scan started. `apply` queues nothing, so only the guard keeps it.
+    let mut newer = discus_store::Entry::new(discus_store::Value::Str("newer".into()), None);
+    newer.version = old.node.stamp().unwrap();
+    assert!(old.node.store.apply(lost[0].as_bytes(), newer));
+    old.node.faults.hold_drop.store(false, Ordering::Relaxed);
+    let rep = old.node.replicator().unwrap();
+    assert!(wait_until(Duration::from_secs(60), || !rep.scanning()).await);
+    let held: Vec<&String> = lost
+        .iter()
+        .filter(|k| old.node.store.read(k.as_bytes(), |e| e.is_some()))
+        .collect();
+    assert_eq!(held, vec![&lost[0]]);
+}
+
+#[tokio::test]
+async fn the_drop_keeps_every_key_after_a_batch_from_a_newer_epoch() {
+    let net = Net::new();
+    let (nodes, joiner, lost) = held_drop(&net, "ahead").await;
+    let old = &nodes[0];
+    let rep = old.node.replicator().unwrap();
+    let mut ahead = old.node.epoch_id();
+    ahead.generation += 1;
+    rep.handle(
+        joiner.id,
+        discus_wire::Message::Replicate(discus_wire::Batch::new(ahead)),
+    )
+    .await;
+    old.node.faults.hold_drop.store(false, Ordering::Relaxed);
+    assert!(wait_until(Duration::from_secs(60), || !rep.scanning()).await);
+    assert!(lost
+        .iter()
+        .all(|k| old.node.store.read(k.as_bytes(), |e| e.is_some())));
+}
