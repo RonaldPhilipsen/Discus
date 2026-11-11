@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use discus_placement::slot;
-use security_support::common::cluster::{start_cluster_clients, Cluster};
+use security_support::common::cluster::{free_port, start_redirect_cluster, Cluster};
 use security_support::common::gossip::wait_until;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -26,38 +26,14 @@ async fn start_authed(
     extra: impl Fn(usize) -> Vec<String>,
     token: Option<&str>,
 ) -> (Cluster, Vec<SocketAddr>) {
-    let ports: Vec<SocketAddr> = (0..3).map(|_| reserve()).collect();
-    let c = start_cluster_clients(
-        3,
-        |i| Some(ports[i]),
-        |i| {
-            let mut flags: Vec<String> = vec![
-                "--replication-factor".into(),
-                "3".into(),
-                "--redirect-listen".into(),
-                ports[i].to_string(),
-                "--client-advertise".into(),
-                ports[i].to_string(),
-            ];
-            flags.extend(extra(i));
-            flags
-        },
-    )
+    let (c, ports) = start_redirect_cluster(3, |i| {
+        let mut flags: Vec<String> = vec!["--replication-factor".into(), "3".into()];
+        flags.extend(extra(i));
+        flags
+    })
     .await;
     warm(&c, token).await;
     (c, ports)
-}
-
-/// A free port for a redirect listener that binds later. The port comes from below the
-/// ephemeral range, so the connections and `:0` listeners of parallel tests do not take it in the
-/// meantime.
-fn reserve() -> SocketAddr {
-    loop {
-        let port = 20000 + (discus_placement::NodeId::random().as_u128() % 12000) as u16;
-        if let Ok(l) = std::net::TcpListener::bind(("127.0.0.1", port)) {
-            return l.local_addr().unwrap();
-        }
-    }
 }
 
 /// A node learns the epoch of a peer from a forward. Forward one write from every node to every
@@ -649,10 +625,18 @@ async fn topology_needs_auth() {
 
 #[tokio::test]
 async fn single_node_answers_one_range() {
-    let port = reserve();
-    let node = security_support::common::try_start_full(&["--redirect-listen", &port.to_string()])
-        .await
-        .unwrap();
+    // The probe frees the port before the node binds it, so a start that loses the port to
+    // another process tries again on a fresh one.
+    let (port, node) = loop {
+        let port = free_port();
+        match security_support::common::try_start_full(&["--redirect-listen", &port.to_string()])
+            .await
+        {
+            Ok(node) => break (port, node),
+            Err(e) if e.contains("Address already in use") => continue,
+            Err(e) => panic!("{e}"),
+        }
+    };
     let mut r = conn(port, false).await;
     let id = text(&query(&mut r, &["CLUSTER", "MYID"]).await);
     let entries = parse_slots(&query(&mut r, &["CLUSTER", "SLOTS"]).await);

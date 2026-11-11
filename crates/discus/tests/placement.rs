@@ -125,26 +125,8 @@ async fn static_peers_form_the_same_epoch_on_every_node() {
 #[tokio::test]
 async fn members_advertise_their_redirect_port() {
     // A static peer learns the client address of another member only from the list, so the
-    // test reserves the ports first.
-    let ports: Vec<std::net::SocketAddr> = (0..3)
-        .map(|_| {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap()
-        })
-        .collect();
-    let c = common::cluster::start_cluster_clients(
-        3,
-        |i| Some(ports[i]),
-        |i| {
-            vec![
-                "--redirect-listen".into(),
-                ports[i].to_string(),
-                "--client-advertise".into(),
-                ports[i].to_string(),
-            ]
-        },
-    )
-    .await;
+    // helper reserves the ports first.
+    let (c, ports) = common::cluster::start_redirect_cluster(3, |_| vec![]).await;
     let first = c.nodes[0].node.epochs().current().clone();
     for n in &c.nodes {
         assert_eq!(**n.node.epochs().current(), *first);

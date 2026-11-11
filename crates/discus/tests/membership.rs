@@ -159,6 +159,33 @@ async fn no_writes_while_a_normal_peer_is_silent() {
 }
 
 #[tokio::test]
+async fn topology_waits_while_the_node_is_not_normal() {
+    let net = Net::new();
+    let tc = TransportConfig::new(
+        "127.0.0.1:0".parse().unwrap(),
+        net.ca.material(TEST_SAN),
+        NodeId::random(),
+        ClusterId::mint(),
+    );
+    let silent = Transport::bind(tc, Arc::new(Silent)).await.unwrap();
+    let node = net
+        .start(&[silent.local_addr()], &["--cluster-topology", "on"])
+        .await;
+    assert!(!node.is_normal());
+    for sub in ["SLOTS", "SHARDS", "NODES"] {
+        let wire = format!("*2\r\n$7\r\nCLUSTER\r\n${}\r\n{sub}\r\n", sub.len());
+        let reply = common::roundtrip(node.addr, wire.as_bytes()).await;
+        assert_eq!(
+            reply, "-TRYAGAIN the cluster is changing, try again later\r\n",
+            "{sub}"
+        );
+    }
+    let info = common::roundtrip(node.addr, b"*2\r\n$7\r\nCLUSTER\r\n$4\r\nINFO\r\n").await;
+    assert!(info.contains("cluster_state:fail\r\n"), "{info}");
+    assert!(!node.is_normal());
+}
+
+#[tokio::test]
 async fn a_self_seed_is_ignored() {
     let net = Net::new();
     let (s, addr) = socket();

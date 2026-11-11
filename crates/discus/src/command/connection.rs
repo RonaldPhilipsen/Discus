@@ -380,7 +380,6 @@ fn standalone_topology(node: &Node, conn: &ConnState, kind: TopologyKind) -> Opt
         &alone,
         rf,
         conn.protocol,
-        node.id,
-        true,
+        node.topology_responder(true),
     ))
 }

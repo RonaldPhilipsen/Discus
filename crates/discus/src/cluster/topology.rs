@@ -120,8 +120,14 @@ pub fn slots(epoch: &Epoch, rf: usize, protocol: Protocol) -> Result<Value, Comm
 }
 
 /// `CLUSTER SHARDS`: one shard for each distinct ordered owner list, in the order of its first
-/// slot. A node appears in every shard that lists it.
-pub fn shards(epoch: &Epoch, rf: usize, protocol: Protocol) -> Result<Value, CommandError> {
+/// slot. A node appears in every shard that lists it. With client TLS (`tls`), the port field is
+/// `tls-port`, else `port`.
+pub fn shards(
+    epoch: &Epoch,
+    rf: usize,
+    protocol: Protocol,
+    tls: bool,
+) -> Result<Value, CommandError> {
     let known = endpoints(epoch)?;
     let mut order: Vec<Vec<NodeId>> = Vec::new();
     let mut slots: HashMap<Vec<NodeId>, Vec<Value>> = HashMap::new();
@@ -137,7 +143,10 @@ pub fn shards(epoch: &Epoch, rf: usize, protocol: Protocol) -> Result<Value, Com
         let (m, to) = &known[id];
         let mut fields = vec![
             ("id", bulk(node_id(*id))),
-            ("port", Value::Integer(i64::from(to.port))),
+            (
+                if tls { "tls-port" } else { "port" },
+                Value::Integer(i64::from(to.port)),
+            ),
             ("ip", bulk(ip(m))),
             ("endpoint", bulk(to.host.clone())),
         ];
@@ -244,25 +253,34 @@ pub fn info(epoch: &Epoch, rf: usize, normal: bool) -> String {
     lines.iter().map(|l| format!("{l}\r\n")).collect()
 }
 
-/// The reply of `kind`. `me` names the `myself` line of `CLUSTER NODES`.
+/// How one node answers the topology commands.
+#[derive(Debug, Clone, Copy)]
+pub struct Responder {
+    /// The node that answers. It names the `myself` line of `CLUSTER NODES`.
+    pub me: NodeId,
+    pub normal: bool,
+    /// The client listeners use TLS (`--tls-mode node`).
+    pub tls: bool,
+}
+
+/// The reply of `kind`.
 pub fn build(
     kind: TopologyKind,
     epoch: &Epoch,
     rf: usize,
     protocol: Protocol,
-    me: NodeId,
-    normal: bool,
+    by: Responder,
 ) -> Result<Value, CommandError> {
     match kind {
         TopologyKind::Slots => slots(epoch, rf, protocol),
-        TopologyKind::Shards => shards(epoch, rf, protocol),
+        TopologyKind::Shards => shards(epoch, rf, protocol, by.tls),
         TopologyKind::Nodes => {
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as u64);
-            nodes(epoch, rf, me, now_ms).map(bulk)
+            nodes(epoch, rf, by.me, now_ms).map(bulk)
         }
-        TopologyKind::Info => Ok(bulk(info(epoch, rf, normal))),
+        TopologyKind::Info => Ok(bulk(info(epoch, rf, by.normal))),
     }
 }
 
@@ -396,7 +414,7 @@ mod tests {
             node_id(NodeId::from_u128(2))
         ));
         assert_eq!(slots(&e, 2, Protocol::Resp2), Err(want.clone()));
-        assert_eq!(shards(&e, 2, Protocol::Resp2), Err(want.clone()));
+        assert_eq!(shards(&e, 2, Protocol::Resp2, false), Err(want.clone()));
         assert_eq!(nodes(&e, 2, NodeId::from_u128(1), 0), Err(want));
     }
 
@@ -450,7 +468,7 @@ mod tests {
     fn shards_group_by_owner_list() {
         let rf = 2;
         let e = epoch((1..=3).map(|n| member(n, true)).collect());
-        let Value::Array(shards) = shards(&e, rf, Protocol::Resp3).unwrap() else {
+        let Value::Array(shards) = shards(&e, rf, Protocol::Resp3, false).unwrap() else {
             panic!("not an array");
         };
         let mut lists = std::collections::HashSet::new();
@@ -489,6 +507,28 @@ mod tests {
             );
         }
         assert_eq!(covered, i64::from(SLOTS));
+    }
+
+    #[test]
+    fn shards_name_the_tls_port_with_tls() {
+        let e = epoch(vec![member(1, true)]);
+        for (tls, name, other) in [(false, "port", "tls-port"), (true, "tls-port", "port")] {
+            let Value::Array(all) = shards(&e, 1, Protocol::Resp3, tls).unwrap() else {
+                panic!("not an array");
+            };
+            let Value::Map(shard) = &all[0] else {
+                panic!("not a map");
+            };
+            let Value::Array(nodes) = &shard[1].1 else {
+                panic!("not nodes");
+            };
+            let Value::Map(fields) = &nodes[0] else {
+                panic!("not a map");
+            };
+            let field = |k: &str| fields.iter().find(|(f, _)| *f == bulk(k)).map(|f| &f.1);
+            assert_eq!(field(name), Some(&Value::Integer(6380)), "tls {tls}");
+            assert_eq!(field(other), None, "tls {tls}");
+        }
     }
 
     #[test]
