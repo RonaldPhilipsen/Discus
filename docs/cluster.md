@@ -186,6 +186,8 @@ spec:
   ports:
     - name: resp
       port: 6379
+    - name: resp-cluster
+      port: 6380
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -219,10 +221,17 @@ spec:
           args:
             - --discovery-dns=discus-peers
             - --cluster-advertise=$(POD_IP):7379
+            - --redirect-listen=0.0.0.0:6380
+            - --client-advertise=$(POD_IP):6380
             - --cluster-ca=/tls/ca.crt
             - --cluster-cert=/tls/tls.crt
             - --cluster-key=/tls/tls.key
             - --shutdown-timeout-secs=30
+          ports:
+            - name: resp
+              containerPort: 6379
+            - name: resp-cluster
+              containerPort: 6380
           startupProbe:
             httpGet:
               path: /startupz
@@ -276,6 +285,17 @@ of the release. By default, it is the full name of the release, for example `dis
 You can install more than one release in a namespace. The chart gives each release its own lease
 names, so each release is a separate cluster. Use a different CA for each release, or require a
 URI SAN that is different for each release.
+
+To run without the redirect listener, set `clusterClients.enabled=false`. The chart then passes no
+redirect flags and opens no redirect port. To name hosts instead of IPs in the topology replies, set
+`clusterClients.hostname`. This is an option. For example,
+`{ip}.<release>-peers.<namespace>.svc.cluster.local` becomes a name for each pod of the headless
+Service when CoreDNS answers it. The Discus tests do not check this. The certificate must then carry
+a matching DNS SAN (see [TLS on the redirect listener](security.md#tls-on-the-redirect-listener)).
+
+The chart uses the pod IP as the client address, and a pod gets a new IP at each restart. A cluster
+client must therefore reach the pod network. A client outside the pod network uses the Service on
+port 6379.
 
 ### Memory budget
 
@@ -404,6 +424,21 @@ ingress:
         protocol: UDP
 ```
 
+If the nodes have a redirect listener, a second rule must let clients reach every pod on the
+redirect port over TCP. A cluster client connects to each pod, not only to the Service. Replace
+`<client label>` with the labels of your client pods:
+
+```yaml
+ingress:
+  - from:
+      - podSelector:
+          matchLabels:
+            <client label>
+    ports:
+      - port: 6380
+        protocol: TCP
+```
+
 ## Start three nodes
 
 Outside Kubernetes, give every node the other nodes as seeds and use the lease provider `none`.
@@ -476,6 +511,94 @@ The members form one epoch. Every node computes the same owners for a key from t
 
 Replies keep the order of the pipeline. Commands on the same key run in the order that the client
 sent them. Commands on different keys run at the same time.
+
+## Cluster clients
+
+An ordinary client connects to `--listen` and does not need to know the topology. A node forwards
+each command to the owner of the key. Forwarding costs one extra hop. A cluster client can avoid
+that hop. It reads the topology from the cluster and sends each command to the owner of the key.
+
+`--redirect-listen` starts a second client listener. Both listeners accept every command and use
+the same TLS mode, certificates, authentication policy, and limits. They differ when another node
+serves the key:
+
+| Listener | Flag | Reply for a key that another node serves |
+| --- | --- | --- |
+| Forward | `--listen` | The node forwards the command and returns the reply. |
+| Redirect | `--redirect-listen` | The node returns `-MOVED <slot> <host>:<port>`. |
+
+### Slots
+
+Discus maps each key to one of 16384 slots. It uses the CRC16 of the key, as Redis Cluster does.
+A hash tag works too. If a key has `{tag}` in it, only the text in the braces sets the slot.
+`CLUSTER KEYSLOT <key>` returns the slot. Discus assigns the slots to nodes by itself. You do not
+move or manage slots.
+
+### The topology commands
+
+With `--cluster-topology auto`, a node that has a redirect listener answers `CLUSTER SLOTS`,
+`CLUSTER SHARDS`, `CLUSTER NODES`, `CLUSTER INFO`, `CLUSTER KEYSLOT`, and `CLUSTER MYID`. It
+answers them on both listeners. The replies name the redirect listener of each node. So after
+its first `CLUSTER SLOTS`, a cluster client uses redirect listeners only. See
+[Compatibility](compatibility.md#cluster-commands) for the replies.
+
+`--cluster-topology on` always answers. With no redirect listener, the replies name the `--listen`
+addresses. The client then routes straight to the owner, but it never gets `-MOVED`. Use it for
+tests. `--cluster-topology off` never answers.
+
+A client that detects cluster mode by itself, for example rueidis or valkey-go, switches to
+cluster mode when the topology commands answer.
+
+### When a node returns MOVED
+
+On a redirect connection, a node returns `-MOVED` when all three conditions are true:
+
+- The command is a single-slot command, and another node is the target.
+- The current epoch lists the target as `NORMAL` with a client address, and the target is up.
+- The node knows that the target has this epoch or a newer one.
+
+For a write, the target is the primary. For a read, the target is the primary, unless the
+connection sent `READONLY`, `--read-from-replicas` is true, and this node holds the slot. Then this
+node serves the read.
+
+In any other case the node forwards the command, as the forward listener does. This happens during
+an epoch change, and when the target looks down. The metric `discus.client.misrouted` counts these
+forwards. The metric `discus.client.redirects` counts the `-MOVED` replies. See
+[Telemetry](telemetry.md).
+
+A command on counter keys never gets `-MOVED`. The node forwards it to the leader of the group.
+A command with keys in several slots is served as on the forward listener. Discus never returns
+`-CROSSSLOT`.
+
+### Scans and counts
+
+On a redirect connection, `SCAN` lists only the keys of the slots that the node is the primary of.
+`DBSIZE` returns the local key count divided by the number of copies of each key. A cluster
+client scans every primary and adds the counts, so each key appears once. `FLUSHDB` and
+`FLUSHALL` still clear every member. A cluster client sends them to every primary, so the flush
+runs several times. This is safe.
+
+### Addresses
+
+Each node advertises a client address. By default, it is the IP of `--cluster-advertise` with the
+port of `--redirect-listen`. Set `--client-advertise` to change it. Set `--client-hostname` to
+name a host in the replies. The template `{ip}` becomes the IP with dashes, for example `10-1-2-3`.
+
+With `--membership static`, a node has no default client address. Set `--client-advertise` on
+each node to the address that its peers list. List the address of each peer with
+`--peer <node-id>@<ip>:<port>/<client-ip>:<client-port>`. A mixed config is refused at start. While
+a `NORMAL` member has no client address, the topology commands return
+`-ERR the cluster topology is not complete, member <id> has no client address`.
+
+`--tls-mode lb` together with `--redirect-listen` is a start error.
+
+### Upgrade from 0.3
+
+Slot placement gives every key new owners. A node of 0.3 and a node of this version cannot share
+a cluster. A new node refuses an old peer with a placement mismatch. So a rolling update from 0.3
+stalls. To upgrade, uninstall the release and install it again. You can also install a second
+release with its own lease names and then move the clients. In both cases the cache starts
+empty. See [Security](security.md#tls-on-the-redirect-listener) for the certificates.
 
 ## Replication
 

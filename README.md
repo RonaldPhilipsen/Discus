@@ -13,7 +13,7 @@ The target is a cache, not a durable database. Discus should:
 
 - scale throughput by adding nodes;
 - survive node loss without taking the cache offline;
-- keep clients topology-unaware;
+- let clients stay topology-unaware;
 - stay permissively licensed.
 
 ## Why not Redis Cluster or Sentinel?
@@ -100,7 +100,7 @@ follow the same path. A strong `INCR` mixed with an asynchronous `SET` would bre
 ## Non-goals
 
 Durability, persistence, transactions, Lua, pub/sub, streams, blocking commands, Redis Cluster
-protocol compatibility, Sentinel compatibility, cross-datacenter replication, strong consistency,
+slot management, Sentinel compatibility, cross-datacenter replication, strong consistency,
 and multi-tenancy.
 
 ## Status

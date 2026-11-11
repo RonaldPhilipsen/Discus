@@ -5,6 +5,8 @@
 #
 # With no argument the script builds the node, starts it on COMPAT_PORT (default 16379), runs the
 # checks, and stops the node. With an argument it checks that node and leaves it running.
+# The node of the script also has a redirect listener on COMPAT_REDIRECT_PORT (default 16380) for
+# the cluster client check. For a node that you name, set COMPAT_REDIRECT=host:port to run it.
 # FLUSHDB and FLUSHALL run only when COMPAT_ALLOW_FLUSH=1, because they delete data.
 set -u
 cd "$(dirname "$0")/.."
@@ -17,12 +19,14 @@ if [ $# -ge 1 ]; then
   target=$1
 else
   port=${COMPAT_PORT:-16379}
+  redirect_port=${COMPAT_REDIRECT_PORT:-16380}
   cargo build -q -p discus || exit 1
-  target/debug/discus --listen "127.0.0.1:$port" --admin-listen "127.0.0.1:$((port + 1000))" \
-    >/dev/null 2>&1 &
+  "${CARGO_TARGET_DIR:-target}/debug/discus" --listen "127.0.0.1:$port" --redirect-listen "127.0.0.1:$redirect_port" \
+    --admin-listen "127.0.0.1:$((port + 1000))" >/dev/null 2>&1 &
   node_pid=$!
   target="127.0.0.1:$port"
   export COMPAT_ALLOW_FLUSH=1
+  COMPAT_REDIRECT="127.0.0.1:$redirect_port"
   for _ in $(seq 1 50); do
     redis-cli -h 127.0.0.1 -p "$port" PING >/dev/null 2>&1 && break
     sleep 0.1
@@ -180,7 +184,29 @@ else
 fi
 
 # Cluster
-ok CLUSTER 'not a Redis Cluster' CLUSTER INFO
+ok "CLUSTER INFO" 'cluster_state:ok' CLUSTER INFO
+ok "CLUSTER SLOTS" '16383' CLUSTER SLOTS
+ok "CLUSTER KEYSLOT" '^12182$' CLUSTER KEYSLOT foo
+ok READONLY '^OK$' READONLY
+ok READWRITE '^OK$' READWRITE
+ok ASKING '^OK$' ASKING
+ok "COMMAND INFO" '^get$' COMMAND INFO get
+if [ -n "${COMPAT_REDIRECT:-}" ]; then
+  rhost=${COMPAT_REDIRECT%:*}
+  rport=${COMPAT_REDIRECT##*:}
+  rcli() { timeout 5 redis-cli -c -h "$rhost" -p "$rport" "$@" 2>&1; }
+  rcli SET "$p:cc" cluster-client >/dev/null
+  out=$(rcli GET "$p:cc")
+  if [ "$out" = cluster-client ]; then
+    echo "ok   redis-cli -c SET and GET"
+  else
+    echo "FAIL redis-cli -c SET and GET: got: $out"
+    fail=1
+  fi
+  rcli DEL "$p:cc" >/dev/null
+else
+  echo "skip redis-cli -c (set COMPAT_REDIRECT=host:port to run it)"
+fi
 
 # Unsupported
 for name in MULTI EXEC DISCARD WATCH UNWATCH EVAL EVALSHA SCRIPT FUNCTION PUBLISH PUBSUB \
