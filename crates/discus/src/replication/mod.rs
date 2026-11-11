@@ -714,9 +714,12 @@ impl Replicator {
             .map(|m| m.rpc_addr)
             .ok_or_else(|| TransportError::Connect(format!("node {peer} is not a member")))?;
         let code = message.type_code();
-        let build = |info: &PeerInfo| match info.capabilities & caps::REPLICATION {
-            0 => Err(TransportError::PeerUnsupported(code)),
-            _ => Ok(message),
+        let build = |info: &PeerInfo| {
+            link.saw_peer_epoch(peer, info.epoch);
+            match info.capabilities & caps::REPLICATION {
+                0 => Err(TransportError::PeerUnsupported(code)),
+                _ => Ok(message),
+            }
         };
         let frame = link
             .transport
@@ -732,6 +735,10 @@ impl Replicator {
             .await?;
         // An answered bulk message shows the peer is up (spec "Target health").
         link.note_forward(peer, true);
+        // The ack carries the epoch that the peer adopted, so redirects need no forward first.
+        if let Message::BatchAck(a) = &frame.message {
+            link.saw_peer_epoch(peer, a.epoch);
+        }
         Ok(frame.message)
     }
 

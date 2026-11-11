@@ -60,10 +60,8 @@ async fn send_in_span(
     let mut peer_caps = 0;
     let build = |info: &PeerInfo| {
         peer_caps = info.capabilities;
-        let known = link
-            .peer_epoch(target)
-            .unwrap_or(info.epoch)
-            .max(info.epoch);
+        link.saw_peer_epoch(target, info.epoch);
+        let known = link.peer_epoch(target).unwrap_or(info.epoch);
         let push = info.capabilities & caps::EPOCH_PUSH != 0 && epoch.id() > known;
         let mut path = hop.path.clone();
         path.push(node.id);
