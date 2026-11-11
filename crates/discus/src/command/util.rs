@@ -46,6 +46,17 @@ pub fn check_value(node: &Node, value: &[u8]) -> Result<(), CommandError> {
     Ok(())
 }
 
+/// Check the arity of `MSET`, then each key and value in order.
+pub fn check_mset(node: &Node, cmd: &[Bytes]) -> Result<(), CommandError> {
+    if cmd.len().is_multiple_of(2) {
+        return Err(CommandError::WrongArity("MSET".into()));
+    }
+    cmd[1..].chunks(2).try_for_each(|pair| {
+        check_key(node, &pair[0])?;
+        check_value(node, &pair[1])
+    })
+}
+
 /// Make room for a write of about `bytes`. A value larger than the whole budget is refused.
 pub fn admit(node: &Node, bytes: usize) -> Result<(), CommandError> {
     match node

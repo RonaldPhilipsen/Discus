@@ -11,8 +11,8 @@ use super::route::{keys_of, Keys};
 use super::{allowed, candidates, forward, hold, local, spent, Dispatch, Failure, Hop, Job, Reply};
 use std::time::Instant;
 
-use crate::command::util::{check_key, check_value};
-use crate::command::{CommandError, CommandSpec};
+use crate::command::util::check_mset;
+use crate::command::CommandSpec;
 use crate::node::Node;
 use bytes::Bytes;
 
@@ -145,13 +145,8 @@ pub fn multi(
     } = job;
     let width = if merge == Merge::AllOk { 2 } else { 1 };
     if width == 2 {
-        if cmd.len().is_multiple_of(2) {
-            return Dispatch::Ready(Reply::error(CommandError::WrongArity("MSET".into())));
-        }
-        for pair in cmd[1..].chunks(2) {
-            if let Err(e) = check_key(node, &pair[0]).and_then(|_| check_value(node, &pair[1])) {
-                return Dispatch::Ready(Reply::error(e));
-            }
+        if let Err(e) = check_mset(node, &cmd) {
+            return Dispatch::Ready(Reply::error(e));
         }
     }
     let now = Instant::now();

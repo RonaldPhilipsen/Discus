@@ -18,7 +18,7 @@ use super::{state, Counters, Refusal};
 use crate::cluster::multi::{split, Merge};
 use crate::cluster::route::{keys_of, Keys, Route};
 use crate::cluster::{forward, Dispatch, Hop, Job, Reply, MAX_HOPS};
-use crate::command::util::{check_key, check_value};
+use crate::command::util::{check_key, check_mset, check_value};
 use crate::command::{CommandError, CommandSpec};
 use crate::Node;
 
@@ -87,12 +87,7 @@ pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
 
 fn check_sizes(node: &Node, name: &str, cmd: &Command) -> Result<(), CommandError> {
     let (keys, values) = match name {
-        "MSET" => {
-            if cmd.len().is_multiple_of(2) {
-                return Err(CommandError::WrongArity("MSET".into()));
-            }
-            (cmd.len() / 2, cmd.len() / 2)
-        }
+        "MSET" => return check_mset(node, cmd),
         "SET" | "APPEND" => (1, 1),
         _ => (1, 0),
     };

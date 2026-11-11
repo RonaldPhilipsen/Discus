@@ -7,7 +7,7 @@ use discus_store::{Entry, Value as Stored};
 use super::error::CommandError;
 use super::float::{incr_by_float, parse_float_delta};
 use super::table::CommandSpec;
-use super::util::{admit, check_key, check_value, parse_i64, upper};
+use super::util::{admit, check_key, check_mset, check_value, parse_i64, upper};
 use crate::cluster::route::Route;
 use crate::node::{ConnState, Node};
 
@@ -204,13 +204,7 @@ fn mget(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 }
 
 fn mset(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    if cmd.len().is_multiple_of(2) {
-        return Err(CommandError::WrongArity("MSET".into()));
-    }
-    for pair in cmd[1..].chunks(2) {
-        check_key(node, &pair[0])?;
-        check_value(node, &pair[1])?;
-    }
+    check_mset(node, cmd)?;
     // One stamp for the whole command. Each key still has its own version.
     let stamp = node.stamp()?;
     for pair in cmd[1..].chunks(2) {
