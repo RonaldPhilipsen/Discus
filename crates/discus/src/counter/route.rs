@@ -16,7 +16,7 @@ use futures::future::join_all;
 
 use super::{state, Counters, Refusal};
 use crate::cluster::multi::{split, Merge};
-use crate::cluster::route::{keys_of, Keys, Route};
+use crate::cluster::route::{keys_of, Keys};
 use crate::cluster::{forward, Dispatch, Hop, Job, Reply, MAX_HOPS};
 use crate::command::util::{check_key, check_mset, check_value};
 use crate::command::{CommandError, CommandSpec};
@@ -64,20 +64,9 @@ pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
     }
     let (node, cmd, hop, route) = (node.clone(), job.cmd.clone(), hop.clone(), job.spec.route);
     Some(Dispatch::Pending(Box::pin(async move {
-        match route {
-            Route::MultiRead { sum } => {
-                let merge = if sum { Merge::Sum } else { Merge::InOrder };
-                fan_out(&node, &counters, cmd, hop, merge, 1).await
-            }
-            Route::MultiWrite { pairs } => {
-                let (merge, width) = if pairs {
-                    (Merge::AllOk, 2)
-                } else {
-                    (Merge::Sum, 1)
-                };
-                fan_out(&node, &counters, cmd, hop, merge, width).await
-            }
-            _ => {
+        match Merge::of(route) {
+            Some((merge, width)) => fan_out(&node, &counters, cmd, hop, merge, width).await,
+            None => {
                 let g = counters.group_of(&cmd[1]);
                 run(&node, &counters, g, cmd, hop).await
             }

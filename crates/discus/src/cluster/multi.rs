@@ -7,7 +7,7 @@ use discus_resp::{Command, Value};
 use discus_wire::ForwardMode;
 use futures::future::join_all;
 
-use super::route::{keys_of, Keys};
+use super::route::{keys_of, Keys, Route};
 use super::{allowed, candidates, forward, hold, local, spent, Dispatch, Failure, Hop, Job, Reply};
 use std::time::Instant;
 
@@ -89,6 +89,19 @@ pub enum Merge {
 }
 
 impl Merge {
+    /// The merge of a multi-key route and the number of arguments per key. `None` for any other
+    /// route.
+    pub(crate) fn of(route: Route) -> Option<(Merge, usize)> {
+        match route {
+            Route::MultiRead { sum: true } | Route::MultiWrite { pairs: false } => {
+                Some((Merge::Sum, 1))
+            }
+            Route::MultiRead { sum: false } => Some((Merge::InOrder, 1)),
+            Route::MultiWrite { pairs: true } => Some((Merge::AllOk, 2)),
+            _ => None,
+        }
+    }
+
     /// Merge the non-error replies of `groups`, one per group in order. `None` when a part has
     /// the wrong shape.
     pub(crate) fn apply<T>(
@@ -127,14 +140,7 @@ impl Merge {
 
 /// Plan and run a multi-key command. With every key local, the original command runs inline.
 /// The grouping by owner runs in the `route` span.
-pub fn multi(
-    node: &Arc<Node>,
-    job: Job,
-    hop: Hop,
-    merge: Merge,
-    write: bool,
-    route: tracing::Span,
-) -> Dispatch {
+pub fn multi(node: &Arc<Node>, job: Job, hop: Hop, route: tracing::Span) -> Dispatch {
     let Job {
         cmd,
         spec,
@@ -143,7 +149,11 @@ pub fn multi(
         redirect,
         readonly,
     } = job;
-    let width = if merge == Merge::AllOk { 2 } else { 1 };
+    let Some((merge, width)) = Merge::of(spec.route) else {
+        drop(route);
+        return Dispatch::Ready(local(node, spec, &cmd));
+    };
+    let write = matches!(spec.route, Route::MultiWrite { .. });
     if width == 2 {
         if let Err(e) = check_mset(node, &cmd) {
             return Dispatch::Ready(Reply::error(e));

@@ -335,22 +335,7 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
     }
     match job.spec.route {
         Route::Single { write } => single(node, job, hop, write, route),
-        Route::MultiRead { sum } => {
-            let merge = if sum {
-                multi::Merge::Sum
-            } else {
-                multi::Merge::InOrder
-            };
-            multi::multi(node, job, hop, merge, false, route)
-        }
-        Route::MultiWrite { pairs } => {
-            let merge = if pairs {
-                multi::Merge::AllOk
-            } else {
-                multi::Merge::Sum
-            };
-            multi::multi(node, job, hop, merge, true, route)
-        }
+        Route::MultiRead { .. } | Route::MultiWrite { .. } => multi::multi(node, job, hop, route),
         // Only the entry node fans out. A forwarded copy runs locally. These routes need no
         // owner, so the route span ends at once.
         Route::Fanout if redirect::applies(job.redirect, &hop) && job.spec.name == "DBSIZE" => {
