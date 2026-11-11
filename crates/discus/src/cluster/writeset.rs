@@ -117,31 +117,45 @@ impl WriteSet {
         self.budget.sub(size as u64);
     }
 
-    fn pop_oldest(&mut self) -> bool {
-        match self.map.pop_lru() {
-            Some((_, r)) => {
-                self.release(r.size);
-                true
-            }
-            None => false,
+    /// Drop the oldest key from the set but keep its budget share. Returns the size it held.
+    fn evict_oldest(&mut self) -> Option<usize> {
+        let (_, r) = self.map.pop_lru()?;
+        self.bytes -= r.size;
+        Some(r.size)
+    }
+
+    fn give_back(&mut self, size: usize) {
+        if size > 0 {
+            self.budget.sub(size as u64);
         }
     }
 
     /// Record a write of `key` that the primary acknowledged at `version`. A key that does not
     /// fit the node budget even after this set gave up its own oldest keys is not recorded.
     pub fn record(&mut self, key: &Bytes, version: Version, now: Instant) {
-        self.remove(key);
+        // The same key has the same size, so its share of the budget stays as it is.
+        if let Some(r) = self.map.get_mut(key) {
+            r.version = version;
+            r.at = now;
+            return;
+        }
         let size = key.len() + KEY_OVERHEAD;
+        // The budget of evicted keys passes to the new key first. A full set evicts on every
+        // write, and the shared counters then change only by the difference.
+        let mut freed = 0;
         while self.map.len() >= self.limits.keys || self.bytes + size > self.limits.bytes {
-            if !self.pop_oldest() {
-                return;
+            match self.evict_oldest() {
+                Some(n) => freed += n,
+                None => return self.give_back(freed),
             }
         }
-        while !self.budget.try_add(size as u64) {
-            if !self.pop_oldest() {
-                return;
+        while freed < size && !self.budget.try_add((size - freed) as u64) {
+            match self.evict_oldest() {
+                Some(n) => freed += n,
+                None => return self.give_back(freed),
             }
         }
+        self.give_back(freed.saturating_sub(size));
         self.bytes += size;
         self.map.push(
             key.clone(),
@@ -279,6 +293,35 @@ mod tests {
         assert_eq!(w.len(), 1);
         w.observed(b"a", Some(v(5)), true);
         assert!(w.is_empty());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn the_node_budget_matches_the_recorded_keys(
+            ops in proptest::collection::vec((0u8..40, 1usize..30, proptest::bool::ANY), 1..300),
+            keys in 1usize..12,
+            cap in 0u64..2_000,
+        ) {
+            let budget = Arc::new(WriteSetBudget::new(cap, None));
+            let mut one = WriteSet::new(limits(keys, 600), budget.clone());
+            let mut two = WriteSet::new(limits(keys, 600), budget.clone());
+            let now = Instant::now();
+            for (i, (id, len, first)) in ops.into_iter().enumerate() {
+                let key = Bytes::from(vec![id; len % 8 + id as usize % 3 + 1]);
+                let w = if first { &mut one } else { &mut two };
+                w.record(&key, v(i as u64 + 1), now);
+                if len % 7 == 0 {
+                    w.observed(&key, Some(v(u64::MAX)), true);
+                }
+                let held = one.bytes + two.bytes;
+                proptest::prop_assert_eq!(budget.used(), held as u64);
+                proptest::prop_assert!(budget.used() <= cap);
+                proptest::prop_assert!(one.map.len() <= keys && one.bytes <= 600);
+            }
+            drop(one);
+            drop(two);
+            proptest::prop_assert_eq!(budget.used(), 0);
+        }
     }
 
     #[test]
