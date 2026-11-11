@@ -725,6 +725,8 @@ start a handoff, so a new owner does not start empty.
   longer own it. This applies to reads and writes, so an `INCR` of a moved key starts from the old
   value. The fallback ends in three cases: every old owner finished or gave up, the old owners
   leave, or `--handoff-timeout-ms` (default 5 minutes) ends. After that, a miss is a miss.
+- After a scan reached every new owner, the old owner drops the keys it no longer owns. If the scan
+  gave up on a new owner, the old owner keeps them.
 
 `/startupz` passes only after the node received its handoff. A rolling restart therefore waits for
 each new pod to fill before it replaces the next one.

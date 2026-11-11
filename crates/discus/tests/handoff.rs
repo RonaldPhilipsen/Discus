@@ -231,3 +231,32 @@ async fn handoff_skips_unchanged_ranges() {
         .collect();
     assert_eq!(moved, expected);
 }
+
+/// After a join, the old owners drop the keys they handed off, so each node holds only its own
+/// keys and `DBSIZE` counts every key once.
+#[tokio::test]
+async fn old_owners_drop_the_keys_they_handed_off() {
+    let net = Net::new();
+    let extra = ["--replication-factor", "3"];
+    let nodes = net.start_agreed(3, &extra).await;
+    let keys = fill(&nodes[0], "drop", 400).await;
+    let joiner = net.start(&[nodes[0].cluster_addr], &extra).await;
+    assert!(started(&joiner).await);
+    let all: Vec<&GossipNode> = nodes.iter().chain(std::iter::once(&joiner)).collect();
+    wait_agreed(&all, FORM).await;
+    let only_owned = || {
+        all.iter().all(|n| {
+            let epoch = n.node.epochs().current().clone();
+            n.node.replicator().is_some_and(|r| !r.scanning())
+                && keys.iter().all(|k| {
+                    let owns = epoch.owners(k.as_bytes(), 3).contains(&n.id);
+                    n.node.store.read(k.as_bytes(), |e| e.is_some()) == owns
+                })
+        })
+    };
+    assert!(wait_until(Duration::from_secs(60), only_owned).await);
+    let mut c = nodes[0].redis().await;
+    let size: i64 = redis::cmd("DBSIZE").query_async(&mut c).await.unwrap();
+    assert_eq!(size, keys.len() as i64);
+    assert_eq!(hits(&joiner, &keys).await, keys.len());
+}

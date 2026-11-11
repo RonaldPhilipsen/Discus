@@ -258,7 +258,7 @@ fn retain_and_clear_drop_tombstones_too() {
     put(&s, "a", v(1));
     put(&s, "b", v(1));
     del(&s, "b", v(2));
-    s.retain(|k| k != b"a");
+    s.retain(|k, _| k != b"a");
     assert!(s.entry(b"a").is_none());
     assert!(s.entry(b"b").is_some());
     s.clear();

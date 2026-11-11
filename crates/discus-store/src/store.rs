@@ -468,11 +468,16 @@ impl Store {
         shard.needs_refill.store(false, Ordering::Relaxed);
     }
 
-    /// Keep only the keys for which `f` is true, tombstones included.
-    pub fn retain(&self, f: impl Fn(&[u8]) -> bool) {
+    /// Keep only the entries for which `f` is true, tombstones included.
+    pub fn retain(&self, f: impl Fn(&[u8], &Entry) -> bool) {
         for shard in &self.shards {
             let mut guard = shard.inner.write();
-            let drop: Vec<Bytes> = guard.map.keys().filter(|k| !f(k)).cloned().collect();
+            let drop: Vec<Bytes> = guard
+                .map
+                .iter()
+                .filter(|(k, e)| !f(k, e))
+                .map(|(k, _)| k.clone())
+                .collect();
             for k in drop {
                 self.take(&mut guard, &k);
             }

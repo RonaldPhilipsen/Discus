@@ -137,13 +137,13 @@ pub struct Limits {
 }
 
 /// Run one scan for every change in `changes`, from the oldest old epoch to `to`. Returns when
-/// every target got its `done` batch or was abandoned.
-pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits: Limits) {
+/// every target got its `done` batch or was abandoned, and whether every target got it.
+pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits: Limits) -> bool {
     let Some(replicator) = node.replicator().cloned() else {
-        return;
+        return false;
     };
     let Some(from) = changes.iter().map(|c| c.old.clone()).min_by_key(|e| e.id()) else {
-        return;
+        return false;
     };
     let me = node.id;
     let mut targets: HashMap<NodeId, Target> = changes
@@ -153,7 +153,7 @@ pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits
         .map(|g| (g, Target::new()))
         .collect();
     if targets.is_empty() {
-        return;
+        return true;
     }
     // Entries written after this point replicate to their current owners on their own.
     let watermark = node.hlc.current();
@@ -226,6 +226,34 @@ pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits
             flush(node, &replicator, *g, t, Some(range), limits).await;
         }
     }
+    targets.values().all(|t| !t.abandoned)
+}
+
+/// Drop the keys that `me` owns neither in `to` nor in `current`, after a scan up to `to` that
+/// reached every target. The old owner keeps its entries only until the new owners acknowledge
+/// the handoff (spec section 5.2): after its `done` batch, no new owner falls back to it.
+///
+/// A key stays when its entry is newer than `watermark`, because a peer in a newer epoch can
+/// forward a write here first. It also stays once `newest` passes the generation of `current`:
+/// a peer in an epoch that this node has not adopted yet sent entries, maybe of ranges that
+/// this node gains in that epoch.
+pub fn drop_lost(
+    store: &discus_store::Store,
+    me: NodeId,
+    (to, current): (&Epoch, &Epoch),
+    rf: usize,
+    watermark: discus_placement::NTP64,
+    newest: &std::sync::atomic::AtomicU64,
+) {
+    let owned: Vec<bool> = (0..discus_placement::RANGES)
+        .map(|r| to.range_owners(r, rf).contains(&me) || current.range_owners(r, rf).contains(&me))
+        .collect();
+    let generation = current.id().generation;
+    store.retain(|k, e| {
+        owned[usize::from(range_of(slot(k)))]
+            || e.version.time() > watermark
+            || newest.load(std::sync::atomic::Ordering::SeqCst) > generation
+    });
 }
 
 /// Send the batch of one target with retries. A target that keeps failing is abandoned for
@@ -306,4 +334,95 @@ pub fn changes(
         })
         .filter(|s| !s.is_empty());
     (outgoing, incoming)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+    use std::sync::atomic::AtomicU64;
+
+    use discus_placement::{ClusterId, ManualClock, Member, MemberState, Weight, NTP64};
+    use discus_store::{Entry, Store, StoreConfig, Value};
+
+    use super::*;
+
+    fn member(id: u128) -> Member {
+        let addr: SocketAddr = "10.0.0.1:7000".parse().unwrap();
+        Member {
+            id: NodeId::from_u128(id),
+            addr,
+            rpc_addr: addr,
+            client_addr: None,
+            client_host: None,
+            state: MemberState::Normal,
+            weight: Weight::default(),
+        }
+    }
+
+    fn put(store: &Store, key: &str, time: u64) {
+        let mut e = Entry::new(Value::Str(Bytes::from_static(b"v")), None);
+        e.version = Version::new(NTP64(time), NodeId::from_u128(9));
+        assert!(store.apply(key.as_bytes(), e));
+    }
+
+    /// Two members with `RF = 1`, and keys on both sides of the watermark.
+    fn setup() -> (Store, Epoch, Vec<String>, Vec<String>) {
+        let id = EpochId {
+            generation: 5,
+            origin: NodeId::from_u128(1),
+        };
+        let epoch = Epoch::new(id, ClusterId::NIL, vec![member(1), member(2)]).unwrap();
+        epoch.table(1);
+        let store = Store::new(StoreConfig::default(), Arc::new(ManualClock::new(1)));
+        let (mut mine, mut lost) = (Vec::new(), Vec::new());
+        for i in 0..200 {
+            let k = format!("k{i}");
+            put(&store, &k, 10);
+            if epoch.owners(k.as_bytes(), 1) == [NodeId::from_u128(1)] {
+                mine.push(k);
+            } else {
+                lost.push(k);
+            }
+        }
+        (store, epoch, mine, lost)
+    }
+
+    fn held(store: &Store, keys: &[String]) -> usize {
+        keys.iter()
+            .filter(|k| store.read(k.as_bytes(), |e| e.is_some()))
+            .count()
+    }
+
+    #[test]
+    fn drop_lost_keeps_owned_and_newer_keys() {
+        let (store, epoch, mine, lost) = setup();
+        put(&store, &lost[0], 30);
+        let me = NodeId::from_u128(1);
+        drop_lost(
+            &store,
+            me,
+            (&epoch, &epoch),
+            1,
+            NTP64(20),
+            &AtomicU64::new(5),
+        );
+        assert_eq!(held(&store, &mine), mine.len());
+        assert_eq!(held(&store, &lost), 1);
+        assert!(store.read(lost[0].as_bytes(), |e| e.is_some()));
+    }
+
+    #[test]
+    fn drop_lost_keeps_every_key_after_a_batch_from_a_newer_epoch() {
+        let (store, epoch, mine, lost) = setup();
+        let me = NodeId::from_u128(1);
+        drop_lost(
+            &store,
+            me,
+            (&epoch, &epoch),
+            1,
+            NTP64(20),
+            &AtomicU64::new(6),
+        );
+        assert_eq!(held(&store, &mine) + held(&store, &lost), 200);
+    }
 }

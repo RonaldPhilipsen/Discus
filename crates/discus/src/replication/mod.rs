@@ -22,7 +22,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use discus_placement::{ClusterId, Epoch, NodeId, Version};
+use discus_placement::{ClusterId, Epoch, NodeId, Version, NTP64};
 use discus_store::{refill_bucket, Entry, Store};
 use discus_transport::{Lane, PeerInfo, TransportError};
 use discus_wire::{caps, Batch, BatchAck, Message, TraceContext};
@@ -103,6 +103,9 @@ pub struct Replicator {
     scans: AtomicU64,
     ready: AtomicBool,
     probing: AtomicBool,
+    /// The newest epoch generation of a batch that a peer sent, recorded before its entries
+    /// apply. `handoff::drop_lost` keeps every key once it passes the current generation.
+    peer_generation: AtomicU64,
 }
 
 impl Replicator {
@@ -125,6 +128,7 @@ impl Replicator {
             scans: AtomicU64::new(0),
             ready: AtomicBool::new(false),
             probing: AtomicBool::new(false),
+            peer_generation: AtomicU64::new(0),
         });
         // Under memory pressure the store frees the oldest hints after its normal entries
         // (spec section 11).
@@ -355,7 +359,10 @@ impl Replicator {
                 rate_bytes: self.settings.handoff_rate,
                 rf: self.settings.rf,
             };
-            handoff::scan(&node, &changes, to, limits).await;
+            let watermark = node.hlc.current();
+            if handoff::scan(&node, &changes, to.clone(), limits).await {
+                self.drop_lost(&node, to, watermark).await;
+            }
             self.scans.fetch_add(1, Ordering::Relaxed);
             drop(changes);
             let more = {
@@ -366,6 +373,28 @@ impl Replicator {
             if more {
                 self.scan_wake.notify_one();
             }
+        }
+    }
+
+    /// Drop the keys that this node lost up to `to`, off the async workers.
+    async fn drop_lost(self: &Arc<Self>, node: &Node, to: Arc<Epoch>, watermark: NTP64) {
+        let current = node.epochs().current().clone();
+        let (me, rf) = (self.clone(), self.settings.rf);
+        let walk = move || {
+            let before = me.store.len();
+            handoff::drop_lost(
+                &me.store,
+                me.id,
+                (&to, &current),
+                rf,
+                watermark,
+                &me.peer_generation,
+            );
+            before.saturating_sub(me.store.len())
+        };
+        match tokio::task::spawn_blocking(walk).await {
+            Ok(dropped) => tracing::info!(dropped, "dropped the keys that moved to other owners"),
+            Err(e) => tracing::warn!(error = %e, "the drop of moved keys failed"),
         }
     }
 
@@ -753,10 +782,12 @@ impl Replicator {
         };
         match message {
             Message::Replicate(b) => {
+                self.saw_generation(&b);
                 let applied = self.apply_entries(&node, b.entries);
                 ack(&node, applied, Vec::new())
             }
             Message::HintReplay(b) => {
+                self.saw_generation(&b);
                 if !b.discard.is_empty() {
                     self.discard(&node, from, b.discard).await;
                 }
@@ -774,6 +805,7 @@ impl Replicator {
                 })
             }
             Message::Handoff(b) => {
+                self.saw_generation(&b);
                 let want: Vec<Bytes> = b
                     .offers
                     .into_iter()
@@ -835,12 +867,17 @@ impl Replicator {
         }
     }
 
+    fn saw_generation(&self, b: &Batch) {
+        self.peer_generation
+            .fetch_max(b.epoch.generation, Ordering::SeqCst);
+    }
+
     /// Drop the keys of the lost refill buckets whose primary is `from`, before a replay
     /// refills what it can (spec section 9). The walk of the store runs off the async workers.
     async fn discard(&self, node: &Node, from: NodeId, buckets: Vec<u8>) {
         let (epoch, store) = (node.epochs().current().clone(), self.store.clone());
         let walk = move || {
-            store.retain(|k| {
+            store.retain(|k, _| {
                 !(buckets.contains(&refill_bucket(k)) && epoch.primary(k) == Some(from))
             })
         };
