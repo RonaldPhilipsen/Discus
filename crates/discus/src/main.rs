@@ -7,9 +7,21 @@ use tokio_util::sync::CancellationToken;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
-    let mut config = Config::parse();
+fn main() -> std::io::Result<()> {
+    let config = Config::parse();
+    let target = discus::priority::data_thread_target(config.data_nice);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .on_thread_start(move || {
+            if let Some(t) = target {
+                discus::priority::set_current_thread_nice_recorded(t);
+            }
+        })
+        .build()?;
+    runtime.block_on(run(config, target))
+}
+
+async fn run(mut config: Config, nice_target: Option<i32>) -> std::io::Result<()> {
     // The node ID is fixed before telemetry starts, so the resource carries the real ID.
     if let Err(e) = config.resolve_identity() {
         eprintln!("discus: {e}");
@@ -26,6 +38,14 @@ async fn main() -> std::io::Result<()> {
             std::process::exit(2);
         }
     };
+    if let Some(e) = discus::priority::first_failure() {
+        tracing::warn!(
+            error = %e,
+            data_nice = config.data_nice,
+            target_nice = ?nice_target,
+            "could not lower the data runtime priority"
+        );
+    }
     tracing::info!(
         build = discus::build::BUILD_ID,
         features = discus::build::FEATURES.join(","),

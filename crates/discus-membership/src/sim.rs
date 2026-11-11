@@ -19,7 +19,7 @@ use bytes::Bytes;
 use discus_placement::{
     Adopt, ClusterId, Epoch, EpochError, EpochHistory, EpochId, Member, MemberState, NodeId, Weight,
 };
-use discus_wire::{Capacity, Gossip, Liveness, MemberInfo, Rumor};
+use discus_wire::{Capacity, Gossip, GossipKind, Liveness, MemberInfo, Rumor};
 
 use crate::lease::{LeaseHolder, LeaseProvider, LeaseState, MemoryLease};
 use crate::{provisional_epoch, Action, Event, Host, Millis, Outcome, Phase, Swim, SwimConfig};
@@ -87,6 +87,17 @@ impl Host for SimHost {
     }
 }
 
+/// An action that a node emitted, for tests that check the timeouts of the core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Emitted {
+    pub kind: GossipKind,
+    /// The ping was sent for a ping-req of another node.
+    pub relay: bool,
+    pub timeout_ms: Millis,
+    pub at: Millis,
+    pub to: SocketAddr,
+}
+
 pub struct SimNode {
     pub swim: Swim,
     pub host: SimHost,
@@ -94,7 +105,10 @@ pub struct SimNode {
     /// The node answers nothing, but its connections work.
     pub silenced: bool,
     isolated_until: Millis,
+    /// The tick lag that the node reports before each tick.
+    lag_ms: u64,
     sent: u64,
+    pub emitted: Vec<Emitted>,
     /// Tokens that wait for a reply or a timeout.
     waiting: BTreeSet<u64>,
     /// Relay tokens: the requester and its token.
@@ -229,6 +243,7 @@ impl Sim {
         let info = MemberInfo {
             id,
             addr,
+            rpc_addr: addr,
             state: MemberState::Joining,
             incarnation: 0,
             weight: Weight::default(),
@@ -247,7 +262,9 @@ impl Sim {
             alive: true,
             silenced: false,
             isolated_until: 0,
+            lag_ms: 0,
             sent: 0,
+            emitted: Vec::new(),
             waiting: BTreeSet::new(),
             relays: HashMap::new(),
             events: Vec::new(),
@@ -270,6 +287,7 @@ impl Sim {
             .map(|id| Member {
                 id: *id,
                 addr: self.nodes[id].swim.me().addr,
+                rpc_addr: self.nodes[id].swim.me().rpc_addr,
                 state: MemberState::Normal,
                 weight: Weight::default(),
             })
@@ -378,6 +396,11 @@ impl Sim {
         self.nodes[&id].sent
     }
 
+    /// Make the node report a tick lag of `ms` before each tick, until it is set to 0.
+    pub fn lag(&mut self, id: NodeId, ms: u64) {
+        self.node_mut(id).lag_ms = ms;
+    }
+
     pub fn data_path_failure(&mut self, observer: NodeId, subject: NodeId) {
         let now = self.now;
         self.node_mut(observer).swim.evidence(now, subject);
@@ -427,12 +450,20 @@ impl Sim {
 
     /// Send the actions of `from`.
     pub fn send(&mut self, from: NodeId, actions: Vec<Action>) {
+        let now = self.now;
         for a in actions {
             let node = self.node_mut(from);
             node.sent += 1;
+            let relay = node.relays.contains_key(&a.token);
+            node.emitted.push(Emitted {
+                kind: a.msg.kind,
+                relay,
+                timeout_ms: a.timeout_ms,
+                at: now,
+                to: a.to,
+            });
             node.waiting.insert(a.token);
             let lat = self.latency();
-            let now = self.now;
             self.schedule(
                 now + lat,
                 Delivery::Request {
@@ -475,6 +506,7 @@ impl Sim {
                 let now = self.now;
                 let node = self.node_mut(id);
                 node.host.now = now;
+                node.swim.observe_lag(node.lag_ms);
                 let actions = node.swim.tick(now, &mut node.host);
                 self.send(id, actions);
             }

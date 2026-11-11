@@ -19,6 +19,7 @@ use crate::cluster::writeset::{WriteSet, WriteSetBudget, WriteSetLimits};
 use crate::cluster::ClusterLink;
 use crate::command::CommandError;
 use crate::counter::Counters;
+use crate::lag::LagProbe;
 use crate::membership::Membership;
 use crate::replication::Replicator;
 use crate::security::{ConnAuth, Security};
@@ -64,6 +65,10 @@ pub struct Node {
     phase: AtomicU8,
     link: OnceLock<ClusterLink>,
     membership: OnceLock<Arc<Membership>>,
+    lag: LagProbe,
+    data: OnceLock<tokio::runtime::Handle>,
+    /// The ordered consumer of [`Node::apply_epoch`] work on the data runtime.
+    epoch_work: OnceLock<tokio::sync::mpsc::UnboundedSender<(Arc<Epoch>, Arc<Epoch>)>>,
     replicator: OnceLock<Arc<Replicator>>,
     counters: OnceLock<Arc<Counters>>,
     epoch_tx: tokio::sync::watch::Sender<EpochId>,
@@ -84,6 +89,8 @@ pub struct Faults {
     pub stall_forwards: std::sync::atomic::AtomicBool,
     /// Delay inbound counter messages by this many milliseconds.
     pub stall_counter_ms: AtomicU64,
+    /// The names of the threads that ran [`Node::apply_epoch`].
+    pub epoch_work_threads: parking_lot::Mutex<Vec<String>>,
     /// Never answer an inbound message of any kind from these peers. Blocking both sides makes
     /// a partition.
     pub blocked: parking_lot::Mutex<std::collections::HashSet<NodeId>>,
@@ -175,6 +182,7 @@ impl Node {
         let me = Member {
             id,
             addr: config.cluster_listen,
+            rpc_addr: config.cluster_listen,
             state: MemberState::Normal,
             weight: Weight::new(config.weight).unwrap_or_default(),
         };
@@ -206,6 +214,9 @@ impl Node {
             phase: AtomicU8::new(Phase::Starting as u8),
             link: OnceLock::new(),
             membership: OnceLock::new(),
+            lag: LagProbe::new(),
+            data: OnceLock::new(),
+            epoch_work: OnceLock::new(),
             replicator: OnceLock::new(),
             counters: OnceLock::new(),
             epoch_tx,
@@ -218,6 +229,27 @@ impl Node {
     /// Cancelled by `POST /admin/drain`. `Server::run` then drains as on SIGTERM (spec §15.3).
     pub fn drain_token(&self) -> tokio_util::sync::CancellationToken {
         self.drain.clone()
+    }
+
+    /// The data runtime. Work on the control lane that touches the store, or spawns tasks that
+    /// do, runs here.
+    ///
+    /// # Panics
+    ///
+    /// Before `Server::bind_with` set it.
+    pub fn data_handle(&self) -> &tokio::runtime::Handle {
+        self.data
+            .get()
+            .expect("Server::bind_with sets the data runtime")
+    }
+
+    pub(crate) fn set_data_handle(&self, handle: tokio::runtime::Handle) {
+        let _ = self.data.set(handle);
+    }
+
+    /// The lag probe of the data runtime.
+    pub fn lag(&self) -> &LagProbe {
+        &self.lag
     }
 
     pub fn membership(&self) -> Option<&Arc<Membership>> {
@@ -329,6 +361,20 @@ impl Node {
         self.link.get()
     }
 
+    /// The QUIC address of `--cluster-listen`, when the transport runs. With gossip membership
+    /// it serves gossip only.
+    pub fn cluster_addr(&self) -> Option<SocketAddr> {
+        match self.membership() {
+            Some(m) => Some(m.gossip_transport().local_addr()),
+            None => self.rpc_addr(),
+        }
+    }
+
+    /// The QUIC address that serves node-to-node RPC, when the transport runs.
+    pub fn rpc_addr(&self) -> Option<SocketAddr> {
+        self.link().map(|l| l.transport.local_addr())
+    }
+
     /// The link, the address, and the current epoch for a request to member `to`.
     pub(crate) fn peer(
         &self,
@@ -338,7 +384,7 @@ impl Node {
         let epoch = self.epochs().current().clone();
         let addr = epoch
             .member(to)
-            .map(|m| m.addr)
+            .map(|m| m.rpc_addr)
             .ok_or_else(|| format!("node {to} is not a member"))?;
         Ok((link, addr, epoch))
     }
@@ -371,15 +417,72 @@ impl Node {
                 })
             });
         }
+        // Adoptions run on the control lane and on the data runtime, so the send happens under
+        // the lock to keep the work in adoption order.
+        let unsent = match self.epoch_work.get() {
+            Some(tx) => tx.send((old, new)).err().map(|e| e.0),
+            None => Some((old, new)),
+        };
         drop(epochs);
-        if let Some(r) = self.replicator() {
-            r.on_epoch(&old, &new);
-        }
-        if let Some(link) = self.link() {
-            link.forget_non_members(&new);
+        if let Some((old, new)) = unsent {
+            self.apply_epoch(&old, &new);
         }
         self.epoch_tx.send_replace(id);
         result
+    }
+
+    /// The work of an adoption that may wait: it grows with the replication backlog.
+    fn apply_epoch(&self, old: &Arc<Epoch>, new: &Arc<Epoch>) {
+        #[cfg(feature = "testing")]
+        self.faults.epoch_work_threads.lock().push(
+            std::thread::current()
+                .name()
+                .unwrap_or_default()
+                .to_string(),
+        );
+        // The work can run after later adoptions. Pruning against `new` would then drop the
+        // queues and hints of a peer that joined in a later epoch, so it prunes against the
+        // current epoch. Work from a cluster that a reset replaced has nothing left to do.
+        let current = self.epochs().current().clone();
+        if current.cluster_id() != new.cluster_id() {
+            return;
+        }
+        if let Some(r) = self.replicator() {
+            r.on_epoch(old, new, &current);
+        }
+        if let Some(link) = self.link() {
+            link.forget_non_members(&current);
+        }
+    }
+
+    /// Run the work of later adoptions on the current runtime, in adoption order, until `stop`.
+    /// Adoptions on the control lane would otherwise run it on the lane. Without the consumer,
+    /// or after `stop`, adoptions run it inline.
+    pub fn spawn_epoch_work(self: &Arc<Self>, stop: tokio_util::sync::CancellationToken) {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(Arc<Epoch>, Arc<Epoch>)>();
+        if self.epoch_work.set(tx).is_err() {
+            return;
+        }
+        let node = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                let work = tokio::select! {
+                    _ = stop.cancelled() => break,
+                    work = rx.recv() => work,
+                };
+                let (Some((old, new)), Some(node)) = (work, node.upgrade()) else {
+                    return;
+                };
+                node.apply_epoch(&old, &new);
+            }
+            // Later sends fail and run inline. Work queued before the close still runs here.
+            rx.close();
+            while let Ok((old, new)) = rx.try_recv() {
+                if let Some(node) = node.upgrade() {
+                    node.apply_epoch(&old, &new);
+                }
+            }
+        });
     }
 
     pub fn epoch_id(&self) -> EpochId {
@@ -480,6 +583,7 @@ fn static_epoch(me: Member, config: &Config, cluster_id: ClusterId) -> Epoch {
         // Config::validate requires the ID with static membership.
         id: p.id.unwrap_or(NodeId::NIL),
         addr: p.addr,
+        rpc_addr: p.addr,
         state: MemberState::Normal,
         weight: Weight::default(),
     }));

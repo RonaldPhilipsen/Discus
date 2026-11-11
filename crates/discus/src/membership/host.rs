@@ -11,7 +11,8 @@ use crate::Node;
 pub struct NodeHost {
     pub node: Weak<Node>,
     pub id: NodeId,
-    pub transport: Transport,
+    pub gossip: Transport,
+    pub rpc: Transport,
     /// The cluster that the last lease read named. The merge rule uses it.
     pub lease_cluster: Option<ClusterId>,
 }
@@ -26,7 +27,11 @@ impl Host for NodeHost {
 
     fn adopt(&mut self, epoch: Epoch) -> Result<Adopt, EpochError> {
         match self.node.upgrade() {
-            Some(node) => node.adopt_epoch(epoch),
+            Some(node) => {
+                // Adoption spawns store work, which belongs on the data runtime.
+                let _data = node.data_handle().enter();
+                node.adopt_epoch(epoch)
+            }
             None => Ok(Adopt::Stale),
         }
     }
@@ -38,9 +43,12 @@ impl Host for NodeHost {
     }
 
     fn reset_cluster(&mut self, epoch: Epoch) {
-        // The RPC channel only admits peers of the new cluster from now on.
-        self.transport.set_cluster_id(epoch.cluster_id());
+        // The RPC channel only admits peers of the new cluster from now on. The gossip endpoint
+        // reports the cluster in its HELLO, so it changes too.
+        self.gossip.set_cluster_id(epoch.cluster_id());
+        self.rpc.set_cluster_id(epoch.cluster_id());
         if let Some(node) = self.node.upgrade() {
+            let _data = node.data_handle().enter();
             node.reset_cluster(epoch);
         }
     }

@@ -276,7 +276,7 @@ impl Counters {
             identity: self.id.to_string(),
             address: node
                 .as_ref()
-                .and_then(|n| n.membership().map(|m| m.local().addr))
+                .and_then(|n| n.membership().map(|m| m.local().rpc_addr))
                 .or_else(|| node.as_ref().map(|n| n.config.cluster_listen))
                 .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 0))),
             cluster_id: node.map_or(discus_placement::ClusterId::NIL, |n| n.cluster_id()),

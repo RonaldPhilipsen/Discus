@@ -110,6 +110,9 @@ spec:
             - name: cluster
               containerPort: 7379
               protocol: UDP
+            - name: rpc
+              containerPort: 7380
+              protocol: UDP
             - name: admin
               containerPort: 9100
           startupProbe:

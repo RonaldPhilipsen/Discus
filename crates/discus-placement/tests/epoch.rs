@@ -11,6 +11,7 @@ fn member(id: u128) -> Member {
     Member {
         id: NodeId::from_u128(id),
         addr: SocketAddr::from(([127, 0, 0, 1], 7000)),
+        rpc_addr: SocketAddr::from(([127, 0, 0, 1], 7000)),
         state: MemberState::Normal,
         weight: Weight::default(),
     }

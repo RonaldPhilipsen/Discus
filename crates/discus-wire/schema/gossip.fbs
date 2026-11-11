@@ -29,6 +29,7 @@ table MemberInfo {
   capacity_max: ulong (id: 8);
   /// Counter leader hints. Opaque to membership. The counter plan defines the content.
   leader_hints: [ubyte] (id: 9);
+  rpc_addr: string (id: 10);
 }
 
 /// One member update with its liveness. A suspect rumor names the accuser.

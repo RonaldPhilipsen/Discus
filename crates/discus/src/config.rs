@@ -133,6 +133,19 @@ pub struct Config {
     /// is specified, else the local address toward the first seed.
     #[arg(long)]
     pub cluster_advertise: Option<SocketAddr>,
+    /// Node-to-node RPC (QUIC, UDP) listen address, with gossip membership. With static
+    /// membership RPC shares `--cluster-listen`.
+    #[arg(long, default_value = "0.0.0.0:7380")]
+    pub rpc_listen: SocketAddr,
+    /// The RPC address that other members use. Default: the IP of the cluster advertise address
+    /// with the bound `--rpc-listen` port.
+    #[arg(long)]
+    pub rpc_advertise: Option<SocketAddr>,
+    /// Raise the nice value of the data runtime threads by this much over the process value,
+    /// from 0 to 19. The result is capped at 19. The control thread keeps the process value, so
+    /// it wins CPU under a quota. 0 changes nothing. Linux only.
+    #[arg(long, default_value_t = 5)]
+    pub data_nice: i32,
     /// The cluster lease provider.
     #[arg(long, value_enum, default_value_t = LeaseKind::default_kind())]
     pub lease_provider: LeaseKind,
@@ -189,10 +202,10 @@ pub struct Config {
     #[arg(long, default_value = "spiffe://cluster.local/ns/default/sa/discus")]
     pub cluster_san: String,
     /// Forward timeout for reads, in milliseconds. Then the next owner is tried.
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = 500)]
     pub forward_read_timeout_ms: u64,
     /// Forward timeout for writes, in milliseconds.
-    #[arg(long, default_value_t = 200)]
+    #[arg(long, default_value_t = 2000)]
     pub forward_write_timeout_ms: u64,
     /// Timeout for a QUIC connect plus HELLO, in milliseconds.
     #[arg(long, default_value_t = 2000)]
@@ -380,6 +393,9 @@ impl Config {
     pub fn validate(&self) -> Result<(), String> {
         let certs = self.cert_flags();
         let set = certs.iter().filter(|(_, s)| *s).count();
+        if !(0..=19).contains(&self.data_nice) {
+            return Err("--data-nice must be from 0 to 19".into());
+        }
         if self.gossip_enabled() {
             self.swim().validate()?;
             if self.lease_provider == LeaseKind::K8s && !cfg!(feature = "k8s") {
@@ -536,5 +552,33 @@ mod tests {
         let config =
             Config::parse_from(["discus", "--counter-lease-prefix", "blue-counter"]).unwrap();
         assert_eq!(config.counter_lease_name(0), "blue-counter-0");
+    }
+
+    #[test]
+    fn data_nice_defaults_to_5() {
+        assert_eq!(Config::parse_from(["discus"]).unwrap().data_nice, 5);
+    }
+
+    #[test]
+    fn data_nice_above_19_is_rejected() {
+        let config = Config::parse_from(["discus", "--data-nice", "20"]).unwrap();
+        assert!(config.validate().unwrap_err().contains("--data-nice"));
+    }
+
+    #[test]
+    fn data_nice_zero_and_19_are_accepted() {
+        for v in ["0", "19"] {
+            Config::parse_from(["discus", "--data-nice", v])
+                .unwrap()
+                .validate()
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn forward_timeouts_default_to_500_ms_and_2_s() {
+        let config = Config::parse_from(["discus"]).unwrap();
+        assert_eq!(config.forward_read_timeout_ms, 500);
+        assert_eq!(config.forward_write_timeout_ms, 2000);
     }
 }

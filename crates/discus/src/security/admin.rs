@@ -108,10 +108,17 @@ async fn force_reconfigure(
         return (StatusCode::OK, Json(Vec::new()));
     };
     tracing::warn!(group = ?q.group, "RAFT_FORCE_RECONFIGURE requested on the admin port");
-    (
-        StatusCode::OK,
-        Json(counters.force_reconfigure(q.group).await),
-    )
+    let data = node.data_handle().clone();
+    match data
+        .spawn(async move { counters.force_reconfigure(q.group).await })
+        .await
+    {
+        Ok(groups) => (StatusCode::OK, Json(groups)),
+        Err(e) => {
+            tracing::warn!(error = %e, "RAFT_FORCE_RECONFIGURE failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(Vec::new()))
+        }
+    }
 }
 
 /// One counter group on the status page.

@@ -242,6 +242,7 @@ fn member(n: u128) -> Member {
     Member {
         id: NodeId::from_u128(n),
         addr: SocketAddr::from(([127, 0, 0, 1], 7000 + n as u16)),
+        rpc_addr: SocketAddr::from(([127, 0, 0, 1], 7000 + n as u16)),
         state: MemberState::Normal,
         weight: Weight::default(),
     }

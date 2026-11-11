@@ -6,9 +6,12 @@ pub type Millis = u64;
 /// Settings of the SWIM core.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SwimConfig {
-    /// The protocol period: one probe per period.
+    /// The protocol period: one probe per period. It does not scale with the health multiplier.
+    /// A probe that is still in flight does not delay the next one, which goes to another target.
     pub period_ms: Millis,
-    /// Time to wait for a direct ack before the indirect probes start.
+    /// Time to wait for a direct ack before the indirect probes start. The core scales it by the
+    /// health multiplier, so the scaled value can be longer than the period. Unscaled, it must be
+    /// below the period.
     pub probe_timeout_ms: Millis,
     /// Members asked to probe a target that missed a direct ping.
     pub indirect_probes: usize,
@@ -46,6 +49,22 @@ pub struct SwimConfig {
     pub epoch_jitter_ms: Millis,
     /// A starting node looks for a NORMAL peer this long before it tries the lease.
     pub bootstrap_deadline_ms: Millis,
+    /// Level smoothing of the local health score for a rising tick lag.
+    pub health_alpha_up: f64,
+    /// Level smoothing of the local health score for a falling tick lag.
+    pub health_alpha_down: f64,
+    /// Trend smoothing of the local health score.
+    pub health_beta: f64,
+    /// How many ticks ahead the trend projects.
+    pub health_horizon_ticks: u32,
+    /// A tick lag below this is scheduling noise.
+    pub health_deadband_ms: Millis,
+    /// The score above the deadband that adds one step to the health multiplier.
+    pub health_unit_ms: Millis,
+    /// The upper bound of the health multiplier.
+    pub health_max_multiplier: f64,
+    /// At or above this multiplier, data-path evidence is dropped.
+    pub health_evidence_cutoff: f64,
     /// The replication factor, for the ownership-gained event.
     pub replication_factor: usize,
     /// The seed of the random source. Production uses a random seed.
@@ -74,6 +93,14 @@ impl Default for SwimConfig {
             suspicion_k: 3,
             epoch_jitter_ms: 50,
             bootstrap_deadline_ms: 10_000,
+            health_alpha_up: 0.2,
+            health_alpha_down: 0.01,
+            health_beta: 0.3,
+            health_horizon_ticks: 5,
+            health_deadband_ms: 10,
+            health_unit_ms: 10,
+            health_max_multiplier: 9.0,
+            health_evidence_cutoff: 1.5,
             replication_factor: discus_placement::DEFAULT_RF,
             seed: fastrand::u64(..),
         }
@@ -113,6 +140,55 @@ impl SwimConfig {
         if self.data_path_weight < 0.0 || self.missed_ping_weight < 0.0 {
             return Err("the evidence weights must not be negative".into());
         }
+        let unit_range = |v: f64| v > 0.0 && v <= 1.0;
+        if !(unit_range(self.health_alpha_up)
+            && unit_range(self.health_alpha_down)
+            && unit_range(self.health_beta))
+        {
+            return Err("the health smoothing factors need 0 < value <= 1".into());
+        }
+        if self.health_unit_ms == 0 {
+            return Err("the health unit must be above 0".into());
+        }
+        if !(self.health_max_multiplier.is_finite() && self.health_max_multiplier >= 1.0) {
+            return Err("the health maximum multiplier must be finite and at least 1".into());
+        }
+        if self.health_evidence_cutoff.is_nan() || self.health_evidence_cutoff < 1.0 {
+            return Err("the health evidence cutoff must be at least 1".into());
+        }
+        // The multiplier never exceeds its maximum, so a higher cutoff never drops evidence.
+        if self.health_evidence_cutoff > self.health_max_multiplier {
+            return Err("the health evidence cutoff must not exceed the maximum multiplier".into());
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_rejects_bad_health_values() {
+        let bad: [fn(&mut SwimConfig); 9] = [
+            |c| c.health_alpha_up = 0.0,
+            |c| c.health_beta = 1.5,
+            |c| c.health_unit_ms = 0,
+            |c| c.health_max_multiplier = 0.5,
+            |c| c.health_max_multiplier = f64::INFINITY,
+            |c| c.health_max_multiplier = f64::NAN,
+            |c| c.health_evidence_cutoff = 0.9,
+            |c| c.health_evidence_cutoff = f64::INFINITY,
+            |c| c.health_evidence_cutoff = c.health_max_multiplier + 0.5,
+        ];
+        for (i, f) in bad.iter().enumerate() {
+            let mut c = SwimConfig::default();
+            f(&mut c);
+            assert!(c.validate().is_err(), "case {i}");
+        }
+        assert!(SwimConfig::default().validate().is_ok());
+        let mut at_max = SwimConfig::default();
+        at_max.health_evidence_cutoff = at_max.health_max_multiplier;
+        assert!(at_max.validate().is_ok());
     }
 }

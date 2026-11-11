@@ -11,9 +11,11 @@ cluster.
 
 ## How nodes talk
 
-Nodes talk over QUIC on one UDP port per node. The default port is 7379. Every connection uses
-TLS 1.3 with mutual authentication (mTLS). Discus never sends node-to-node traffic as plain text,
-also not in development.
+Nodes talk over QUIC on UDP. With gossip membership, each node uses two ports. Gossip uses the
+cluster port, 7379 by default. Node-to-node requests use the RPC port, 7380 by default. With
+`--membership static`, the RPC traffic stays on `--cluster-listen`, and the node uses one port.
+Every connection uses TLS 1.3 with mutual authentication (mTLS). Discus never sends node-to-node
+traffic as plain text, also not in development.
 
 Each node presents a certificate. The peer accepts the certificate only in two cases together:
 
@@ -54,6 +56,13 @@ suspects the member shortens the timeout.
 
 A forward timeout, a reset connection, or a failed handshake toward a member weighs more than a
 missed probe. So a node that the clients reach through several entry nodes becomes `DEAD` faster.
+
+A node whose data runtime lags does not trust its own timers. It measures the lag and turns it into
+a multiplier from 1 to 9. The probe timeouts and the suspicion timeout grow by this multiplier. The
+gossip period does not grow, so the peers keep hearing from the node at the normal rate. If a
+longer probe timeout is still running when the next probe is due, the next probe starts anyway and
+goes to another member. Each probe keeps its own result. While the multiplier is 1.5 or higher, the
+node ignores forward failures as evidence.
 
 A `DEAD` member leaves the epoch. One node builds the next epoch: the live `NORMAL` member with the
 lowest node ID. It waits a random 0 to 50 ms, then creates the next epoch. The other nodes wait
@@ -162,6 +171,9 @@ spec:
   ports:
     - name: cluster
       port: 7379
+      protocol: UDP
+    - name: rpc
+      port: 7380
       protocol: UDP
 ---
 apiVersion: v1
@@ -292,7 +304,10 @@ the CPU limit of the container from the cgroup (the Linux resource control group
 | `--node-id` | random | This node's ID, 32 hex digits. Required with `--membership static`. |
 | `--cluster-id` | minted | The cluster ID, 32 hex digits. With `static`, every member uses the same value, and the flag is required. With `gossip`, it is the ID that this node gives a cluster it forms. |
 | `--cluster-listen` | `0.0.0.0:7379` | The UDP address for node-to-node traffic. |
-| `--cluster-advertise` | see below | The node-to-node address that other members use. |
+| `--cluster-advertise` | see below | The gossip address that other members use. |
+| `--rpc-listen` | `0.0.0.0:7380` | The UDP address for node-to-node requests. With `--membership static`, requests use `--cluster-listen` instead. |
+| `--rpc-advertise` | see below | The RPC address that other members use. Default: the IP of the advertised cluster address with the bound `--rpc-listen` port. |
+| `--data-nice` | `5` | Raise the nice value of the data runtime threads by this much over the process value, from 0 to 19. The result is capped at 19. The control thread keeps the process value, so it gets CPU first under a quota. 0 changes nothing. Linux only. |
 | `--peer` | none | A seed as `<ip>:<port>`, or `<node-id>@<ip>:<port>`. Repeat the flag. With `static`, list every other member with its node ID. |
 | `--discovery-dns` | none | A headless Service name, as `<host>` or `<host>:<port>`. The port defaults to the `--cluster-listen` port. |
 | `--lease-provider` | `k8s` | `k8s` or `none`. Without the `k8s` build feature, the default is `none`. |
@@ -313,8 +328,8 @@ the CPU limit of the container from the cgroup (the Linux resource control group
 | `--cluster-cert` | none | PEM file with this node's certificate chain. |
 | `--cluster-key` | none | PEM file with this node's private key. |
 | `--cluster-san` | `spiffe://cluster.local/ns/default/sa/discus` | The URI SAN that every peer must carry. If the value is empty, any certificate from the CA is accepted. |
-| `--forward-read-timeout-ms` | 20 | Time to wait for a forwarded read. |
-| `--forward-write-timeout-ms` | 200 | Time to wait for a forwarded write. |
+| `--forward-read-timeout-ms` | 500 | Time to wait for a forwarded read. |
+| `--forward-write-timeout-ms` | 2000 | Time to wait for a forwarded write. |
 | `--cluster-handshake-timeout-ms` | 2000 | Time to wait for a new connection and its `HELLO`. |
 | `--cluster-idle-timeout-ms` | 30000 | A quiet connection closes after this time. |
 | `--cluster-keep-alive-ms` | 5000 | Interval of keep-alive packets on a quiet connection. |
@@ -366,24 +381,45 @@ The advertised address is the first of these that applies:
 3. The local address of the network interface toward the first seed.
 4. `127.0.0.1` with the listen port.
 
-In Kubernetes, set `--cluster-advertise $(POD_IP):7379` from the downward API.
+In Kubernetes, set `--cluster-advertise $(POD_IP):7379` from the downward API. The RPC address
+follows from it, so `--rpc-advertise` is rarely needed.
+
+If a NetworkPolicy or a firewall limits pod traffic, allow both UDP ports between the pods. This is
+the ingress rule of the policy:
+
+```yaml
+ingress:
+  - from:
+      - podSelector:
+          matchLabels:
+            app: discus
+    ports:
+      - port: 7379
+        protocol: UDP
+      - port: 7380
+        protocol: UDP
+```
 
 ## Start three nodes
 
 Outside Kubernetes, give every node the other nodes as seeds and use the lease provider `none`.
 With `none`, start one node first and let it form the cluster. Start the others after it is
-ready. This example runs three nodes on one host.
+ready. This example runs three nodes on one host. Each node needs its own `--rpc-listen`, so the
+nodes do not collide on port 7380.
 
 ```bash
 TLS="--cluster-ca ca.pem --cluster-cert node.pem --cluster-key node-key.pem"
 GOSSIP="--lease-provider none $TLS"
 
 discus --listen 127.0.0.1:6380 --admin-listen 127.0.0.1:9101 --cluster-listen 127.0.0.1:7381 \
+  --rpc-listen 127.0.0.1:7391 \
   $GOSSIP &
 sleep 12
 discus --listen 127.0.0.1:6381 --admin-listen 127.0.0.1:9102 --cluster-listen 127.0.0.1:7382 \
+  --rpc-listen 127.0.0.1:7392 \
   $GOSSIP --peer 127.0.0.1:7381 &
 discus --listen 127.0.0.1:6382 --admin-listen 127.0.0.1:9103 --cluster-listen 127.0.0.1:7383 \
+  --rpc-listen 127.0.0.1:7393 \
   $GOSSIP --peer 127.0.0.1:7381 --peer 127.0.0.1:7382 &
 
 redis-cli -p 6380 SET greeting hello
@@ -391,7 +427,9 @@ redis-cli -p 6382 GET greeting
 ```
 
 `INFO discus` on each node shows `discus_membership`, `discus_member_state`,
-`discus_incarnation`, `discus_epoch`, and `discus_members`.
+`discus_incarnation`, `discus_epoch`, and `discus_members`. `discus_cluster_addr` is the bound
+`--cluster-listen` address, which serves gossip, and `discus_rpc_addr` is the bound `--rpc-listen`
+address. With static membership, both show the one cluster address.
 
 ## Static membership
 

@@ -132,11 +132,13 @@ fn epoch_to<'a>(fbb: &mut FlatBufferBuilder<'a>, epoch: &Epoch) -> WIPOffset<fb:
         .iter()
         .map(|m| {
             let addr = fbb.create_string(&m.addr.to_string());
+            let rpc_addr = fbb.create_string(&m.rpc_addr.to_string());
             fb::Member::create(
                 fbb,
                 &fb::MemberArgs {
                     id: Some(&id128(m.id.to_be_bytes())),
                     addr: Some(addr),
+                    rpc_addr: Some(rpc_addr),
                     state: state_to(m.state),
                     weight: m.weight.get(),
                 },
@@ -166,9 +168,14 @@ fn epoch_of(e: fb::Epoch<'_>) -> Result<Epoch, DecodeError> {
             .addr()
             .and_then(|a| a.parse().ok())
             .ok_or_else(|| invalid("member without a valid address"))?;
+        let rpc_addr = m
+            .rpc_addr()
+            .and_then(|a| a.parse().ok())
+            .ok_or_else(|| invalid("member without a valid RPC address"))?;
         members.push(Member {
             id: node_of(mid),
             addr,
+            rpc_addr,
             state: state_of(m.state())?,
             weight: Weight::new(m.weight()).ok_or_else(|| invalid("member with a bad weight"))?,
         });
@@ -187,12 +194,14 @@ fn cluster_of(id: &fb::Id128) -> ClusterId {
 
 fn info_to<'a>(fbb: &mut FlatBufferBuilder<'a>, m: &MemberInfo) -> WIPOffset<fb::MemberInfo<'a>> {
     let addr = fbb.create_string(&m.addr.to_string());
+    let rpc_addr = fbb.create_string(&m.rpc_addr.to_string());
     let hints = (!m.leader_hints.is_empty()).then(|| fbb.create_vector(&m.leader_hints));
     fb::MemberInfo::create(
         fbb,
         &fb::MemberInfoArgs {
             id: Some(&id128(m.id.to_be_bytes())),
             addr: Some(addr),
+            rpc_addr: Some(rpc_addr),
             state: state_to(m.state),
             incarnation: m.incarnation,
             weight: m.weight.get(),
@@ -212,6 +221,10 @@ fn info_of(m: fb::MemberInfo<'_>) -> Result<MemberInfo, DecodeError> {
             .addr()
             .and_then(|a| a.parse().ok())
             .ok_or_else(|| invalid("member info without a valid address"))?,
+        rpc_addr: m
+            .rpc_addr()
+            .and_then(|a| a.parse().ok())
+            .ok_or_else(|| invalid("member info without a valid RPC address"))?,
         state: state_of(m.state())?,
         incarnation: m.incarnation(),
         weight: Weight::new(m.weight()).ok_or_else(|| invalid("member info with a bad weight"))?,

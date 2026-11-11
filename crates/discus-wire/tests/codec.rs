@@ -39,6 +39,7 @@ fn member(n: u128, port: u16, state: MemberState) -> Member {
     Member {
         id: id(n),
         addr: SocketAddr::from(([127, 0, 0, 1], port)),
+        rpc_addr: SocketAddr::from(([127, 0, 0, 1], port + 1)),
         state,
         weight: Weight::new(1.5).unwrap(),
     }

@@ -378,7 +378,9 @@ pub struct Capacity {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemberInfo {
     pub id: NodeId,
+    /// The gossip address. `rpc_addr` is the RPC address. They are equal with static membership.
     pub addr: SocketAddr,
+    pub rpc_addr: SocketAddr,
     pub state: MemberState,
     /// Only the member itself raises its incarnation.
     pub incarnation: u64,

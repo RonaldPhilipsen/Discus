@@ -9,7 +9,9 @@ use std::sync::atomic::AtomicU64;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use crate::attrs::{CommandLabel, CounterMode, CounterRole, MemberState, NodeLabel, Status};
+use crate::attrs::{
+    CommandLabel, CounterMode, CounterRole, MemberState, NodeLabel, Status, TransportChannel,
+};
 
 /// Latency histogram bucket bounds in milliseconds.
 pub const LATENCY_BUCKETS_MS: [f64; 10] = [0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0];
@@ -26,6 +28,15 @@ pub struct StoreStats {
     pub used_memory: u64,
     pub max_memory: u64,
     pub keys: u64,
+}
+
+/// A snapshot of the local health, read at each metric collection.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HealthStats {
+    pub lag_ms: u64,
+    pub score_ms: f64,
+    pub multiplier: f64,
+    pub evidence_dropped: u64,
 }
 
 /// A snapshot of the transport counters, read at each metric collection.
@@ -84,8 +95,11 @@ mod imp {
         #[inline]
         pub fn observe_store(&self, source: impl Fn() -> StoreStats + Send + Sync + 'static) {}
         #[inline]
+        pub fn observe_health(&self, source: impl Fn() -> HealthStats + Send + Sync + 'static) {}
+        #[inline]
         pub fn observe_transport(
             &self,
+            channel: TransportChannel,
             source: impl Fn() -> TransportCounts + Send + Sync + 'static,
         ) {
         }
@@ -106,11 +120,11 @@ mod imp {
         #[inline]
         pub fn gossip_rtt(&self, peer: &NodeLabel, rtt: Duration) {}
         #[inline]
-        pub fn peer_error(&self, peer: &NodeLabel, kind: Status) {}
+        pub fn peer_error(&self, peer: &NodeLabel, kind: Status, channel: TransportChannel) {}
         #[inline]
         pub fn forward(&self, cmd: CommandLabel, status: Status, hops: u8) {}
         #[inline]
-        pub fn quic_failure(&self, peer: &NodeLabel, kind: Status) {}
+        pub fn quic_failure(&self, peer: &NodeLabel, kind: Status, channel: TransportChannel) {}
         #[inline]
         pub fn tombstones(&self, count: u64) {}
         #[inline]
@@ -138,7 +152,11 @@ mod imp {
     use crate::attrs::{check, Attribute};
 
     type Source = Box<dyn Fn() -> StoreStats + Send + Sync>;
-    type TransportSource = Box<dyn Fn() -> TransportCounts + Send + Sync>;
+    type HealthSource = Box<dyn Fn() -> HealthStats + Send + Sync>;
+    type TransportSource = (
+        TransportChannel,
+        Box<dyn Fn() -> TransportCounts + Send + Sync>,
+    );
 
     /// The metrics handle. Cheap to clone.
     #[derive(Clone, Default)]
@@ -177,7 +195,8 @@ mod imp {
         counter_failovers: Counter<u64>,
         raft_single_voter_groups: Gauge<u64>,
         store: Arc<RwLock<Option<Source>>>,
-        transport: Arc<RwLock<Option<TransportSource>>>,
+        transport: Arc<RwLock<Vec<TransportSource>>>,
+        health: Arc<RwLock<Option<HealthSource>>>,
         // The observable instruments stay registered while these handles live.
         _observers: Vec<Box<dyn std::any::Any + Send + Sync>>,
     }
@@ -191,6 +210,7 @@ mod imp {
             Attribute::State(s) => s.as_str().into(),
             Attribute::Role(r) => r.as_str().into(),
             Attribute::Mode(m) => m.as_str().into(),
+            Attribute::Channel(c) => c.as_str().into(),
             Attribute::Node(n) | Attribute::Peer(n) => n.shared().into(),
         };
         KeyValue::new(key, Value::String(value))
@@ -313,7 +333,55 @@ mod imp {
                 Box::new(crate::logging::suppressed),
             )));
 
-            let transport: Arc<RwLock<Option<TransportSource>>> = Arc::new(RwLock::new(None));
+            let health: Arc<RwLock<Option<HealthSource>>> = Arc::new(RwLock::new(None));
+            let health_gauge = |name: &'static str,
+                                desc: &'static str,
+                                unit: &'static str,
+                                pick: fn(&HealthStats) -> f64| {
+                let health = health.clone();
+                meter
+                    .f64_observable_gauge(name)
+                    .with_description(desc)
+                    .with_unit(unit)
+                    .with_callback(move |o| {
+                        if let Some(f) = health.read().ok().as_ref().and_then(|s| s.as_ref()) {
+                            o.observe(pick(&f()), &[]);
+                        }
+                    })
+                    .build()
+            };
+            observers.push(Box::new(health_gauge(
+                "discus.local_health.lag",
+                "Lag of the data runtime",
+                "ms",
+                |h| h.lag_ms as f64,
+            )));
+            observers.push(Box::new(health_gauge(
+                "discus.local_health.score",
+                "Smoothed lag that scales the membership timeouts",
+                "ms",
+                |h| h.score_ms,
+            )));
+            observers.push(Box::new(health_gauge(
+                "discus.local_health.multiplier",
+                "Factor applied to the membership timeouts",
+                "1",
+                |h| h.multiplier,
+            )));
+            let evidence = health.clone();
+            observers.push(Box::new(
+                meter
+                    .u64_observable_counter("discus.local_health.evidence_dropped")
+                    .with_description("Data-path evidence dropped while the local health was at or above the evidence cutoff")
+                    .with_callback(move |o| {
+                        if let Some(f) = evidence.read().ok().as_ref().and_then(|s| s.as_ref()) {
+                            o.observe(f().evidence_dropped, &[]);
+                        }
+                    })
+                    .build(),
+            ));
+
+            let transport: Arc<RwLock<Vec<TransportSource>>> = Arc::new(RwLock::new(Vec::new()));
             let transport_counter =
                 |name: &'static str, desc: &'static str, pick: fn(&TransportCounts) -> u64| {
                     let transport = transport.clone();
@@ -321,9 +389,11 @@ mod imp {
                         .u64_observable_counter(name)
                         .with_description(desc)
                         .with_callback(move |o| {
-                            let slot = transport.read().ok();
-                            if let Some(f) = slot.as_ref().and_then(|s| s.as_ref()) {
-                                o.observe(pick(&f()), &[]);
+                            let Ok(sources) = transport.read() else {
+                                return;
+                            };
+                            for (channel, f) in sources.iter() {
+                                o.observe(pick(&f()), &[kv(Attribute::Channel(*channel))]);
                             }
                         })
                         .build()
@@ -420,6 +490,7 @@ mod imp {
                 ),
                 store,
                 transport,
+                health,
                 _observers: observers,
             };
             Metrics {
@@ -461,15 +532,28 @@ mod imp {
             });
         }
 
-        /// Read the transport counters from `source` at each collection. A later call replaces
-        /// the source.
+        /// Read the local health from `source` at each collection. A later call replaces the
+        /// source.
+        pub fn observe_health(&self, source: impl Fn() -> HealthStats + Send + Sync + 'static) {
+            self.with(|i| {
+                if let Ok(mut slot) = i.health.write() {
+                    *slot = Some(Box::new(source));
+                }
+            });
+        }
+
+        /// Read the transport counters of the endpoint `channel` from `source` at each collection.
+        /// Each channel reports its own data points. A later call for the same channel replaces
+        /// its source.
         pub fn observe_transport(
             &self,
+            channel: TransportChannel,
             source: impl Fn() -> TransportCounts + Send + Sync + 'static,
         ) {
             self.with(|i| {
-                if let Ok(mut slot) = i.transport.write() {
-                    *slot = Some(Box::new(source));
+                if let Ok(mut sources) = i.transport.write() {
+                    sources.retain(|(c, _)| *c != channel);
+                    sources.push((channel, Box::new(source)));
                 }
             });
         }
@@ -521,13 +605,14 @@ mod imp {
             });
         }
 
-        pub fn peer_error(&self, peer: &NodeLabel, kind: Status) {
+        pub fn peer_error(&self, peer: &NodeLabel, kind: Status, channel: TransportChannel) {
             self.with(|i| {
                 i.peer_errors.add(
                     1,
                     &[
                         kv(Attribute::Peer(peer.clone())),
                         kv(Attribute::Status(kind)),
+                        kv(Attribute::Channel(channel)),
                     ],
                 )
             });
@@ -543,13 +628,14 @@ mod imp {
             });
         }
 
-        pub fn quic_failure(&self, peer: &NodeLabel, kind: Status) {
+        pub fn quic_failure(&self, peer: &NodeLabel, kind: Status, channel: TransportChannel) {
             self.with(|i| {
                 i.quic_failures.add(
                     1,
                     &[
                         kv(Attribute::Peer(peer.clone())),
                         kv(Attribute::Status(kind)),
+                        kv(Attribute::Channel(channel)),
                     ],
                 )
             });

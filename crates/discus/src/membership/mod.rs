@@ -1,7 +1,7 @@
 //! SWIM membership over QUIC on the `discus-gossip` ALPN (spec section 6).
 //!
 //! The sans-IO core in `discus-membership` decides everything. This driver feeds it the time,
-//! the inbound gossip, and the data-path evidence of the transport, sends its requests, runs
+//! the inbound gossip, and the data-path evidence of the RPC transport, sends its requests, runs
 //! discovery and the lease renewal, and publishes its events.
 
 pub mod discovery;
@@ -9,7 +9,7 @@ mod host;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -59,7 +59,13 @@ struct Inner {
 
 pub struct Membership {
     node: Weak<Node>,
+    /// The gossip endpoint. Every SWIM message goes through it.
     transport: Transport,
+    /// The RPC endpoint. Its forward timeouts, resets, and failed handshakes are the data-path
+    /// evidence (spec section 6.1).
+    rpc: Transport,
+    evidence_received: AtomicU64,
+    gossip_handled: AtomicU64,
     lease: Arc<dyn LeaseProvider>,
     inner: Mutex<Inner>,
     start: Instant,
@@ -79,14 +85,17 @@ pub struct Membership {
 impl Membership {
     pub fn new(
         node: &Arc<Node>,
-        transport: Transport,
+        gossip: Transport,
+        rpc: Transport,
         lease: Arc<dyn LeaseProvider>,
         advertise: SocketAddr,
+        rpc_advertise: SocketAddr,
     ) -> Arc<Membership> {
         let config = &node.config;
         let me = MemberInfo {
             id: node.id,
             addr: advertise,
+            rpc_addr: rpc_advertise,
             state: MemberState::Joining,
             incarnation: 0,
             weight: Weight::new(config.weight).unwrap_or_default(),
@@ -104,13 +113,17 @@ impl Membership {
         let host = NodeHost {
             node: Arc::downgrade(node),
             id: node.id,
-            transport: transport.clone(),
+            gossip: gossip.clone(),
+            rpc: rpc.clone(),
             lease_cluster: None,
         };
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         Arc::new(Membership {
             node: Arc::downgrade(node),
-            transport,
+            transport: gossip,
+            rpc,
+            evidence_received: AtomicU64::new(0),
+            gossip_handled: AtomicU64::new(0),
             lease,
             inner: Mutex::new(Inner { swim, host }),
             start: Instant::now(),
@@ -125,6 +138,32 @@ impl Membership {
             lease_renew: Duration::from_millis(config.lease_renew_ms.max(1)),
             stop: CancellationToken::new(),
         })
+    }
+
+    /// The gossip endpoint.
+    pub fn gossip_transport(&self) -> &Transport {
+        &self.transport
+    }
+
+    /// Data-path events that named a peer, including those the core then dropped.
+    pub fn evidence_received(&self) -> u64 {
+        self.evidence_received.load(Ordering::Relaxed)
+    }
+
+    /// Inbound gossip messages received.
+    pub fn gossip_handled(&self) -> u64 {
+        self.gossip_handled.load(Ordering::Relaxed)
+    }
+
+    pub fn health(&self) -> discus_telemetry::metrics::HealthStats {
+        let lag_ms = self.node.upgrade().map_or(0, |n| n.lag().lag_ms());
+        let inner = self.inner.lock();
+        discus_telemetry::metrics::HealthStats {
+            lag_ms,
+            score_ms: inner.swim.health_score_ms(),
+            multiplier: inner.swim.health_multiplier(),
+            evidence_dropped: inner.swim.evidence_dropped(),
+        }
     }
 
     fn now(&self) -> Millis {
@@ -148,9 +187,16 @@ impl Membership {
             "gossip membership starting"
         );
         let me = self.clone();
-        every(TICK, stop.clone(), move || {
-            me.tick();
-            std::future::ready(())
+        let s = stop.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(TICK);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = s.cancelled() => return,
+                    _ = ticker.tick() => me.tick(),
+                }
+            }
         });
         let me = self.clone();
         let s = stop.clone();
@@ -189,6 +235,7 @@ impl Membership {
         let now = self.now();
         let actions = self.drive(|swim, host| {
             swim.set_capacity(capacity);
+            swim.observe_lag(node.lag().lag_ms());
             swim.tick(now, host)
         });
         self.dispatch(actions);
@@ -242,6 +289,7 @@ impl Membership {
 
     /// Answer one inbound gossip message from `src`.
     pub async fn handle(self: &Arc<Self>, src: SocketAddr, msg: Gossip) -> Gossip {
+        self.gossip_handled.fetch_add(1, Ordering::Relaxed);
         let now = self.now();
         let handled = self.drive(|swim, host| swim.handle(now, src, msg, host));
         let Some(relay) = handled.relay else {
@@ -267,7 +315,7 @@ impl Membership {
 
     async fn read_evidence(self: Arc<Self>, stop: CancellationToken) {
         use tokio::sync::broadcast::error::RecvError;
-        let mut events = self.transport.events();
+        let mut events = self.rpc.events();
         loop {
             let event = tokio::select! {
                 _ = stop.cancelled() => return,
@@ -276,6 +324,7 @@ impl Membership {
             match event {
                 Ok(event) => {
                     if let Some(peer) = event.peer {
+                        self.evidence_received.fetch_add(1, Ordering::Relaxed);
                         let now = self.now();
                         self.inner.lock().swim.evidence(now, peer);
                     }
@@ -370,8 +419,11 @@ impl Membership {
                     tracing::info!(peer = %id, state = state.name(), ?liveness, "member changed");
                     if matches!(liveness, Liveness::Suspect | Liveness::Dead) {
                         if let Some(label) = crate::telemetry::node_label(*id) {
-                            discus_telemetry::global()
-                                .peer_error(&label, discus_telemetry::attrs::Status::Timeout);
+                            discus_telemetry::global().peer_error(
+                                &label,
+                                discus_telemetry::attrs::Status::Timeout,
+                                discus_telemetry::attrs::TransportChannel::Gossip,
+                            );
                         }
                     }
                 }

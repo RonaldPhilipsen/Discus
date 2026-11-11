@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use discus_placement::NodeId;
 use discus_resp::{Command, Value};
-use discus_telemetry::attrs::NodeLabel;
+use discus_telemetry::attrs::{NodeLabel, TransportChannel};
 use discus_telemetry::context::{TraceContext, TRACEPARENT, TRACESTATE};
 use discus_telemetry::pipeline::{
     ResourceInfo, DEFAULT_ENDPOINT, DEFAULT_EXPORT_INTERVAL, DEFAULT_SAMPLING_RATIO,
@@ -208,10 +208,20 @@ pub fn observe_store_on(metrics: &Metrics, node: &Arc<Node>) {
     });
 }
 
-/// Report the transport counters of `transport` through `metrics`.
-pub fn observe_transport(metrics: &Metrics, transport: &discus_transport::Transport) {
+/// Report the local health of `membership` through `metrics`.
+pub fn observe_health(metrics: &Metrics, membership: &Arc<crate::membership::Membership>) {
+    let membership = membership.clone();
+    metrics.observe_health(move || membership.health());
+}
+
+/// Report the transport counters of `transport` through `metrics`, under `channel`.
+pub fn observe_transport(
+    metrics: &Metrics,
+    transport: &discus_transport::Transport,
+    channel: TransportChannel,
+) {
     let transport = transport.clone();
-    metrics.observe_transport(move || {
+    metrics.observe_transport(channel, move || {
         let s = transport.stats().snapshot();
         discus_telemetry::metrics::TransportCounts {
             frames_rejected: s.frames_rejected,
@@ -430,19 +440,25 @@ pub fn record_epoch(metrics: &Metrics, epoch: &discus_placement::Epoch) {
     }
 }
 
-/// Record one transport event. A failed handshake and a lost connection are QUIC failures. A
-/// request without a reply in time is a peer error. An event without a known peer has no label,
-/// so it is not recorded.
-pub fn record_peer_event(metrics: &Metrics, event: &discus_transport::PeerEvent) {
+/// Record one transport event of the endpoint `channel`. A failed handshake and a lost connection
+/// are QUIC failures. A request without a reply in time is a peer error. An event without a known
+/// peer has no label, so it is not recorded.
+pub fn record_peer_event(
+    metrics: &Metrics,
+    event: &discus_transport::PeerEvent,
+    channel: TransportChannel,
+) {
     use discus_telemetry::attrs::Status;
     use discus_transport::PeerEventKind;
     let Some(peer) = event.peer.and_then(node_label) else {
         return;
     };
     match event.kind {
-        PeerEventKind::HandshakeFailed(_) => metrics.quic_failure(&peer, Status::Handshake),
-        PeerEventKind::Reset(_) => metrics.quic_failure(&peer, Status::Reset),
-        PeerEventKind::ForwardTimeout { .. } => metrics.peer_error(&peer, Status::Timeout),
+        PeerEventKind::HandshakeFailed(_) => {
+            metrics.quic_failure(&peer, Status::Handshake, channel)
+        }
+        PeerEventKind::Reset(_) => metrics.quic_failure(&peer, Status::Reset, channel),
+        PeerEventKind::ForwardTimeout { .. } => metrics.peer_error(&peer, Status::Timeout, channel),
     }
 }
 
@@ -451,6 +467,7 @@ pub fn record_peer_event(metrics: &Metrics, event: &discus_transport::PeerEvent)
 pub async fn observe_peer_events(
     metrics: &'static Metrics,
     transport: &discus_transport::Transport,
+    channel: TransportChannel,
     stop: tokio_util::sync::CancellationToken,
 ) {
     use tokio::sync::broadcast::error::RecvError;
@@ -461,7 +478,7 @@ pub async fn observe_peer_events(
             event = events.recv() => event,
         };
         match event {
-            Ok(event) => record_peer_event(metrics, &event),
+            Ok(event) => record_peer_event(metrics, &event, channel),
             Err(RecvError::Lagged(missed)) => {
                 tracing::debug!(missed, "telemetry missed transport events");
             }

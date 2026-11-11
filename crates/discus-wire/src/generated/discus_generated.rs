@@ -1894,6 +1894,7 @@ impl<'a> Member<'a> {
   pub const VT_ADDR: ::flatbuffers::VOffsetT = 6;
   pub const VT_STATE: ::flatbuffers::VOffsetT = 8;
   pub const VT_WEIGHT: ::flatbuffers::VOffsetT = 10;
+  pub const VT_RPC_ADDR: ::flatbuffers::VOffsetT = 12;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -1906,6 +1907,7 @@ impl<'a> Member<'a> {
   ) -> ::flatbuffers::WIPOffset<Member<'bldr>> {
     let mut builder = MemberBuilder::new(_fbb);
     builder.add_weight(args.weight);
+    if let Some(x) = args.rpc_addr { builder.add_rpc_addr(x); }
     if let Some(x) = args.addr { builder.add_addr(x); }
     if let Some(x) = args.id { builder.add_id(x); }
     builder.add_state(args.state);
@@ -1941,6 +1943,13 @@ impl<'a> Member<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<f64>(Member::VT_WEIGHT, Some(1.0)).unwrap()}
   }
+  #[inline]
+  pub fn rpc_addr(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(Member::VT_RPC_ADDR, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for Member<'_> {
@@ -1953,6 +1962,7 @@ impl ::flatbuffers::Verifiable for Member<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("addr", Self::VT_ADDR, false)?
      .visit_field::<MemberState>("state", Self::VT_STATE, false)?
      .visit_field::<f64>("weight", Self::VT_WEIGHT, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("rpc_addr", Self::VT_RPC_ADDR, false)?
      .finish();
     Ok(())
   }
@@ -1962,6 +1972,7 @@ pub struct MemberArgs<'a> {
     pub addr: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub state: MemberState,
     pub weight: f64,
+    pub rpc_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for MemberArgs<'a> {
   #[inline]
@@ -1971,6 +1982,7 @@ impl<'a> Default for MemberArgs<'a> {
       addr: None,
       state: MemberState::JOINING,
       weight: 1.0,
+      rpc_addr: None,
     }
   }
 }
@@ -1997,6 +2009,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> MemberBuilder<'a, 'b, A> {
     self.fbb_.push_slot::<f64>(Member::VT_WEIGHT, weight, 1.0);
   }
   #[inline]
+  pub fn add_rpc_addr(&mut self, rpc_addr: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(Member::VT_RPC_ADDR, rpc_addr);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> MemberBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     MemberBuilder {
@@ -2018,6 +2034,7 @@ impl ::core::fmt::Debug for Member<'_> {
       ds.field("addr", &self.addr());
       ds.field("state", &self.state());
       ds.field("weight", &self.weight());
+      ds.field("rpc_addr", &self.rpc_addr());
       ds.finish()
   }
 }
@@ -3370,6 +3387,7 @@ impl<'a> MemberInfo<'a> {
   pub const VT_CAPACITY_USED: ::flatbuffers::VOffsetT = 18;
   pub const VT_CAPACITY_MAX: ::flatbuffers::VOffsetT = 20;
   pub const VT_LEADER_HINTS: ::flatbuffers::VOffsetT = 22;
+  pub const VT_RPC_ADDR: ::flatbuffers::VOffsetT = 24;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -3386,6 +3404,7 @@ impl<'a> MemberInfo<'a> {
     builder.add_capabilities(args.capabilities);
     builder.add_weight(args.weight);
     builder.add_incarnation(args.incarnation);
+    if let Some(x) = args.rpc_addr { builder.add_rpc_addr(x); }
     if let Some(x) = args.leader_hints { builder.add_leader_hints(x); }
     if let Some(x) = args.epoch { builder.add_epoch(x); }
     if let Some(x) = args.addr { builder.add_addr(x); }
@@ -3469,6 +3488,13 @@ impl<'a> MemberInfo<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(MemberInfo::VT_LEADER_HINTS, None)}
   }
+  #[inline]
+  pub fn rpc_addr(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(MemberInfo::VT_RPC_ADDR, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for MemberInfo<'_> {
@@ -3487,6 +3513,7 @@ impl ::flatbuffers::Verifiable for MemberInfo<'_> {
      .visit_field::<u64>("capacity_used", Self::VT_CAPACITY_USED, false)?
      .visit_field::<u64>("capacity_max", Self::VT_CAPACITY_MAX, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("leader_hints", Self::VT_LEADER_HINTS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("rpc_addr", Self::VT_RPC_ADDR, false)?
      .finish();
     Ok(())
   }
@@ -3502,6 +3529,7 @@ pub struct MemberInfoArgs<'a> {
     pub capacity_used: u64,
     pub capacity_max: u64,
     pub leader_hints: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+    pub rpc_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for MemberInfoArgs<'a> {
   #[inline]
@@ -3517,6 +3545,7 @@ impl<'a> Default for MemberInfoArgs<'a> {
       capacity_used: 0,
       capacity_max: 0,
       leader_hints: None,
+      rpc_addr: None,
     }
   }
 }
@@ -3567,6 +3596,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> MemberInfoBuilder<'a, 'b, A> 
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(MemberInfo::VT_LEADER_HINTS, leader_hints);
   }
   #[inline]
+  pub fn add_rpc_addr(&mut self, rpc_addr: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(MemberInfo::VT_RPC_ADDR, rpc_addr);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> MemberInfoBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     MemberInfoBuilder {
@@ -3594,6 +3627,7 @@ impl ::core::fmt::Debug for MemberInfo<'_> {
       ds.field("capacity_used", &self.capacity_used());
       ds.field("capacity_max", &self.capacity_max());
       ds.field("leader_hints", &self.leader_hints());
+      ds.field("rpc_addr", &self.rpc_addr());
       ds.finish()
   }
 }

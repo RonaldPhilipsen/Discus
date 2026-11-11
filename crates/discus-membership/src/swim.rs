@@ -18,6 +18,7 @@ use bytes::Bytes;
 use discus_placement::{ClusterId, Epoch, EpochId, Member, MemberState, NodeId};
 use discus_wire::{Capacity, Gossip, GossipKind, Liveness, MemberInfo, Rumor};
 
+use crate::health::LocalHealth;
 use crate::lease::{LeaseError, LeaseState};
 use crate::merge::{winner, JoinLimiter};
 use crate::view::{retransmit_limit, supersedes, Broadcasts, Record};
@@ -78,8 +79,8 @@ pub enum Phase {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pending {
-    Direct { target: NodeId },
-    Indirect { target: NodeId },
+    Direct { target: NodeId, probe: u64 },
+    Indirect { target: NodeId, probe: u64 },
     Relay { target: NodeId },
     Sync,
     Join,
@@ -91,6 +92,8 @@ struct Probe {
     target: NodeId,
     acked: bool,
     indirect_left: usize,
+    /// When the last request of the probe times out.
+    deadline: Millis,
 }
 
 pub struct Swim {
@@ -103,7 +106,11 @@ pub struct Swim {
     rng: fastrand::Rng,
     order: Vec<NodeId>,
     next_probe: Millis,
-    probe: Option<Probe>,
+    /// The probes in flight by sequence number. The scaled timeouts of a lagging node can outlast
+    /// the period, so several probes can be in flight at once. Each request names its probe, so
+    /// its outcome ends that probe only. A probe leaves the map when it ends.
+    probes: BTreeMap<u64, Probe>,
+    probe_seq: u64,
     pending: HashMap<u64, Pending>,
     next_token: u64,
     next_sync: Millis,
@@ -128,6 +135,10 @@ pub struct Swim {
     /// The cluster size that the detectors expect. They are rebuilt when the size doubles or
     /// halves.
     detector_n: usize,
+    health: LocalHealth,
+    evidence_dropped: u64,
+    /// Whether the multiplier was at or above the evidence cutoff at the last change.
+    shedding: bool,
 }
 
 impl Swim {
@@ -135,16 +146,20 @@ impl Swim {
     pub fn new(cfg: SwimConfig, me: MemberInfo) -> Swim {
         let rng = fastrand::Rng::with_seed(cfg.seed);
         Swim {
+            health: LocalHealth::new(&cfg),
             cfg,
             me,
             cluster_id: ClusterId::NIL,
             phase: Phase::Seeking,
             members: BTreeMap::new(),
             broadcasts: Broadcasts::default(),
+            evidence_dropped: 0,
+            shedding: false,
             rng,
             order: Vec::new(),
             next_probe: 0,
-            probe: None,
+            probes: BTreeMap::new(),
+            probe_seq: 0,
             pending: HashMap::new(),
             next_token: 1,
             next_sync: 0,
@@ -284,10 +299,46 @@ impl Swim {
 
     /// Data-path evidence against `peer`: a forward timeout, a reset, or a failed handshake.
     pub fn evidence(&mut self, now: Millis, peer: NodeId) {
+        if self.health.multiplier() >= self.cfg.health_evidence_cutoff {
+            self.evidence_dropped += 1;
+            return;
+        }
         let weight = self.cfg.data_path_weight;
         if let Some(r) = self.members.get_mut(&peer) {
             r.detector.evidence(now, weight);
         }
+    }
+
+    /// Feed the lag of the last tick. While this node lags, its own timeouts stretch and its
+    /// data-path evidence is dropped, because a slow node cannot tell a dead peer from its own delay.
+    pub fn observe_lag(&mut self, lag_ms: u64) {
+        self.health.observe(lag_ms);
+        let shedding = self.health.multiplier() >= self.cfg.health_evidence_cutoff;
+        if shedding != self.shedding {
+            self.shedding = shedding;
+            tracing::info!(
+                shedding,
+                score_ms = self.health.score_ms(),
+                "the data-path evidence gate changed"
+            );
+        }
+    }
+
+    pub fn health_score_ms(&self) -> f64 {
+        self.health.score_ms()
+    }
+
+    pub fn health_multiplier(&self) -> f64 {
+        self.health.multiplier()
+    }
+
+    pub fn evidence_dropped(&self) -> u64 {
+        self.evidence_dropped
+    }
+
+    /// Stretch a timeout by the health multiplier.
+    fn scaled(&self, ms: Millis) -> Millis {
+        scale(ms, self.health.multiplier())
     }
 
     fn token(&mut self, pending: Pending) -> u64 {
@@ -431,6 +482,7 @@ impl Swim {
                     r.info.epoch = rumor.info.epoch;
                     r.info.capacity = rumor.info.capacity;
                     r.info.addr = rumor.info.addr;
+                    r.info.rpc_addr = rumor.info.rpc_addr;
                 }
             }
         }
@@ -480,6 +532,7 @@ impl Swim {
         Some(Member {
             id,
             addr: info.addr,
+            rpc_addr: info.rpc_addr,
             state,
             weight: info.weight,
         })
@@ -693,7 +746,7 @@ impl Swim {
         self.epoch_timer = None;
         self.order.clear();
         self.pending.clear();
-        self.probe = None;
+        self.probes.clear();
         self.broadcasts = Broadcasts::default();
         self.last_epoch = Some(host.epoch());
         self.last_normal_seen = Some(now);
@@ -721,6 +774,7 @@ impl Swim {
         let me = Member {
             id: self.me.id,
             addr: self.me.addr,
+            rpc_addr: self.me.rpc_addr,
             state: MemberState::Normal,
             weight: self.me.weight,
         };
@@ -795,9 +849,14 @@ impl Swim {
         }
         self.rescale_detectors(now);
         self.check_failures(now);
+        // The period does not scale with the health multiplier: a longer period would cut the
+        // heartbeat rate that every peer's phi detector sees. The scaled timeouts can outlast the
+        // period, so a due probe starts while older ones are still in flight. Waiting for them
+        // would also cut the heartbeat rate, and replacing them would lose their evidence.
         if now >= self.next_probe {
             self.next_probe = now + self.cfg.period_ms;
-            out.extend(self.start_probe(host));
+            self.expire_probes(now);
+            out.extend(self.start_probe(now, host));
         }
         if self.phase == Phase::Seeking {
             self.seek(now, host, &mut out);
@@ -922,6 +981,7 @@ impl Swim {
 
     fn check_failures(&mut self, now: Millis) {
         let me = self.me.id;
+        let multiplier = self.health.multiplier();
         let mut changes = Vec::new();
         for (id, r) in self.members.iter_mut() {
             let score = r.detector.score(now);
@@ -937,12 +997,13 @@ impl Swim {
                         self.broadcasts.push(*id);
                     }
                     let others = r.accusers.iter().filter(|a| **a != me).count();
-                    let timeout = suspicion_timeout(&self.cfg, others);
+                    let timeout = scale(suspicion_timeout(&self.cfg, others), multiplier);
                     let elapsed = now.saturating_sub(r.since);
                     // A high score ends the suspicion early, but never before the minimum: the
                     // member always gets that long to refute, and the operator keeps DEAD slow
                     // (spec section 17).
-                    let strong = score >= self.cfg.phi_dead && elapsed >= self.cfg.suspicion_min_ms;
+                    let strong = score >= self.cfg.phi_dead
+                        && elapsed >= scale(self.cfg.suspicion_min_ms, multiplier);
                     if elapsed >= timeout || strong {
                         r.liveness = Liveness::Dead;
                         r.since = now;
@@ -1011,22 +1072,69 @@ impl Swim {
         }
     }
 
-    fn start_probe(&mut self, host: &dyn Host) -> Option<Action> {
-        let target = self.next_target()?;
+    /// Drop the probes whose outcome is overdue. Every request resolves at its timeout at the
+    /// latest, so a probe normally ends by its deadline. A period of slack past it keeps a lost
+    /// outcome from holding its target and its map entry for good.
+    fn expire_probes(&mut self, now: Millis) {
+        let slack = self.cfg.period_ms;
+        self.probes
+            .retain(|_, p| now < p.deadline.saturating_add(slack));
+    }
+
+    /// The next target in the round-robin without a probe in flight. A second probe of the same
+    /// target would count its misses twice and add load to a node that is already slow. A
+    /// skipped target comes first in the next period.
+    fn next_free_target(&mut self) -> Option<NodeId> {
+        let candidates = self
+            .members
+            .values()
+            .filter(|r| r.liveness != Liveness::Dead)
+            .count();
+        let mut skipped = Vec::new();
+        let mut found = None;
+        // The rest of the current round, then one full round, sees every candidate.
+        for _ in 0..2 * candidates {
+            let Some(id) = self.next_target() else {
+                break;
+            };
+            if self.probes.values().any(|p| p.target == id) {
+                skipped.push(id);
+            } else {
+                found = Some(id);
+                break;
+            }
+        }
+        for id in skipped.into_iter().rev() {
+            if !self.order.contains(&id) {
+                self.order.push(id);
+            }
+        }
+        found
+    }
+
+    fn start_probe(&mut self, now: Millis, host: &dyn Host) -> Option<Action> {
+        let target = self.next_free_target()?;
         let addr = self.members.get(&target)?.info.addr;
-        self.probe = Some(Probe {
-            target,
-            acked: false,
-            indirect_left: 0,
-        });
+        let timeout_ms = self.scaled(self.cfg.probe_timeout_ms);
+        self.probe_seq += 1;
+        let seq = self.probe_seq;
+        self.probes.insert(
+            seq,
+            Probe {
+                target,
+                acked: false,
+                indirect_left: 0,
+                deadline: now + timeout_ms,
+            },
+        );
         let msg = self.message(GossipKind::Ping, Some(target), host);
-        let token = self.token(Pending::Direct { target });
+        let token = self.token(Pending::Direct { target, probe: seq });
         Some(Action {
             token,
             to: addr,
             expected: Some(target),
             msg,
-            timeout_ms: self.cfg.probe_timeout_ms,
+            timeout_ms,
         })
     }
 
@@ -1040,9 +1148,6 @@ impl Swim {
     fn probe_acked(&mut self, now: Millis, target: NodeId) {
         if let Some(r) = self.members.get_mut(&target) {
             r.detector.heartbeat(now);
-        }
-        if let Some(p) = self.probe.as_mut().filter(|p| p.target == target) {
-            p.acked = true;
         }
     }
 
@@ -1060,26 +1165,35 @@ impl Swim {
             self.absorb(now, g, host);
         }
         match pending {
-            Pending::Direct { target } => match outcome {
+            Pending::Direct { target, probe } => match outcome {
                 Outcome::Reply(_) => {
                     self.probe_acked(now, target);
+                    self.probes.remove(&probe);
                     Vec::new()
                 }
-                _ => self.start_indirect(now, target, host),
+                _ => self.start_indirect(now, target, probe, host),
             },
-            Pending::Indirect { target } => {
-                if matches!(&outcome, Outcome::Reply(g) if g.kind == GossipKind::Ack) {
+            Pending::Indirect { target, probe } => {
+                let acked = matches!(&outcome, Outcome::Reply(g) if g.kind == GossipKind::Ack);
+                if acked {
                     self.probe_acked(now, target);
                 }
-                let done = match self.probe.as_mut().filter(|p| p.target == target) {
+                let (ended, missed) = match self.probes.get_mut(&probe) {
                     Some(p) => {
+                        p.acked |= acked;
                         p.indirect_left = p.indirect_left.saturating_sub(1);
-                        (p.indirect_left == 0 && !p.acked).then_some(target)
+                        (
+                            p.acked || p.indirect_left == 0,
+                            !p.acked && p.indirect_left == 0,
+                        )
                     }
-                    None => None,
+                    None => (false, false),
                 };
-                if let Some(t) = done {
-                    self.missed(now, t);
+                if missed {
+                    self.missed(now, target);
+                }
+                if ended {
+                    self.probes.remove(&probe);
                 }
                 Vec::new()
             }
@@ -1134,8 +1248,18 @@ impl Swim {
         self.set_state(now, MemberState::Normal, Phase::Member);
     }
 
-    fn start_indirect(&mut self, now: Millis, target: NodeId, host: &dyn Host) -> Vec<Action> {
+    fn start_indirect(
+        &mut self,
+        now: Millis,
+        target: NodeId,
+        probe: u64,
+        host: &dyn Host,
+    ) -> Vec<Action> {
+        if !self.probes.contains_key(&probe) {
+            return Vec::new();
+        }
         let Some(t) = self.members.get(&target) else {
+            self.probes.remove(&probe);
             return Vec::new();
         };
         let target_addr = t.info.addr;
@@ -1149,16 +1273,16 @@ impl Swim {
         helpers.truncate(self.cfg.indirect_probes);
         if helpers.is_empty() {
             self.missed(now, target);
+            self.probes.remove(&probe);
             return Vec::new();
         }
-        if let Some(p) = self.probe.as_mut().filter(|p| p.target == target) {
-            p.indirect_left = helpers.len();
-        }
         let timeout = self
-            .cfg
-            .period_ms
-            .saturating_sub(self.cfg.probe_timeout_ms)
+            .scaled(self.cfg.period_ms.saturating_sub(self.cfg.probe_timeout_ms))
             .max(1);
+        if let Some(p) = self.probes.get_mut(&probe) {
+            p.indirect_left = helpers.len();
+            p.deadline = now + timeout;
+        }
         let mut out = Vec::new();
         for helper in helpers {
             let Some(addr) = self.members.get(&helper).map(|r| r.info.addr) else {
@@ -1166,7 +1290,7 @@ impl Swim {
             };
             let mut msg = self.message(GossipKind::PingReq, Some(helper), host);
             msg.target = Some((target, target_addr));
-            let token = self.token(Pending::Indirect { target });
+            let token = self.token(Pending::Indirect { target, probe });
             out.push(Action {
                 token,
                 to: addr,
@@ -1210,7 +1334,7 @@ impl Swim {
                 };
                 let ping = self.message(GossipKind::Ping, Some(target), host);
                 let token = self.token(Pending::Relay { target });
-                let timeout = self.cfg.probe_timeout_ms;
+                let timeout = self.scaled(self.cfg.probe_timeout_ms);
                 Handled {
                     reply: self.message(GossipKind::Nack, sender, host),
                     relay: Some(Action {
@@ -1301,6 +1425,10 @@ impl Swim {
             _ => self.message(GossipKind::Nack, None, host),
         }
     }
+}
+
+fn scale(ms: Millis, multiplier: f64) -> Millis {
+    (ms as f64 * multiplier).round() as Millis
 }
 
 /// Lifeguard suspicion timeout: `max - (max - min) * ln(c + 1) / ln(K + 1)` with `c` other

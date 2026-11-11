@@ -59,12 +59,37 @@ impl Channel {
     }
 }
 
+/// The channels an endpoint serves and dials.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Channels {
+    /// Both ALPNs on one endpoint.
+    #[default]
+    Both,
+    /// Only `discus-gossip`: the control endpoint.
+    GossipOnly,
+    /// Only `discus-rpc`: the data endpoint.
+    RpcOnly,
+}
+
+impl Channels {
+    fn serves(self, channel: Channel) -> bool {
+        matches!(
+            (self, channel),
+            (Channels::Both, _)
+                | (Channels::GossipOnly, Channel::Gossip)
+                | (Channels::RpcOnly, Channel::Rpc)
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
     pub listen: SocketAddr,
     pub tls: TlsMaterial,
     pub node_id: NodeId,
     pub cluster_id: ClusterId,
+    /// The channels this endpoint serves. A channel that it does not serve is also not dialed.
+    pub channels: Channels,
     /// The capability bits this node offers in `HELLO`.
     pub capabilities: u64,
     /// The largest frame this node accepts. `HELLO` agrees on the smaller offer.
@@ -89,6 +114,7 @@ impl TransportConfig {
             tls,
             node_id,
             cluster_id,
+            channels: Channels::Both,
             capabilities: caps::KNOWN,
             max_frame: DEFAULT_MAX_FRAME,
             idle_timeout: Duration::from_secs(30),
@@ -210,8 +236,8 @@ type Slot = Arc<tokio::sync::Mutex<Option<Conn>>>;
 
 struct Inner {
     endpoint: quinn::Endpoint,
-    client: quinn::ClientConfig,
-    gossip_client: quinn::ClientConfig,
+    client: Option<quinn::ClientConfig>,
+    gossip_client: Option<quinn::ClientConfig>,
     node_id: NodeId,
     cluster_id: parking_lot::RwLock<ClusterId>,
     capabilities: u64,
@@ -264,19 +290,27 @@ impl Transport {
         service: Arc<dyn Service>,
     ) -> io::Result<Transport> {
         let transport = quinn_transport(&config)?;
+        let alpns: Vec<&[u8]> = [Channel::Rpc, Channel::Gossip]
+            .into_iter()
+            .filter(|c| config.channels.serves(*c))
+            .map(Channel::alpn)
+            .collect();
         let server_tls =
-            QuicServerConfig::try_from(config.tls.server_config(&[ALPN_RPC, ALPN_GOSSIP]))
-                .map_err(other)?;
+            QuicServerConfig::try_from(config.tls.server_config(&alpns)).map_err(other)?;
         let mut server = quinn::ServerConfig::with_crypto(Arc::new(server_tls));
         server.transport_config(transport.clone());
-        let client_for = |alpn: &[u8]| -> io::Result<quinn::ClientConfig> {
-            let tls = QuicClientConfig::try_from(config.tls.client_config(alpn)).map_err(other)?;
+        let client_for = |channel: Channel| -> io::Result<Option<quinn::ClientConfig>> {
+            if !config.channels.serves(channel) {
+                return Ok(None);
+            }
+            let tls = QuicClientConfig::try_from(config.tls.client_config(channel.alpn()))
+                .map_err(other)?;
             let mut client = quinn::ClientConfig::new(Arc::new(tls));
             client.transport_config(transport.clone());
-            Ok(client)
+            Ok(Some(client))
         };
-        let client = client_for(ALPN_RPC)?;
-        let gossip_client = client_for(ALPN_GOSSIP)?;
+        let client = client_for(Channel::Rpc)?;
+        let gossip_client = client_for(Channel::Gossip)?;
         let runtime = quinn::default_runtime().ok_or_else(|| other("no async runtime"))?;
         let endpoint = quinn::Endpoint::new(
             quinn::EndpointConfig::default(),
@@ -363,6 +397,7 @@ impl Transport {
             message,
         };
         let request = encode_frame(&frame);
+        TransportStats::bump(&self.0.stats.requests_out);
         let bytes = match tokio::time::timeout(timeout, exchange(&conn, &info, &request)).await {
             Err(_) => return Err(GossipError::Silent(Box::new(info))),
             Ok(Err(e)) => {
@@ -587,6 +622,15 @@ impl Transport {
         if self.0.closed.is_cancelled() {
             return Err(TransportError::Connect("the transport is closed".into()));
         }
+        let configured = match channel {
+            Channel::Rpc => self.0.client.is_some(),
+            Channel::Gossip => self.0.gossip_client.is_some(),
+        };
+        if !configured {
+            return Err(TransportError::Connect(format!(
+                "this endpoint does not serve {channel:?}"
+            )));
+        }
         let slot = pool.lock().entry(key).or_default().clone();
         let mut guard = slot.lock().await;
         if let Some(c) = guard.as_ref() {
@@ -640,7 +684,8 @@ impl Transport {
         let client = match channel {
             Channel::Rpc => self.0.client.clone(),
             Channel::Gossip => self.0.gossip_client.clone(),
-        };
+        }
+        .ok_or_else(|| connect(&"this endpoint does not serve the channel"))?;
         let conn = self
             .0
             .endpoint

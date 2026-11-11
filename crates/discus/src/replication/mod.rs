@@ -486,18 +486,20 @@ impl Replicator {
         self.peers.read().values().all(|q| !q.holds(key)) && !self.hints.lock().holds(key)
     }
 
-    /// A newer epoch is current. Queues and hints stop carrying keys that the target no longer
-    /// owns, and queues stop carrying keys that this node no longer owns (spec sections 5.1 and
-    /// 9). A peer that left the epoch is `DEAD` or departed, so it loses its queue and hints.
-    pub fn on_epoch(&self, old: &Arc<Epoch>, new: &Arc<Epoch>) {
+    /// The node adopted `new` after `old`, and `current` is its epoch now. Queues and hints stop
+    /// carrying keys that the target no longer owns in `current`, and queues stop carrying keys
+    /// that this node no longer owns (spec sections 5.1 and 9). A peer that left `current` is
+    /// `DEAD` or departed, so it loses its queue and hints. Only the promotion reconciliation
+    /// uses the `old` to `new` step.
+    pub fn on_epoch(&self, old: &Arc<Epoch>, new: &Arc<Epoch>, current: &Epoch) {
         let rf = self.settings.rf;
         self.peers.write().retain(|peer, q| {
-            if new.member(*peer).is_none() {
+            if current.member(*peer).is_none() {
                 q.close();
                 return false;
             }
             q.retain(|k| {
-                let owners = new.owners(k, rf);
+                let owners = current.owners(k, rf);
                 owners.contains(peer) && owners.contains(&self.id)
             });
             true
@@ -505,15 +507,17 @@ impl Replicator {
         {
             let mut hints = self.hints.lock();
             for target in hints.targets() {
-                if new.member(target).is_none() {
+                if current.member(target).is_none() {
                     hints.drop_target(target);
                 }
             }
-            hints.retain(|target, k| new.owners(k, rf).contains(&target));
+            hints.retain(|target, k| current.owners(k, rf).contains(&target));
         }
         self.sync_charge();
-        self.prune_handoffs(new);
-        self.contacts.lock().retain(|p, _| new.member(*p).is_some());
+        self.prune_handoffs(current);
+        self.contacts
+            .lock()
+            .retain(|p, _| current.member(*p).is_some());
         if !digest::removed(old, new).is_empty() && new.member(self.id).is_some() {
             if let Some(node) = self.node.upgrade() {
                 tokio::spawn(digest::reconcile(node, old.clone(), new.clone()));
@@ -702,7 +706,7 @@ impl Replicator {
             .epochs()
             .current()
             .member(peer)
-            .map(|m| m.addr)
+            .map(|m| m.rpc_addr)
             .ok_or_else(|| TransportError::Connect(format!("node {peer} is not a member")))?;
         let code = message.type_code();
         let build = |info: &PeerInfo| match info.capabilities & caps::REPLICATION {
