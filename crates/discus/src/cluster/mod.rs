@@ -325,12 +325,12 @@ pub fn serve_here(
     write: bool,
     owners: &[NodeId],
 ) -> Dispatch {
-    let key = cmd[1].clone();
-    let sources = crate::replication::repair::sources(node, &key, write, owners);
+    let sources = crate::replication::repair::sources(node, &cmd[1], write, owners);
     if sources.is_empty() {
         return local_acked(node, spec, cmd);
     }
     let node = node.clone();
+    let key = cmd[1].clone();
     Dispatch::Pending(Box::pin(async move {
         crate::replication::repair::fetch(&node, &key, sources).await;
         local_acked(&node, spec, cmd).finish().await
