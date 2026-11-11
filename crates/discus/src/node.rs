@@ -183,16 +183,10 @@ impl Node {
         );
         let id = config.node_id.unwrap_or_else(NodeId::random);
         let cluster_id = config.cluster_id.unwrap_or_else(ClusterId::mint);
-        let client_addr = config.client_advertise.or_else(|| {
-            let ip = config.cluster_listen.ip();
-            // Static members learn each other's client address only from `--peer`, so a node
-            // that did not ask for cluster clients keeps the record that its peers list.
-            let static_clients = config.cluster_enabled()
-                && !config.gossip_enabled()
-                && config.redirect_listen.is_some();
-            (static_clients && !ip.is_unspecified())
-                .then(|| default_client_addr(ip, config.redirect_listen, config.listen))
-        });
+        // A static node takes its client address only from the flag, because its peers list the
+        // same address and every node must build the same member records. Gossip nodes default
+        // it in `Membership::new`.
+        let client_addr = config.client_advertise;
         let me = Member {
             id,
             addr: config.cluster_listen,

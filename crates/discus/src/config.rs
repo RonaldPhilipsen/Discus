@@ -472,6 +472,23 @@ impl Config {
                     missing.join(", ")
                 ));
             }
+            let suffixed = self
+                .peers
+                .iter()
+                .filter(|p| p.client_addr.is_some())
+                .count();
+            let consistent = if suffixed == 0 {
+                self.client_advertise.is_none()
+            } else {
+                suffixed == self.peers.len() && self.client_advertise.is_some()
+            };
+            if !consistent {
+                return Err("with --membership static, either every --peer has a \
+                    /<client-ip>:<client-port> suffix and --client-advertise is set, or no --peer \
+                    has a suffix and --client-advertise is unset. Every node must build the same \
+                    member list"
+                    .into());
+            }
             if self.weight != 1.0 {
                 return Err(
                     "--weight must be 1 with --peer, because every static member has weight 1"
@@ -724,5 +741,59 @@ mod tests {
             default_client_addr(ip, None, listen),
             "10.0.0.5:6379".parse().unwrap()
         );
+    }
+
+    fn static_args(extra: &[&str]) -> Vec<String> {
+        let mut argv: Vec<String> = [
+            "discus",
+            "--membership",
+            "static",
+            "--cluster-ca",
+            "ca",
+            "--cluster-cert",
+            "cert",
+            "--cluster-key",
+            "key",
+            "--node-id",
+            &NodeId::random().to_string(),
+            "--cluster-id",
+            &ClusterId::mint().to_string(),
+        ]
+        .map(String::from)
+        .to_vec();
+        argv.extend(extra.iter().map(|s| s.to_string()));
+        argv
+    }
+
+    #[test]
+    fn static_client_addresses_are_all_set_or_all_unset() {
+        let (a, b) = (NodeId::random(), NodeId::random());
+        let plain = [format!("{a}@10.0.0.1:7379"), format!("{b}@10.0.0.2:7379")];
+        let suffixed = [
+            format!("{a}@10.0.0.1:7379/10.0.0.1:6380"),
+            format!("{b}@10.0.0.2:7379/10.0.0.2:6380"),
+        ];
+        let check = |peers: &[String], advertise: bool| {
+            let mut extra: Vec<&str> = Vec::new();
+            for p in peers {
+                extra.extend(["--peer", p]);
+            }
+            if advertise {
+                extra.extend(["--client-advertise", "10.0.0.3:6380"]);
+            }
+            Config::parse_from(static_args(&extra)).unwrap().validate()
+        };
+        check(&plain, false).unwrap();
+        check(&suffixed, true).unwrap();
+        let mixed = [plain[0].clone(), suffixed[1].clone()];
+        for bad in [
+            check(&mixed, true),
+            check(&mixed, false),
+            check(&suffixed, false),
+            check(&plain, true),
+        ] {
+            let err = bad.unwrap_err();
+            assert!(err.contains("--peer") && err.contains("--client-advertise"));
+        }
     }
 }

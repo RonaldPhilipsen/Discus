@@ -308,11 +308,11 @@ the CPU limit of the container from the cgroup (the Linux resource control group
 | `--rpc-listen` | `0.0.0.0:7380` | The UDP address for node-to-node requests. With `--membership static`, requests use `--cluster-listen` instead. |
 | `--rpc-advertise` | see below | The RPC address that other members use. Default: the IP of the advertised cluster address with the bound `--rpc-listen` port. |
 | `--redirect-listen` | off | The TCP address of the redirect listener. It is a second client listener. |
-| `--client-advertise` | see below | The client address that other members and cluster clients use. Default: the IP of the advertised cluster address with the bound `--redirect-listen` port. Without a redirect listener, it uses the bound `--listen` port. |
+| `--client-advertise` | see below | The client address that other members and cluster clients use. Default: the IP of the advertised cluster address with the bound `--redirect-listen` port. Without a redirect listener, it uses the bound `--listen` port. With `--membership static`, the node has no default. It must set this flag to the address that its peers list for it. |
 | `--client-hostname` | none | A host name template for client addresses. `{ip}` becomes the advertised IP with dashes, for example `10-1-2-3`. An empty value means no host name. |
 | `--cluster-topology` | `auto` | `auto` answers the topology commands when the node has a redirect listener. `on` always answers. `off` never answers. |
 | `--data-nice` | `5` | Raise the nice value of the data runtime threads by this much over the process value, from 0 to 19. The result is capped at 19. The control thread keeps the process value, so it gets CPU first under a quota. 0 changes nothing. Linux only. |
-| `--peer` | none | A seed as `<ip>:<port>`, or `<node-id>@<ip>:<port>`. Repeat the flag. With `static`, list every other member with its node ID. Add `/<client-ip>:<client-port>` to give the member a client address. |
+| `--peer` | none | A seed as `<ip>:<port>`, or `<node-id>@<ip>:<port>`. Repeat the flag. With `static`, list every other member with its node ID. Add `/<client-ip>:<client-port>` to give the member a client address. With `static`, either every `--peer` has the suffix and `--client-advertise` is set, or no `--peer` has it. |
 | `--discovery-dns` | none | A headless Service name, as `<host>` or `<host>:<port>`. The port defaults to the `--cluster-listen` port. |
 | `--lease-provider` | `k8s` | `k8s` or `none`. Without the `k8s` build feature, the default is `none`. |
 | `--lease-name` | `discus-cluster` | The name of the cluster lease. |
