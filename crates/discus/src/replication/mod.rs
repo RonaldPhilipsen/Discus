@@ -22,7 +22,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use discus_placement::{Epoch, NodeId, Version};
+use discus_placement::{ClusterId, Epoch, NodeId, Version};
 use discus_store::{refill_bucket, Entry, Store};
 use discus_transport::{Lane, PeerInfo, TransportError};
 use discus_wire::{caps, Batch, BatchAck, Message, TraceContext};
@@ -714,8 +714,10 @@ impl Replicator {
             .map(|m| m.rpc_addr)
             .ok_or_else(|| TransportError::Connect(format!("node {peer} is not a member")))?;
         let code = message.type_code();
+        let mut cluster = ClusterId::NIL;
         let build = |info: &PeerInfo| {
-            link.saw_peer_epoch(peer, info.epoch);
+            cluster = info.cluster_id;
+            link.saw_peer_epoch(peer, info.cluster_id, info.epoch);
             match info.capabilities & caps::REPLICATION {
                 0 => Err(TransportError::PeerUnsupported(code)),
                 _ => Ok(message),
@@ -737,7 +739,7 @@ impl Replicator {
         link.note_forward(peer, true);
         // The ack carries the epoch that the peer adopted, so redirects need no forward first.
         if let Message::BatchAck(a) = &frame.message {
-            link.saw_peer_epoch(peer, a.epoch);
+            link.saw_peer_epoch(peer, cluster, a.epoch);
         }
         Ok(frame.message)
     }

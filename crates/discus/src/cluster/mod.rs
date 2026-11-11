@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use discus_placement::{EpochId, NodeId, Version};
+use discus_placement::{ClusterId, EpochId, NodeId, Version};
 use discus_resp::{Command, Value};
 use discus_transport::Transport;
 use discus_wire::TraceContext;
@@ -104,9 +104,21 @@ impl ClusterLink {
             .retain(|p| epoch.member(*p).is_some());
     }
 
-    /// Record the epoch a peer reported. Only a newer one replaces the record.
-    pub fn saw_peer_epoch(&self, peer: NodeId, epoch: EpochId) {
+    /// Forget every peer epoch and every failed forward. A new cluster history starts its
+    /// generations again, so records of the old history are not comparable (spec "Epoch changes").
+    pub fn reset(&self) {
+        self.peer_epochs.lock().clear();
+        self.health.down.write().clear();
+    }
+
+    /// Record the epoch a peer reported on a connection of cluster `cluster`. Only a newer one
+    /// replaces the record. A report from another cluster history drops the record instead.
+    pub fn saw_peer_epoch(&self, peer: NodeId, cluster: ClusterId, epoch: EpochId) {
         let mut map = self.peer_epochs.lock();
+        if cluster != self.transport.cluster_id() {
+            map.remove(&peer);
+            return;
+        }
         let entry = map.entry(peer).or_insert(epoch);
         if epoch > *entry {
             *entry = epoch;
