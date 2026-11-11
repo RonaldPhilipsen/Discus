@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use discus_placement::{Epoch, EpochId, NodeId, Version};
+use discus_placement::{range_of, slot, Epoch, EpochId, NodeId, Version};
 use discus_wire::{Batch, Message};
 
 use crate::node::EpochPin;
@@ -158,6 +158,7 @@ pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits
     // Entries written after this point replicate to their current owners on their own.
     let watermark = node.hlc.current();
     let rf = limits.rf;
+    let changed = from.changed_ranges(&to, rf);
     tracing::info!(from = %from.id(), to = %to.id(), targets = targets.len(), "handoff scan");
     let mut cursor = 0;
     loop {
@@ -165,6 +166,9 @@ pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits
             .store
             .scan_entries(cursor, STEP, |_, e| e.version.time() <= watermark);
         for (k, e) in entries {
+            if !changed.contains(range_of(slot(&k))) {
+                continue;
+            }
             let old_owners = from.owners(&k, rf);
             let survivors: Vec<NodeId> = old_owners
                 .iter()

@@ -188,3 +188,36 @@ async fn a_rolling_restart_keeps_the_data_and_a_short_history() {
         );
     }
 }
+
+#[tokio::test]
+async fn handoff_skips_unchanged_ranges() {
+    let net = Net::new();
+    let extra = ["--replication-factor", "1"];
+    let nodes = net.start_agreed(2, &extra).await;
+    let keys = fill(&nodes[0], "skip", 400).await;
+    let old = nodes[0].node.epochs().current().clone();
+    let joiner = net.start(&[nodes[0].cluster_addr], &extra).await;
+    assert!(started(&joiner).await);
+    let new = joiner.node.epochs().current().clone();
+    let changed = old.changed_ranges(&new, 1);
+    let expected: Vec<&String> = keys
+        .iter()
+        .filter(|k| {
+            let range = discus_placement::range_of(discus_placement::slot(k.as_bytes()));
+            changed.contains(range) && new.owners(k.as_bytes(), 1).contains(&joiner.id)
+        })
+        .collect();
+    assert!(!expected.is_empty());
+    assert!(
+        wait_until(FORM, || expected
+            .iter()
+            .all(|k| joiner.node.store.read(k.as_bytes(), |e| e.is_some())))
+        .await
+    );
+    assert!(wait_until(FORM, || !nodes[0].node.replicator().unwrap().scanning()).await);
+    let moved: Vec<&String> = keys
+        .iter()
+        .filter(|k| joiner.node.store.read(k.as_bytes(), |e| e.is_some()))
+        .collect();
+    assert_eq!(moved, expected);
+}
