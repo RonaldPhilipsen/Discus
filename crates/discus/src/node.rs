@@ -288,8 +288,9 @@ impl Node {
         host_of(&self.config, Some(addr))
     }
 
-    /// A topology reply from the current epoch, encoded once per epoch, kind, and protocol
-    /// (spec "Epoch changes"). A node that is not `NORMAL` returns `-TRYAGAIN`, except for
+    /// A topology reply from the current epoch. The node builds the reply value once per epoch,
+    /// kind, and protocol and caches it. Each reply still encodes the cached value (spec "Epoch
+    /// changes"). A node that is not `NORMAL` returns `-TRYAGAIN`, except for
     /// `CLUSTER INFO`, which then reports `cluster_state:fail` and is not cached.
     pub fn topology(
         &self,
@@ -312,7 +313,11 @@ impl Node {
         }
         let rf = self.config.replication_factor;
         let reply = Arc::new(topology::build(
-            kind, &epoch, rf, protocol, self.id, normal,
+            kind,
+            &epoch,
+            rf,
+            protocol,
+            self.topology_responder(normal),
         )?);
         // A reply of an epoch that a newer one replaced in the meantime is not stored.
         if normal && self.epoch_id() == epoch.id() {
@@ -326,6 +331,14 @@ impl Node {
             cache.replies[at] = Some(reply.clone());
         }
         Ok(reply)
+    }
+
+    pub(crate) fn topology_responder(&self, normal: bool) -> topology::Responder {
+        topology::Responder {
+            me: self.id,
+            normal,
+            tls: self.config.security.tls_mode == crate::security::TlsMode::Node,
+        }
     }
 
     /// Settle the client address from the resolved cluster IP, unless a flag already did.
