@@ -49,6 +49,11 @@ impl SlotTable {
         self.rf
     }
 
+    /// True when every range lists all `NORMAL` members, so the table answers any `rf`.
+    pub fn lists_all_normal(&self) -> bool {
+        self.per_range < self.rf
+    }
+
     /// The owners of `range`, primary first.
     pub fn owners(&self, range: u16) -> impl Iterator<Item = &Member> {
         let start = usize::from(range) * self.per_range;

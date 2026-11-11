@@ -146,12 +146,13 @@ impl Epoch {
         self.range_owners(range_of(slot), rf)
     }
 
-    /// The owners of `range`, primary first. A request with an `rf` other than the cached table's
-    /// is computed directly.
+    /// The owners of `range`, primary first. The owner list for a smaller `rf` is a prefix of the
+    /// longer one, so the cached table answers every `rf` it covers. A larger `rf` is computed
+    /// directly.
     pub fn range_owners(&self, range: u16, rf: usize) -> Vec<NodeId> {
         let table = self.table(rf);
-        if table.rf() == rf {
-            table.owners(range).map(|m| m.id).collect()
+        if rf <= table.rf() || table.lists_all_normal() {
+            table.owners(range).take(rf).map(|m| m.id).collect()
         } else {
             hrw::owners(&range.to_be_bytes(), &self.members, rf)
         }
