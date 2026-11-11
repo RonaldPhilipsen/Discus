@@ -174,7 +174,13 @@ async fn forwarded(
         track: f.track,
         held: false,
     };
-    run_hop(node, Job::plain(cmd, spec), hop, telemetry::route_span())
-        .finish()
-        .await
+    run_hop(
+        node,
+        Job::plain(cmd, spec),
+        hop,
+        None,
+        telemetry::route_span(),
+    )
+    .finish()
+    .await
 }

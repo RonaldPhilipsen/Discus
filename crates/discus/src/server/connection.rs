@@ -155,7 +155,7 @@ impl Pipeline {
             (wait, Some(done), None)
         };
         if wait.is_ready() {
-            match cluster::run(&self.node, job, route) {
+            match cluster::run(&self.node, job, self.conn.writes.as_ref(), route) {
                 Dispatch::Ready(reply) => {
                     drop(done);
                     trace.finish(&reply.value);
@@ -178,10 +178,13 @@ impl Pipeline {
         }
         drop(route);
         let node = self.node.clone();
+        let writes = self.conn.writes.clone();
         self.pending.push_back(Box::pin(
             async move {
                 wait.wait().await;
-                let reply = cluster::run(&node, job, trace.route_span()).finish().await;
+                let reply = cluster::run(&node, job, writes.as_ref(), trace.route_span())
+                    .finish()
+                    .await;
                 drop(done);
                 trace.finish(&reply.value);
                 Slot::reply(protocol, reply.value)

@@ -184,8 +184,6 @@ pub struct Job {
     pub spec: &'static CommandSpec,
     /// The per-connection round-robin position for reads.
     pub rr: u64,
-    /// The write set of the client connection. Forwarded jobs have none.
-    pub writes: Option<Writes>,
     /// From a redirect connection, so hop 0 may return `-MOVED`.
     pub redirect: bool,
     /// The connection sent `READONLY`.
@@ -201,7 +199,6 @@ impl Job {
             cmd,
             spec,
             rr: 0,
-            writes: None,
             redirect: false,
             readonly: false,
         }
@@ -254,7 +251,6 @@ pub fn prepare(
         cmd,
         spec,
         rr: conn.next_rr(),
-        writes: conn.writes.clone(),
         redirect: conn.redirect,
         readonly: conn.readonly,
     })
@@ -335,13 +331,19 @@ pub fn serve_here(
 
 /// Run a data command from the entry node. `route` is the `route` span: the owner choice runs
 /// in it, and it ends before the command runs or forwards.
-pub fn run(node: &Arc<Node>, job: Job, route: Span) -> Dispatch {
-    run_hop(node, job, Hop::default(), route)
+pub fn run(node: &Arc<Node>, job: Job, writes: Option<&Writes>, route: Span) -> Dispatch {
+    run_hop(node, job, Hop::default(), writes, route)
 }
 
 /// Run a data command at any hop. A command that needs no other node runs inline. A command on
 /// counter keys goes to its group leader first, so it never takes the replicated path.
-pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
+pub fn run_hop(
+    node: &Arc<Node>,
+    job: Job,
+    hop: Hop,
+    writes: Option<&Writes>,
+    route: Span,
+) -> Dispatch {
     if let Some(dispatch) = crate::counter::route::intercept(node, &job, &hop) {
         drop(route);
         return dispatch;
@@ -355,8 +357,10 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
         return Dispatch::Ready(local(node, job.spec, &job.cmd));
     }
     match job.spec.route {
-        Route::Single { write } => single(node, job, hop, write, route),
-        Route::MultiRead { .. } | Route::MultiWrite { .. } => multi::multi(node, job, hop, route),
+        Route::Single { write } => single(node, job, hop, write, writes, route),
+        Route::MultiRead { .. } | Route::MultiWrite { .. } => {
+            multi::multi(node, job, hop, writes, route)
+        }
         // Only the entry node fans out. A forwarded copy runs locally. These routes need no
         // owner, so the route span ends at once.
         Route::Fanout if redirect::applies(job.redirect, &hop) && job.spec.name == "DBSIZE" => {
@@ -374,7 +378,7 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
         }
         Route::Rename => {
             drop(route);
-            rename::run(node, job, hop)
+            rename::run(node, job, hop, writes)
         }
         Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => {
             drop(route);
@@ -467,10 +471,17 @@ enum Plan {
     Moved(CommandError),
 }
 
-fn single(node: &Arc<Node>, job: Job, hop: Hop, write: bool, route: Span) -> Dispatch {
+fn single(
+    node: &Arc<Node>,
+    job: Job,
+    hop: Hop,
+    write: bool,
+    writes: Option<&Writes>,
+    route: Span,
+) -> Dispatch {
     // A primary-read key keeps no write-set entry: every read of it goes to the primary.
-    let tracked = job.writes.is_some() && !node.is_primary_read_key(&job.cmd[1]);
-    let need = match (&job.writes, write) {
+    let tracked = writes.is_some() && !node.is_primary_read_key(&job.cmd[1]);
+    let need = match (writes, write) {
         (Some(w), false) if tracked => w.lock().required(&job.cmd[1], std::time::Instant::now()),
         _ => None,
     };
@@ -480,11 +491,11 @@ fn single(node: &Arc<Node>, job: Job, hop: Hop, write: bool, route: Span) -> Dis
     let dispatch = single_planned(
         node, job.spec, job.cmd, hop, write, job.rr, need, readonly, route,
     );
-    let (Some(writes), Some(key)) = (job.writes, key) else {
+    let (Some(writes), Some(key)) = (writes, key) else {
         return dispatch;
     };
     // The write set changes before the key order releases the next command on this key.
-    let note = move |reply: &Reply| {
+    let note = move |writes: &Writes, reply: &Reply| {
         let mut w = writes.lock();
         match (write, reply.applied) {
             (true, Some(v)) if !matches!(reply.value, Value::Error(_)) => {
@@ -496,14 +507,17 @@ fn single(node: &Arc<Node>, job: Job, hop: Hop, write: bool, route: Span) -> Dis
     };
     match dispatch {
         Dispatch::Ready(reply) => {
-            note(&reply);
+            note(writes, &reply);
             Dispatch::Ready(reply)
         }
-        Dispatch::Pending(f) => Dispatch::Pending(Box::pin(async move {
-            let reply = f.await;
-            note(&reply);
-            reply
-        })),
+        Dispatch::Pending(f) => {
+            let writes = writes.clone();
+            Dispatch::Pending(Box::pin(async move {
+                let reply = f.await;
+                note(&writes, &reply);
+                reply
+            }))
+        }
     }
 }
 
