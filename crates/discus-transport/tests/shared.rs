@@ -14,7 +14,7 @@ use discus_transport::testing::TestCa;
 use discus_transport::{
     frame, Inbound, PeerEventKind, Service, Transport, TransportError, RESET_BAD_FRAME,
 };
-use discus_wire::{caps, decode_frame, encode_frame, Frame, Limits, Message, TraceContext};
+use discus_wire::{decode_frame, encode_frame, Frame, Limits, Message, TraceContext};
 use futures::future::BoxFuture;
 
 /// Answers `Ping` with `Pong` after `nonce` milliseconds, so replies can come back out of order.
@@ -59,7 +59,7 @@ struct Pair {
     cluster: ClusterId,
 }
 
-async fn pair(b_caps: u64) -> (TestCa, Pair) {
+async fn pair() -> (TestCa, Pair) {
     let ca = TestCa::new();
     let cluster = ClusterId::mint();
     let a_id = NodeId::random();
@@ -67,9 +67,7 @@ async fn pair(b_caps: u64) -> (TestCa, Pair) {
     let a = Transport::bind(config(&ca, a_id, cluster), Arc::new(Delay(epoch(1, a_id))))
         .await
         .unwrap();
-    let mut cb = config(&ca, b_id, cluster);
-    cb.capabilities = b_caps;
-    let b = Transport::bind(cb, Arc::new(Delay(epoch(1, b_id))))
+    let b = Transport::bind(config(&ca, b_id, cluster), Arc::new(Delay(epoch(1, b_id))))
         .await
         .unwrap();
     (
@@ -134,7 +132,7 @@ const LONG: Duration = Duration::from_secs(10);
 
 #[tokio::test]
 async fn concurrent_writes_share_the_stream_and_get_their_own_replies() {
-    let (_ca, p) = pair(caps::KNOWN).await;
+    let (_ca, p) = pair().await;
     let p = Arc::new(p);
     // Later requests finish first, so the replies come back in reverse order.
     let tasks: Vec<_> = (0..100u64)
@@ -153,7 +151,7 @@ async fn concurrent_writes_share_the_stream_and_get_their_own_replies() {
 
 #[tokio::test]
 async fn large_requests_take_their_own_streams() {
-    let (_ca, p) = pair(caps::KNOWN).await;
+    let (_ca, p) = pair().await;
     let big = Message::Ping { nonce: 0 };
     assert!(p.send(big, LONG, true).await.is_ok());
     let big = Message::Fetch {
@@ -169,7 +167,7 @@ async fn large_requests_take_their_own_streams() {
 
 #[tokio::test]
 async fn reads_share_the_stream_and_a_large_reply_takes_its_own() {
-    let (_ca, p) = pair(caps::KNOWN).await;
+    let (_ca, p) = pair().await;
     let p = Arc::new(p);
     let large = {
         let p = p.clone();
@@ -193,31 +191,8 @@ async fn reads_share_the_stream_and_a_large_reply_takes_its_own() {
 }
 
 #[tokio::test]
-async fn a_peer_without_shared_reads_gets_a_stream_per_read() {
-    let (_ca, p) = pair(caps::KNOWN & !caps::SHARED_READS).await;
-    assert_eq!(p.ping(0, LONG, false).await.unwrap(), 0);
-    assert_eq!(p.b.stats().snapshot().shared_in, 0);
-    // Writes still share the stream, and their replies stay on it at any size.
-    assert_eq!(p.sized(200_000, true).await.unwrap(), 200_000);
-    let stats = p.b.stats().snapshot();
-    assert_eq!(stats.shared_in, 1);
-    assert_eq!(stats.large_replies_out, 0);
-}
-
-#[tokio::test]
-async fn a_peer_without_the_bit_gets_a_stream_per_write() {
-    let (_ca, p) = pair(caps::KNOWN & !caps::SHARED_STREAM).await;
-    for nonce in 0..5 {
-        assert_eq!(p.ping(nonce, LONG, true).await.unwrap(), nonce);
-    }
-    let stats = p.b.stats().snapshot();
-    assert_eq!(stats.requests_in, 5);
-    assert_eq!(stats.shared_in, 0);
-}
-
-#[tokio::test]
 async fn a_timed_out_write_leaves_the_stream_usable() {
-    let (_ca, p) = pair(caps::KNOWN).await;
+    let (_ca, p) = pair().await;
     p.a.peer(p.b_id, p.b.local_addr()).await.unwrap();
     let mut events = p.a.events();
     let err = p
@@ -239,7 +214,7 @@ async fn a_timed_out_write_leaves_the_stream_usable() {
 
 #[tokio::test]
 async fn a_lost_connection_fails_waiting_writes_at_once() {
-    let (_ca, p) = pair(caps::KNOWN).await;
+    let (_ca, p) = pair().await;
     p.a.peer(p.b_id, p.b.local_addr()).await.unwrap();
     let p = Arc::new(p);
     let pending = {
@@ -305,7 +280,7 @@ fn ping_frame(request_id: u64, nonce: u64) -> Vec<u8> {
 
 #[tokio::test]
 async fn the_acceptor_answers_every_frame_on_a_shared_stream() {
-    let (ca, p) = pair(caps::KNOWN).await;
+    let (ca, p) = pair().await;
     let conn = raw(&ca, p.cluster, p.b.local_addr()).await;
     let (mut send, mut recv) = conn.open_bi().await.unwrap();
     frame::write_frame(&mut send, &[]).await.unwrap();
@@ -337,7 +312,7 @@ async fn the_acceptor_answers_every_frame_on_a_shared_stream() {
 
 #[tokio::test]
 async fn a_bad_frame_resets_the_shared_stream_but_not_the_connection() {
-    let (ca, p) = pair(caps::KNOWN).await;
+    let (ca, p) = pair().await;
     let conn = raw(&ca, p.cluster, p.b.local_addr()).await;
     let (mut send, mut recv) = conn.open_bi().await.unwrap();
     frame::write_frame(&mut send, &[]).await.unwrap();

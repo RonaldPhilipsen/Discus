@@ -25,7 +25,7 @@ use bytes::Bytes;
 use discus_placement::{ClusterId, Epoch, NodeId, Version};
 use discus_store::{refill_bucket, Entry, Store};
 use discus_transport::{Lane, PeerInfo, TransportError};
-use discus_wire::{caps, Batch, BatchAck, Message, TraceContext};
+use discus_wire::{Batch, BatchAck, Message, TraceContext};
 use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
@@ -737,8 +737,7 @@ impl Replicator {
         }
     }
 
-    /// Send one bulk message to `peer` and return its reply. A peer without the replication
-    /// capability gets nothing.
+    /// Send one bulk message to `peer` and return its reply.
     pub(crate) async fn send(
         &self,
         node: &Arc<Node>,
@@ -754,15 +753,11 @@ impl Replicator {
             .member(peer)
             .map(|m| m.rpc_addr)
             .ok_or_else(|| TransportError::Connect(format!("node {peer} is not a member")))?;
-        let code = message.type_code();
         let mut cluster = ClusterId::NIL;
         let build = |info: &PeerInfo| {
             cluster = info.cluster_id;
             link.saw_peer_epoch(peer, info.cluster_id, info.epoch);
-            match info.capabilities & caps::REPLICATION {
-                0 => Err(TransportError::PeerUnsupported(code)),
-                _ => Ok(message),
-            }
+            Ok(message)
         };
         let frame = link
             .transport

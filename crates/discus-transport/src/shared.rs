@@ -6,7 +6,7 @@
 //! the request ID. A writer task sends all frames that wait in one write, so a busy connection
 //! pays for fewer stream writes, packets, and task wakeups than with a stream per request.
 //!
-//! With `SHARED_READS`, reads use the stream too. The reply to a read can be large, and on the
+//! Reads use the stream too. The reply to a read can be large, and on the
 //! shared stream it would delay the replies behind it past the short read timeout. So the
 //! acceptor sends a reply over [`SHARED_REPLY_BYTES`] on a new unidirectional stream instead.
 
@@ -25,8 +25,8 @@ use crate::frame::{codec, read_frame};
 /// The bytes that one write takes. Frames that wait past it go out in the next write.
 const WRITE_BYTES: usize = 256 * 1024;
 
-/// The largest reply that the acceptor sends on the shared stream to a dialer with
-/// `SHARED_READS`. A larger one takes a unidirectional stream.
+/// The largest reply that the acceptor sends on the shared stream. A larger one takes a
+/// unidirectional stream.
 pub(crate) const SHARED_REPLY_BYTES: usize = 64 * 1024;
 
 /// Runs when a reply frame fails the verifier, with the reason.
@@ -104,12 +104,11 @@ pub(crate) struct Shared {
 impl Shared {
     /// Open the stream on `conn` and start its writer and reader tasks. `rejected` runs when a
     /// reply frame fails the verifier. Such a frame on the shared stream cannot be matched to a
-    /// request, so the stream ends and its requests fail. With `reads`, a task also takes the
-    /// large replies that come on unidirectional streams.
+    /// request, so the stream ends and its requests fail. A task also takes the large replies that
+    /// come on unidirectional streams.
     pub(crate) async fn open(
         conn: &quinn::Connection,
         max_frame: usize,
-        reads: bool,
         rejected: Rejected,
     ) -> Option<Arc<Shared>> {
         let (send, recv) = conn.open_bi().await.ok()?;
@@ -128,15 +127,13 @@ impl Shared {
                 fail_all(&waiting, &stop, reason);
             }
         });
-        if reads {
-            tokio::spawn(read_large_replies(
-                conn.clone(),
-                max_frame,
-                waiting.clone(),
-                stop.clone(),
-                rejected.clone(),
-            ));
-        }
+        tokio::spawn(read_large_replies(
+            conn.clone(),
+            max_frame,
+            waiting.clone(),
+            stop.clone(),
+            rejected.clone(),
+        ));
         tokio::spawn(read_replies(
             recv,
             max_frame,

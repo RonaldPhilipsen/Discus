@@ -221,7 +221,7 @@ pub enum GossipError {
 struct Conn {
     conn: quinn::Connection,
     info: PeerInfo,
-    /// The shared stream of a command-lane connection, when the peer has `SHARED_STREAM`.
+    /// The shared stream of a command-lane connection.
     shared: Option<Arc<Shared>>,
 }
 
@@ -490,10 +490,8 @@ impl Transport {
     /// after the connection exists. `write` labels a timeout in the evidence channel. A bulk
     /// timeout is not evidence, because a large batch can be slow on a healthy peer.
     ///
-    /// A small request on the command lane takes the shared stream when the peer has it: a write
-    /// with `SHARED_STREAM`, a read only with `SHARED_READS`. Any other request takes a new
-    /// stream. Without `SHARED_READS`, the large reply to a read would delay the replies behind it
-    /// on the shared stream past the short read timeout.
+    /// A small request on the command lane takes the shared stream. Any other request takes a
+    /// new stream.
     #[allow(clippy::too_many_arguments)]
     pub async fn request_with(
         &self,
@@ -523,8 +521,7 @@ impl Transport {
         let request_id = frame.request_id;
         let sent_type = frame.message.type_code();
         let bytes = encode_frame(&frame);
-        let reads = info.capabilities & caps::SHARED_READS != 0;
-        let shared = shared.filter(|_| (write || reads) && bytes.len() <= SHARED_REQUEST_BYTES);
+        let shared = shared.filter(|_| bytes.len() <= SHARED_REQUEST_BYTES);
         let limits = Limits {
             max_frame: info.max_frame,
         };
@@ -595,8 +592,7 @@ impl Transport {
             TransportStats::bump(&inner.stats.frames_rejected);
             tracing::warn!(%peer, reason, "dropped a reply frame on the shared stream");
         });
-        let reads = conn.info.capabilities & caps::SHARED_READS != 0;
-        Shared::open(&conn.conn, conn.info.max_frame, reads, rejected).await
+        Shared::open(&conn.conn, conn.info.max_frame, rejected).await
     }
 
     fn pool(&self, lane: Lane) -> &Mutex<HashMap<NodeId, Slot>> {
@@ -609,7 +605,7 @@ impl Transport {
     /// The live pooled connection under `key`, or a new one to `addr`. Concurrent callers wait
     /// on the slot lock, so they share one dial. `node` is the expected peer of an RPC
     /// connection: its connection is watched, and its failed dial is evidence. `share` opens the
-    /// shared stream on a new connection when the peer has it.
+    /// shared stream on a new connection.
     async fn cached_or_dial<K: std::hash::Hash + Eq>(
         &self,
         pool: &Mutex<HashMap<K, Slot>>,
@@ -653,7 +649,7 @@ impl Transport {
                 if let Some(node) = node {
                     tokio::spawn(watch(self.0.clone(), node, conn.conn.clone()));
                 }
-                if share && conn.info.capabilities & caps::SHARED_STREAM != 0 {
+                if share {
                     conn.shared = self.open_shared(&conn).await;
                 }
                 let out = Pooled {
@@ -977,7 +973,7 @@ async fn serve_stream(
     let request = match frames.next().await {
         None => return,
         Some(Err(e)) => return reject(&inner, &peer, &mut send, frames.get_mut(), &e.to_string()),
-        Some(Ok(bytes)) if bytes.is_empty() && peer.capabilities & caps::SHARED_STREAM != 0 => {
+        Some(Ok(bytes)) if bytes.is_empty() => {
             return serve_shared(inner, conn, peer, send, frames).await;
         }
         Some(Ok(bytes)) => match decode_request(&inner, &peer, &bytes) {
@@ -994,7 +990,7 @@ async fn serve_stream(
 /// Serve a shared stream until the dialer finishes it. Each request runs in its own task, at
 /// most `max_streams` at a time, and its reply goes out when it is ready. At the limit the
 /// reader waits, so flow control holds back the dialer as the stream limit does. A reply over
-/// the shared limit goes on a new unidirectional stream when the dialer has `SHARED_READS`.
+/// the shared limit goes on a new unidirectional stream.
 async fn serve_shared(
     inner: Arc<Inner>,
     conn: quinn::Connection,
@@ -1036,9 +1032,7 @@ async fn serve_shared(
         let out = out.clone();
         tokio::spawn(async move {
             let reply = encode_frame(&reply_to(inner.clone(), peer, request).await);
-            let large = reply.len() > shared::SHARED_REPLY_BYTES
-                && peer.capabilities & caps::SHARED_READS != 0;
-            if large {
+            if reply.len() > shared::SHARED_REPLY_BYTES {
                 TransportStats::bump(&inner.stats.large_replies_out);
                 // A failed send leaves the request to time out on the dialer, like a lost stream.
                 if let Ok(mut send) = conn.open_uni().await {
