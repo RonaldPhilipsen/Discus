@@ -96,8 +96,8 @@ The redirect listener uses the same TLS mode, certificates, and client CA as `--
 `--tls-mode lb` together with `--redirect-listen` is a start error. In `lb` mode, clients reach the
 nodes only through the load balancer, so they cannot route by themselves.
 
-A cluster client connects to the address in the topology reply. It checks the certificate of the
-node against that address. The certificate must therefore name the address. Two setups work:
+A cluster client connects to the address in the topology reply. The client compares the certificate
+of the node with that address. The certificate must therefore name the address. Two setups work:
 
 - A certificate for each pod with an IP SAN. The IP SAN is the pod IP, which is the address that
   the node advertises. In Kubernetes, the pod IP changes at each restart, so the certificate must
@@ -105,14 +105,14 @@ node against that address. The certificate must therefore name the address. Two 
 - The flag `--client-hostname` with a wildcard DNS SAN. For example, the template
   `{ip}.discus-peers.<namespace>.svc.cluster.local` fits the SAN
   `*.discus-peers.<namespace>.svc.cluster.local`. The topology replies then name hosts, so one
-  certificate serves every pod. The template is an option. The Discus tests do not check that
+  certificate serves every pod. The template is optional. The Discus tests do not test that
   CoreDNS answers such names for the pods of a headless Service.
 
 Every connection must authenticate. A cluster client opens one connection to each node and
 authenticates on each one. The limit on failed attempts counts for each node.
 
-The `CLUSTER` subcommands, `READONLY`, `READWRITE`, and `ASKING` need an authenticated connection
-when an authentication policy is on. The replies show the internal address of every node. A command
+If an authentication policy is on, the `CLUSTER` subcommands, `READONLY`, `READWRITE`, and `ASKING`
+need an authenticated connection. The replies show the internal address of every node. A command
 that the scopes deny returns `-NOPERM`, never `-MOVED`.
 
 ## Authentication policy
