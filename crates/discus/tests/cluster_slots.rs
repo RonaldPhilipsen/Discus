@@ -26,12 +26,7 @@ async fn start_authed(
     extra: impl Fn(usize) -> Vec<String>,
     token: Option<&str>,
 ) -> (Cluster, Vec<SocketAddr>) {
-    let ports: Vec<SocketAddr> = (0..3)
-        .map(|_| {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap()
-        })
-        .collect();
+    let ports: Vec<SocketAddr> = (0..3).map(|_| reserve()).collect();
     let c = start_cluster_clients(
         3,
         |i| Some(ports[i]),
@@ -51,6 +46,18 @@ async fn start_authed(
     .await;
     warm(&c, token).await;
     (c, ports)
+}
+
+/// A free port for a redirect listener that binds later. The port comes from below the
+/// ephemeral range, so the connections and `:0` listeners of parallel tests do not take it in the
+/// meantime.
+fn reserve() -> SocketAddr {
+    loop {
+        let port = 20000 + (discus_placement::NodeId::random().as_u128() % 12000) as u16;
+        if let Ok(l) = std::net::TcpListener::bind(("127.0.0.1", port)) {
+            return l.local_addr().unwrap();
+        }
+    }
 }
 
 /// A node learns the epoch of a peer from a forward. Forward one write from every node to every
@@ -368,7 +375,8 @@ async fn scan_over_primaries_lists_each_key_once() {
             let reply = r.cmd(&["SCAN", &cursor, "COUNT", "100"]).await;
             let parts: Vec<&str> = reply.split("\r\n").collect();
             cursor = parts[2].to_string();
-            for key in parts[5..].iter().step_by(2) {
+            // A page can hold no keys: `*0` ends the reply after the cursor.
+            for key in parts.get(5..).unwrap_or_default().iter().step_by(2) {
                 assert!(seen.insert(key.to_string()), "{key} listed twice");
             }
             if cursor == "0" {
@@ -377,4 +385,321 @@ async fn scan_over_primaries_lists_each_key_once() {
         }
     }
     assert_eq!(seen.len(), total);
+}
+
+/// A redis-rs connection to `addr`, in RESP3 when `resp3`.
+async fn conn(addr: SocketAddr, resp3: bool) -> redis::aio::MultiplexedConnection {
+    let url = if resp3 {
+        format!("redis://{addr}/?protocol=resp3")
+    } else {
+        format!("redis://{addr}")
+    };
+    let config =
+        redis::AsyncConnectionConfig::new().set_response_timeout(Some(Duration::from_secs(30)));
+    redis::Client::open(url)
+        .unwrap()
+        .get_multiplexed_async_connection_with_config(&config)
+        .await
+        .unwrap()
+}
+
+async fn query(c: &mut redis::aio::MultiplexedConnection, parts: &[&str]) -> redis::Value {
+    let mut cmd = redis::cmd(parts[0]);
+    for p in &parts[1..] {
+        cmd.arg(*p);
+    }
+    cmd.query_async(c).await.unwrap()
+}
+
+fn text(v: &redis::Value) -> String {
+    match v {
+        redis::Value::BulkString(b) => String::from_utf8(b.clone()).unwrap(),
+        redis::Value::SimpleString(s) => s.clone(),
+        redis::Value::VerbatimString { text, .. } => text.clone(),
+        other => panic!("not a string: {other:?}"),
+    }
+}
+
+fn int(v: &redis::Value) -> i64 {
+    match v {
+        redis::Value::Int(n) => *n,
+        other => panic!("not an integer: {other:?}"),
+    }
+}
+
+fn array(v: &redis::Value) -> &[redis::Value] {
+    match v {
+        redis::Value::Array(a) => a,
+        other => panic!("not an array: {other:?}"),
+    }
+}
+
+/// One `CLUSTER SLOTS` entry: start, end, and each owner as (host, port, id).
+type Entry = (u16, u16, Vec<(String, u16, String)>);
+
+fn parse_slots(v: &redis::Value) -> Vec<Entry> {
+    array(v)
+        .iter()
+        .map(|entry| {
+            let entry = array(entry);
+            let owners = entry[2..]
+                .iter()
+                .map(|n| {
+                    let n = array(n);
+                    (text(&n[0]), int(&n[1]) as u16, text(&n[2]))
+                })
+                .collect();
+            (int(&entry[0]) as u16, int(&entry[1]) as u16, owners)
+        })
+        .collect()
+}
+
+fn redis_id(id: discus_placement::NodeId) -> String {
+    format!("{id}00000000")
+}
+
+#[tokio::test]
+async fn slots_cover_every_slot_once_and_agree() {
+    let (c, ports) = start(|_| vec![]).await;
+    let port_of = |id: &str| {
+        let i = c.nodes.iter().position(|n| redis_id(n.id) == id).unwrap();
+        ports[i].port()
+    };
+    let epoch = c.nodes[0].node.epochs().current().clone();
+    let mut replies = Vec::new();
+    for p in &ports {
+        let mut r = conn(*p, false).await;
+        let entries = parse_slots(&query(&mut r, &["CLUSTER", "SLOTS"]).await);
+        let mut next = 0u32;
+        for (start, end, owners) in &entries {
+            assert_eq!(
+                u32::from(*start),
+                next,
+                "a gap or an overlap before {start}"
+            );
+            next = u32::from(*end) + 1;
+            for s in *start..=*end {
+                let want: Vec<String> = epoch.slot_owners(s, 3).into_iter().map(redis_id).collect();
+                let got: Vec<String> = owners.iter().map(|o| o.2.clone()).collect();
+                assert_eq!(got, want, "slot {s}");
+            }
+            for (host, port, id) in owners {
+                assert_eq!(host, "127.0.0.1");
+                assert_eq!(*port, port_of(id));
+            }
+        }
+        assert_eq!(next, 16384);
+        replies.push(entries);
+    }
+    assert_eq!(replies[0], replies[1]);
+    assert_eq!(replies[0], replies[2]);
+}
+
+#[tokio::test]
+async fn resp3_topology_parses() {
+    let (_c, ports) = start(|_| vec![]).await;
+    let mut r = conn(ports[0], true).await;
+    let slots = query(&mut r, &["CLUSTER", "SLOTS"]).await;
+    for entry in array(&slots) {
+        for node in &array(entry)[2..] {
+            assert!(matches!(array(node)[3], redis::Value::Map(_)), "{node:?}");
+        }
+    }
+    assert_eq!(
+        parse_slots(&slots)
+            .iter()
+            .map(|e| u32::from(e.1 - e.0) + 1)
+            .sum::<u32>(),
+        16384
+    );
+    let shards = query(&mut r, &["CLUSTER", "SHARDS"]).await;
+    for shard in array(&shards) {
+        let redis::Value::Map(fields) = shard else {
+            panic!("not a map: {shard:?}");
+        };
+        assert_eq!(text(&fields[0].0), "slots");
+        assert_eq!(text(&fields[1].0), "nodes");
+        for node in array(&fields[1].1) {
+            assert!(matches!(node, redis::Value::Map(_)), "{node:?}");
+        }
+    }
+
+    let urls: Vec<String> = ports.iter().map(|p| format!("redis://{p}")).collect();
+    let client = redis::cluster::ClusterClientBuilder::new(urls)
+        .use_protocol(redis::ProtocolVersion::RESP3)
+        .response_timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
+    let mut cluster = client.get_async_connection().await.unwrap();
+    let _: () = redis::AsyncCommands::set(&mut cluster, "resp3", "v")
+        .await
+        .unwrap();
+    let got: String = redis::AsyncCommands::get(&mut cluster, "resp3")
+        .await
+        .unwrap();
+    assert_eq!(got, "v");
+}
+
+#[tokio::test]
+async fn shards_nodes_info_pass_format_checks() {
+    let (c, ports) = start(|_| vec![]).await;
+    let mut r = conn(ports[1], false).await;
+    let info = text(&query(&mut r, &["CLUSTER", "INFO"]).await);
+    for line in [
+        "cluster_state:ok",
+        "cluster_slots_assigned:16384",
+        "cluster_known_nodes:3",
+    ] {
+        assert!(info.contains(&format!("{line}\r\n")), "{line} in {info}");
+    }
+    let nodes = text(&query(&mut r, &["CLUSTER", "NODES"]).await);
+    let lines: Vec<&str> = nodes.lines().collect();
+    assert_eq!(lines.len(), 3, "{nodes}");
+    for line in &lines {
+        let fields: Vec<&str> = line.split(' ').collect();
+        assert!(fields.len() >= 9, "{line}");
+        if fields[0] == redis_id(c.nodes[1].id) {
+            assert_eq!(fields[2], "myself,master");
+            assert!(fields[1].starts_with(&format!("127.0.0.1:{}@", ports[1].port())));
+        } else {
+            assert_eq!(fields[2], "master");
+        }
+    }
+    let shards = query(&mut r, &["CLUSTER", "SHARDS"]).await;
+    let mut covered = 0;
+    for shard in array(&shards) {
+        let shard = array(shard);
+        assert_eq!(text(&shard[0]), "slots");
+        for pair in array(&shard[1]).chunks(2) {
+            covered += int(&pair[1]) - int(&pair[0]) + 1;
+        }
+        assert_eq!(text(&shard[2]), "nodes");
+        assert_eq!(array(&shard[3]).len(), 3);
+    }
+    assert_eq!(covered, 16384);
+}
+
+#[tokio::test]
+async fn keyslot_and_myid() {
+    let (c, ports) = start(|_| vec![]).await;
+    let mut r = Raw::connect(ports[2]).await;
+    assert_eq!(r.cmd(&["CLUSTER", "KEYSLOT", "foo"]).await, ":12182");
+    let id = r.cmd(&["CLUSTER", "MYID"]).await;
+    assert_eq!(id, format!("$40\r\n{}", redis_id(c.nodes[2].id)));
+}
+
+#[tokio::test]
+async fn unknown_subcommand_is_refused() {
+    let (_c, ports) = start(|_| vec![]).await;
+    let mut r = Raw::connect(ports[0]).await;
+    assert_eq!(
+        r.cmd(&["CLUSTER", "MEET", "10.0.0.1", "7000"]).await,
+        "-ERR Discus places slots by itself. CLUSTER MEET is not supported"
+    );
+}
+
+fn forwards(c: &Cluster) -> Vec<u64> {
+    c.nodes
+        .iter()
+        .map(|n| {
+            n.node
+                .faults
+                .forwards
+                .load(std::sync::atomic::Ordering::Relaxed)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn cluster_client_routes_directly() {
+    let (c, ports) = start(|_| vec![]).await;
+    let before = forwards(&c);
+    let urls: Vec<String> = ports.iter().map(|p| format!("redis://{p}")).collect();
+    let client = redis::cluster::ClusterClientBuilder::new(urls)
+        .response_timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
+    let mut cluster = client.get_async_connection().await.unwrap();
+    for i in 0..1000 {
+        let key = format!("direct{i}");
+        let _: () = redis::AsyncCommands::set(&mut cluster, &key, i)
+            .await
+            .unwrap();
+    }
+    for i in 0..1000 {
+        let got: i64 = redis::AsyncCommands::get(&mut cluster, format!("direct{i}"))
+            .await
+            .unwrap();
+        assert_eq!(got, i);
+    }
+    assert_eq!(forwards(&c), before);
+}
+
+#[tokio::test]
+async fn topology_needs_auth() {
+    let (_c, ports) = start_authed(
+        |_| vec!["--shared-token".into(), "s3cret".into()],
+        Some("s3cret"),
+    )
+    .await;
+    let mut r = Raw::connect(ports[0]).await;
+    let reply = r.cmd(&["CLUSTER", "SLOTS"]).await;
+    assert!(reply.starts_with("-NOAUTH"), "{reply:?}");
+}
+
+#[tokio::test]
+async fn single_node_answers_one_range() {
+    let port = reserve();
+    let node = security_support::common::try_start_full(&["--redirect-listen", &port.to_string()])
+        .await
+        .unwrap();
+    let mut r = conn(port, false).await;
+    let id = text(&query(&mut r, &["CLUSTER", "MYID"]).await);
+    let entries = parse_slots(&query(&mut r, &["CLUSTER", "SLOTS"]).await);
+    assert_eq!(
+        entries,
+        vec![(0, 16383, vec![("127.0.0.1".to_string(), port.port(), id)])]
+    );
+
+    let client = redis::cluster::ClusterClientBuilder::new(vec![format!("redis://{port}")])
+        .response_timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
+    let mut cluster = client.get_async_connection().await.unwrap();
+    for i in 0..20 {
+        let reply: String = redis::cmd("SET")
+            .arg(format!("alone{i}"))
+            .arg("v")
+            .query_async(&mut cluster)
+            .await
+            .unwrap();
+        assert_eq!(reply, "OK");
+    }
+    drop(node);
+}
+
+#[tokio::test]
+async fn info_has_a_cluster_section() {
+    let (_c, ports) = start(|_| vec![]).await;
+    let mut r = conn(ports[0], false).await;
+    let info = text(&query(&mut r, &["INFO", "cluster"]).await);
+    assert!(
+        info.contains("# Cluster\r\ncluster_enabled:1\r\n"),
+        "{info}"
+    );
+    assert!(!info.contains("# discus"), "{info}");
+    let discus = text(&query(&mut r, &["INFO", "discus"]).await);
+    assert!(
+        discus.contains(&format!("discus_redirect_addr:{}\r\n", ports[0])),
+        "{discus}"
+    );
+    assert!(
+        discus.contains(&format!("discus_client_addr:{}\r\n", ports[0])),
+        "{discus}"
+    );
+
+    let plain = security_support::common::start_node(&[]).await;
+    let mut p = conn(plain, false).await;
+    let info = text(&query(&mut p, &["INFO", "cluster"]).await);
+    assert!(info.contains("cluster_enabled:0\r\n"), "{info}");
 }

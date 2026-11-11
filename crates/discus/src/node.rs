@@ -11,10 +11,11 @@ use discus_placement::{
     hlc, Adopt, Clock, ClusterId, Epoch, EpochError, EpochHistory, EpochId, Hlc, Member,
     MemberState, NodeId, Version, Weight, NTP64,
 };
-use discus_resp::Protocol;
+use discus_resp::{Protocol, Value};
 use discus_store::{Slot, Store, StoreConfig, SystemClock, HASH_SEED};
 use parking_lot::{RwLock, RwLockReadGuard};
 
+use crate::cluster::topology::{self, TopologyKind};
 use crate::cluster::writeset::{WriteSet, WriteSetBudget, WriteSetLimits};
 use crate::cluster::ClusterLink;
 use crate::command::CommandError;
@@ -78,6 +79,7 @@ pub struct Node {
     epoch_tx: tokio::sync::watch::Sender<EpochId>,
     write_budget: Arc<WriteSetBudget>,
     drain: tokio_util::sync::CancellationToken,
+    topology: parking_lot::Mutex<TopologyCache>,
     /// Faults that tests inject.
     #[cfg(feature = "testing")]
     pub faults: Faults,
@@ -98,6 +100,8 @@ pub struct Faults {
     /// Never answer an inbound message of any kind from these peers. Blocking both sides makes
     /// a partition.
     pub blocked: parking_lot::Mutex<std::collections::HashSet<NodeId>>,
+    /// Commands that this node forwarded to another node.
+    pub forwards: AtomicU64,
 }
 
 #[cfg(feature = "testing")]
@@ -233,6 +237,7 @@ impl Node {
             counters: OnceLock::new(),
             epoch_tx,
             drain: tokio_util::sync::CancellationToken::new(),
+            topology: parking_lot::Mutex::default(),
             #[cfg(feature = "testing")]
             faults: Faults::default(),
         }
@@ -276,6 +281,51 @@ impl Node {
     /// The host name that this node advertises: `--client-hostname` for the client address.
     pub fn client_host(&self) -> Option<String> {
         host_of(&self.config, self.client_addr())
+    }
+
+    /// The `--client-hostname` name for `addr`.
+    pub(crate) fn host_for(&self, addr: SocketAddr) -> Option<String> {
+        host_of(&self.config, Some(addr))
+    }
+
+    /// A topology reply from the current epoch, encoded once per epoch, kind, and protocol
+    /// (spec "Epoch changes"). A node that is not `NORMAL` returns `-TRYAGAIN`, except for
+    /// `CLUSTER INFO`, which then reports `cluster_state:fail` and is not cached.
+    pub fn topology(
+        &self,
+        kind: TopologyKind,
+        protocol: Protocol,
+    ) -> Result<Arc<Value>, CommandError> {
+        let normal = self.is_normal();
+        if !normal && kind != TopologyKind::Info {
+            return Err(CommandError::ClusterTryAgain);
+        }
+        let epoch = self.epochs().current().clone();
+        let at = kind as usize * 2 + usize::from(protocol == Protocol::Resp3);
+        if normal {
+            let cache = self.topology.lock();
+            if cache.epoch == Some(epoch.id()) {
+                if let Some(reply) = &cache.replies[at] {
+                    return Ok(reply.clone());
+                }
+            }
+        }
+        let rf = self.config.replication_factor;
+        let reply = Arc::new(topology::build(
+            kind, &epoch, rf, protocol, self.id, normal,
+        )?);
+        // A reply of an epoch that a newer one replaced in the meantime is not stored.
+        if normal && self.epoch_id() == epoch.id() {
+            let mut cache = self.topology.lock();
+            if cache.epoch != Some(epoch.id()) {
+                *cache = TopologyCache {
+                    epoch: Some(epoch.id()),
+                    ..TopologyCache::default()
+                };
+            }
+            cache.replies[at] = Some(reply.clone());
+        }
+        Ok(reply)
     }
 
     /// Settle the client address from the resolved cluster IP, unless a flag already did.
@@ -611,6 +661,13 @@ impl Node {
     pub fn next_conn_id(&self) -> u64 {
         self.next_conn_id.fetch_add(1, Ordering::Relaxed)
     }
+}
+
+/// The topology replies of one epoch, indexed by kind and protocol.
+#[derive(Default)]
+struct TopologyCache {
+    epoch: Option<EpochId>,
+    replies: [Option<Arc<Value>>; 8],
 }
 
 fn host_of(config: &Config, client_addr: Option<SocketAddr>) -> Option<String> {

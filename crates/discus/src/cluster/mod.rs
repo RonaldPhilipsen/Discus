@@ -6,6 +6,7 @@ pub mod multi;
 pub mod redirect;
 pub mod route;
 pub mod service;
+pub mod topology;
 pub mod writeset;
 
 use std::collections::{HashMap, HashSet};
