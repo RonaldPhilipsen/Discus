@@ -9,7 +9,7 @@ pub mod network;
 pub mod store;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Cursor;
+use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,7 +17,9 @@ use bytes::Bytes;
 use discus_placement::NodeId;
 use discus_resp::{Command, Value};
 use discus_wire::{Message, RaftReply, Regime};
-use openraft::{Config, Membership, Raft, RaftMetrics, ServerState, SnapshotPolicy};
+use openraft::async_runtime::WatchReceiver;
+use openraft::{Config, Membership, RaftMetrics, ReadPolicy, ServerState, SnapshotPolicy};
+use openraft_legacy::network_v1::ChunkedSnapshotReceiver;
 use parking_lot::Mutex;
 
 use super::budget::Budget;
@@ -32,11 +34,31 @@ openraft::declare_raft_types!(
         Node = Peer,
 );
 
+pub type Raft = openraft::Raft<TypeConfig, SmStore>;
+pub type Entry = openraft::type_config::alias::EntryOf<TypeConfig>;
+pub type LogId = openraft::type_config::alias::LogIdOf<TypeConfig>;
+pub type Vote = openraft::type_config::alias::VoteOf<TypeConfig>;
+pub type Peers = Membership<u64, Peer>;
+
 /// One log entry: the leader stamp and the command (spec section 10.4).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Op {
     pub stamp_ms: u64,
     pub command: Command,
+}
+
+/// The command name only: a `RESTORE` entry carries the whole state.
+impl fmt::Display for Op {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = self.command.first().map(|n| String::from_utf8_lossy(n));
+        write!(
+            f,
+            "{} ({} args) @{}",
+            name.as_deref().unwrap_or(""),
+            self.command.len().saturating_sub(1),
+            self.stamp_ms
+        )
+    }
 }
 
 /// The node behind a replica ID.
@@ -70,7 +92,7 @@ impl RaftTiming {
 }
 
 pub struct Replica {
-    pub raft: Raft<TypeConfig>,
+    pub raft: Raft,
     pub sm: Arc<Mutex<Sm>>,
     pub replica: u64,
     pub regime: Regime,
@@ -158,32 +180,46 @@ impl Replica {
     pub async fn handle(&self, message: Message) -> Message {
         let reply = match message {
             Message::RaftAppend(a) => match convert::append_of(a) {
-                Some(req) => match self.raft.append_entries(req).await {
-                    Ok(r) => convert::append_reply_to(&r),
-                    Err(_) => RaftReply::refused(),
-                },
+                Some(req) => {
+                    let last = req.last_log_id();
+                    match self.raft.append_entries(req).await {
+                        Ok(r) => convert::append_reply_to(&r, last),
+                        Err(_) => RaftReply::refused(),
+                    }
+                }
                 None => RaftReply::refused(),
             },
             Message::RaftVote(v) => match self.raft.vote(convert::vote_req_of(v)).await {
                 Ok(r) => convert::vote_reply_to(&r),
                 Err(_) => RaftReply::refused(),
             },
-            Message::RaftSnapshot(s) => {
-                match self.raft.install_snapshot(convert::snapshot_of(s)).await {
+            Message::RaftSnapshot(s) => match convert::snapshot_of(s) {
+                Some(req) => match self.raft.install_snapshot(req).await {
                     Ok(r) => convert::snapshot_reply_to(&r),
                     Err(_) => RaftReply::refused(),
-                }
-            }
+                },
+                None => RaftReply::refused(),
+            },
             _ => RaftReply::refused(),
         };
         Message::RaftReply(reply)
     }
 
-    pub(super) fn with_metrics<R>(&self, f: impl FnOnce(&RaftMetrics<u64, Peer>) -> R) -> R {
-        f(&self.raft.metrics().borrow())
+    pub(super) fn with_metrics<R>(&self, f: impl FnOnce(&RaftMetrics<TypeConfig>) -> R) -> R {
+        f(&self.raft.metrics().borrow_watched())
     }
 
-    fn with_membership<R>(&self, f: impl FnOnce(&Membership<u64, Peer>) -> R) -> R {
+    /// A linearizable read point: the leader confirms its leadership with a quorum and waits
+    /// until it applied every entry committed before (spec section 10.2).
+    pub async fn ensure_linearizable(&self) -> Result<(), String> {
+        self.raft
+            .ensure_linearizable(ReadPolicy::ReadIndex)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    fn with_membership<R>(&self, f: impl FnOnce(&Peers) -> R) -> R {
         self.with_metrics(|m| f(m.membership_config.membership()))
     }
 
@@ -214,7 +250,7 @@ impl Replica {
 
     pub fn learners(&self) -> Vec<(u64, NodeId)> {
         self.with_membership(|m| {
-            m.learner_ids()
+            m.non_write_voter_ids()
                 .filter_map(|id| m.get_node(&id).map(|p| (id, p.node)))
                 .collect()
         })
@@ -233,7 +269,7 @@ impl Replica {
     }
 
     pub fn is_learner(&self) -> bool {
-        self.with_membership(|m| m.learner_ids().any(|id| id == self.replica))
+        self.with_membership(|m| m.non_write_voter_ids().any(|id| id == self.replica))
     }
 
     /// The voter configs of the current membership. A joint change has two.
