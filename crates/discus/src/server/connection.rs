@@ -191,18 +191,21 @@ impl Pipeline {
 }
 
 /// Run the transport setup of a new connection (TLS or the PROXY header), then serve it.
+/// `redirect` marks a connection of the redirect listener.
 pub async fn accept(
     tcp: TcpStream,
     peer: SocketAddr,
     node: Arc<Node>,
     hard_stop: CancellationToken,
+    redirect: bool,
 ) {
+    let local_addr = tcp.local_addr().ok();
     let accepted = tokio::select! {
         _ = hard_stop.cancelled() => return,
         accepted = node.security.accept(tcp, peer) => accepted,
     };
     match accepted {
-        Ok((stream, auth)) => serve(stream, auth, node, hard_stop).await,
+        Ok((stream, auth)) => serve(stream, auth, node, hard_stop, redirect, local_addr).await,
         Err(e) => tracing::debug!(%peer, error = %e, "client connection setup failed"),
     }
 }
@@ -213,6 +216,8 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     auth: ConnAuth,
     node: Arc<Node>,
     hard_stop: CancellationToken,
+    redirect: bool,
+    local_addr: Option<SocketAddr>,
 ) {
     let _guard = node.track_connection();
     let cfg = &node.config;
@@ -229,6 +234,8 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     let max_request = cfg.max_request_bytes;
     let mut parser = Parser::new(limits);
     let mut conn = ConnState::new(node.next_conn_id(), auth);
+    conn.redirect = redirect;
+    conn.local_addr = local_addr;
     if node.link().is_some() {
         conn.writes = Some(Arc::new(parking_lot::Mutex::new(node.new_write_set())));
     }

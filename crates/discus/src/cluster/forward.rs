@@ -30,6 +30,9 @@ pub async fn send(
     let result = send_in_span(node, target, cmd, hop, mode, write, timeout)
         .instrument(telemetry::forward_span())
         .await;
+    if let Some(link) = node.link() {
+        link.note_forward(target, result.is_ok());
+    }
     telemetry::record_forward(
         discus_telemetry::global(),
         cmd,

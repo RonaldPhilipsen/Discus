@@ -194,7 +194,7 @@ pub async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, wire: &[u8])
 }
 
 #[path = "../common/mod.rs"]
-mod common;
+pub mod common;
 
 pub use common::{status, try_start_full as try_start, wait_status, Running as Node};
 

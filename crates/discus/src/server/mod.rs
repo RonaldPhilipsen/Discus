@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -108,6 +108,14 @@ async fn bind_transport(
 
 mod connection;
 mod order;
+
+/// Accept on `listener`, or wait forever without one.
+async fn accept_on(listener: Option<&TcpListener>) -> io::Result<(TcpStream, SocketAddr)> {
+    match listener {
+        Some(l) => l.accept().await,
+        None => std::future::pending().await,
+    }
+}
 
 /// A node with both listeners bound.
 pub struct Server {
@@ -292,8 +300,7 @@ impl Server {
     pub async fn run(self, shutdown: CancellationToken) -> io::Result<()> {
         let Server {
             listener,
-            // Bound so that the port is held and the address is advertised. Nothing accepts yet.
-            redirect: _redirect,
+            redirect,
             admin,
             node,
             lane,
@@ -325,6 +332,9 @@ impl Server {
             "bootstrapped"
         );
         tracing::info!(addr = ?listener.local_addr().ok(), "serving");
+        if let Some(redirect) = &redirect {
+            tracing::info!(addr = ?redirect.local_addr().ok(), "serving redirects");
+        }
         node.lag().spawn(stop_background.clone());
         node.spawn_epoch_work(stop_background.clone());
         if let Some(membership) = node.membership() {
@@ -397,7 +407,14 @@ impl Server {
                 accepted = listener.accept() => match accepted {
                     Ok((stream, peer)) => {
                         let _ = stream.set_nodelay(true);
-                        tracker.spawn(connection::accept(stream, peer, node.clone(), hard_stop.clone()));
+                        tracker.spawn(connection::accept(stream, peer, node.clone(), hard_stop.clone(), false));
+                    }
+                    Err(e) => break Err(e),
+                },
+                accepted = accept_on(redirect.as_ref()) => match accepted {
+                    Ok((stream, peer)) => {
+                        let _ = stream.set_nodelay(true);
+                        tracker.spawn(connection::accept(stream, peer, node.clone(), hard_stop.clone(), true));
                     }
                     Err(e) => break Err(e),
                 },
@@ -412,6 +429,7 @@ impl Server {
         }
         tracing::info!(open = node.connected_clients(), "draining");
         drop(listener);
+        drop(redirect);
         tracker.close();
         let timeout = Duration::from_secs(node.config.shutdown_timeout_secs);
         // The node stays a handoff source, flushes its queues, and hands its counter roles over

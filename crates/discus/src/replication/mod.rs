@@ -475,6 +475,11 @@ impl Replicator {
         q.clone()
     }
 
+    /// The queue to `peer` is down. False without a queue.
+    pub fn peer_down(&self, peer: NodeId) -> bool {
+        self.peers.read().get(&peer).is_some_and(|q| q.is_down())
+    }
+
     /// Keys waiting for `peer`.
     pub fn depth(&self, peer: NodeId) -> usize {
         self.peers.read().get(&peer).map_or(0, |q| q.len())
@@ -725,6 +730,8 @@ impl Replicator {
                 true,
             )
             .await?;
+        // An answered bulk message shows the peer is up (spec "Target health").
+        link.note_forward(peer, true);
         Ok(frame.message)
     }
 

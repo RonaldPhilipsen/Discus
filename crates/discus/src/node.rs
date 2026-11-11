@@ -286,6 +286,17 @@ impl Node {
     }
 
     /// Attach the gossip membership. Only the first call has an effect.
+    /// The target health of `id` (spec "Target health"): SWIM sees it `Alive`, or the node has no
+    /// failure detector, and neither the last forward nor the replication queue to it failed.
+    pub fn target_up(&self, id: NodeId) -> bool {
+        let alive = self
+            .membership()
+            .is_none_or(|m| m.liveness(id) == Some(discus_wire::Liveness::Alive));
+        alive
+            && !self.link().is_some_and(|l| l.forward_down(id))
+            && !self.replicator().is_some_and(|r| r.peer_down(id))
+    }
+
     pub fn set_membership(&self, membership: Arc<Membership>) {
         let _ = self.membership.set(membership);
     }
@@ -650,6 +661,12 @@ pub struct ConnState {
     rr: u64,
     /// The recent writes of a client connection in a cluster. Internal execution has none.
     pub writes: Option<Arc<parking_lot::Mutex<WriteSet>>>,
+    /// A connection of the redirect listener: keys that another node serves get `-MOVED`.
+    pub redirect: bool,
+    /// Set by `READONLY`, cleared by `READWRITE`. Only a redirect connection reads it.
+    pub readonly: bool,
+    /// The local address of the client socket.
+    pub local_addr: Option<SocketAddr>,
 }
 
 impl ConnState {
@@ -662,6 +679,9 @@ impl ConnState {
             closing: false,
             rr: id,
             writes: None,
+            redirect: false,
+            readonly: false,
+            local_addr: None,
         }
     }
 
