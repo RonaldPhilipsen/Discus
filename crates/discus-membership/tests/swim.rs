@@ -130,6 +130,8 @@ fn a_direct_rumor_at_the_same_incarnation_refreshes_the_rpc_address() {
         id: NodeId::from_u128(n),
         addr: "10.0.0.1:7379".parse().unwrap(),
         rpc_addr: format!("10.0.0.1:{rpc_port}").parse().unwrap(),
+        client_addr: None,
+        client_host: None,
         state: MemberState::Normal,
         incarnation: 5,
         weight: Default::default(),

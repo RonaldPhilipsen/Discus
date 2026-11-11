@@ -1,5 +1,7 @@
 //! Frame encoding and the verifying decoder.
 
+use std::net::SocketAddr;
+
 use bytes::Bytes;
 use discus_placement::{
     ClusterId, Epoch, EpochId, Member, MemberState, NodeId, Version, Weight, NTP64,
@@ -103,6 +105,7 @@ fn code_to(c: HandshakeCode) -> fb::HandshakeCode {
         HandshakeCode::FrameTooSmall => fb::HandshakeCode::FRAME_TOO_SMALL,
         HandshakeCode::NotHello => fb::HandshakeCode::NOT_HELLO,
         HandshakeCode::UnexpectedNode => fb::HandshakeCode::UNEXPECTED_NODE,
+        HandshakeCode::PlacementMismatch => fb::HandshakeCode::PLACEMENT_MISMATCH,
     }
 }
 
@@ -112,6 +115,7 @@ fn code_of(c: fb::HandshakeCode) -> HandshakeCode {
         fb::HandshakeCode::FRAME_TOO_SMALL => HandshakeCode::FrameTooSmall,
         fb::HandshakeCode::NOT_HELLO => HandshakeCode::NotHello,
         fb::HandshakeCode::UNEXPECTED_NODE => HandshakeCode::UnexpectedNode,
+        fb::HandshakeCode::PLACEMENT_MISMATCH => HandshakeCode::PlacementMismatch,
         // An unknown code from a newer build is still a failed handshake.
         _ => HandshakeCode::Other,
     }
@@ -126,6 +130,11 @@ fn version_of(v: &fb::Version) -> Version {
     Version::new(NTP64(v.time()), origin)
 }
 
+fn client_addr_of(s: Option<&str>) -> Result<Option<SocketAddr>, DecodeError> {
+    s.map(|a| a.parse().map_err(|_| invalid("a bad client address")))
+        .transpose()
+}
+
 fn epoch_to<'a>(fbb: &mut FlatBufferBuilder<'a>, epoch: &Epoch) -> WIPOffset<fb::Epoch<'a>> {
     let members: Vec<_> = epoch
         .members()
@@ -133,12 +142,16 @@ fn epoch_to<'a>(fbb: &mut FlatBufferBuilder<'a>, epoch: &Epoch) -> WIPOffset<fb:
         .map(|m| {
             let addr = fbb.create_string(&m.addr.to_string());
             let rpc_addr = fbb.create_string(&m.rpc_addr.to_string());
+            let client_addr = m.client_addr.map(|a| fbb.create_string(&a.to_string()));
+            let client_host = m.client_host.as_deref().map(|h| fbb.create_string(h));
             fb::Member::create(
                 fbb,
                 &fb::MemberArgs {
                     id: Some(&id128(m.id.to_be_bytes())),
                     addr: Some(addr),
                     rpc_addr: Some(rpc_addr),
+                    client_addr,
+                    client_host,
                     state: state_to(m.state),
                     weight: m.weight.get(),
                 },
@@ -176,6 +189,8 @@ fn epoch_of(e: fb::Epoch<'_>) -> Result<Epoch, DecodeError> {
             id: node_of(mid),
             addr,
             rpc_addr,
+            client_addr: client_addr_of(m.client_addr())?,
+            client_host: m.client_host().map(str::to_owned),
             state: state_of(m.state())?,
             weight: Weight::new(m.weight()).ok_or_else(|| invalid("member with a bad weight"))?,
         });
@@ -195,6 +210,8 @@ fn cluster_of(id: &fb::Id128) -> ClusterId {
 fn info_to<'a>(fbb: &mut FlatBufferBuilder<'a>, m: &MemberInfo) -> WIPOffset<fb::MemberInfo<'a>> {
     let addr = fbb.create_string(&m.addr.to_string());
     let rpc_addr = fbb.create_string(&m.rpc_addr.to_string());
+    let client_addr = m.client_addr.map(|a| fbb.create_string(&a.to_string()));
+    let client_host = m.client_host.as_deref().map(|h| fbb.create_string(h));
     let hints = (!m.leader_hints.is_empty()).then(|| fbb.create_vector(&m.leader_hints));
     fb::MemberInfo::create(
         fbb,
@@ -202,6 +219,8 @@ fn info_to<'a>(fbb: &mut FlatBufferBuilder<'a>, m: &MemberInfo) -> WIPOffset<fb:
             id: Some(&id128(m.id.to_be_bytes())),
             addr: Some(addr),
             rpc_addr: Some(rpc_addr),
+            client_addr,
+            client_host,
             state: state_to(m.state),
             incarnation: m.incarnation,
             weight: m.weight.get(),
@@ -225,6 +244,8 @@ fn info_of(m: fb::MemberInfo<'_>) -> Result<MemberInfo, DecodeError> {
             .rpc_addr()
             .and_then(|a| a.parse().ok())
             .ok_or_else(|| invalid("member info without a valid RPC address"))?,
+        client_addr: client_addr_of(m.client_addr())?,
+        client_host: m.client_host().map(str::to_owned),
         state: state_of(m.state())?,
         incarnation: m.incarnation(),
         weight: Weight::new(m.weight()).ok_or_else(|| invalid("member info with a bad weight"))?,

@@ -682,6 +682,8 @@ mod tests {
                 id: *id,
                 addr: std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
                 rpc_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+                client_addr: None,
+                client_host: None,
                 state: MemberState::Normal,
                 weight: Weight::default(),
             })

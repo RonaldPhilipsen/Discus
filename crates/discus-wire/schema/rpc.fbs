@@ -20,6 +20,7 @@ enum HandshakeCode: ubyte {
   FRAME_TOO_SMALL = 2,
   NOT_HELLO = 3,
   UNEXPECTED_NODE = 4,
+  PLACEMENT_MISMATCH = 5,
 }
 
 table HandshakeFailed {

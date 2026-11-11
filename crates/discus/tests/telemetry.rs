@@ -300,6 +300,8 @@ mod otel {
             id: NodeId::random(),
             addr: "127.0.0.1:7379".parse().unwrap(),
             rpc_addr: "127.0.0.1:7379".parse().unwrap(),
+            client_addr: None,
+            client_host: None,
             state,
             weight: Weight::default(),
         };

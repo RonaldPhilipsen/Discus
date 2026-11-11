@@ -183,6 +183,8 @@ impl Node {
             id,
             addr: config.cluster_listen,
             rpc_addr: config.cluster_listen,
+            client_addr: None,
+            client_host: None,
             state: MemberState::Normal,
             weight: Weight::new(config.weight).unwrap_or_default(),
         };
@@ -587,6 +589,8 @@ fn static_epoch(me: Member, config: &Config, cluster_id: ClusterId) -> Epoch {
         id: p.id.unwrap_or(NodeId::NIL),
         addr: p.addr,
         rpc_addr: p.addr,
+        client_addr: None,
+        client_host: None,
         state: MemberState::Normal,
         weight: Weight::default(),
     }));

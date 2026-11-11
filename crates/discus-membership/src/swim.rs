@@ -533,6 +533,8 @@ impl Swim {
             id,
             addr: info.addr,
             rpc_addr: info.rpc_addr,
+            client_addr: info.client_addr,
+            client_host: info.client_host.clone(),
             state,
             weight: info.weight,
         })
@@ -775,6 +777,8 @@ impl Swim {
             id: self.me.id,
             addr: self.me.addr,
             rpc_addr: self.me.rpc_addr,
+            client_addr: self.me.client_addr,
+            client_host: self.me.client_host.clone(),
             state: MemberState::Normal,
             weight: self.me.weight,
         };
