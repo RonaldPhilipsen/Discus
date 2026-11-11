@@ -471,21 +471,20 @@ enum Plan {
     Moved(CommandError),
 }
 
-fn single(node: &Arc<Node>, mut job: Job, hop: Hop, write: bool, route: Span) -> Dispatch {
-    let key = job.cmd[1].clone();
-    let writes = job
-        .writes
-        .take()
-        .filter(|_| !node.is_primary_read_key(&key));
-    let need = match (&writes, write) {
-        (Some(w), false) => w.lock().required(&key, std::time::Instant::now()),
+fn single(node: &Arc<Node>, job: Job, hop: Hop, write: bool, route: Span) -> Dispatch {
+    // A primary-read key keeps no write-set entry: every read of it goes to the primary.
+    let tracked = job.writes.is_some() && !node.is_primary_read_key(&job.cmd[1]);
+    let need = match (&job.writes, write) {
+        (Some(w), false) if tracked => w.lock().required(&job.cmd[1], std::time::Instant::now()),
         _ => None,
     };
     let readonly = redirect::applies(job.redirect, &hop).then_some(job.readonly);
+    // Only a write, or a read that must see an earlier write, changes the write set.
+    let key = (tracked && (write || need.is_some())).then(|| job.cmd[1].clone());
     let dispatch = single_planned(
         node, job.spec, job.cmd, hop, write, job.rr, need, readonly, route,
     );
-    let Some(writes) = writes else {
+    let (Some(writes), Some(key)) = (job.writes, key) else {
         return dispatch;
     };
     // The write set changes before the key order releases the next command on this key.
@@ -524,22 +523,22 @@ fn single_planned(
     redirect: Option<bool>,
     route: Span,
 ) -> Dispatch {
-    let key = cmd[1].clone();
+    let key: &[u8] = &cmd[1];
     let (plan, owners) = route.in_scope(|| {
-        let owners = node.owners(&key);
+        let owners = node.owners(key);
         let forward = || {
-            let targets = candidates(node, &key, &owners, write, rr, need);
+            let targets = candidates(node, key, &owners, write, rr, need);
             match targets.first() {
                 None => Plan::Retry,
                 Some(first) if *first == node.id => Plan::Local,
                 Some(_) => Plan::Forward(allowed(node, &hop, targets)),
             }
         };
-        let plan = match redirect.map(|ro| redirect::target(node, &key, &owners, write, need, ro)) {
+        let plan = match redirect.map(|ro| redirect::target(node, key, &owners, write, need, ro)) {
             None => forward(),
             Some(None) => Plan::Retry,
             Some(Some(t)) if t == node.id => Plan::Local,
-            Some(Some(t)) => match redirect::moved(node, &key, t) {
+            Some(Some(t)) => match redirect::moved(node, key, t) {
                 Some(moved) => Plan::Moved(moved),
                 None => forward(),
             },
@@ -551,16 +550,17 @@ fn single_planned(
         Plan::Retry => return Dispatch::Ready(Reply::try_again()),
         Plan::Moved(moved) => return Dispatch::Ready(Reply::error(moved)),
         Plan::Local if need.is_some() || hop.track => {
+            let owned = cmd[1].clone();
             return match local_acked(node, spec, cmd) {
                 Dispatch::Ready(mut reply) => {
-                    track_here(node, &key, &mut reply);
+                    track_here(node, &owned, &mut reply);
                     Dispatch::Ready(reply)
                 }
                 Dispatch::Pending(f) => {
                     let node = node.clone();
                     Dispatch::Pending(Box::pin(async move {
                         let mut reply = f.await;
-                        track_here(&node, &key, &mut reply);
+                        track_here(&node, &owned, &mut reply);
                         reply
                     }))
                 }
@@ -570,7 +570,8 @@ fn single_planned(
         Plan::Forward(targets) => targets,
     };
     if targets.is_empty() {
-        return spent(node, spec, cmd, &[&key], write);
+        let owned = cmd[1].clone();
+        return spent(node, spec, cmd, &[&owned], write);
     }
     hop.track |= need.is_some();
     let node = node.clone();
