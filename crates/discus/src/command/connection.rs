@@ -8,9 +8,10 @@ use discus_resp::{Command, Protocol, Value};
 
 use super::access::Access;
 use super::error::CommandError;
-use super::table::{names, CommandSpec};
+use super::table::{check, lookup, names, CommandSpec};
 use super::util::{glob_match, parse_i64, upper};
 use crate::build;
+use crate::cluster::route::{keys_of, Keys, Route};
 use crate::cluster::topology::{self, TopologyKind};
 use crate::node::{ConnState, Node};
 
@@ -143,12 +144,63 @@ fn command(_: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         None => Ok(Value::Array(
             names()
                 .into_iter()
-                .map(|n| Value::bulk(n.to_lowercase().into_bytes()))
+                .filter_map(|n| lookup(n.as_bytes()))
+                .map(command_entry)
                 .collect(),
         )),
         Some("COUNT") => Ok(Value::Integer(names().len() as i64)),
-        Some("DOCS") | Some("INFO") => Ok(Value::Array(vec![])),
+        Some("DOCS") => Ok(Value::Array(vec![])),
+        Some("INFO") => Ok(Value::Array(
+            cmd[2..]
+                .iter()
+                .map(|name| lookup(name).map_or(Value::Null, command_entry))
+                .collect(),
+        )),
+        Some("GETKEYS") if cmd.len() >= 3 => getkeys(&cmd[2..]),
         Some(_) => Err(CommandError::Syntax),
+    }
+}
+
+/// One `COMMAND` entry in the Redis 7 shape. The flag is `readonly` unless the command changes
+/// data. The ACL categories, tips, key specifications, and subcommands are empty.
+fn command_entry(spec: &CommandSpec) -> Value {
+    let flag = if spec.access == Access::Write {
+        "write"
+    } else {
+        "readonly"
+    };
+    let (first, last, step) = match spec.route {
+        Route::Single { .. } => (1, 1, 1),
+        Route::MultiRead { .. } | Route::MultiWrite { pairs: false } => (1, -1, 1),
+        Route::MultiWrite { pairs: true } => (1, -1, 2),
+        Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => (0, 0, 0),
+    };
+    Value::Array(vec![
+        Value::bulk(spec.name.to_lowercase().into_bytes()),
+        Value::Integer(i64::from(spec.arity)),
+        Value::Array(vec![Value::simple(flag)]),
+        Value::Integer(first),
+        Value::Integer(last),
+        Value::Integer(step),
+        Value::Array(vec![]),
+        Value::Array(vec![]),
+        Value::Array(vec![]),
+        Value::Array(vec![]),
+    ])
+}
+
+fn getkeys(args: &[Bytes]) -> Reply {
+    let inner: Command = args.to_vec();
+    let Ok(spec) = check(lookup(&inner[0]), &inner) else {
+        return Err(CommandError::Custom(
+            "ERR Invalid command specified or wrong number of arguments".into(),
+        ));
+    };
+    match keys_of(spec.route, &inner) {
+        Keys::Some(keys) => Ok(Value::Array(keys.into_iter().map(Value::Bulk).collect())),
+        Keys::None | Keys::Barrier => Err(CommandError::Custom(
+            "ERR The command has no key arguments".into(),
+        )),
     }
 }
 
@@ -382,4 +434,54 @@ fn standalone_topology(node: &Node, conn: &ConnState, kind: TopologyKind) -> Opt
         conn.protocol,
         node.topology_responder(true),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn positions(entry: &Value) -> (i64, i64, i64) {
+        let Value::Array(parts) = entry else {
+            panic!("entry is not an array: {entry:?}");
+        };
+        assert_eq!(parts.len(), 10, "{parts:?}");
+        let int = |i: usize| match parts[i] {
+            Value::Integer(n) => n,
+            ref other => panic!("not an integer: {other:?}"),
+        };
+        for empty in &parts[6..] {
+            assert_eq!(empty, &Value::Array(vec![]));
+        }
+        (int(3), int(4), int(5))
+    }
+
+    #[test]
+    fn every_entry_has_its_key_positions() {
+        for name in names() {
+            let spec = lookup(name.as_bytes()).unwrap();
+            let want = match spec.route {
+                Route::Single { .. } => (1, 1, 1),
+                Route::MultiRead { .. } | Route::MultiWrite { pairs: false } => (1, -1, 1),
+                Route::MultiWrite { pairs: true } => (1, -1, 2),
+                _ => (0, 0, 0),
+            };
+            assert_eq!(positions(&command_entry(spec)), want, "{name}");
+        }
+        let of = |name: &str| positions(&command_entry(lookup(name.as_bytes()).unwrap()));
+        assert_eq!(of("MSET"), (1, -1, 2));
+        assert_eq!(of("GET"), (1, 1, 1));
+        assert_eq!(of("PING"), (0, 0, 0));
+    }
+
+    #[test]
+    fn flags_follow_access() {
+        let flags = |name: &str| {
+            let Value::Array(p) = command_entry(lookup(name.as_bytes()).unwrap()) else {
+                unreachable!()
+            };
+            p[2].clone()
+        };
+        assert_eq!(flags("GET"), Value::Array(vec![Value::simple("readonly")]));
+        assert_eq!(flags("SET"), Value::Array(vec![Value::simple("write")]));
+    }
 }
