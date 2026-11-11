@@ -114,6 +114,19 @@ fn persist(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 }
 
 fn scan(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+    scan_where(node, cmd, |_| true)
+}
+
+/// `SCAN` for a redirect connection: only the keys that this node is primary for, so a client
+/// that scans every node sees each key once.
+pub fn scan_primary(node: &Node, cmd: &Command) -> Value {
+    let epochs = node.epochs();
+    let epoch = epochs.current();
+    scan_where(node, cmd, |key| epoch.primary(key) == Some(node.id))
+        .unwrap_or_else(|e| e.to_value())
+}
+
+fn scan_where(node: &Node, cmd: &Command, keep: impl Fn(&[u8]) -> bool) -> Reply {
     let cursor = std::str::from_utf8(&cmd[1])
         .ok()
         .and_then(|c| c.parse::<u64>().ok())
@@ -137,7 +150,12 @@ fn scan(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     let (next, keys) = node.store.scan(cursor, count, pattern.as_deref());
     Ok(Value::Array(vec![
         Value::bulk(next.to_string().into_bytes()),
-        Value::Array(keys.into_iter().map(Value::Bulk).collect()),
+        Value::Array(
+            keys.into_iter()
+                .filter(|k| keep(k))
+                .map(Value::Bulk)
+                .collect(),
+        ),
     ]))
 }
 
