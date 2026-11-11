@@ -669,13 +669,14 @@ fn stop(role: &Role) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
     use discus_placement::{ClusterId, EpochId, Member, MemberState, Weight};
 
-    fn view(ids: &[NodeId]) -> View {
+    /// A view of `ids`, all `NORMAL`, from the first.
+    pub(in crate::counter) fn view(ids: &[NodeId]) -> View {
         let members = ids
             .iter()
             .map(|id| Member {

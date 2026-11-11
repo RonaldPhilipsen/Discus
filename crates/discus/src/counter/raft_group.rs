@@ -34,8 +34,8 @@ pub struct RaftRole {
     /// Since when this replica leads. A new leader has heard from nobody yet, so it measures the
     /// silence of a voter from here, never from the start of the replica.
     leading_since: Mutex<Option<Instant>>,
-    /// Since when the leader that the hints name lists this node in no role and does not
-    /// replicate to this replica.
+    /// Since when [`removed_by`] holds without a break. Every step takes it, and only a step
+    /// that reaches the check puts it back, so any other branch restarts the wait.
     dropped_since: Mutex<Option<Instant>>,
 }
 
@@ -152,6 +152,46 @@ fn voter_goal(
     joint.then(|| last.clone())
 }
 
+/// The leader of `regime` removed this replica, but the replica missed the entry that removes
+/// it: openraft stops replicating to a removed node once the change commits. Its own membership
+/// still lists it as a voter, so it keeps starting elections that the voters refuse while their
+/// leader lease runs, which never ends. `hint` shows the removal: a `NORMAL` leader of the
+/// regime lists this node in no role, and this replica does not follow it. `leader_term` is the
+/// newest term of a leader that this replica accepted. A hint of an older term can come from a
+/// leader that has lost its place to one that lists this node.
+fn removed_by(
+    hint: Option<&GroupHint>,
+    view: &View,
+    regime: Regime,
+    following: Option<NodeId>,
+    leader_term: u64,
+) -> bool {
+    hint.is_some_and(|k| {
+        k.mode == CounterMode::Raft
+            && k.regime == regime
+            && k.leader != view.me
+            && view.normal(k.leader)
+            && k.term >= leader_term
+            && !k.voters.contains(&view.me)
+            && !k.learners.contains(&view.me)
+            && following != Some(k.leader)
+    })
+}
+
+/// Whether `cond` held for `wait` since `since`: the new start, and whether the wait is over.
+fn held_for(
+    cond: bool,
+    since: Option<Instant>,
+    now: Instant,
+    wait: Duration,
+) -> (Option<Instant>, bool) {
+    if !cond {
+        return (None, false);
+    }
+    let since = since.unwrap_or(now);
+    (Some(since), now.duration_since(since) > wait)
+}
+
 /// The `NORMAL` voters form a majority of `voters`, so they can elect a leader without the
 /// others.
 fn normal_quorum(voters: &[NodeId], normal: impl Fn(NodeId) -> bool) -> bool {
@@ -229,6 +269,7 @@ impl Group {
         r: &Arc<RaftRole>,
     ) {
         let replica = &r.replica;
+        let dropped_since = r.dropped_since.lock().take();
         let voters = replica.voters();
         let me_voter = replica.is_voter();
         if view.normal_count() < 3 {
@@ -298,32 +339,23 @@ impl Group {
             .is_some_and(|k| k.regime > r.regime());
         let listed = me_voter || replica.is_learner();
         let orphan = !listed && replica.started.elapsed() > ORPHAN_AFTER;
-        if known_newer || orphan || self.dropped(view, r) {
+        if known_newer || orphan || self.dropped(view, r, dropped_since) {
             self.set_role_if(seen, Role::Idle);
         }
     }
 
-    /// The leader of this regime removed this replica, but the replica missed the entry that
-    /// removes it: openraft stops replicating to a removed node once the change commits. Its
-    /// own membership still lists it as a voter, so it keeps starting elections that the voters
-    /// refuse while their leader lease runs, which never ends. The hint of the leader shows the
-    /// removal: it lists this node in no role, and this replica does not follow that leader.
-    fn dropped(&self, view: &View, r: &RaftRole) -> bool {
-        let gone = self.inner().known.as_ref().is_some_and(|k| {
-            k.mode == CounterMode::Raft
-                && k.regime == r.regime()
-                && k.leader != view.me
-                && view.normal(k.leader)
-                && !k.voters.contains(&view.me)
-                && !k.learners.contains(&view.me)
-                && r.replica.leader_node() != Some(k.leader)
-        });
-        let mut since = r.dropped_since.lock();
-        if !gone {
-            *since = None;
-            return false;
-        }
-        since.get_or_insert_with(Instant::now).elapsed() > ORPHAN_AFTER
+    /// [`removed_by`] the known hint held for `ORPHAN_AFTER`, counted from `since`.
+    fn dropped(&self, view: &View, r: &RaftRole, since: Option<Instant>) -> bool {
+        let removed = removed_by(
+            self.inner().known.as_ref(),
+            view,
+            r.regime(),
+            r.replica.leader_node(),
+            r.replica.leader_term(),
+        );
+        let (since, due) = held_for(removed, since, Instant::now(), ORPHAN_AFTER);
+        *r.dropped_since.lock() = since;
+        due
     }
 
     /// Below three `NORMAL` members the group goes back to leader-follower mode at once. The
@@ -627,12 +659,87 @@ impl Group {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::counter::group;
 
     fn set(ids: &[u64]) -> BTreeSet<u64> {
         ids.iter().copied().collect()
     }
 
     const ALL: fn(&u64) -> bool = |_| true;
+
+    fn ids() -> Vec<NodeId> {
+        (1..=4).map(NodeId::from_u128).collect()
+    }
+
+    /// The hint of leader `ids[1]` in term 3 of regime 1, with voters `voters`.
+    fn hint(voters: &[NodeId], learners: &[NodeId]) -> GroupHint {
+        GroupHint {
+            mode: CounterMode::Raft,
+            regime: Regime {
+                generation: 1,
+                origin: ids()[1],
+            },
+            leader: ids()[1],
+            term: 3,
+            voters: voters.to_vec(),
+            learners: learners.to_vec(),
+            ..GroupHint::default()
+        }
+    }
+
+    #[test]
+    fn a_voter_that_its_leader_dropped_is_removed() {
+        let (n, v) = (ids(), group::tests::view(&ids()));
+        let h = hint(&n[1..], &[]);
+        assert!(removed_by(Some(&h), &v, h.regime, None, 3));
+        assert!(removed_by(Some(&h), &v, h.regime, Some(n[0]), 1));
+    }
+
+    #[test]
+    fn a_listed_replica_is_never_removed() {
+        let (n, v) = (ids(), group::tests::view(&ids()));
+        // A learner, a learner being promoted, and a voter in a joint config that keeps it.
+        for h in [
+            hint(&n[1..3], &[n[0]]),
+            hint(&n[..3], &[]),
+            hint(&n[..4], &[]),
+        ] {
+            assert!(!removed_by(Some(&h), &v, h.regime, None, 3), "{h:?}");
+        }
+    }
+
+    #[test]
+    fn a_replica_that_follows_the_leader_stays() {
+        let (n, v) = (ids(), group::tests::view(&ids()));
+        let h = hint(&n[1..], &[]);
+        assert!(!removed_by(Some(&h), &v, h.regime, Some(h.leader), 3));
+    }
+
+    #[test]
+    fn the_hint_of_an_older_term_or_regime_removes_nothing() {
+        let (n, v) = (ids(), group::tests::view(&ids()));
+        let h = hint(&n[1..], &[]);
+        // This replica follows a newer leader that lists it, whose hint did not arrive yet.
+        assert!(!removed_by(Some(&h), &v, h.regime, Some(n[2]), 4));
+        let newer = Regime {
+            generation: 2,
+            ..h.regime
+        };
+        assert!(!removed_by(Some(&h), &v, newer, None, 0));
+        assert!(!removed_by(None, &v, h.regime, None, 0));
+    }
+
+    #[test]
+    fn the_wait_restarts_when_the_condition_breaks() {
+        let wait = Duration::from_secs(5);
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_secs(6);
+        assert_eq!(held_for(true, None, t0, wait), (Some(t0), false));
+        assert_eq!(held_for(true, Some(t0), later, wait), (Some(t0), true));
+        assert_eq!(held_for(false, Some(t0), later, wait), (None, false));
+        // A step that skipped the check put no start back, so the wait begins again.
+        assert_eq!(held_for(true, None, later, wait), (Some(later), false));
+    }
 
     #[test]
     fn a_single_voter_waits_for_every_target() {

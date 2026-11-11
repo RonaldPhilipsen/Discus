@@ -192,6 +192,15 @@ async fn a_voter_that_missed_its_removal_leaves() {
         "the removed voter still holds group {g}\n{}",
         dump(&all)
     );
+    // The promoted fourth node and the other voters stay past the wait that removes a replica.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    for n in all.iter().filter(|n| want.contains(&n.id)) {
+        assert!(
+            matches!(role(n, g), "voter" | "leader"),
+            "a target left group {g}\n{}",
+            dump(&all)
+        );
+    }
     let leader = leader_of(&all, g).unwrap();
     let mut c = leader.redis().await;
     let _: i64 = incr_until(&mut c, &key_in(leader, g, "gone"), Duration::from_secs(10)).await;
