@@ -120,8 +120,7 @@ fn scan(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 /// `SCAN` for a redirect connection: only the keys that this node is primary for, so a client
 /// that scans every node sees each key once.
 pub fn scan_primary(node: &Node, cmd: &Command) -> Value {
-    let epochs = node.epochs();
-    let epoch = epochs.current();
+    let epoch = node.epochs().current().clone();
     scan_where(node, cmd, |key| epoch.primary(key) == Some(node.id))
         .unwrap_or_else(|e| e.to_value())
 }
