@@ -37,7 +37,8 @@ async fn start_authed(
 }
 
 /// A node learns the epoch of a peer from a forward. Forward one write from every node to every
-/// other node, so `-MOVED` does not wait for the epoch check.
+/// other node, so `-MOVED` does not wait for the epoch check. The write also replicates, and a
+/// replication queue that is not up yet makes the target look down, so wait for target health.
 async fn warm(c: &Cluster, token: Option<&str>) {
     for (i, from) in c.nodes.iter().enumerate() {
         let mut client = Raw::connect(from.addr).await;
@@ -50,6 +51,8 @@ async fn warm(c: &Cluster, token: Option<&str>) {
                 assert_eq!(client.cmd(&["SET", &key, "w"]).await, "+OK");
                 let link = from.node.link().unwrap();
                 assert!(link.peer_epoch(to.id).is_some());
+                let up = wait_until(Duration::from_secs(20), || from.node.target_up(to.id));
+                assert!(up.await, "node {i} never saw node {j} up");
             }
         }
     }
