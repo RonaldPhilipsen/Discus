@@ -40,6 +40,8 @@ fn member(n: u128, port: u16, state: MemberState) -> Member {
         id: id(n),
         addr: SocketAddr::from(([127, 0, 0, 1], port)),
         rpc_addr: SocketAddr::from(([127, 0, 0, 1], port + 1)),
+        client_addr: None,
+        client_host: None,
         state,
         weight: Weight::new(1.5).unwrap(),
     }
@@ -347,4 +349,24 @@ fn a_reused_builder_gives_the_same_bytes() {
     assert_eq!(encode_frame(&small), first);
     assert_eq!(decode_frame(&first, &limits()).unwrap(), small);
     assert_eq!(decode_frame(&big, &limits()).unwrap(), large);
+}
+
+#[test]
+fn an_epoch_round_trips_client_addresses() {
+    let mut a = member(1, 7001, MemberState::Normal);
+    a.client_addr = Some(SocketAddr::from(([127, 0, 0, 1], 6379)));
+    a.client_host = Some("cache-0.discus.svc".into());
+    let mut b = member(2, 7002, MemberState::Normal);
+    b.client_addr = Some(SocketAddr::from(([10, 0, 0, 2], 6380)));
+    let c = member(3, 7003, MemberState::Normal);
+    let epoch = Epoch::new(epoch_id(4, 1), ClusterId::from_u128(77), vec![a, b, c]).unwrap();
+    round_trip(Message::Forward(Forward {
+        command: Bytes::from_static(b"*1\r\n$6\r\nDBSIZE\r\n"),
+        epoch: epoch_id(4, 1),
+        epoch_body: Some(epoch),
+        hops: 1,
+        path: vec![],
+        mode: ForwardMode::Route,
+        track: false,
+    }));
 }

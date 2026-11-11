@@ -281,15 +281,16 @@ impl ::flatbuffers::SimpleToVerifyInSlice for MessageType {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_HANDSHAKE_CODE: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_HANDSHAKE_CODE: u8 = 4;
+pub const ENUM_MAX_HANDSHAKE_CODE: u8 = 5;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_HANDSHAKE_CODE: [HandshakeCode; 5] = [
+pub const ENUM_VALUES_HANDSHAKE_CODE: [HandshakeCode; 6] = [
   HandshakeCode::OTHER,
   HandshakeCode::CLUSTER_MISMATCH,
   HandshakeCode::FRAME_TOO_SMALL,
   HandshakeCode::NOT_HELLO,
   HandshakeCode::UNEXPECTED_NODE,
+  HandshakeCode::PLACEMENT_MISMATCH,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -302,15 +303,17 @@ impl HandshakeCode {
   pub const FRAME_TOO_SMALL: Self = Self(2);
   pub const NOT_HELLO: Self = Self(3);
   pub const UNEXPECTED_NODE: Self = Self(4);
+  pub const PLACEMENT_MISMATCH: Self = Self(5);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 4;
+  pub const ENUM_MAX: u8 = 5;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::OTHER,
     Self::CLUSTER_MISMATCH,
     Self::FRAME_TOO_SMALL,
     Self::NOT_HELLO,
     Self::UNEXPECTED_NODE,
+    Self::PLACEMENT_MISMATCH,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -320,6 +323,7 @@ impl HandshakeCode {
       Self::FRAME_TOO_SMALL => Some("FRAME_TOO_SMALL"),
       Self::NOT_HELLO => Some("NOT_HELLO"),
       Self::UNEXPECTED_NODE => Some("UNEXPECTED_NODE"),
+      Self::PLACEMENT_MISMATCH => Some("PLACEMENT_MISMATCH"),
       _ => None,
     }
   }
@@ -1895,6 +1899,8 @@ impl<'a> Member<'a> {
   pub const VT_STATE: ::flatbuffers::VOffsetT = 8;
   pub const VT_WEIGHT: ::flatbuffers::VOffsetT = 10;
   pub const VT_RPC_ADDR: ::flatbuffers::VOffsetT = 12;
+  pub const VT_CLIENT_ADDR: ::flatbuffers::VOffsetT = 14;
+  pub const VT_CLIENT_HOST: ::flatbuffers::VOffsetT = 16;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -1907,6 +1913,8 @@ impl<'a> Member<'a> {
   ) -> ::flatbuffers::WIPOffset<Member<'bldr>> {
     let mut builder = MemberBuilder::new(_fbb);
     builder.add_weight(args.weight);
+    if let Some(x) = args.client_host { builder.add_client_host(x); }
+    if let Some(x) = args.client_addr { builder.add_client_addr(x); }
     if let Some(x) = args.rpc_addr { builder.add_rpc_addr(x); }
     if let Some(x) = args.addr { builder.add_addr(x); }
     if let Some(x) = args.id { builder.add_id(x); }
@@ -1950,6 +1958,22 @@ impl<'a> Member<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(Member::VT_RPC_ADDR, None)}
   }
+  /// The address of the client port. Absent when the node serves none.
+  #[inline]
+  pub fn client_addr(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(Member::VT_CLIENT_ADDR, None)}
+  }
+  /// The host name that clients dial instead of the address, when set.
+  #[inline]
+  pub fn client_host(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(Member::VT_CLIENT_HOST, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for Member<'_> {
@@ -1963,6 +1987,8 @@ impl ::flatbuffers::Verifiable for Member<'_> {
      .visit_field::<MemberState>("state", Self::VT_STATE, false)?
      .visit_field::<f64>("weight", Self::VT_WEIGHT, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("rpc_addr", Self::VT_RPC_ADDR, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("client_addr", Self::VT_CLIENT_ADDR, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("client_host", Self::VT_CLIENT_HOST, false)?
      .finish();
     Ok(())
   }
@@ -1973,6 +1999,8 @@ pub struct MemberArgs<'a> {
     pub state: MemberState,
     pub weight: f64,
     pub rpc_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub client_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub client_host: Option<::flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for MemberArgs<'a> {
   #[inline]
@@ -1983,6 +2011,8 @@ impl<'a> Default for MemberArgs<'a> {
       state: MemberState::JOINING,
       weight: 1.0,
       rpc_addr: None,
+      client_addr: None,
+      client_host: None,
     }
   }
 }
@@ -2013,6 +2043,14 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> MemberBuilder<'a, 'b, A> {
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(Member::VT_RPC_ADDR, rpc_addr);
   }
   #[inline]
+  pub fn add_client_addr(&mut self, client_addr: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(Member::VT_CLIENT_ADDR, client_addr);
+  }
+  #[inline]
+  pub fn add_client_host(&mut self, client_host: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(Member::VT_CLIENT_HOST, client_host);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> MemberBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     MemberBuilder {
@@ -2035,6 +2073,8 @@ impl ::core::fmt::Debug for Member<'_> {
       ds.field("state", &self.state());
       ds.field("weight", &self.weight());
       ds.field("rpc_addr", &self.rpc_addr());
+      ds.field("client_addr", &self.client_addr());
+      ds.field("client_host", &self.client_host());
       ds.finish()
   }
 }
@@ -3388,6 +3428,8 @@ impl<'a> MemberInfo<'a> {
   pub const VT_CAPACITY_MAX: ::flatbuffers::VOffsetT = 20;
   pub const VT_LEADER_HINTS: ::flatbuffers::VOffsetT = 22;
   pub const VT_RPC_ADDR: ::flatbuffers::VOffsetT = 24;
+  pub const VT_CLIENT_ADDR: ::flatbuffers::VOffsetT = 26;
+  pub const VT_CLIENT_HOST: ::flatbuffers::VOffsetT = 28;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -3404,6 +3446,8 @@ impl<'a> MemberInfo<'a> {
     builder.add_capabilities(args.capabilities);
     builder.add_weight(args.weight);
     builder.add_incarnation(args.incarnation);
+    if let Some(x) = args.client_host { builder.add_client_host(x); }
+    if let Some(x) = args.client_addr { builder.add_client_addr(x); }
     if let Some(x) = args.rpc_addr { builder.add_rpc_addr(x); }
     if let Some(x) = args.leader_hints { builder.add_leader_hints(x); }
     if let Some(x) = args.epoch { builder.add_epoch(x); }
@@ -3495,6 +3539,20 @@ impl<'a> MemberInfo<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(MemberInfo::VT_RPC_ADDR, None)}
   }
+  #[inline]
+  pub fn client_addr(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(MemberInfo::VT_CLIENT_ADDR, None)}
+  }
+  #[inline]
+  pub fn client_host(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(MemberInfo::VT_CLIENT_HOST, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for MemberInfo<'_> {
@@ -3514,6 +3572,8 @@ impl ::flatbuffers::Verifiable for MemberInfo<'_> {
      .visit_field::<u64>("capacity_max", Self::VT_CAPACITY_MAX, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("leader_hints", Self::VT_LEADER_HINTS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("rpc_addr", Self::VT_RPC_ADDR, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("client_addr", Self::VT_CLIENT_ADDR, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("client_host", Self::VT_CLIENT_HOST, false)?
      .finish();
     Ok(())
   }
@@ -3530,6 +3590,8 @@ pub struct MemberInfoArgs<'a> {
     pub capacity_max: u64,
     pub leader_hints: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
     pub rpc_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub client_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub client_host: Option<::flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for MemberInfoArgs<'a> {
   #[inline]
@@ -3546,6 +3608,8 @@ impl<'a> Default for MemberInfoArgs<'a> {
       capacity_max: 0,
       leader_hints: None,
       rpc_addr: None,
+      client_addr: None,
+      client_host: None,
     }
   }
 }
@@ -3600,6 +3664,14 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> MemberInfoBuilder<'a, 'b, A> 
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(MemberInfo::VT_RPC_ADDR, rpc_addr);
   }
   #[inline]
+  pub fn add_client_addr(&mut self, client_addr: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(MemberInfo::VT_CLIENT_ADDR, client_addr);
+  }
+  #[inline]
+  pub fn add_client_host(&mut self, client_host: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(MemberInfo::VT_CLIENT_HOST, client_host);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> MemberInfoBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     MemberInfoBuilder {
@@ -3628,6 +3700,8 @@ impl ::core::fmt::Debug for MemberInfo<'_> {
       ds.field("capacity_max", &self.capacity_max());
       ds.field("leader_hints", &self.leader_hints());
       ds.field("rpc_addr", &self.rpc_addr());
+      ds.field("client_addr", &self.client_addr());
+      ds.field("client_host", &self.client_host());
       ds.finish()
   }
 }

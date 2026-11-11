@@ -12,6 +12,8 @@ fn member(id: u128, state: MemberState, weight: f64) -> Member {
         id: NodeId::from_u128(id),
         addr: SocketAddr::from(([127, 0, 0, 1], 7000)),
         rpc_addr: SocketAddr::from(([127, 0, 0, 1], 7000)),
+        client_addr: None,
+        client_host: None,
         state,
         weight: Weight::new(weight).unwrap(),
     }

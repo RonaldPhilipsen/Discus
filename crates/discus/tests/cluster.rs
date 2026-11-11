@@ -108,7 +108,10 @@ async fn a_higher_epoch_is_adopted_before_acting() {
 async fn without_epoch_push_the_receiver_keeps_its_epoch() {
     let c = start_cluster_with(2, |i| {
         if i == 0 {
-            vec!["--cluster-capabilities".into(), "0".into()]
+            vec![
+                "--cluster-capabilities".into(),
+                (discus_wire::caps::KNOWN & !discus_wire::caps::EPOCH_PUSH).to_string(),
+            ]
         } else {
             vec![]
         }

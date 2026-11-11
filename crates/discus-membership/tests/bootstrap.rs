@@ -194,6 +194,8 @@ fn a_discovery_refresh_keeps_learned_seeds() {
         id: NodeId::from_u128(1),
         addr: "10.0.0.1:7379".parse().unwrap(),
         rpc_addr: "10.0.0.1:7379".parse().unwrap(),
+        client_addr: None,
+        client_host: None,
         state: MemberState::Joining,
         incarnation: 0,
         weight: Default::default(),

@@ -22,6 +22,7 @@ pub enum HandshakeCode {
     FrameTooSmall,
     NotHello,
     UnexpectedNode,
+    PlacementMismatch,
 }
 
 /// How the receiver of a forward acts on it.
@@ -288,6 +289,8 @@ pub struct CounterAck {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+// One message lives for one frame, so boxing the gossip variant would only add an allocation.
+#[allow(clippy::large_enum_variant)]
 pub enum Message {
     Hello(Hello),
     HandshakeFailed(HandshakeFailed),
@@ -381,6 +384,8 @@ pub struct MemberInfo {
     /// The gossip address. `rpc_addr` is the RPC address. They are equal with static membership.
     pub addr: SocketAddr,
     pub rpc_addr: SocketAddr,
+    pub client_addr: Option<SocketAddr>,
+    pub client_host: Option<String>,
     pub state: MemberState,
     /// Only the member itself raises its incarnation.
     pub incarnation: u64,

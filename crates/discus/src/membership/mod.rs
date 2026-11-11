@@ -96,6 +96,8 @@ impl Membership {
             id: node.id,
             addr: advertise,
             rpc_addr: rpc_advertise,
+            client_addr: None,
+            client_host: None,
             state: MemberState::Joining,
             incarnation: 0,
             weight: Weight::new(config.weight).unwrap_or_default(),

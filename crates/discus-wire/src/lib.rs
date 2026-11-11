@@ -61,9 +61,17 @@ pub mod caps {
     /// The dialer takes reads on the shared stream too. The acceptor sends a reply larger than
     /// the shared limit on a new unidirectional stream, and the dialer accepts those streams.
     pub const SHARED_READS: u64 = 32;
+    /// The node places keys by hash slot range. A peer without this bit places keys by the older
+    /// rule, and the handshake refuses it.
+    pub const SLOT_PLACEMENT: u64 = 64;
     /// Every bit this build knows.
-    pub const KNOWN: u64 =
-        EPOCH_PUSH | GOSSIP | REPLICATION | COUNTERS | SHARED_STREAM | SHARED_READS;
+    pub const KNOWN: u64 = EPOCH_PUSH
+        | GOSSIP
+        | REPLICATION
+        | COUNTERS
+        | SHARED_STREAM
+        | SHARED_READS
+        | SLOT_PLACEMENT;
 }
 
 /// The frame limit before `HELLO` completes, and the smallest offer that `HELLO` accepts.

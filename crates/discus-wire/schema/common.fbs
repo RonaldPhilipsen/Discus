@@ -37,6 +37,10 @@ table Member {
   state: MemberState (id: 2);
   weight: double = 1.0 (id: 3);
   rpc_addr: string (id: 4);
+  /// The address of the client port. Absent when the node serves none.
+  client_addr: string (id: 5);
+  /// The host name that clients dial instead of the address, when set.
+  client_host: string (id: 6);
 }
 
 /// A full epoch: identity, cluster, and the sorted member list.

@@ -23,6 +23,8 @@ fn info(n: u128, port: u16, state: MemberState) -> MemberInfo {
         id: id(n),
         addr: addr(port),
         rpc_addr: addr(port + 1),
+        client_addr: None,
+        client_host: None,
         state,
         incarnation: n as u64 + 3,
         weight: Weight::new(2.0).unwrap(),
@@ -45,6 +47,8 @@ fn epoch() -> Epoch {
             id: id(n),
             addr: addr(7000 + n as u16),
             rpc_addr: addr(7500 + n as u16),
+            client_addr: None,
+            client_host: None,
             state: MemberState::Normal,
             weight: Weight::default(),
         })
@@ -249,4 +253,24 @@ fn a_member_info_with_a_bad_or_missing_rpc_addr_fails_to_decode() {
         decode_frame(&bytes, &Limits::default()),
         Err(DecodeError::Invalid(_))
     ));
+}
+
+#[test]
+fn member_info_round_trips_client_addresses() {
+    for (client_addr, client_host) in [
+        (Some(addr(6379)), Some("cache-0.discus.svc".to_string())),
+        (Some(addr(6379)), None),
+        (None, None),
+    ] {
+        let mut m = info(1, 7379, MemberState::Normal);
+        m.client_addr = client_addr;
+        m.client_host = client_host;
+        let frame = Frame {
+            request_id: 1,
+            trace: TraceContext::default(),
+            message: Message::Gossip(Gossip::new(GossipKind::Ping, m)),
+        };
+        let decoded = decode_frame(&encode_frame(&frame), &Limits::default()).unwrap();
+        assert_eq!(decoded, frame);
+    }
 }
