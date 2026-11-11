@@ -3,6 +3,7 @@
 use std::fmt::Write;
 
 use bytes::Bytes;
+use discus_placement::{slot, Epoch};
 use discus_resp::{Command, Protocol, Value};
 
 use super::access::Access;
@@ -10,6 +11,7 @@ use super::error::CommandError;
 use super::table::{names, CommandSpec};
 use super::util::{glob_match, parse_i64, upper};
 use crate::build;
+use crate::cluster::topology::{self, TopologyKind};
 use crate::node::{ConnState, Node};
 
 /// The Redis version that Discus reports. Clients gate features on it.
@@ -216,6 +218,13 @@ fn info(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         &[format!("db0:keys={},expires=0,avg_ttl=0", node.store.len())],
     );
     section(
+        "Cluster",
+        &[format!(
+            "cluster_enabled:{}",
+            u8::from(node.config.topology_enabled())
+        )],
+    );
+    section(
         "discus",
         &[
             format!("discus_build:{}", build::BUILD_ID),
@@ -241,6 +250,17 @@ fn info(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
             format!(
                 "discus_rpc_addr:{}",
                 node.rpc_addr()
+                    .map_or("none".to_string(), |a| a.to_string())
+            ),
+            format!(
+                "discus_redirect_addr:{}",
+                node.config
+                    .redirect_listen
+                    .map_or("none".to_string(), |a| a.to_string())
+            ),
+            format!(
+                "discus_client_addr:{}",
+                node.client_addr()
                     .map_or("none".to_string(), |a| a.to_string())
             ),
             format!("discus_peers:{}", node.config.peers.len()),
@@ -292,10 +312,75 @@ fn config(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     ))
 }
 
-fn cluster(_: &Node, _: &mut ConnState, _: &Command) -> Reply {
-    Err(CommandError::Custom(
-        "ERR Discus is not a Redis Cluster. Any node accepts any key, so clients do not need \
-         topology awareness. Use a standalone client."
-            .into(),
+fn cluster(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    if !node.config.topology_enabled() {
+        return Err(CommandError::Custom(
+            "ERR Discus is not a Redis Cluster. Any node accepts any key, so clients do not need \
+             topology awareness. Use a standalone client."
+                .into(),
+        ));
+    }
+    let Some(sub) = cmd.get(1).map(upper) else {
+        return Err(CommandError::WrongArity("CLUSTER".into()));
+    };
+    let kind = match sub.as_str() {
+        "SLOTS" => Some(TopologyKind::Slots),
+        "SHARDS" => Some(TopologyKind::Shards),
+        "NODES" => Some(TopologyKind::Nodes),
+        "INFO" => Some(TopologyKind::Info),
+        _ => None,
+    };
+    let arity = match sub.as_str() {
+        "KEYSLOT" => 3,
+        _ => 2,
+    };
+    let known = kind.is_some() || matches!(sub.as_str(), "KEYSLOT" | "MYID");
+    if known && cmd.len() != arity {
+        return Err(CommandError::WrongArity(format!("CLUSTER|{sub}")));
+    }
+    if let Some(kind) = kind {
+        return match standalone_topology(node, conn, kind) {
+            Some(reply) => reply,
+            None => node
+                .topology(kind, conn.protocol)
+                .map(|reply| (*reply).clone()),
+        };
+    }
+    match sub.as_str() {
+        "KEYSLOT" => Ok(Value::Integer(i64::from(slot(&cmd[2])))),
+        "MYID" => Ok(Value::bulk(topology::node_id(node.id).into_bytes())),
+        "COUNTKEYSINSLOT" | "GETKEYSINSLOT" => Err(CommandError::Custom(format!(
+            "ERR Discus does not support CLUSTER {sub}, because it keeps no index by slot"
+        ))),
+        _ => Err(CommandError::Custom(format!(
+            "ERR Discus places slots by itself. CLUSTER {sub} is not supported"
+        ))),
+    }
+}
+
+/// A single node without a cluster and without an advertised address names the local address
+/// of the connection that asks (spec "CLUSTER and connection commands"). That reply depends on
+/// the connection, so it is not cached. `None` when the node advertises an address.
+fn standalone_topology(node: &Node, conn: &ConnState, kind: TopologyKind) -> Option<Reply> {
+    let local = conn.local_addr?;
+    let epoch = node.epochs().current().clone();
+    let [me] = epoch.members() else {
+        return None;
+    };
+    if me.id != node.id || me.client_addr.is_some() || !node.is_normal() {
+        return None;
+    }
+    let mut me = me.clone();
+    me.client_addr = Some(local);
+    me.client_host = node.host_for(local);
+    let alone = Epoch::new(epoch.id(), epoch.cluster_id(), vec![me]).ok()?;
+    let rf = node.config.replication_factor;
+    Some(topology::build(
+        kind,
+        &alone,
+        rf,
+        conn.protocol,
+        node.id,
+        true,
     ))
 }

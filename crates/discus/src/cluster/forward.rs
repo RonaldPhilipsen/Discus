@@ -27,6 +27,10 @@ pub async fn send(
     write: bool,
     timeout: Option<std::time::Duration>,
 ) -> Result<Reply, TransportError> {
+    #[cfg(feature = "testing")]
+    node.faults
+        .forwards
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let result = send_in_span(node, target, cmd, hop, mode, write, timeout)
         .instrument(telemetry::forward_span())
         .await;
