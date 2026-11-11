@@ -45,7 +45,7 @@ fn is_error(v: &Value, text: &str) -> bool {
 
 /// Take a command with counter keys. `None` for any other command.
 pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
-    let counters = node.counters()?.clone();
+    let counters = node.counters()?;
     let (mut keys, mut strong) = (0, 0);
     for key in key_args(job.spec.route, &job.cmd)? {
         keys += 1;
@@ -63,7 +63,8 @@ pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
     if let Err(e) = check_sizes(node, job.spec.name, &job.cmd) {
         return Some(Dispatch::Ready(Reply::error(e)));
     }
-    let (node, cmd, hop, route) = (node.clone(), job.cmd.clone(), hop.clone(), job.spec.route);
+    let (node, counters, cmd, hop) = (node.clone(), counters.clone(), job.cmd.clone(), hop.clone());
+    let route = job.spec.route;
     Some(Dispatch::Pending(Box::pin(async move {
         match Merge::of(route) {
             Some((merge, width)) => fan_out(&node, &counters, cmd, hop, merge, width).await,
