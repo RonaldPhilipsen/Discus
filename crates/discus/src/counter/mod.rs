@@ -139,7 +139,7 @@ impl View {
 
     /// Every `NORMAL` member, best first by HRW with the key of group `g`.
     pub fn ranked(&self, g: u16) -> Vec<NodeId> {
-        self.epoch.owners(&group_key(g), usize::MAX)
+        discus_placement::hrw::owners(&group_key(g), self.epoch.members(), usize::MAX)
     }
 }
 

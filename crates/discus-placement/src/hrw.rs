@@ -14,7 +14,7 @@ use crate::{Member, MemberState, NodeId};
 
 /// The seed of the placement hash. It differs from the store shard seed on purpose, so shard
 /// choice and owner choice are independent.
-pub const PLACEMENT_SEED: u64 = 0x4449_5343_5553_0002;
+pub const PLACEMENT_SEED: u64 = 0x4449_5343_5553_0003;
 
 pub const DEFAULT_RF: usize = 3;
 

@@ -1,8 +1,10 @@
 //! Epochs: numbered snapshots of the member list, spec §5.1.
 
 use std::fmt;
+use std::sync::OnceLock;
 
-use crate::{hrw, ClusterId, Member, MemberState, NodeId};
+use crate::table::{RangeSet, SlotTable};
+use crate::{hrw, range_of, slot, ClusterId, Member, MemberState, NodeId, RANGES};
 
 /// The generation of the first epoch of a cluster.
 pub const FIRST_GENERATION: u64 = 1;
@@ -34,11 +36,29 @@ pub enum EpochError {
 }
 
 /// One epoch: its identity, its cluster, and its member list sorted by node ID.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub struct Epoch {
     id: EpochId,
     cluster_id: ClusterId,
     members: Vec<Member>,
+    table: OnceLock<SlotTable>,
+}
+
+impl Clone for Epoch {
+    fn clone(&self) -> Epoch {
+        Epoch {
+            id: self.id,
+            cluster_id: self.cluster_id,
+            members: self.members.clone(),
+            table: OnceLock::new(),
+        }
+    }
+}
+
+impl PartialEq for Epoch {
+    fn eq(&self, other: &Epoch) -> bool {
+        self.id == other.id && self.cluster_id == other.cluster_id && self.members == other.members
+    }
 }
 
 impl Epoch {
@@ -56,6 +76,7 @@ impl Epoch {
             id,
             cluster_id,
             members,
+            table: OnceLock::new(),
         })
     }
 
@@ -68,6 +89,7 @@ impl Epoch {
             },
             cluster_id,
             members: vec![member],
+            table: OnceLock::new(),
         }
     }
 
@@ -103,13 +125,46 @@ impl Epoch {
             .map(|i| &self.members[i])
     }
 
+    /// The slot table of this epoch. The first call builds it with `rf`. Later calls return that
+    /// table whatever `rf` they pass.
+    pub fn table(&self, rf: usize) -> &SlotTable {
+        self.table
+            .get_or_init(|| SlotTable::build(&self.members, rf))
+    }
+
     /// The owner set of `key` in this epoch. The first owner is the primary.
     pub fn owners(&self, key: &[u8], rf: usize) -> Vec<NodeId> {
-        hrw::owners(key, &self.members, rf)
+        self.range_owners(range_of(slot(key)), rf)
     }
 
     /// The primary of `key` in this epoch, if any member is `NORMAL`.
     pub fn primary(&self, key: &[u8]) -> Option<NodeId> {
-        hrw::owners(key, &self.members, 1).first().copied()
+        self.range_owners(range_of(slot(key)), 1).first().copied()
+    }
+
+    pub fn slot_owners(&self, slot: u16, rf: usize) -> Vec<NodeId> {
+        self.range_owners(range_of(slot), rf)
+    }
+
+    /// The owners of `range`, primary first. A request with an `rf` other than the cached table's
+    /// is computed directly.
+    pub fn range_owners(&self, range: u16, rf: usize) -> Vec<NodeId> {
+        let table = self.table(rf);
+        if table.rf() == rf {
+            table.owners(range).map(|m| m.id).collect()
+        } else {
+            hrw::owners(&range.to_be_bytes(), &self.members, rf)
+        }
+    }
+
+    /// The ranges whose ordered owner list differs between the two epochs.
+    pub fn changed_ranges(&self, other: &Epoch, rf: usize) -> RangeSet {
+        let mut changed = RangeSet::empty();
+        for range in 0..RANGES {
+            if self.range_owners(range, rf) != other.range_owners(range, rf) {
+                changed.insert(range);
+            }
+        }
+        changed
     }
 }

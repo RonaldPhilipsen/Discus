@@ -12,6 +12,7 @@ pub mod member;
 #[cfg(feature = "mock-clock")]
 pub mod mock;
 pub mod slot;
+pub mod table;
 
 pub use clock::{Clock, SystemClock};
 pub use epoch::{Epoch, EpochError, EpochId, FIRST_GENERATION};
@@ -23,4 +24,5 @@ pub use member::{Member, MemberState, Weight};
 #[cfg(feature = "mock-clock")]
 pub use mock::ManualClock;
 pub use slot::{range_of, slot, RANGES, SLOTS, SLOTS_PER_RANGE};
+pub use table::{RangeSet, SlotTable};
 pub use uhlc::NTP64;

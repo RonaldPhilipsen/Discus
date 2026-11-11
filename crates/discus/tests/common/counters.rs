@@ -205,7 +205,7 @@ pub fn key_in(n: &GossipNode, g: u16, prefix: &str) -> String {
 
 /// The target voters of group `g` in the epoch of `n`.
 pub fn targets(n: &GossipNode, g: u16) -> Vec<NodeId> {
-    n.node.epochs().current().owners(&group_key(g), 3)
+    discus_placement::hrw::owners(&group_key(g), n.node.epochs().current().members(), 3)
 }
 
 /// The groups whose targets include `n`.

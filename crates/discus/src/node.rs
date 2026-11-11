@@ -287,6 +287,7 @@ impl Node {
     /// Pins of the old history are dropped with it.
     pub fn reset_cluster(&self, epoch: Epoch) {
         let id = epoch.id();
+        epoch.table(self.config.replication_factor);
         let mut epochs = self.epochs.write();
         *epochs = EpochHistory::new(epoch);
         tracing::info!(epoch = %id, cluster = %epochs.cluster_id(), "took a new cluster history");
@@ -397,6 +398,7 @@ impl Node {
     /// Adopt a newer epoch of this cluster. A stale epoch changes nothing.
     pub fn adopt_epoch(&self, epoch: Epoch) -> Result<Adopt, EpochError> {
         let id = epoch.id();
+        epoch.table(self.config.replication_factor);
         let mut epochs = self.epochs.write();
         let old = epochs.current().clone();
         let result = epochs.adopt(epoch);

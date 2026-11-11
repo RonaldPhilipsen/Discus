@@ -52,7 +52,7 @@ fn the_hash_is_pinned() {
     );
 }
 
-const PINNED_UNIT_BITS: u64 = 0x3fe4_2e23_c745_7ecf;
+const PINNED_UNIT_BITS: u64 = 0x3fe0_3ffb_5be0_26a7;
 
 #[test]
 fn the_hash_input_is_key_then_big_endian_id() {
