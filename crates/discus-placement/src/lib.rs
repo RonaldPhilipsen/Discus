@@ -15,7 +15,7 @@ pub mod slot;
 pub mod table;
 
 pub use clock::{Clock, SystemClock};
-pub use epoch::{Epoch, EpochError, EpochId, FIRST_GENERATION};
+pub use epoch::{Epoch, EpochError, EpochId, Owners, FIRST_GENERATION};
 pub use history::{Adopt, EpochHistory, MIN_HISTORY};
 pub use hlc::{Hlc, HlcError, Version, MAX_DRIFT};
 pub use hrw::{owners, DEFAULT_RF, PLACEMENT_SEED};

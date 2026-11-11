@@ -15,6 +15,8 @@ pub struct SlotTable {
     rf: usize,
     per_range: usize,
     owners: Vec<u16>,
+    /// The IDs of `owners`, so a lookup can borrow an owner list.
+    ids: Vec<NodeId>,
 }
 
 impl SlotTable {
@@ -37,11 +39,13 @@ impl SlotTable {
             per_range = ids.len();
             owners.extend(ids.into_iter().map(index_of));
         }
+        let ids = owners.iter().map(|&i| members[usize::from(i)].id).collect();
         SlotTable {
             members: members.to_vec(),
             rf,
             per_range,
             owners,
+            ids,
         }
     }
 
@@ -62,6 +66,14 @@ impl SlotTable {
             .unwrap_or_default()
             .iter()
             .map(|&i| &self.members[usize::from(i)])
+    }
+
+    /// The IDs of the owners of `range`, primary first.
+    pub fn owner_ids(&self, range: u16) -> &[NodeId] {
+        let start = usize::from(range) * self.per_range;
+        self.ids
+            .get(start..start + self.per_range)
+            .unwrap_or_default()
     }
 }
 

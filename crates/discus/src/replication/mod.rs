@@ -468,7 +468,7 @@ impl Replicator {
     }
 
     /// Queue `key` for every owner in `owners` but this node.
-    fn queue_for(&self, owners: Vec<NodeId>, key: &Bytes) {
+    fn queue_for(&self, owners: impl IntoIterator<Item = NodeId>, key: &Bytes) {
         for owner in owners {
             if owner == self.id {
                 continue;
