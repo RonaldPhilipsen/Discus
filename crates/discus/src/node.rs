@@ -192,6 +192,7 @@ impl Node {
         } else {
             static_epoch(me, &config, cluster_id)
         };
+        first.table(config.replication_factor);
         let epochs = EpochHistory::new(first);
         crate::telemetry::record_epoch(discus_telemetry::global(), epochs.current());
         let (epoch_tx, _) = tokio::sync::watch::channel(epochs.current().id());
