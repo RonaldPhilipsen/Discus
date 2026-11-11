@@ -1,7 +1,7 @@
 //! State shared by every connection on a node.
 
 use std::cell::Cell;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -11,13 +11,15 @@ use discus_placement::{
     hlc, Adopt, Clock, ClusterId, Epoch, EpochError, EpochHistory, EpochId, Hlc, Member,
     MemberState, NodeId, Version, Weight, NTP64,
 };
-use discus_resp::Protocol;
+use discus_resp::{Protocol, Value};
 use discus_store::{Slot, Store, StoreConfig, SystemClock, HASH_SEED};
 use parking_lot::{RwLock, RwLockReadGuard};
 
+use crate::cluster::topology::{self, TopologyKind};
 use crate::cluster::writeset::{WriteSet, WriteSetBudget, WriteSetLimits};
 use crate::cluster::ClusterLink;
 use crate::command::CommandError;
+use crate::config::{client_host, default_client_addr};
 use crate::counter::Counters;
 use crate::lag::LagProbe;
 use crate::membership::Membership;
@@ -65,6 +67,9 @@ pub struct Node {
     phase: AtomicU8,
     link: OnceLock<ClusterLink>,
     membership: OnceLock<Arc<Membership>>,
+    /// The client address that this node advertises. Set at construction when the flags and the
+    /// static member list settle it, else by `Membership::new` once the cluster address is known.
+    client_addr: OnceLock<SocketAddr>,
     lag: LagProbe,
     data: OnceLock<tokio::runtime::Handle>,
     /// The ordered consumer of [`Node::apply_epoch`] work on the data runtime.
@@ -74,6 +79,7 @@ pub struct Node {
     epoch_tx: tokio::sync::watch::Sender<EpochId>,
     write_budget: Arc<WriteSetBudget>,
     drain: tokio_util::sync::CancellationToken,
+    topology: parking_lot::Mutex<TopologyCache>,
     /// Faults that tests inject.
     #[cfg(feature = "testing")]
     pub faults: Faults,
@@ -94,6 +100,29 @@ pub struct Faults {
     /// Never answer an inbound message of any kind from these peers. Blocking both sides makes
     /// a partition.
     pub blocked: parking_lot::Mutex<std::collections::HashSet<NodeId>>,
+    /// Commands that this node forwarded to another node.
+    pub forwards: AtomicU64,
+    /// `-MOVED` replies that this node returned.
+    pub redirects: AtomicU64,
+    /// The handoff scan waits before each page while this is set.
+    pub hold_scan: std::sync::atomic::AtomicBool,
+    /// A handoff scan waited on `hold_scan`.
+    pub scan_held: std::sync::atomic::AtomicBool,
+    /// The drop of moved keys waits before each page while this is set.
+    pub hold_drop: std::sync::atomic::AtomicBool,
+    /// A drop of moved keys waited on `hold_drop`.
+    pub drop_held: std::sync::atomic::AtomicBool,
+    /// The replication senders keep their queued keys while this is set.
+    pub hold_replication: std::sync::atomic::AtomicBool,
+    /// Bulk acknowledgements carry this epoch in place of the current one, as from a node that
+    /// lags or runs ahead.
+    pub ack_epoch: parking_lot::Mutex<Option<discus_placement::EpochId>>,
+    /// Inbound replicated and handed-off entries are refused, as with clock drift.
+    pub refuse_apply: std::sync::atomic::AtomicBool,
+    /// Why the last drop of moved keys stopped early.
+    pub drop_stopped: parking_lot::Mutex<Option<&'static str>>,
+    /// The sweep of expired entries skips its runs while this is set.
+    pub hold_sweep: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "testing")]
@@ -179,10 +208,16 @@ impl Node {
         );
         let id = config.node_id.unwrap_or_else(NodeId::random);
         let cluster_id = config.cluster_id.unwrap_or_else(ClusterId::mint);
+        // A static node takes its client address only from the flag, because its peers list the
+        // same address and every node must build the same member records. Gossip nodes default
+        // it in `Membership::new`.
+        let client_addr = config.client_advertise;
         let me = Member {
             id,
             addr: config.cluster_listen,
             rpc_addr: config.cluster_listen,
+            client_addr,
+            client_host: host_of(&config, client_addr),
             state: MemberState::Normal,
             weight: Weight::new(config.weight).unwrap_or_default(),
         };
@@ -192,6 +227,7 @@ impl Node {
         } else {
             static_epoch(me, &config, cluster_id)
         };
+        first.table(config.replication_factor);
         let epochs = EpochHistory::new(first);
         crate::telemetry::record_epoch(discus_telemetry::global(), epochs.current());
         let (epoch_tx, _) = tokio::sync::watch::channel(epochs.current().id());
@@ -214,6 +250,7 @@ impl Node {
             phase: AtomicU8::new(Phase::Starting as u8),
             link: OnceLock::new(),
             membership: OnceLock::new(),
+            client_addr: client_addr.map(OnceLock::from).unwrap_or_default(),
             lag: LagProbe::new(),
             data: OnceLock::new(),
             epoch_work: OnceLock::new(),
@@ -221,6 +258,7 @@ impl Node {
             counters: OnceLock::new(),
             epoch_tx,
             drain: tokio_util::sync::CancellationToken::new(),
+            topology: parking_lot::Mutex::default(),
             #[cfg(feature = "testing")]
             faults: Faults::default(),
         }
@@ -256,6 +294,92 @@ impl Node {
         self.membership.get()
     }
 
+    /// The client address that this node advertises, when it is known.
+    pub fn client_addr(&self) -> Option<SocketAddr> {
+        self.client_addr.get().copied()
+    }
+
+    /// The host name that this node advertises: `--client-hostname` for the client address.
+    pub fn client_host(&self) -> Option<String> {
+        host_of(&self.config, self.client_addr())
+    }
+
+    /// The `--client-hostname` name for `addr`.
+    pub(crate) fn host_for(&self, addr: SocketAddr) -> Option<String> {
+        host_of(&self.config, Some(addr))
+    }
+
+    /// A topology reply from the current epoch. The node builds the reply value once per epoch,
+    /// kind, and protocol and caches it. Each reply still encodes the cached value (spec "Epoch
+    /// changes"). A node that is not `NORMAL` returns `-TRYAGAIN`, except for
+    /// `CLUSTER INFO`, which then reports `cluster_state:fail` and is not cached.
+    pub fn topology(
+        &self,
+        kind: TopologyKind,
+        protocol: Protocol,
+    ) -> Result<Arc<Value>, CommandError> {
+        let normal = self.is_normal();
+        if !normal && kind != TopologyKind::Info {
+            return Err(CommandError::ClusterTryAgain);
+        }
+        let epoch = self.epochs().current().clone();
+        let at = kind as usize * 2 + usize::from(protocol == Protocol::Resp3);
+        if normal {
+            let cache = self.topology.lock();
+            if cache.epoch == Some(epoch.id()) {
+                if let Some(reply) = &cache.replies[at] {
+                    return Ok(reply.clone());
+                }
+            }
+        }
+        let rf = self.config.replication_factor;
+        let reply = Arc::new(topology::build(
+            kind,
+            &epoch,
+            rf,
+            protocol,
+            self.topology_responder(normal),
+        )?);
+        // A reply of an epoch that a newer one replaced in the meantime is not stored.
+        if normal && self.epoch_id() == epoch.id() {
+            let mut cache = self.topology.lock();
+            if cache.epoch != Some(epoch.id()) {
+                *cache = TopologyCache {
+                    epoch: Some(epoch.id()),
+                    ..TopologyCache::default()
+                };
+            }
+            cache.replies[at] = Some(reply.clone());
+        }
+        Ok(reply)
+    }
+
+    pub(crate) fn topology_responder(&self, normal: bool) -> topology::Responder {
+        topology::Responder {
+            me: self.id,
+            normal,
+            tls: self.config.security.tls_mode == crate::security::TlsMode::Node,
+        }
+    }
+
+    /// Settle the client address from the resolved cluster IP, unless a flag already did.
+    pub(crate) fn resolve_client_addr(&self, cluster_ip: IpAddr) -> SocketAddr {
+        *self.client_addr.get_or_init(|| {
+            default_client_addr(cluster_ip, self.config.redirect_listen, self.config.listen)
+        })
+    }
+
+    /// The target health of `id` (spec "Target health"): SWIM sees it `Alive`, or the node has no
+    /// failure detector, and neither the last forward nor the replication queue to it failed.
+    pub fn target_up(&self, id: NodeId) -> bool {
+        let alive = self
+            .membership()
+            .is_none_or(|m| m.liveness(id) == Some(discus_wire::Liveness::Alive));
+        alive
+            && !self.link().is_some_and(|l| l.forward_down(id))
+            && !self.replicator().is_some_and(|r| r.peer_down(id))
+    }
+
     /// Attach the gossip membership. Only the first call has an effect.
     pub fn set_membership(&self, membership: Arc<Membership>) {
         let _ = self.membership.set(membership);
@@ -287,11 +411,15 @@ impl Node {
     /// Pins of the old history are dropped with it.
     pub fn reset_cluster(&self, epoch: Epoch) {
         let id = epoch.id();
+        epoch.table(self.config.replication_factor);
         let mut epochs = self.epochs.write();
         *epochs = EpochHistory::new(epoch);
         tracing::info!(epoch = %id, cluster = %epochs.cluster_id(), "took a new cluster history");
         crate::telemetry::record_epoch(discus_telemetry::global(), epochs.current());
         drop(epochs);
+        if let Some(link) = self.link() {
+            link.reset();
+        }
         if let Some(r) = self.replicator() {
             r.reset_handoffs();
         }
@@ -397,6 +525,7 @@ impl Node {
     /// Adopt a newer epoch of this cluster. A stale epoch changes nothing.
     pub fn adopt_epoch(&self, epoch: Epoch) -> Result<Adopt, EpochError> {
         let id = epoch.id();
+        epoch.table(self.config.replication_factor);
         let mut epochs = self.epochs.write();
         let old = epochs.current().clone();
         let result = epochs.adopt(epoch);
@@ -571,6 +700,21 @@ impl Node {
     }
 }
 
+/// The topology replies of one epoch, indexed by kind and protocol.
+#[derive(Default)]
+struct TopologyCache {
+    epoch: Option<EpochId>,
+    replies: [Option<Arc<Value>>; 8],
+}
+
+fn host_of(config: &Config, client_addr: Option<SocketAddr>) -> Option<String> {
+    let template = config
+        .client_hostname
+        .as_deref()
+        .filter(|t| !t.is_empty())?;
+    Some(client_host(template, client_addr?.ip()))
+}
+
 /// The first epoch. With static peers, every member is `NORMAL` with weight 1 and the epoch is
 /// `(1, lowest NodeId)`, so every node forms the same epoch. Alone, the node bootstraps `(1, self)`.
 fn static_epoch(me: Member, config: &Config, cluster_id: ClusterId) -> Epoch {
@@ -584,6 +728,8 @@ fn static_epoch(me: Member, config: &Config, cluster_id: ClusterId) -> Epoch {
         id: p.id.unwrap_or(NodeId::NIL),
         addr: p.addr,
         rpc_addr: p.addr,
+        client_addr: p.client_addr,
+        client_host: host_of(config, p.client_addr),
         state: MemberState::Normal,
         weight: Weight::default(),
     }));
@@ -609,6 +755,12 @@ pub struct ConnState {
     rr: u64,
     /// The recent writes of a client connection in a cluster. Internal execution has none.
     pub writes: Option<Arc<parking_lot::Mutex<WriteSet>>>,
+    /// A connection of the redirect listener: keys that another node serves get `-MOVED`.
+    pub redirect: bool,
+    /// Set by `READONLY`, cleared by `READWRITE`. Only a redirect connection reads it.
+    pub readonly: bool,
+    /// The local address of the client socket.
+    pub local_addr: Option<SocketAddr>,
 }
 
 impl ConnState {
@@ -621,6 +773,9 @@ impl ConnState {
             closing: false,
             rr: id,
             writes: None,
+            redirect: false,
+            readonly: false,
+            local_addr: None,
         }
     }
 
@@ -637,5 +792,19 @@ pub struct ConnectionGuard(Arc<Node>);
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         self.0.connected.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_client_hostname_means_none() {
+        let addr = Some("10.1.2.3:6380".parse().unwrap());
+        let empty = Config::parse_from(["discus", "--client-hostname", ""]).unwrap();
+        assert_eq!(host_of(&empty, addr), None);
+        let set = Config::parse_from(["discus", "--client-hostname", "{ip}.peers"]).unwrap();
+        assert_eq!(host_of(&set, addr).as_deref(), Some("10-1-2-3.peers"));
     }
 }

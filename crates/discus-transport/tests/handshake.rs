@@ -213,17 +213,42 @@ async fn a_tiny_frame_offer_fails_hello() {
 }
 
 #[tokio::test]
+async fn a_peer_without_slot_placement_is_refused() {
+    let ca = TestCa::new();
+    let cluster = ClusterId::mint();
+    let b_id = NodeId::random();
+    let (a, _) = start(config(&ca, NodeId::random(), cluster)).await;
+    let mut cb = config(&ca, b_id, cluster);
+    cb.capabilities = caps::KNOWN & !caps::SLOT_PLACEMENT;
+    let (b, _) = start(cb).await;
+    let err = a.peer(b_id, b.local_addr()).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            TransportError::Handshake {
+                code: HandshakeCode::PlacementMismatch,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
 async fn disjoint_capabilities_agree_on_none() {
     let ca = TestCa::new();
     let cluster = ClusterId::mint();
     let b_id = NodeId::random();
     let mut ca_cfg = config(&ca, NodeId::random(), cluster);
-    ca_cfg.capabilities = 1;
+    ca_cfg.capabilities = caps::SLOT_PLACEMENT | 1;
     let mut cb = config(&ca, b_id, cluster);
-    cb.capabilities = 1 << 5;
+    cb.capabilities = caps::SLOT_PLACEMENT | 1 << 7;
     let (a, _) = start(ca_cfg).await;
     let (b, _) = start(cb).await;
-    assert_eq!(a.peer(b_id, b.local_addr()).await.unwrap().capabilities, 0);
+    assert_eq!(
+        a.peer(b_id, b.local_addr()).await.unwrap().capabilities,
+        caps::SLOT_PLACEMENT
+    );
 
     let c_id = NodeId::random();
     let mut cc = config(&ca, NodeId::random(), cluster);

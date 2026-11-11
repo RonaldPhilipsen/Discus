@@ -9,11 +9,12 @@
 //! once every source is done or gone.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use discus_placement::{Epoch, EpochId, NodeId, Version};
+use discus_placement::{range_of, slot, Epoch, EpochId, NodeId, Version, NTP64, RANGES};
 use discus_wire::{Batch, Message};
 
 use crate::node::EpochPin;
@@ -26,6 +27,10 @@ const BATCH_BYTES: u64 = 1 << 20;
 /// Attempts per batch before the source gives up on a target for this scan.
 const ATTEMPTS: u32 = 4;
 const FIRST_BACKOFF: Duration = Duration::from_millis(200);
+const MAX_BACKOFF: Duration = Duration::from_secs(2);
+/// Tries per page of the drop of moved keys while an owner runs an older epoch. With the backoff
+/// this waits about 20 seconds before the pass keeps the keys of that owner.
+const BEHIND_TRIES: u32 = 12;
 
 /// One ownership change that this node sends entries for.
 pub struct Outgoing {
@@ -137,13 +142,13 @@ pub struct Limits {
 }
 
 /// Run one scan for every change in `changes`, from the oldest old epoch to `to`. Returns when
-/// every target got its `done` batch or was abandoned.
-pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits: Limits) {
+/// every target got its `done` batch or was abandoned, and whether every target got it.
+pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits: Limits) -> bool {
     let Some(replicator) = node.replicator().cloned() else {
-        return;
+        return false;
     };
     let Some(from) = changes.iter().map(|c| c.old.clone()).min_by_key(|e| e.id()) else {
-        return;
+        return false;
     };
     let me = node.id;
     let mut targets: HashMap<NodeId, Target> = changes
@@ -153,18 +158,33 @@ pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits
         .map(|g| (g, Target::new()))
         .collect();
     if targets.is_empty() {
-        return;
+        return true;
     }
     // Entries written after this point replicate to their current owners on their own.
     let watermark = node.hlc.current();
     let rf = limits.rf;
+    let changed = from.changed_ranges(&to, rf);
     tracing::info!(from = %from.id(), to = %to.id(), targets = targets.len(), "handoff scan");
     let mut cursor = 0;
     loop {
+        #[cfg(feature = "testing")]
+        while node
+            .faults
+            .hold_scan
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            node.faults
+                .scan_held
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         let (next, entries) = node
             .store
             .scan_entries(cursor, STEP, |_, e| e.version.time() <= watermark);
         for (k, e) in entries {
+            if !changed.contains(range_of(slot(&k))) {
+                continue;
+            }
             let old_owners = from.owners(&k, rf);
             let survivors: Vec<NodeId> = old_owners
                 .iter()
@@ -211,7 +231,186 @@ pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits
             flush(node, &replicator, *g, t, Some(range), limits).await;
         }
     }
+    targets.values().all(|t| !t.abandoned)
 }
+
+/// Drop the keys that this node owns neither in `to` nor in the current epoch, after a scan up
+/// to `to` that reached every target. The old owner keeps its entries only until the new owners
+/// acknowledge the handoff (spec section 5.2): after its `done` batch, no new owner falls back to
+/// it. Returns how many keys it dropped.
+///
+/// A write can reach this node after the scan passed its key, from a command that routed before
+/// the adoption. The scan never sent it, and its replication can still be queued. So each key is
+/// first offered at its version to every current owner, which asks for it if its stored copy,
+/// expired or not, is older. Asked-for keys are sent and offered again, so an owner that refused
+/// them asks again and the keys stay. A key goes only if every owner answered in the epoch of
+/// this node, holds the key at the offered version or newer, no queue or hint holds it, and the
+/// entry still has the offered version. An owner in an older epoch can still forward a command
+/// on the key here, so its keys stay; an owner in a newer epoch ends the pass.
+///
+/// A key also stays when its entry is newer than `watermark`, because a peer in a newer epoch can
+/// forward a write here first. Every key stays once this node adopts another epoch during the
+/// pass, or once a peer sent a batch from an epoch newer than the current one: such a batch can
+/// carry entries of ranges that this node gains in that epoch.
+pub async fn drop_lost(node: &Arc<Node>, to: &Epoch, watermark: NTP64, limits: Limits) -> usize {
+    let Some(replicator) = node.replicator().cloned() else {
+        return 0;
+    };
+    let adoptions = replicator.adoptions.load(Ordering::SeqCst);
+    let (me, rf) = (node.id, limits.rf);
+    let current = node.epochs().current().clone();
+    if !current.is_normal(me) {
+        return 0;
+    }
+    let epoch = current.id();
+    let lost: Vec<bool> = (0..RANGES)
+        .map(|r| {
+            !to.range_owners(r, rf).contains(&me) && !current.range_owners(r, rf).contains(&me)
+        })
+        .collect();
+    let moved_on = || {
+        replicator.peer_generation.load(Ordering::SeqCst) > epoch.generation
+            || replicator.adoptions.load(Ordering::SeqCst) != adoptions
+    };
+    let mut failed: BTreeSet<NodeId> = BTreeSet::new();
+    let mut dropped = 0;
+    let mut cursor = 0;
+    loop {
+        #[cfg(feature = "testing")]
+        while node.faults.hold_drop.load(Ordering::Relaxed) {
+            node.faults.drop_held.store(true, Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        if moved_on() {
+            stopped(node, "this node moved on to another epoch");
+            return dropped;
+        }
+        let (next, entries) = node.store.scan_entries(cursor, STEP, |k, e| {
+            lost[usize::from(range_of(slot(k)))] && e.version.time() <= watermark
+        });
+        let offered: Vec<(Bytes, Version, Vec<NodeId>)> = entries
+            .into_iter()
+            .map(|(k, e)| (k.clone(), e.version, current.owners(&k, rf)))
+            .filter(|(_, _, owners)| {
+                !owners.is_empty() && !owners.iter().any(|o| failed.contains(o))
+            })
+            .collect();
+        let mut offers: HashMap<NodeId, Vec<(Bytes, Version)>> = HashMap::new();
+        for (k, v, owners) in &offered {
+            for o in owners {
+                offers.entry(*o).or_default().push((k.clone(), *v));
+            }
+        }
+        let mut answers: HashMap<NodeId, Answer> = HashMap::new();
+        for (owner, offers) in offers {
+            let mut answer = confirm(node, &replicator, owner, offers.clone(), epoch).await;
+            // An owner that lags behind adopts the epoch soon, as a rule.
+            let mut wait = FIRST_BACKOFF;
+            for _ in 0..BEHIND_TRIES {
+                if !matches!(answer, Answer::Behind) || moved_on() {
+                    break;
+                }
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(MAX_BACKOFF);
+                answer = confirm(node, &replicator, owner, offers.clone(), epoch).await;
+            }
+            match answer {
+                Answer::Ahead => {
+                    stopped(node, "an owner runs ahead of this node");
+                    return dropped;
+                }
+                Answer::Failed | Answer::Behind => {
+                    failed.insert(owner);
+                }
+                Answer::Holds(_) => {}
+            }
+            answers.insert(owner, answer);
+        }
+        for (k, v, owners) in offered {
+            let held = owners.iter().all(|o| match answers.get(o) {
+                Some(Answer::Holds(missing)) => !missing.contains(&k),
+                _ => false,
+            });
+            if !held || !replicator.settled(&k) {
+                continue;
+            }
+            let removed = node.store.remove_if(&k, |e| e.version == v && !moved_on());
+            dropped += usize::from(removed);
+        }
+        if next == 0 {
+            return dropped;
+        }
+        cursor = next;
+    }
+}
+
+/// What one owner answered to the offers of a page.
+enum Answer {
+    /// The owner is in the epoch of the drop and holds every offered key at the offered version
+    /// or newer, but these.
+    Holds(BTreeSet<Bytes>),
+    /// The owner still runs an older epoch, where this node can own the keys. It can forward a
+    /// command on them here, so they stay.
+    Behind,
+    /// The owner runs a newer epoch that this node has not adopted.
+    Ahead,
+    /// The owner did not answer.
+    Failed,
+}
+
+/// Offer `offers` to `owner`, send the keys it asks for, and offer those again at the versions
+/// sent. A key that the owner still asks for after that was refused, for example for clock
+/// drift or size.
+async fn confirm(
+    node: &Arc<Node>,
+    replicator: &crate::replication::Replicator,
+    owner: NodeId,
+    offers: Vec<(Bytes, Version)>,
+    epoch: EpochId,
+) -> Answer {
+    let mut batch = Batch::new(epoch);
+    batch.offers = offers;
+    for round in 0..2 {
+        let Some(ack) = send(node, replicator, owner, &batch).await else {
+            return Answer::Failed;
+        };
+        if ack.epoch != epoch {
+            return if ack.epoch.generation > epoch.generation {
+                Answer::Ahead
+            } else {
+                Answer::Behind
+            };
+        }
+        if ack.want.is_empty() || round == 1 {
+            return Answer::Holds(ack.want.into_iter().collect());
+        }
+        let mut missing = BTreeSet::new();
+        batch = Batch::new(epoch);
+        for k in ack.want {
+            match node.store.entry(&k) {
+                Some(e) => {
+                    batch.offers.push((k.clone(), e.version));
+                    batch.entries.push((k, e));
+                }
+                None => {
+                    missing.insert(k);
+                }
+            }
+        }
+        if batch.offers.is_empty() {
+            return Answer::Holds(missing);
+        }
+    }
+    unreachable!("the second round returns")
+}
+
+#[cfg(feature = "testing")]
+fn stopped(node: &Node, why: &'static str) {
+    *node.faults.drop_stopped.lock() = Some(why);
+}
+
+#[cfg(not(feature = "testing"))]
+fn stopped(_: &Node, _: &'static str) {}
 
 /// Send the batch of one target with retries. A target that keeps failing is abandoned for
 /// this scan. Wanted keys from the acknowledgement go into the next batch.
@@ -233,18 +432,33 @@ async fn flush(
     batch.offers = std::mem::take(&mut t.offers);
     batch.done = done;
     let bytes = std::mem::take(&mut t.bytes);
+    match send(node, replicator, target, &batch).await {
+        Some(ack) => {
+            t.wanted = ack.want;
+            pace(bytes, limits.rate_bytes).await;
+        }
+        None => {
+            tracing::warn!(%target, "abandoned a handoff target after its retries");
+            t.abandoned = true;
+        }
+    }
+}
+
+/// Send one handoff batch with retries. `None` when every attempt failed.
+async fn send(
+    node: &Arc<Node>,
+    replicator: &crate::replication::Replicator,
+    target: NodeId,
+    batch: &Batch,
+) -> Option<discus_wire::BatchAck> {
     let mut backoff = FIRST_BACKOFF;
     for attempt in 0..ATTEMPTS {
         match replicator
             .send(node, target, Message::Handoff(batch.clone()))
             .await
         {
-            Ok(Message::BatchAck(ack)) => {
-                t.wanted = ack.want;
-                pace(bytes, limits.rate_bytes).await;
-                return;
-            }
-            Ok(_) => break,
+            Ok(Message::BatchAck(ack)) => return Some(ack),
+            Ok(_) => return None,
             Err(e) => {
                 tracing::debug!(%target, attempt, error = %e, "a handoff batch failed");
                 if attempt + 1 < ATTEMPTS {
@@ -254,8 +468,7 @@ async fn flush(
             }
         }
     }
-    tracing::warn!(%target, "abandoned a handoff target after its retries");
-    t.abandoned = true;
+    None
 }
 
 /// Wait long enough that the scan stays under `rate` bytes per second.

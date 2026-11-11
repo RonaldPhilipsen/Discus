@@ -122,6 +122,83 @@ async fn static_peers_form_the_same_epoch_on_every_node() {
     }
 }
 
+#[tokio::test]
+async fn members_advertise_their_redirect_port() {
+    // A static peer learns the client address of another member only from the list, so the
+    // helper reserves the ports first.
+    let (c, ports) = common::cluster::start_redirect_cluster(3, |_| vec![]).await;
+    let first = c.nodes[0].node.epochs().current().clone();
+    for n in &c.nodes {
+        assert_eq!(**n.node.epochs().current(), *first);
+        let epoch = n.node.epochs().current().clone();
+        for (i, other) in c.nodes.iter().enumerate() {
+            let m = epoch.member(other.id).unwrap();
+            assert_eq!(m.client_addr, Some(ports[i]));
+            assert_eq!(m.client_addr.unwrap().ip(), other.cluster_addr.ip());
+        }
+        assert_eq!(
+            n.node.client_addr(),
+            epoch.member(n.id).unwrap().client_addr
+        );
+    }
+}
+
+#[tokio::test]
+async fn gossip_members_advertise_their_redirect_port() {
+    let net = common::gossip::Net::new();
+    let nodes = net
+        .start_agreed(
+            3,
+            &[
+                "--redirect-listen",
+                "127.0.0.1:0",
+                "--client-hostname",
+                "{ip}.peers",
+            ],
+        )
+        .await;
+    for n in &nodes {
+        let epoch = n.node.epochs().current().clone();
+        for other in &nodes {
+            let m = epoch.member(other.id).unwrap();
+            let want = other.node.client_addr().unwrap();
+            assert_ne!(want.port(), 0);
+            assert_eq!(m.client_addr, Some(want));
+            assert_eq!(m.client_host.as_deref(), Some("127-0-0-1.peers"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_empty_client_hostname_leaves_the_member_without_a_host() {
+    let ports: Vec<std::net::SocketAddr> = ["127.0.0.1:6380", "127.0.0.1:6381"]
+        .map(|a| a.parse().unwrap())
+        .to_vec();
+    let c = common::cluster::start_cluster_clients(
+        2,
+        |i| Some(ports[i]),
+        |i| {
+            vec![
+                "--client-advertise".into(),
+                ports[i].to_string(),
+                "--client-hostname".into(),
+                "".into(),
+            ]
+        },
+    )
+    .await;
+    let first = c.nodes[0].node.epochs().current().clone();
+    for n in &c.nodes {
+        assert_eq!(**n.node.epochs().current(), *first);
+        assert_eq!(n.node.client_host(), None);
+    }
+    for (i, n) in c.nodes.iter().enumerate() {
+        let m = first.member(n.id).unwrap();
+        assert_eq!(m.client_addr, Some(ports[i]));
+        assert_eq!(m.client_host, None);
+    }
+}
+
 fn cluster_args(extra: &[&str]) -> Vec<String> {
     let me = discus_placement::NodeId::random();
     let peer = discus_placement::NodeId::random();

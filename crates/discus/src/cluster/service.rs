@@ -90,7 +90,7 @@ impl Service for NodeService {
                 Message::Forward(f) => {
                     let span =
                         telemetry::forwarded_span(discus_telemetry::global(), &inbound.trace);
-                    let reply = forwarded(&node, inbound.peer.node_id, f, inbound.trace)
+                    let reply = forwarded(&node, &inbound.peer, f, inbound.trace)
                         .instrument(span)
                         .await;
                     Message::ForwardReply(ForwardReply {
@@ -133,7 +133,7 @@ fn parse(node: &Node, raw: &[u8]) -> Result<discus_resp::Command, Value> {
 /// Run a forwarded command inside its command span, and mark the span on an error reply.
 async fn forwarded(
     node: &Arc<Node>,
-    sender: discus_placement::NodeId,
+    sender: &discus_transport::PeerInfo,
     f: Forward,
     trace: TraceContext,
 ) -> Reply {
@@ -144,12 +144,12 @@ async fn forwarded(
 
 async fn run_forwarded(
     node: &Arc<Node>,
-    sender: discus_placement::NodeId,
+    sender: &discus_transport::PeerInfo,
     f: Forward,
     trace: TraceContext,
 ) -> Reply {
     if let Some(link) = node.link() {
-        link.saw_peer_epoch(sender, f.epoch);
+        link.saw_peer_epoch(sender.node_id, sender.cluster_id, f.epoch);
     }
     // A receiver with a lower epoch adopts the higher one before it acts (spec section 7.2).
     if f.epoch > node.epoch_id() {
@@ -192,6 +192,8 @@ async fn run_forwarded(
         spec,
         rr: 0,
         writes: None,
+        redirect: false,
+        readonly: false,
     };
     run_hop(node, job, hop, telemetry::route_span())
         .finish()

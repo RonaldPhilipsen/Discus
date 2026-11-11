@@ -12,6 +12,8 @@ fn member(id: u128, state: MemberState, weight: f64) -> Member {
         id: NodeId::from_u128(id),
         addr: SocketAddr::from(([127, 0, 0, 1], 7000)),
         rpc_addr: SocketAddr::from(([127, 0, 0, 1], 7000)),
+        client_addr: None,
+        client_host: None,
         state,
         weight: Weight::new(weight).unwrap(),
     }
@@ -52,7 +54,7 @@ fn the_hash_is_pinned() {
     );
 }
 
-const PINNED_UNIT_BITS: u64 = 0x3fe4_2e23_c745_7ecf;
+const PINNED_UNIT_BITS: u64 = 0x3fe0_3ffb_5be0_26a7;
 
 #[test]
 fn the_hash_input_is_key_then_big_endian_id() {

@@ -38,6 +38,12 @@ pub(crate) fn check(
             ),
         ));
     }
+    if theirs.capabilities & caps::SLOT_PLACEMENT == 0 {
+        return Err((
+            HandshakeCode::PlacementMismatch,
+            "the peer places keys by an older rule".to_string(),
+        ));
+    }
     if let Some(want) = expected {
         if theirs.node_id != want {
             return Err((

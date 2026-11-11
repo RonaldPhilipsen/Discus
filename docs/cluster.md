@@ -186,6 +186,8 @@ spec:
   ports:
     - name: resp
       port: 6379
+    - name: resp-cluster
+      port: 6380
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -219,10 +221,17 @@ spec:
           args:
             - --discovery-dns=discus-peers
             - --cluster-advertise=$(POD_IP):7379
+            - --redirect-listen=0.0.0.0:6380
+            - --client-advertise=$(POD_IP):6380
             - --cluster-ca=/tls/ca.crt
             - --cluster-cert=/tls/tls.crt
             - --cluster-key=/tls/tls.key
             - --shutdown-timeout-secs=30
+          ports:
+            - name: resp
+              containerPort: 6379
+            - name: resp-cluster
+              containerPort: 6380
           startupProbe:
             httpGet:
               path: /startupz
@@ -277,6 +286,23 @@ You can install more than one release in a namespace. The chart gives each relea
 names, so each release is a separate cluster. Use a different CA for each release, or require a
 URI SAN that is different for each release.
 
+To run without the redirect listener, set `clusterClients.enabled=false`. The chart then passes no
+redirect flags and opens no redirect port.
+
+The topology replies and `-MOVED` name each pod by a host name, not by its IP. The chart sets
+`--client-hostname` to `{ip}.<release>-peers.<namespace>.svc.cluster.local`. CoreDNS answers this
+name for each pod of the headless peers Service, for example
+`10-42-0-5.discus-peers.cache.svc.cluster.local`. One certificate with a wildcard DNS SAN then
+serves every pod (see [TLS on the redirect listener](security.md#tls-on-the-redirect-listener)).
+
+- If the cluster domain is not `cluster.local`, set `clusterClients.clusterDomain`.
+- To use another template, set `clusterClients.hostname`.
+- To return pod IPs, set `clusterClients.hostnames=false`.
+
+A pod gets a new IP, and thus a new name, at each restart. A cluster client reads the new name from
+the next topology reply or `-MOVED`. A cluster client must reach the pod network and use the
+cluster DNS. A client outside the pod network uses the Service on port 6379.
+
 ### Memory budget
 
 If you do not set `--max-memory`, the node reads the memory limit of the container from the
@@ -307,8 +333,12 @@ the CPU limit of the container from the cgroup (the Linux resource control group
 | `--cluster-advertise` | see below | The gossip address that other members use. |
 | `--rpc-listen` | `0.0.0.0:7380` | The UDP address for node-to-node requests. With `--membership static`, requests use `--cluster-listen` instead. |
 | `--rpc-advertise` | see below | The RPC address that other members use. Default: the IP of the advertised cluster address with the bound `--rpc-listen` port. |
+| `--redirect-listen` | off | The TCP address of the redirect listener. It is a second client listener. With `--membership static`, it needs client addresses: set `--client-advertise` and add a client address to every `--peer`. |
+| `--client-advertise` | see below | The client address that other members and cluster clients use. Default: the IP of the advertised cluster address with the bound `--redirect-listen` port. Without a redirect listener, it uses the bound `--listen` port. With `--membership static`, the node has no default. It must set this flag to the address that its peers list for it. |
+| `--client-hostname` | none | A host name template for client addresses. `{ip}` becomes the advertised IP with dashes, for example `10-1-2-3`. An empty value means no host name. |
+| `--cluster-topology` | `auto` | With `auto`, a node with a redirect listener answers the topology commands. `on` always answers. `off` never answers. With `--membership static`, `on` needs client addresses: set `--client-advertise` and add a client address to every `--peer`. |
 | `--data-nice` | `5` | Raise the nice value of the data runtime threads by this much over the process value, from 0 to 19. The result is capped at 19. The control thread keeps the process value, so it gets CPU first under a quota. 0 changes nothing. Linux only. |
-| `--peer` | none | A seed as `<ip>:<port>`, or `<node-id>@<ip>:<port>`. Repeat the flag. With `static`, list every other member with its node ID. |
+| `--peer` | none | A seed as `<ip>:<port>`, or `<node-id>@<ip>:<port>`. Repeat the flag. With `static`, list every other member with its node ID. Add `/<client-ip>:<client-port>` to give the member a client address. Only `static` accepts this suffix. With `static`, either every `--peer` has the suffix and `--client-advertise` is set, or no `--peer` has it. |
 | `--discovery-dns` | none | A headless Service name, as `<host>` or `<host>:<port>`. The port defaults to the `--cluster-listen` port. |
 | `--lease-provider` | `k8s` | `k8s` or `none`. Without the `k8s` build feature, the default is `none`. |
 | `--lease-name` | `discus-cluster` | The name of the cluster lease. |
@@ -400,6 +430,21 @@ ingress:
         protocol: UDP
 ```
 
+If the nodes have a redirect listener, a second rule must let clients reach every pod on the
+redirect port over TCP. A cluster client connects to each pod, not only to the Service. Replace
+`<client label>` with the labels of your client pods:
+
+```yaml
+ingress:
+  - from:
+      - podSelector:
+          matchLabels:
+            <client label>
+    ports:
+      - port: 6380
+        protocol: TCP
+```
+
 ## Start three nodes
 
 Outside Kubernetes, give every node the other nodes as seeds and use the lease provider `none`.
@@ -472,6 +517,95 @@ The members form one epoch. Every node computes the same owners for a key from t
 
 Replies keep the order of the pipeline. Commands on the same key run in the order that the client
 sent them. Commands on different keys run at the same time.
+
+## Cluster clients
+
+An ordinary client connects to `--listen` and does not need to know the topology. A node forwards
+each command to the owner of the key. Forwarding costs one extra hop. A cluster client can avoid
+that hop. It reads the topology from the cluster and sends each command to the owner of the key.
+
+`--redirect-listen` starts a second client listener. Both listeners accept every command and use
+the same TLS mode, certificates, authentication policy, and limits. If another node serves the
+key, the listeners reply differently:
+
+| Listener | Flag | Reply for a key that another node serves |
+| --- | --- | --- |
+| Forward | `--listen` | The node forwards the command and returns the reply. |
+| Redirect | `--redirect-listen` | The node returns `-MOVED <slot> <host>:<port>`. |
+
+### Slots
+
+Discus maps each key to one of 16384 slots. It uses the CRC16 of the key, as Redis Cluster does.
+A hash tag works too. If a key has `{tag}` in it, only the text in the braces sets the slot.
+`CLUSTER KEYSLOT <key>` returns the slot. Discus assigns the slots to nodes by itself. You do not
+move or manage slots.
+
+### The topology commands
+
+With `--cluster-topology auto`, a node that has a redirect listener answers `CLUSTER SLOTS`,
+`CLUSTER SHARDS`, `CLUSTER NODES`, `CLUSTER INFO`, `CLUSTER KEYSLOT`, and `CLUSTER MYID`. It
+answers them on both listeners. The replies name the redirect listener of each node. So after
+its first `CLUSTER SLOTS`, a cluster client uses redirect listeners only. See
+[Compatibility](compatibility.md#cluster-commands) for the replies.
+
+`--cluster-topology on` always answers. With no redirect listener, the replies name the `--listen`
+addresses. The client then routes straight to the owner, but it never gets `-MOVED`. Use it for
+tests. `--cluster-topology off` never answers.
+
+Some clients detect cluster mode by themselves, for example rueidis or valkey-go. If the topology
+commands answer, such a client switches to cluster mode.
+
+### When a node returns MOVED
+
+If all three conditions are true on a redirect connection, a node returns `-MOVED`:
+
+- The command is a single-slot command, and another node is the target.
+- The current epoch lists the target as `NORMAL` with a client address, and the target is up.
+- The node knows that the target has this epoch or a newer one.
+
+For a write, the target is the primary. For a read, the target is the primary, unless the
+connection sent `READONLY`, `--read-from-replicas` is true, and this node holds the slot. Then this
+node serves the read.
+
+In any other case the node forwards the command, as the forward listener does. This happens during
+an epoch change. It also happens for a target that looks down. The metric `discus.client.misrouted`
+counts these forwards. The metric `discus.client.redirects` counts the `-MOVED` replies. See
+[Telemetry](telemetry.md).
+
+A command on counter keys never gets `-MOVED`. The node forwards it to the leader of the group.
+A command with keys in several slots is served as on the forward listener. Discus never returns
+`-CROSSSLOT`.
+
+### Scans and counts
+
+On a redirect connection, `SCAN` lists only the keys of the slots that the node is the primary of.
+`DBSIZE` returns the local key count divided by the number of copies of each key. A cluster
+client scans every primary and adds the counts, so each key appears once. `FLUSHDB` and
+`FLUSHALL` still clear every member. A cluster client sends them to every primary, so the flush
+runs several times. This is safe.
+
+### Addresses
+
+Each node advertises a client address. By default, it is the IP of `--cluster-advertise` with the
+port of `--redirect-listen`. Set `--client-advertise` to change it. Set `--client-hostname` to
+name a host in the replies. The template `{ip}` becomes the IP with dashes, for example `10-1-2-3`.
+Every node must use the same `--client-hostname` template.
+
+With `--membership static`, a node has no default client address. Set `--client-advertise` on
+each node to the address that its peers list. List the address of each peer with
+`--peer <node-id>@<ip>:<port>/<client-ip>:<client-port>`. A mixed config is refused at start. While
+a `NORMAL` member has no client address, the topology commands return
+`-ERR the cluster topology is not complete, member <id> has no client address`.
+
+`--tls-mode lb` together with `--redirect-listen` is a start error.
+
+### Upgrade from 0.3
+
+Slot placement gives every key new owners. A node of 0.3 and a node of this version cannot share
+a cluster. A new node refuses an old peer with a placement mismatch. So a rolling update from 0.3
+stalls. To upgrade, uninstall the release and install it again. You can also install a second
+release with its own lease names and then move the clients. In both cases the cache starts
+empty. See [Security](security.md#tls-on-the-redirect-listener) for the certificates.
 
 ## Replication
 
@@ -550,8 +684,8 @@ A bound evicts the oldest hints. An evicted hint is lost. The first replay then 
 the key space of each lost hint. The secondary drops its copies of those keys, and they refill
 from the primary as misses.
 
-The primary drops the hints of a secondary that becomes `DEAD` or no longer owns the key. Hints
-live only in the memory of the primary.
+The primary drops the hints of a secondary that becomes `DEAD` or no longer owns the key, and
+queues those keys for their current owners. Hints live only in the memory of the primary.
 
 ## Failover
 
@@ -597,6 +731,17 @@ start a handoff, so a new owner does not start empty.
   longer own it. This applies to reads and writes, so an `INCR` of a moved key starts from the old
   value. The fallback ends in three cases: every old owner finished or gave up, the old owners
   leave, or `--handoff-timeout-ms` (default 5 minutes) ends. After that, a miss is a miss.
+- After a scan reached every new owner, the old owner drops the keys it no longer owns. First it
+  offers each key at its version to every current owner, which asks for the key if its own copy
+  is older, and sends what they ask for. A key stays when an owner did not answer, did not store
+  the key, runs another epoch, or a newer write changed the key in the meantime.
+- After an epoch change, keys that wait in a replication queue or a hint for a node that no
+  longer owns them, or that left, go to the queues of their current owners.
+- A receiver keeps an expired entry until the sweep removes it, and an older copy never replaces
+  it. After the sweep, or after a tombstone outlived `--tombstone-ttl-ms`, the receiver has no
+  record of the key, so an older copy from a handoff can bring the key back. The drop of moved
+  keys offers its copies to every current owner, so a key that expired and was swept while the
+  scan ran can come back once.
 
 `/startupz` passes only after the node received its handoff. A rolling restart therefore waits for
 each new pod to fill before it replaces the next one.

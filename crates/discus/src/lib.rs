@@ -16,6 +16,6 @@ pub mod security;
 pub mod server;
 pub mod telemetry;
 
-pub use config::{Config, LeaseKind, MembershipMode, Peer};
+pub use config::{Config, LeaseKind, MembershipMode, Peer, TopologyMode};
 pub use node::{ConnState, EpochPin, Node, Phase};
 pub use server::Server;

@@ -1,7 +1,8 @@
 //! Metric attributes and the cardinality guard (spec §15.4).
 //!
-//! Every metric attribute is one of six typed values. A command label is a `&'static str`, so it
-//! comes from the code, never from a client. A node or peer label is a short hex node ID, so the
+//! Every metric attribute is one of the eleven typed values of [`Attribute`], under one of the
+//! seven keys of [`ALLOWED_KEYS`]. A `command` value is a `&'static str` from the command table or
+//! a [`TopologyCommand`], so it comes from the code, never from a client. A node or peer label is a short hex node ID, so the
 //! number of values is bounded by the cluster size. [`check`] validates raw pairs against the
 //! same rules. The metrics handle runs it in debug builds, and the tests run it on every exported
 //! data point.
@@ -9,7 +10,9 @@
 use std::sync::Arc;
 
 /// The only attribute keys that a metric can carry.
-pub const ALLOWED_KEYS: [&str; 6] = ["command", "status", "node", "peer", "state", "channel"];
+pub const ALLOWED_KEYS: [&str; 7] = [
+    "command", "status", "node", "peer", "state", "channel", "reason",
+];
 
 const MAX_COMMAND_LEN: usize = 32;
 /// The longest node label: a 128-bit node ID in hex.
@@ -133,6 +136,26 @@ label_enum! {
     }
 }
 
+label_enum! {
+    /// Why a redirect connection forwarded a command instead of answering `-MOVED`.
+    MisrouteReason {
+        Epoch => "epoch",
+        Down => "down",
+        NoAddress => "no_address",
+    }
+}
+
+label_enum! {
+    /// A `CLUSTER` subcommand that returns the topology. Lower case, so it cannot collide with
+    /// a command label.
+    TopologyCommand {
+        Slots => "slots",
+        Shards => "shards",
+        Nodes => "nodes",
+        Info => "info",
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Attribute {
     Command(CommandLabel),
@@ -145,16 +168,20 @@ pub enum Attribute {
     /// A counter mode under the key `state`.
     Mode(CounterMode),
     Channel(TransportChannel),
+    Reason(MisrouteReason),
+    /// A topology subcommand under the key `command`.
+    Topology(TopologyCommand),
 }
 
 impl Attribute {
     pub fn key(&self) -> &'static str {
         match self {
-            Attribute::Command(_) => "command",
+            Attribute::Command(_) | Attribute::Topology(_) => "command",
             Attribute::Status(_) => "status",
             Attribute::Node(_) => "node",
             Attribute::Peer(_) => "peer",
             Attribute::Channel(_) => "channel",
+            Attribute::Reason(_) => "reason",
             Attribute::State(_) | Attribute::Role(_) | Attribute::Mode(_) => "state",
         }
     }
@@ -168,6 +195,8 @@ impl Attribute {
             Attribute::Role(r) => r.as_str(),
             Attribute::Mode(m) => m.as_str(),
             Attribute::Channel(c) => c.as_str(),
+            Attribute::Reason(r) => r.as_str(),
+            Attribute::Topology(t) => t.as_str(),
         }
     }
 }
@@ -204,7 +233,10 @@ fn valid_command(name: &str) -> bool {
 pub fn check<'a>(attrs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Result<(), GuardError> {
     for (key, value) in attrs {
         let (key, ok) = match key {
-            "command" => ("command", valid_command(value)),
+            "command" => (
+                "command",
+                valid_command(value) || TopologyCommand::parse(value).is_some(),
+            ),
             "status" => ("status", Status::parse(value).is_some()),
             "node" => ("node", valid_node(value)),
             "peer" => ("peer", valid_node(value)),
@@ -215,6 +247,7 @@ pub fn check<'a>(attrs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Result<
                     || CounterMode::parse(value).is_some(),
             ),
             "channel" => ("channel", TransportChannel::parse(value).is_some()),
+            "reason" => ("reason", MisrouteReason::parse(value).is_some()),
             other => return Err(GuardError::DisallowedKey(other.to_owned())),
         };
         if !ok {

@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -109,9 +109,18 @@ async fn bind_transport(
 mod connection;
 mod order;
 
+/// Accept on `listener`, or wait forever without one.
+async fn accept_on(listener: Option<&TcpListener>) -> io::Result<(TcpStream, SocketAddr)> {
+    match listener {
+        Some(l) => l.accept().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// A node with both listeners bound.
 pub struct Server {
     listener: TcpListener,
+    redirect: Option<TcpListener>,
     admin: std::net::TcpListener,
     node: Arc<Node>,
     lane: ControlLane,
@@ -137,7 +146,7 @@ impl Server {
         Server::bind_with(config, opts).await
     }
 
-    pub async fn bind_with(config: Config, opts: BindOptions) -> io::Result<Server> {
+    pub async fn bind_with(mut config: Config, opts: BindOptions) -> io::Result<Server> {
         let socket = opts.cluster_socket;
         let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidInput, msg);
         config.validate().map_err(invalid)?;
@@ -168,6 +177,16 @@ impl Server {
         let security =
             Arc::new(Security::from_config(&config).map_err(|e| invalid(e.to_string()))?);
         let listener = TcpListener::bind(config.listen).await?;
+        let redirect = match config.redirect_listen {
+            Some(addr) => Some(TcpListener::bind(addr).await?),
+            None => None,
+        };
+        // The advertised client address needs the bound ports, which differ from the flags
+        // when a flag asks for port 0.
+        config.listen = listener.local_addr()?;
+        if let Some(redirect) = &redirect {
+            config.redirect_listen = Some(redirect.local_addr()?);
+        }
         let admin = std::net::TcpListener::bind(config.admin_listen)?;
         admin.set_nonblocking(true)?;
         let lease = match (config.gossip_enabled(), opts.lease) {
@@ -236,6 +255,7 @@ impl Server {
         }
         Ok(Server {
             listener,
+            redirect,
             admin,
             node,
             lane,
@@ -280,17 +300,31 @@ impl Server {
     pub async fn run(self, shutdown: CancellationToken) -> io::Result<()> {
         let Server {
             listener,
+            redirect,
             admin,
             node,
             lane,
         } = self;
         let stop_background = CancellationToken::new();
-        discus_store::spawn_sweeper(
-            node.store.clone(),
-            Duration::from_millis(100),
-            20,
-            stop_background.clone(),
-        );
+        {
+            let node = node.clone();
+            discus_store::every(
+                Duration::from_millis(100),
+                stop_background.clone(),
+                move || {
+                    #[cfg(feature = "testing")]
+                    if node
+                        .faults
+                        .hold_sweep
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        return std::future::ready(());
+                    }
+                    node.store.sweep_expired(20);
+                    std::future::ready(())
+                },
+            );
+        }
         node.security.start(stop_background.clone());
         let admin_task = {
             let (node, stop) = (node.clone(), stop_background.clone());
@@ -311,6 +345,9 @@ impl Server {
             "bootstrapped"
         );
         tracing::info!(addr = ?listener.local_addr().ok(), "serving");
+        if let Some(redirect) = &redirect {
+            tracing::info!(addr = ?redirect.local_addr().ok(), "serving redirects");
+        }
         node.lag().spawn(stop_background.clone());
         node.spawn_epoch_work(stop_background.clone());
         if let Some(membership) = node.membership() {
@@ -383,7 +420,14 @@ impl Server {
                 accepted = listener.accept() => match accepted {
                     Ok((stream, peer)) => {
                         let _ = stream.set_nodelay(true);
-                        tracker.spawn(connection::accept(stream, peer, node.clone(), hard_stop.clone()));
+                        tracker.spawn(connection::accept(stream, peer, node.clone(), hard_stop.clone(), false));
+                    }
+                    Err(e) => break Err(e),
+                },
+                accepted = accept_on(redirect.as_ref()) => match accepted {
+                    Ok((stream, peer)) => {
+                        let _ = stream.set_nodelay(true);
+                        tracker.spawn(connection::accept(stream, peer, node.clone(), hard_stop.clone(), true));
                     }
                     Err(e) => break Err(e),
                 },
@@ -398,6 +442,7 @@ impl Server {
         }
         tracing::info!(open = node.connected_clients(), "draining");
         drop(listener);
+        drop(redirect);
         tracker.close();
         let timeout = Duration::from_secs(node.config.shutdown_timeout_secs);
         // The node stays a handoff source, flushes its queues, and hands its counter roles over

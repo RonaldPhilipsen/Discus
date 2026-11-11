@@ -50,6 +50,10 @@ pub struct Member {
     /// The gossip address. `rpc_addr` is the RPC address. They are equal with static membership.
     pub addr: SocketAddr,
     pub rpc_addr: SocketAddr,
+    /// The client port address. `None` when the node serves no client port.
+    pub client_addr: Option<SocketAddr>,
+    /// The host name that clients dial in place of `client_addr`.
+    pub client_host: Option<String>,
     pub state: MemberState,
     pub weight: Weight,
 }

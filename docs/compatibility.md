@@ -11,7 +11,7 @@ features from that value.
 
 | Family | Commands |
 | --- | --- |
-| Connection | `PING`, `ECHO`, `QUIT`, `AUTH`, `HELLO` (RESP2 and RESP3), `SELECT` (database 0 only), `COMMAND` (names and count), `CLIENT` (`SETNAME`, `GETNAME`, `ID`, `SETINFO`), `INFO`, `CONFIG GET` (`maxmemory`, `databases`, `maxclients`) |
+| Connection | `PING`, `ECHO`, `QUIT`, `AUTH`, `HELLO` (RESP2 and RESP3), `SELECT` (database 0 only), `COMMAND` (`COUNT`, `INFO`, `GETKEYS`, and the full list), `READONLY`, `READWRITE`, `ASKING`, `CLUSTER` (see below), `CLIENT` (`SETNAME`, `GETNAME`, `ID`, `SETINFO`), `INFO`, `CONFIG GET` (`maxmemory`, `databases`, `maxclients`) |
 | Strings | `GET`, `SET` (`EX`, `PX`, `EXAT`, `PXAT`, `NX`, `XX`, `KEEPTTL`, `GET`), `GETDEL`, `GETEX`, `MGET`, `MSET`, `INCR`, `DECR`, `INCRBY`, `DECRBY`, `INCRBYFLOAT`, `APPEND`, `STRLEN` |
 | Keys and expiry | `DEL`, `EXISTS`, `TYPE`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `SCAN` (`MATCH`, `COUNT`), `RANDOMKEY`, `DBSIZE`, `FLUSHDB`, `FLUSHALL` |
 | Hashes | `HSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HINCRBY`, `HKEYS`, `HVALS` |
@@ -28,10 +28,42 @@ These commands return `-ERR command not supported by Discus`:
 `PFCOUNT`, `MIGRATE`, `WAIT`, `DEBUG`, every stream command that starts with `X`, and every
 command that starts with `GEO`.
 
-`CLUSTER` returns an error that explains that Discus is not a Redis Cluster and that clients do not
-need topology awareness.
+`CLUSTER` answers only on a node with a redirect listener or with `--cluster-topology on`. See
+[Cluster commands](#cluster-commands). On any other node, `CLUSTER` returns an error that
+explains that Discus is not a Redis Cluster and that clients do not need topology awareness.
 
 Any other unknown command returns `-ERR unknown command '<name>'`.
+
+## Cluster commands
+
+A node with a redirect listener or with `--cluster-topology on` answers these commands. Clients use
+them to find the owner of each key. See [Cluster clients](cluster.md#cluster-clients).
+
+| Command | Reply |
+| --- | --- |
+| `CLUSTER SLOTS` | One entry for each run of consecutive slots that have the same owners. The first node of an entry is the primary. The others are replicas. |
+| `CLUSTER SHARDS` | One shard for each distinct list of owners. |
+| `CLUSTER NODES` | One line for each member. The lines show no replicas. |
+| `CLUSTER INFO` | The state of the cluster as text. If every slot has a primary, `cluster_state` is `ok`. |
+| `CLUSTER KEYSLOT <key>` | The slot of the key. |
+| `CLUSTER MYID` | The ID of this node. |
+| `CLUSTER COUNTKEYSINSLOT`, `CLUSTER GETKEYSINSLOT` | An error. Discus does not keep an index by slot. |
+| Any other `CLUSTER` subcommand | An error. Discus places the slots by itself. |
+| `READONLY`, `READWRITE` | `OK`. On a redirect connection, they let this node serve reads of slots that it holds as a replica. |
+| `ASKING` | `OK`. It has no effect, because Discus never sends `-ASK`. |
+
+A Discus node ID has 32 hex digits. A reply adds `00000000` to it, so that clients that expect
+40 digits accept it.
+
+`COMMAND` returns the Redis 7 shape. Each entry has the name, the arity, the flags, the first key,
+the last key, and the step. The flags are `readonly` or `write`. The lists of ACL categories, tips,
+key specifications, and subcommands are empty. `COMMAND INFO <name>` returns the entries of the
+named commands. `COMMAND GETKEYS` returns the keys of a command. `COMMAND COUNT` returns the number
+of commands. `COMMAND DOCS` returns an empty reply.
+
+`INFO` has a `# Cluster` section. It shows `cluster_enabled:1` while the topology commands answer.
+Otherwise it shows `cluster_enabled:0`. Some tools treat a node with `cluster_enabled:1` as a
+cluster node.
 
 ## Counter keys
 
@@ -78,6 +110,17 @@ behave differently from Redis:
 - `FLUSHDB` and `FLUSHALL` clear every member that answers. This is best-effort. A write that is on
   its way during the flush can survive it. If a counter group has no leader or no quorum, the
   command returns `-TRYAGAIN FLUSHALL cleared the cache and <n> of <G> counter groups`.
+
+If another node serves the slot of a command on a redirect connection, the command gets `-MOVED`.
+This applies to a command on keys of one slot. Discus never returns `-CROSSSLOT`. It serves a
+command with keys in several slots, as it does on the forward listener. These commands differ on a
+redirect connection:
+
+- `SCAN` lists only the keys of the slots that this node is the primary of. A cluster client scans
+  every primary.
+- `DBSIZE` returns the local key count divided by the number of copies of each key. A cluster
+  client adds the replies of all primaries.
+- Commands on counter keys never get `-MOVED`. The node forwards them to the leader of the group.
 
 See [Running a cluster](cluster.md) for the details.
 

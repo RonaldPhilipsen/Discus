@@ -669,19 +669,22 @@ fn stop(role: &Role) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
     use discus_placement::{ClusterId, EpochId, Member, MemberState, Weight};
 
-    fn view(ids: &[NodeId]) -> View {
+    /// A view of `ids`, all `NORMAL`, from the first.
+    pub(in crate::counter) fn view(ids: &[NodeId]) -> View {
         let members = ids
             .iter()
             .map(|id| Member {
                 id: *id,
                 addr: std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
                 rpc_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+                client_addr: None,
+                client_host: None,
                 state: MemberState::Normal,
                 weight: Weight::default(),
             })
@@ -695,6 +698,22 @@ mod tests {
             me: ids[0],
             me_normal: true,
             leaving: false,
+        }
+    }
+
+    #[test]
+    fn group_voters_follow_hrw_by_group() {
+        let ids: Vec<NodeId> = (1..=5).map(NodeId::from_u128).collect();
+        let v = view(&ids);
+        for g in 0..64 {
+            assert_eq!(
+                v.ranked(g),
+                discus_placement::hrw::owners(
+                    &super::super::group_key(g),
+                    v.epoch.members(),
+                    usize::MAX
+                )
+            );
         }
     }
 

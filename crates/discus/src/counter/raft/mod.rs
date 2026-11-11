@@ -272,6 +272,20 @@ impl Replica {
         self.with_membership(|m| m.non_write_voter_ids().any(|id| id == self.replica))
     }
 
+    /// The newest term of a leader that this replica accepted: its committed vote, else the
+    /// term of its last applied entry. The term of its own candidacy does not count.
+    pub fn leader_term(&self) -> u64 {
+        self.with_metrics(|m| {
+            let voted = if m.vote.is_committed() {
+                m.vote.leader_id.term
+            } else {
+                0
+            };
+            let logged = m.last_applied.as_ref().map_or(0, |l| l.leader_id.term);
+            voted.max(logged)
+        })
+    }
+
     /// The voter configs of the current membership. A joint change has two.
     pub fn voter_configs(&self) -> Vec<BTreeSet<u64>> {
         self.with_membership(|m| m.get_joint_config().clone())

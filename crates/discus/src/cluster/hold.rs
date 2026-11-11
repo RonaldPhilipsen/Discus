@@ -101,6 +101,8 @@ pub async fn held(
             spec,
             rr: 0,
             writes: None,
+            redirect: false,
+            readonly: false,
         };
         let reply = run_hop(node, job, retry.clone(), tracing::Span::none())
             .finish()

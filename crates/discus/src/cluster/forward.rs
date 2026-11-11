@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use discus_placement::NodeId;
+use discus_placement::{ClusterId, NodeId};
 use discus_resp::Command;
 use discus_transport::{Lane, PeerInfo, TransportError};
 use discus_wire::{caps, encode_command, Forward, ForwardMode, Message};
@@ -27,9 +27,16 @@ pub async fn send(
     write: bool,
     timeout: Option<std::time::Duration>,
 ) -> Result<Reply, TransportError> {
+    #[cfg(feature = "testing")]
+    node.faults
+        .forwards
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let result = send_in_span(node, target, cmd, hop, mode, write, timeout)
         .instrument(telemetry::forward_span())
         .await;
+    if let Some(link) = node.link() {
+        link.note_forward(target, result.is_ok());
+    }
     telemetry::record_forward(
         discus_telemetry::global(),
         cmd,
@@ -51,12 +58,12 @@ async fn send_in_span(
     let (link, addr, epoch) = node.peer(target).map_err(TransportError::Connect)?;
     // The full epoch rides along when the peer can take it and is behind (spec section 7.2).
     let mut peer_caps = 0;
+    let mut cluster = ClusterId::NIL;
     let build = |info: &PeerInfo| {
         peer_caps = info.capabilities;
-        let known = link
-            .peer_epoch(target)
-            .unwrap_or(info.epoch)
-            .max(info.epoch);
+        cluster = info.cluster_id;
+        link.saw_peer_epoch(target, info.cluster_id, info.epoch);
+        let known = link.peer_epoch(target).unwrap_or(info.epoch);
         let push = info.capabilities & caps::EPOCH_PUSH != 0 && epoch.id() > known;
         let mut path = hop.path.clone();
         path.push(node.id);
@@ -82,7 +89,7 @@ async fn send_in_span(
         .await?;
     match frame.message {
         Message::ForwardReply(reply) => {
-            link.saw_peer_epoch(target, reply.epoch);
+            link.saw_peer_epoch(target, cluster, reply.epoch);
             if let Some(applied) = reply.applied {
                 // A timestamp too far ahead is dropped by the HLC. The reply still counts.
                 let _ = node.hlc.observe(applied);

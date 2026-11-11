@@ -8,10 +8,12 @@ use std::time::Duration;
 
 use common::counters::{
     all_hold, all_raft, dump, flags, group_of, incr_once, incr_or_show, incr_until, is_refused,
-    is_try_again, join_to, key_in, leader_of, raft_cluster, role, start, status, targeted,
+    is_try_again, join_to, key_in, leader_of, raft_cluster, role, start, status, targeted, targets,
     voters_of, Leases, GROUPS, RAFT, SLOW_DEATH,
 };
-use common::gossip::{partition, refs, wait_agreed, wait_until, GossipNode, Net};
+use common::gossip::{heal, partition, refs, wait_agreed, wait_until, GossipNode, Net};
+use discus::counter::group_key;
+use discus_placement::NodeId;
 use redis::AsyncCommands;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -116,6 +118,92 @@ async fn a_restarted_node_enters_as_a_learner() {
             assert_eq!(s.first_role, Some("learner"), "group {g}: {s:?}");
         }
     }
+}
+
+/// A voter that the leader removes while it hears nothing keeps its old membership: the leader
+/// no longer sends it the entries that drop it. Once it hears again, it must leave the group, not
+/// start elections that the other voters refuse forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_voter_that_missed_its_removal_leaves() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let nodes = raft_cluster(&net, &leases, 3, SLOW_DEATH).await;
+    let old = refs(&nodes);
+    // A node ID for the fourth node that takes the place of an old voter that leads nothing.
+    let members = old[0].node.epochs().current().members().to_vec();
+    let (fresh_id, x, g) = std::iter::repeat_with(NodeId::random)
+        .find_map(|id| {
+            let mut m = members.clone();
+            let mut joined = m[0].clone();
+            joined.id = id;
+            m.push(joined);
+            (0..GROUPS).find_map(|g| {
+                let new = discus_placement::hrw::owners(&group_key(g), &m, 3);
+                let leader = leader_of(&old, g)?.id;
+                old.iter()
+                    .find(|n| !new.contains(&n.id) && n.id != leader)
+                    .map(|x| (id, *x, g))
+            })
+        })
+        .unwrap();
+    let rest: Vec<&GossipNode> = old.iter().copied().filter(|n| n.id != x.id).collect();
+    partition(x, &rest);
+    x.node.faults.blocked.lock().insert(fresh_id);
+    let id_flag: &'static str = Box::leak(fresh_id.to_string().into_boxed_str());
+    let mut f = flags(SLOW_DEATH);
+    f.extend(["--node-id", id_flag]);
+    let (fresh, _) = join_to(&net, &leases, &rest, &f).await;
+    fresh.node.faults.blocked.lock().insert(x.id);
+    let mut all = old.clone();
+    all.push(&fresh);
+    // The cut-off node cannot take part in the epoch change, so only the others agree.
+    let mut ids: Vec<NodeId> = all.iter().map(|n| n.id).collect();
+    ids.sort();
+    let joined = || {
+        rest.iter().chain([&&fresh]).all(|n| {
+            let e = n.node.epochs().current().clone();
+            let mut listed: Vec<NodeId> = e.members().iter().map(|m| m.id).collect();
+            listed.sort();
+            listed == ids && n.is_normal()
+        })
+    };
+    assert!(
+        wait_until(Duration::from_secs(20), joined).await,
+        "the fourth node did not join"
+    );
+    let mut want = targets(&fresh, g);
+    want.sort();
+    let moved = || {
+        leader_of(&all, g).is_some_and(|l| {
+            let mut v = status(l, g).voters;
+            v.sort();
+            v == want
+        })
+    };
+    assert!(
+        wait_until(Duration::from_secs(30), moved).await,
+        "group {g} did not move to its new targets\n{}",
+        dump(&all)
+    );
+    heal(x, &rest);
+    x.node.faults.blocked.lock().remove(&fresh.id);
+    fresh.node.faults.blocked.lock().remove(&x.id);
+    assert!(
+        wait_until(Duration::from_secs(30), || role(x, g) == "idle").await,
+        "the removed voter still holds group {g}\n{}",
+        dump(&all)
+    );
+    // The promoted fourth node and the other voters stay past the wait that removes a replica.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    for n in all.iter().filter(|n| want.contains(&n.id)) {
+        assert!(
+            matches!(role(n, g), "voter" | "leader"),
+            "a target left group {g}\n{}",
+            dump(&all)
+        );
+    }
+    let leader = leader_of(&all, g).unwrap();
+    let mut c = leader.redis().await;
+    let _: i64 = incr_until(&mut c, &key_in(leader, g, "gone"), Duration::from_secs(10)).await;
 }
 
 /// `incrs` increments of `key` through `nodes[0]`, then the group of `key` and its voters, once

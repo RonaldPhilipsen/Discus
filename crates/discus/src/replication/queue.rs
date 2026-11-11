@@ -178,7 +178,7 @@ impl PeerQueue {
     }
 
     /// Drop the queued keys for which `keep` is false.
-    pub fn retain(&self, keep: impl Fn(&Bytes) -> bool) {
+    pub fn retain(&self, mut keep: impl FnMut(&Bytes) -> bool) {
         let mut s = self.state.lock();
         let drop: Vec<Bytes> = s
             .keys

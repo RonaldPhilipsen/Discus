@@ -24,6 +24,22 @@ service:
   type: ClusterIP
   port: 6379
 
+# A second client listener. A cluster client reads the slot table from it and sends each command
+# to the owner of the key. The nodes advertise their pod IPs, so only a client that can reach the
+# pod network can use it. Other clients keep using the Service port above.
+clusterClients:
+  enabled: true
+  port: 6380
+  # The topology replies and -MOVED name each pod as
+  # <pod IP with dashes>.<release>-peers.<namespace>.svc.<clusterDomain>, for example
+  # 10-42-0-5.discus-peers.cache.svc.cluster.local. CoreDNS answers these names for the pods of the
+  # headless peers Service. A certificate with one wildcard DNS SAN then serves every pod. Set this
+  # to false to return pod IPs instead.
+  hostnames: true
+  clusterDomain: cluster.local
+  # A host name template that replaces the default names. {ip} becomes the pod IP with dashes.
+  hostname: ""
+
 cluster:
   tls:
     # Required. A Secret with the keys ca.crt, tls.crt, and tls.key.

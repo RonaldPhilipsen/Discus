@@ -92,10 +92,13 @@ impl Membership {
         rpc_advertise: SocketAddr,
     ) -> Arc<Membership> {
         let config = &node.config;
+        let client_addr = node.resolve_client_addr(advertise.ip());
         let me = MemberInfo {
             id: node.id,
             addr: advertise,
             rpc_addr: rpc_advertise,
+            client_addr: Some(client_addr),
+            client_host: node.client_host(),
             state: MemberState::Joining,
             incarnation: 0,
             weight: Weight::new(config.weight).unwrap_or_default(),
@@ -461,6 +464,10 @@ impl Membership {
 
     pub fn members(&self) -> Vec<(MemberInfo, Liveness)> {
         self.inner.lock().swim.members()
+    }
+
+    pub fn liveness(&self, id: NodeId) -> Option<Liveness> {
+        self.inner.lock().swim.liveness(id)
     }
 
     /// Publish the counter leader hints of this node (spec section 6.1). They spread with a new

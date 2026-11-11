@@ -3,13 +3,16 @@
 use std::fmt::Write;
 
 use bytes::Bytes;
+use discus_placement::{slot, Epoch};
 use discus_resp::{Command, Protocol, Value};
 
 use super::access::Access;
 use super::error::CommandError;
-use super::table::{names, CommandSpec};
+use super::table::{check, lookup, names, CommandSpec};
 use super::util::{glob_match, parse_i64, upper};
 use crate::build;
+use crate::cluster::route::{keys_of, Keys, Route};
+use crate::cluster::topology::{self, TopologyKind};
 use crate::node::{ConnState, Node};
 
 /// The Redis version that Discus reports. Clients gate features on it.
@@ -27,6 +30,9 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::connection("INFO", -1, info).with_access(Access::Read),
     CommandSpec::connection("CONFIG", -2, config).with_access(Access::Read),
     CommandSpec::connection("CLUSTER", -1, cluster),
+    CommandSpec::connection("READONLY", 1, readonly),
+    CommandSpec::connection("READWRITE", 1, readwrite),
+    CommandSpec::connection("ASKING", 1, asking),
 ];
 
 type Reply = Result<Value, CommandError>;
@@ -37,6 +43,21 @@ fn ping(_: &Node, _: &mut ConnState, cmd: &Command) -> Result<Value, CommandErro
         2 => Ok(Value::Bulk(cmd[1].clone())),
         _ => Err(CommandError::WrongArity("PING".into())),
     }
+}
+
+fn readonly(_: &Node, conn: &mut ConnState, _: &Command) -> Reply {
+    conn.readonly = true;
+    Ok(Value::ok())
+}
+
+fn readwrite(_: &Node, conn: &mut ConnState, _: &Command) -> Reply {
+    conn.readonly = false;
+    Ok(Value::ok())
+}
+
+/// Discus never sends `-ASK`, so `ASKING` has no effect.
+fn asking(_: &Node, _: &mut ConnState, _: &Command) -> Reply {
+    Ok(Value::ok())
 }
 
 fn echo(_: &Node, _: &mut ConnState, cmd: &Command) -> Result<Value, CommandError> {
@@ -123,12 +144,63 @@ fn command(_: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         None => Ok(Value::Array(
             names()
                 .into_iter()
-                .map(|n| Value::bulk(n.to_lowercase().into_bytes()))
+                .filter_map(|n| lookup(n.as_bytes()))
+                .map(command_entry)
                 .collect(),
         )),
         Some("COUNT") => Ok(Value::Integer(names().len() as i64)),
-        Some("DOCS") | Some("INFO") => Ok(Value::Array(vec![])),
+        Some("DOCS") => Ok(Value::Array(vec![])),
+        Some("INFO") => Ok(Value::Array(
+            cmd[2..]
+                .iter()
+                .map(|name| lookup(name).map_or(Value::Null, command_entry))
+                .collect(),
+        )),
+        Some("GETKEYS") if cmd.len() >= 3 => getkeys(&cmd[2..]),
         Some(_) => Err(CommandError::Syntax),
+    }
+}
+
+/// One `COMMAND` entry in the Redis 7 shape. The flag is `readonly` unless the command changes
+/// data. The ACL categories, tips, key specifications, and subcommands are empty.
+fn command_entry(spec: &CommandSpec) -> Value {
+    let flag = if spec.access == Access::Write {
+        "write"
+    } else {
+        "readonly"
+    };
+    let (first, last, step) = match spec.route {
+        Route::Single { .. } => (1, 1, 1),
+        Route::MultiRead { .. } | Route::MultiWrite { pairs: false } => (1, -1, 1),
+        Route::MultiWrite { pairs: true } => (1, -1, 2),
+        Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => (0, 0, 0),
+    };
+    Value::Array(vec![
+        Value::bulk(spec.name.to_lowercase().into_bytes()),
+        Value::Integer(i64::from(spec.arity)),
+        Value::Array(vec![Value::simple(flag)]),
+        Value::Integer(first),
+        Value::Integer(last),
+        Value::Integer(step),
+        Value::Array(vec![]),
+        Value::Array(vec![]),
+        Value::Array(vec![]),
+        Value::Array(vec![]),
+    ])
+}
+
+fn getkeys(args: &[Bytes]) -> Reply {
+    let inner: Command = args.to_vec();
+    let Ok(spec) = check(lookup(&inner[0]), &inner) else {
+        return Err(CommandError::Custom(
+            "ERR Invalid command specified or wrong number of arguments".into(),
+        ));
+    };
+    match keys_of(spec.route, &inner) {
+        Keys::Some(keys) => Ok(Value::Array(keys.into_iter().map(Value::Bulk).collect())),
+        Keys::None | Keys::Barrier => Err(CommandError::Custom(
+            "ERR The command has no key arguments".into(),
+        )),
     }
 }
 
@@ -198,6 +270,13 @@ fn info(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         &[format!("db0:keys={},expires=0,avg_ttl=0", node.store.len())],
     );
     section(
+        "Cluster",
+        &[format!(
+            "cluster_enabled:{}",
+            u8::from(node.config.topology_enabled())
+        )],
+    );
+    section(
         "discus",
         &[
             format!("discus_build:{}", build::BUILD_ID),
@@ -223,6 +302,17 @@ fn info(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
             format!(
                 "discus_rpc_addr:{}",
                 node.rpc_addr()
+                    .map_or("none".to_string(), |a| a.to_string())
+            ),
+            format!(
+                "discus_redirect_addr:{}",
+                node.config
+                    .redirect_listen
+                    .map_or("none".to_string(), |a| a.to_string())
+            ),
+            format!(
+                "discus_client_addr:{}",
+                node.client_addr()
                     .map_or("none".to_string(), |a| a.to_string())
             ),
             format!("discus_peers:{}", node.config.peers.len()),
@@ -274,10 +364,125 @@ fn config(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     ))
 }
 
-fn cluster(_: &Node, _: &mut ConnState, _: &Command) -> Reply {
-    Err(CommandError::Custom(
-        "ERR Discus is not a Redis Cluster. Any node accepts any key, so clients do not need \
-         topology awareness. Use a standalone client."
-            .into(),
+fn cluster(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    if !node.config.topology_enabled() {
+        return Err(CommandError::Custom(
+            "ERR Discus is not a Redis Cluster. Any node accepts any key, so clients do not need \
+             topology awareness. Use a standalone client."
+                .into(),
+        ));
+    }
+    let Some(sub) = cmd.get(1).map(upper) else {
+        return Err(CommandError::WrongArity("CLUSTER".into()));
+    };
+    let kind = match sub.as_str() {
+        "SLOTS" => Some(TopologyKind::Slots),
+        "SHARDS" => Some(TopologyKind::Shards),
+        "NODES" => Some(TopologyKind::Nodes),
+        "INFO" => Some(TopologyKind::Info),
+        _ => None,
+    };
+    let arity = match sub.as_str() {
+        "KEYSLOT" => 3,
+        _ => 2,
+    };
+    let known = kind.is_some() || matches!(sub.as_str(), "KEYSLOT" | "MYID");
+    if known && cmd.len() != arity {
+        return Err(CommandError::WrongArity(format!("CLUSTER|{sub}")));
+    }
+    if let Some(kind) = kind {
+        discus_telemetry::global().topology_request(kind.into());
+        return match standalone_topology(node, conn, kind) {
+            Some(reply) => reply,
+            None => node
+                .topology(kind, conn.protocol)
+                .map(|reply| (*reply).clone()),
+        };
+    }
+    match sub.as_str() {
+        "KEYSLOT" => Ok(Value::Integer(i64::from(slot(&cmd[2])))),
+        "MYID" => Ok(Value::bulk(topology::node_id(node.id).into_bytes())),
+        "COUNTKEYSINSLOT" | "GETKEYSINSLOT" => Err(CommandError::Custom(format!(
+            "ERR Discus does not support CLUSTER {sub}, because it keeps no index by slot"
+        ))),
+        _ => Err(CommandError::Custom(format!(
+            "ERR Discus places slots by itself. CLUSTER {sub} is not supported"
+        ))),
+    }
+}
+
+/// A single node without a cluster and without an advertised address names the local address
+/// of the connection that asks (spec "CLUSTER and connection commands"). That reply depends on
+/// the connection, so it is not cached. `None` when the node advertises an address.
+fn standalone_topology(node: &Node, conn: &ConnState, kind: TopologyKind) -> Option<Reply> {
+    let local = conn.local_addr?;
+    let epoch = node.epochs().current().clone();
+    let [me] = epoch.members() else {
+        return None;
+    };
+    if me.id != node.id || me.client_addr.is_some() || !node.is_normal() {
+        return None;
+    }
+    let mut me = me.clone();
+    me.client_addr = Some(local);
+    me.client_host = node.host_for(local);
+    let alone = Epoch::new(epoch.id(), epoch.cluster_id(), vec![me]).ok()?;
+    let rf = node.config.replication_factor;
+    Some(topology::build(
+        kind,
+        &alone,
+        rf,
+        conn.protocol,
+        node.topology_responder(true),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn positions(entry: &Value) -> (i64, i64, i64) {
+        let Value::Array(parts) = entry else {
+            panic!("entry is not an array: {entry:?}");
+        };
+        assert_eq!(parts.len(), 10, "{parts:?}");
+        let int = |i: usize| match parts[i] {
+            Value::Integer(n) => n,
+            ref other => panic!("not an integer: {other:?}"),
+        };
+        for empty in &parts[6..] {
+            assert_eq!(empty, &Value::Array(vec![]));
+        }
+        (int(3), int(4), int(5))
+    }
+
+    #[test]
+    fn every_entry_has_its_key_positions() {
+        for name in names() {
+            let spec = lookup(name.as_bytes()).unwrap();
+            let want = match spec.route {
+                Route::Single { .. } => (1, 1, 1),
+                Route::MultiRead { .. } | Route::MultiWrite { pairs: false } => (1, -1, 1),
+                Route::MultiWrite { pairs: true } => (1, -1, 2),
+                _ => (0, 0, 0),
+            };
+            assert_eq!(positions(&command_entry(spec)), want, "{name}");
+        }
+        let of = |name: &str| positions(&command_entry(lookup(name.as_bytes()).unwrap()));
+        assert_eq!(of("MSET"), (1, -1, 2));
+        assert_eq!(of("GET"), (1, 1, 1));
+        assert_eq!(of("PING"), (0, 0, 0));
+    }
+
+    #[test]
+    fn flags_follow_access() {
+        let flags = |name: &str| {
+            let Value::Array(p) = command_entry(lookup(name.as_bytes()).unwrap()) else {
+                unreachable!()
+            };
+            p[2].clone()
+        };
+        assert_eq!(flags("GET"), Value::Array(vec![Value::simple("readonly")]));
+        assert_eq!(flags("SET"), Value::Array(vec![Value::simple("write")]));
+    }
 }

@@ -80,6 +80,17 @@ spec:
             - --cluster-key=/tls/tls.key
             - --cluster-san={{ if .Values.cluster.san.enabled }}{{ .Values.cluster.san.value | default (printf "spiffe://cluster.local/ns/%s/sa/%s" .Release.Namespace (include "discus.serviceAccountName" .)) }}{{ end }}
             - --shutdown-timeout-secs={{ .Values.shutdownTimeoutSeconds }}
+            {{- with .Values.clusterClients }}
+            {{- if .enabled }}
+            - --redirect-listen=0.0.0.0:{{ int .port }}
+            - --client-advertise=$(POD_IP):{{ int .port }}
+            {{- if .hostname }}
+            - --client-hostname={{ .hostname }}
+            {{- else if .hostnames }}
+            - --client-hostname={{ printf "{ip}.%s-peers.%s.svc.%s" (include "discus.fullname" $) $.Release.Namespace .clusterDomain }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.otel }}
             {{- if .enabled }}
             - --otel
@@ -107,6 +118,10 @@ spec:
           ports:
             - name: resp
               containerPort: 6379
+            {{- if .Values.clusterClients.enabled }}
+            - name: resp-cluster
+              containerPort: {{ int .Values.clusterClients.port }}
+            {{- end }}
             - name: cluster
               containerPort: 7379
               protocol: UDP

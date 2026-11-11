@@ -79,3 +79,28 @@ async fn client_commands_and_command_listing() {
     let id = common::roundtrip(addr, b"*2\r\n$6\r\nCLIENT\r\n$2\r\nID\r\n").await;
     assert!(id.starts_with(':'), "{id:?}");
 }
+
+#[tokio::test]
+async fn command_info_and_getkeys() {
+    let addr = common::start_node(&[]).await;
+    let info = common::roundtrip(addr, b"*3\r\n$7\r\nCOMMAND\r\n$4\r\nINFO\r\n$3\r\nget\r\n").await;
+    assert!(
+        info.starts_with("*1\r\n*10\r\n$3\r\nget\r\n:2\r\n*1\r\n+readonly\r\n:1\r\n:1\r\n:1\r\n"),
+        "{info:?}"
+    );
+    let unknown =
+        common::roundtrip(addr, b"*3\r\n$7\r\nCOMMAND\r\n$4\r\nINFO\r\n$3\r\nnop\r\n").await;
+    assert_eq!(unknown, "*1\r\n$-1\r\n");
+    let keys = common::roundtrip(
+        addr,
+        b"*7\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$4\r\nMSET\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n",
+    )
+    .await;
+    assert_eq!(keys, "*2\r\n$1\r\na\r\n$1\r\nb\r\n");
+    let none = common::roundtrip(
+        addr,
+        b"*3\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$4\r\nPING\r\n",
+    )
+    .await;
+    assert!(none.starts_with("-ERR"), "{none:?}");
+}

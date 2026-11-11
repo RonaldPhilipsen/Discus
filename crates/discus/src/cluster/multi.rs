@@ -140,7 +140,8 @@ pub fn multi(
         spec,
         rr,
         writes,
-        ..
+        redirect,
+        readonly,
     } = job;
     let width = if merge == Merge::AllOk { 2 } else { 1 };
     if width == 2 {
@@ -154,14 +155,22 @@ pub fn multi(
         }
     }
     let now = Instant::now();
+    let need = |key: &[u8]| match &writes {
+        Some(w) if !write => w.lock().required(key, now),
+        _ => None,
+    };
+    if super::redirect::applies(redirect, &hop) {
+        let keys: Vec<&[u8]> = cmd[1..].chunks(width).map(|item| &item[0][..]).collect();
+        let moved =
+            route.in_scope(|| super::redirect::multi_moved(node, &keys, write, need, readonly));
+        if let Some(moved) = moved {
+            return Dispatch::Ready(Reply::error(moved));
+        }
+    }
     let groups = route.in_scope(|| {
         split(&cmd, width, |key| {
-            let need = match &writes {
-                Some(w) if !write => w.lock().required(key, now),
-                _ => None,
-            };
             let owners = node.owners(key);
-            candidates(node, key, &owners, write, rr, need)
+            candidates(node, key, &owners, write, rr, need(key))
                 .first()
                 .copied()
         })
@@ -272,10 +281,14 @@ pub fn dbsize(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> Dis
                 sum += n;
             }
         }
-        let normal = discus_membership::normal_count(node.epochs().current());
-        let copies = node.config.replication_factor.min(normal).max(1) as i64;
-        Reply::value(Value::Integer(sum / copies))
+        Reply::value(Value::Integer(sum / copies(&node)))
     }))
+}
+
+/// How many members hold each key.
+pub(crate) fn copies(node: &Node) -> i64 {
+    let normal = discus_membership::normal_count(node.epochs().current());
+    node.config.replication_factor.min(normal).max(1) as i64
 }
 
 /// `FLUSHDB` and `FLUSHALL`: every member, best-effort.

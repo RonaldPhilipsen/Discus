@@ -1,7 +1,7 @@
 //! Strong counters (spec section 10): keys under `--counter-prefix` served linearizably by
 //! counter groups.
 //!
-//! The keyspace splits into `G` groups by `xxh3(key) % G`. Each node runs one controller task
+//! The keyspace splits into `G` groups by `slot(key) % G`. Each node runs one controller task
 //! per group, which decides the role of the node in the group. The router sends every command on
 //! a counter key to the leader of its group, so a counter key never enters the store or the
 //! replication queues.
@@ -31,9 +31,6 @@ use group::{Group, Role};
 use raft::Replica;
 use state::Limits;
 
-/// The seed of the group hash. A change is a re-shard (spec section 10.4).
-pub const COUNTER_SEED: u64 = 0x4449_5343_5553_0005;
-
 #[cfg(test)]
 pub(crate) fn cmd(parts: &[&str]) -> Command {
     parts
@@ -50,6 +47,12 @@ const METRICS_EVERY: Duration = Duration::from_secs(1);
 
 /// How long a `RAFT_LEADER` question waits for each answer.
 const ASK_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// The group of `key` when there are `groups` groups: the Redis Cluster slot modulo the count, so
+/// keys that share a hash tag share a group.
+pub fn group_for(key: &[u8], groups: u16) -> u16 {
+    discus_placement::slot(key) % groups
+}
 
 /// The HRW key of group `g`: its target voters are the top members for this key.
 pub fn group_key(g: u16) -> Vec<u8> {
@@ -139,7 +142,7 @@ impl View {
 
     /// Every `NORMAL` member, best first by HRW with the key of group `g`.
     pub fn ranked(&self, g: u16) -> Vec<NodeId> {
-        self.epoch.owners(&group_key(g), usize::MAX)
+        discus_placement::hrw::owners(&group_key(g), self.epoch.members(), usize::MAX)
     }
 }
 
@@ -552,8 +555,7 @@ impl Counters {
 
     /// The group of a counter key.
     pub fn group_of(&self, key: &[u8]) -> u16 {
-        let h = xxhash_rust::xxh3::xxh3_64_with_seed(key, COUNTER_SEED);
-        (h % u64::from(self.settings.groups)) as u16
+        group_for(key, self.settings.groups)
     }
 
     pub fn group(&self, g: u16) -> &Arc<Group> {
@@ -744,6 +746,25 @@ impl Counters {
             other => Message::Unsupported {
                 message_type: other.type_code(),
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::group_for;
+
+    #[test]
+    fn counter_keys_with_one_tag_share_a_group() {
+        for groups in 1..=1024 {
+            assert_eq!(group_for(b"{t}a", groups), group_for(b"{t}b", groups));
+        }
+    }
+
+    #[test]
+    fn group_of_is_the_slot_modulo_the_groups() {
+        for groups in 1..=1024u16 {
+            assert_eq!(group_for(b"foo", groups), 12182 % groups);
         }
     }
 }

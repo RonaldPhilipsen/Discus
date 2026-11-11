@@ -244,6 +244,8 @@ impl Sim {
             id,
             addr,
             rpc_addr: addr,
+            client_addr: None,
+            client_host: None,
             state: MemberState::Joining,
             incarnation: 0,
             weight: Weight::default(),
@@ -288,6 +290,8 @@ impl Sim {
                 id: *id,
                 addr: self.nodes[id].swim.me().addr,
                 rpc_addr: self.nodes[id].swim.me().rpc_addr,
+                client_addr: None,
+                client_host: None,
                 state: MemberState::Normal,
                 weight: Weight::default(),
             })
