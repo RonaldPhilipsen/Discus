@@ -513,12 +513,12 @@ fn batch_of(b: fb::EntryBatch<'_>) -> Result<Batch, DecodeError> {
 }
 
 /// Encode the body of a message as its own FlatBuffer.
-fn encode_body(message: &Message) -> Vec<u8> {
-    let mut fbb = FlatBufferBuilder::new();
+/// Build the payload of `message` in `fbb`, finished.
+fn build_body(fbb: &mut FlatBufferBuilder<'_>, message: &Message) {
     match message {
         Message::Hello(h) => {
             let t = fb::Hello::create(
-                &mut fbb,
+                fbb,
                 &fb::HelloArgs {
                     node_id: Some(&id128(h.node_id.to_be_bytes())),
                     cluster_id: Some(&id128(h.cluster_id.to_be_bytes())),
@@ -532,7 +532,7 @@ fn encode_body(message: &Message) -> Vec<u8> {
         Message::HandshakeFailed(f) => {
             let reason = fbb.create_string(&f.reason);
             let t = fb::HandshakeFailed::create(
-                &mut fbb,
+                fbb,
                 &fb::HandshakeFailedArgs {
                     code: code_to(f.code),
                     reason: Some(reason),
@@ -542,7 +542,7 @@ fn encode_body(message: &Message) -> Vec<u8> {
         }
         Message::Unsupported { message_type } => {
             let t = fb::Unsupported::create(
-                &mut fbb,
+                fbb,
                 &fb::UnsupportedArgs {
                     message_type: *message_type,
                 },
@@ -551,11 +551,11 @@ fn encode_body(message: &Message) -> Vec<u8> {
         }
         Message::Forward(f) => {
             let command = fbb.create_vector(&f.command);
-            let body = f.epoch_body.as_ref().map(|e| epoch_to(&mut fbb, e));
+            let body = f.epoch_body.as_ref().map(|e| epoch_to(fbb, e));
             let path: Vec<fb::Id128> = f.path.iter().map(|n| id128(n.to_be_bytes())).collect();
             let path = fbb.create_vector(&path);
             let t = fb::Forward::create(
-                &mut fbb,
+                fbb,
                 &fb::ForwardArgs {
                     command: Some(command),
                     epoch: Some(&epoch_id_to(f.epoch)),
@@ -572,11 +572,11 @@ fn encode_body(message: &Message) -> Vec<u8> {
             fbb.finish_minimal(t);
         }
         Message::ForwardReply(r) => {
-            let value = to_wire(&mut fbb, &r.value);
+            let value = to_wire(fbb, &r.value);
             let applied = r.applied.map(version_to);
             let observed = r.observed.map(version_to);
             let t = fb::ForwardReply::create(
-                &mut fbb,
+                fbb,
                 &fb::ForwardReplyArgs {
                     value: Some(value),
                     applied: applied.as_ref(),
@@ -588,18 +588,18 @@ fn encode_body(message: &Message) -> Vec<u8> {
             fbb.finish_minimal(t);
         }
         Message::Ping { nonce } | Message::Pong { nonce } => {
-            let t = fb::Ping::create(&mut fbb, &fb::PingArgs { nonce: *nonce });
+            let t = fb::Ping::create(fbb, &fb::PingArgs { nonce: *nonce });
             fbb.finish_minimal(t);
         }
-        Message::Gossip(g) => gossip_to(&mut fbb, g),
+        Message::Gossip(g) => gossip_to(fbb, g),
         Message::Replicate(b)
         | Message::HintReplay(b)
         | Message::Handoff(b)
-        | Message::Entries(b) => batch_to(&mut fbb, b),
+        | Message::Entries(b) => batch_to(fbb, b),
         Message::BatchAck(a) => {
-            let want = blobs(&mut fbb, a.want.iter().map(|k| &k[..]));
+            let want = blobs(fbb, a.want.iter().map(|k| &k[..]));
             let t = fb::BatchAck::create(
-                &mut fbb,
+                fbb,
                 &fb::BatchAckArgs {
                     applied: a.applied,
                     want: Some(want),
@@ -610,8 +610,8 @@ fn encode_body(message: &Message) -> Vec<u8> {
             fbb.finish_minimal(t);
         }
         Message::Fetch { keys } => {
-            let keys = blobs(&mut fbb, keys.iter().map(|k| &k[..]));
-            let t = fb::Fetch::create(&mut fbb, &fb::FetchArgs { keys: Some(keys) });
+            let keys = blobs(fbb, keys.iter().map(|k| &k[..]));
+            let t = fb::Fetch::create(fbb, &fb::FetchArgs { keys: Some(keys) });
             fbb.finish_minimal(t);
         }
         m @ (Message::RaftLeader(_)
@@ -622,12 +622,12 @@ fn encode_body(message: &Message) -> Vec<u8> {
         | Message::RaftReply(_)
         | Message::CounterSync(_)
         | Message::CounterAck(_)) => {
-            crate::counter::encode(&mut fbb, m);
+            crate::counter::encode(fbb, m);
         }
         Message::Digest { from, to, sums } => {
             let sums = fbb.create_vector(sums);
             let t = fb::Digest::create(
-                &mut fbb,
+                fbb,
                 &fb::DigestArgs {
                     from: Some(&epoch_id_to(*from)),
                     to: Some(&epoch_id_to(*to)),
@@ -637,7 +637,41 @@ fn encode_body(message: &Message) -> Vec<u8> {
             fbb.finish_minimal(t);
         }
     }
-    fbb.finished_data().to_vec()
+}
+
+/// Build an `Envelope` around `payload` in `fbb`, finished.
+fn build_envelope(
+    fbb: &mut FlatBufferBuilder<'_>,
+    message_type: u16,
+    request_id: u64,
+    trace: &TraceContext,
+    payload: &[u8],
+) {
+    let payload = fbb.create_vector(payload);
+    let traceparent = trace.traceparent.as_deref().map(|s| fbb.create_string(s));
+    let tracestate = trace.tracestate.as_deref().map(|s| fbb.create_string(s));
+    let env = fb::Envelope::create(
+        fbb,
+        &fb::EnvelopeArgs {
+            type_: fb::MessageType(message_type),
+            request_id,
+            traceparent,
+            tracestate,
+            payload: Some(payload),
+        },
+    );
+    fbb.finish_minimal(env);
+}
+
+/// A builder that grew past this size is dropped after use, so a rare large batch does not pin
+/// its memory to the thread.
+const KEEP_BUILDER_BYTES: usize = 64 << 10;
+
+thread_local! {
+    /// The body and envelope builders of this thread. A reused builder skips the allocation and
+    /// the zeroing of a fresh one for every frame.
+    static BUILDERS: std::cell::RefCell<(FlatBufferBuilder<'static>, FlatBufferBuilder<'static>)> =
+        std::cell::RefCell::new((FlatBufferBuilder::new(), FlatBufferBuilder::new()));
 }
 
 /// Encode an `Envelope` around an already encoded payload. Tests use it to build frames with
@@ -649,32 +683,36 @@ pub fn encode_envelope(
     payload: &[u8],
 ) -> Vec<u8> {
     let mut fbb = FlatBufferBuilder::with_capacity(payload.len() + 128);
-    let payload = fbb.create_vector(payload);
-    let traceparent = trace.traceparent.as_deref().map(|s| fbb.create_string(s));
-    let tracestate = trace.tracestate.as_deref().map(|s| fbb.create_string(s));
-    let env = fb::Envelope::create(
-        &mut fbb,
-        &fb::EnvelopeArgs {
-            type_: fb::MessageType(message_type),
-            request_id,
-            traceparent,
-            tracestate,
-            payload: Some(payload),
-        },
-    );
-    fbb.finish_minimal(env);
+    build_envelope(&mut fbb, message_type, request_id, trace, payload);
     fbb.finished_data().to_vec()
 }
 
 /// Encode a frame as `Envelope` bytes, without the length prefix.
 pub fn encode_frame(frame: &Frame) -> Vec<u8> {
-    let body = encode_body(&frame.message);
-    encode_envelope(
-        frame.message.type_code(),
-        frame.request_id,
-        &frame.trace,
-        &body,
-    )
+    let encode = |body: &mut FlatBufferBuilder<'_>, env: &mut FlatBufferBuilder<'_>| {
+        body.reset();
+        build_body(body, &frame.message);
+        env.reset();
+        build_envelope(
+            env,
+            frame.message.type_code(),
+            frame.request_id,
+            &frame.trace,
+            body.finished_data(),
+        );
+        env.finished_data().to_vec()
+    };
+    BUILDERS.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut pair) => {
+            let (body, env) = &mut *pair;
+            let out = encode(body, env);
+            if body.finished_data().len() > KEEP_BUILDER_BYTES || out.len() > KEEP_BUILDER_BYTES {
+                *pair = (FlatBufferBuilder::new(), FlatBufferBuilder::new());
+            }
+            out
+        }
+        Err(_) => encode(&mut FlatBufferBuilder::new(), &mut FlatBufferBuilder::new()),
+    })
 }
 
 /// Verify and decode a frame. The verifier runs on the envelope and then on the nested payload

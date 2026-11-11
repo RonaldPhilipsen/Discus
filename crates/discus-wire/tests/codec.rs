@@ -322,3 +322,29 @@ fn encode_command_is_a_resp_multibulk() {
     let wire = discus_wire::encode_command(&[Bytes::from("GET"), Bytes::from("key")]);
     assert_eq!(&wire[..], b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n");
 }
+
+#[test]
+fn a_reused_builder_gives_the_same_bytes() {
+    let small = Frame {
+        request_id: 7,
+        trace: trace(),
+        message: Message::Ping { nonce: 3 },
+    };
+    let large = Frame {
+        request_id: 8,
+        trace: TraceContext::default(),
+        message: Message::Fetch {
+            keys: (0..2_000u32)
+                .map(|i| Bytes::from(format!("a long key name {i:>40}")))
+                .collect(),
+        },
+    };
+    let first = encode_frame(&small);
+    let big = encode_frame(&large);
+    assert!(big.len() > 64 << 10);
+    assert_eq!(encode_frame(&small), first);
+    assert_eq!(encode_frame(&large), big);
+    assert_eq!(encode_frame(&small), first);
+    assert_eq!(decode_frame(&first, &limits()).unwrap(), small);
+    assert_eq!(decode_frame(&big, &limits()).unwrap(), large);
+}

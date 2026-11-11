@@ -65,6 +65,19 @@ fn the_hash_input_is_key_then_big_endian_id() {
     assert_eq!(unit(b"some key", id), expected);
 }
 
+proptest! {
+    #[test]
+    fn unit_matches_the_streaming_hash(key in proptest::collection::vec(any::<u8>(), 0..600), id in any::<u128>()) {
+        use discus_placement::PLACEMENT_SEED;
+        let id = NodeId::from_u128(id);
+        let mut h = xxhash_rust::xxh3::Xxh3::with_seed(PLACEMENT_SEED);
+        h.update(&key);
+        h.update(&id.to_be_bytes());
+        let expected = ((h.digest() >> 12) as f64 + 0.5) / 4_503_599_627_370_496.0;
+        prop_assert_eq!(unit(&key, id).to_bits(), expected.to_bits());
+    }
+}
+
 #[test]
 fn score_scales_with_weight() {
     let a = member(1, MemberState::Normal, 1.0);
