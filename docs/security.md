@@ -105,8 +105,8 @@ of the node with that address. The certificate must therefore name the address. 
 - The flag `--client-hostname` with a wildcard DNS SAN. For example, the template
   `{ip}.discus-peers.<namespace>.svc.cluster.local` fits the SAN
   `*.discus-peers.<namespace>.svc.cluster.local`. The topology replies then name hosts, so one
-  certificate serves every pod. The template is optional. The Discus tests do not test that
-  CoreDNS answers such names for the pods of a headless Service.
+  certificate serves every pod. The Helm chart sets this template by default. CoreDNS answers
+  these names for the pods of a headless Service.
 
 Every connection must authenticate. A cluster client opens one connection to each node and
 authenticates on each one. The limit on failed attempts counts for each node.

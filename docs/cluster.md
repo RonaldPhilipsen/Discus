@@ -287,15 +287,21 @@ names, so each release is a separate cluster. Use a different CA for each releas
 URI SAN that is different for each release.
 
 To run without the redirect listener, set `clusterClients.enabled=false`. The chart then passes no
-redirect flags and opens no redirect port. To name hosts instead of IPs in the topology replies, set
-`clusterClients.hostname`. This setting is optional. If CoreDNS answers names for the pods of the
-headless Service, `{ip}.<release>-peers.<namespace>.svc.cluster.local` becomes a name for each pod.
-The Discus tests do not test such names. The certificate must then carry a matching DNS SAN (see
-[TLS on the redirect listener](security.md#tls-on-the-redirect-listener)).
+redirect flags and opens no redirect port.
 
-The chart uses the pod IP as the client address, and a pod gets a new IP at each restart. A cluster
-client must therefore reach the pod network. A client outside the pod network uses the Service on
-port 6379.
+The topology replies and `-MOVED` name each pod by a host name, not by its IP. The chart sets
+`--client-hostname` to `{ip}.<release>-peers.<namespace>.svc.cluster.local`. CoreDNS answers this
+name for each pod of the headless peers Service, for example
+`10-42-0-5.discus-peers.cache.svc.cluster.local`. One certificate with a wildcard DNS SAN then
+serves every pod (see [TLS on the redirect listener](security.md#tls-on-the-redirect-listener)).
+
+- If the cluster domain is not `cluster.local`, set `clusterClients.clusterDomain`.
+- To use another template, set `clusterClients.hostname`.
+- To return pod IPs, set `clusterClients.hostnames=false`.
+
+A pod gets a new IP, and thus a new name, at each restart. A cluster client reads the new name from
+the next topology reply or `-MOVED`. A cluster client must reach the pod network and use the
+cluster DNS. A client outside the pod network uses the Service on port 6379.
 
 ### Memory budget
 

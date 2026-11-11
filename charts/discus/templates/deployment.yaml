@@ -86,6 +86,8 @@ spec:
             - --client-advertise=$(POD_IP):{{ int .port }}
             {{- if .hostname }}
             - --client-hostname={{ .hostname }}
+            {{- else if .hostnames }}
+            - --client-hostname={{ printf "{ip}.%s-peers.%s.svc.%s" (include "discus.fullname" $) $.Release.Namespace .clusterDomain }}
             {{- end }}
             {{- end }}
             {{- end }}
