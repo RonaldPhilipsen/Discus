@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+crc = "3"
 fastrand = "2"
 getrandom = "0.4"
 uhlc = { version = "0.9", default-features = false }
