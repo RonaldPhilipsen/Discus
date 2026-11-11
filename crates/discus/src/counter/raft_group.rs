@@ -34,6 +34,9 @@ pub struct RaftRole {
     /// Since when this replica leads. A new leader has heard from nobody yet, so it measures the
     /// silence of a voter from here, never from the start of the replica.
     leading_since: Mutex<Option<Instant>>,
+    /// Since when the leader that the hints name lists this node in no role and does not
+    /// replicate to this replica.
+    dropped_since: Mutex<Option<Instant>>,
 }
 
 impl RaftRole {
@@ -42,6 +45,7 @@ impl RaftRole {
             replica: Arc::new(replica),
             last_stamp: Mutex::new(0),
             leading_since: Mutex::new(None),
+            dropped_since: Mutex::new(None),
         })
     }
 
@@ -294,9 +298,32 @@ impl Group {
             .is_some_and(|k| k.regime > r.regime());
         let listed = me_voter || replica.is_learner();
         let orphan = !listed && replica.started.elapsed() > ORPHAN_AFTER;
-        if known_newer || orphan {
+        if known_newer || orphan || self.dropped(view, r) {
             self.set_role_if(seen, Role::Idle);
         }
+    }
+
+    /// The leader of this regime removed this replica, but the replica missed the entry that
+    /// removes it: openraft stops replicating to a removed node once the change commits. Its
+    /// own membership still lists it as a voter, so it keeps starting elections that the voters
+    /// refuse while their leader lease runs, which never ends. The hint of the leader shows the
+    /// removal: it lists this node in no role, and this replica does not follow that leader.
+    fn dropped(&self, view: &View, r: &RaftRole) -> bool {
+        let gone = self.inner().known.as_ref().is_some_and(|k| {
+            k.mode == CounterMode::Raft
+                && k.regime == r.regime()
+                && k.leader != view.me
+                && view.normal(k.leader)
+                && !k.voters.contains(&view.me)
+                && !k.learners.contains(&view.me)
+                && r.replica.leader_node() != Some(k.leader)
+        });
+        let mut since = r.dropped_since.lock();
+        if !gone {
+            *since = None;
+            return false;
+        }
+        since.get_or_insert_with(Instant::now).elapsed() > ORPHAN_AFTER
     }
 
     /// Below three `NORMAL` members the group goes back to leader-follower mode at once. The
