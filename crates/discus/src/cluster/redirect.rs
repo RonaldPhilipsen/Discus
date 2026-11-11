@@ -25,6 +25,16 @@ pub enum Misroute {
     NoAddress,
 }
 
+impl From<Misroute> for discus_telemetry::attrs::MisrouteReason {
+    fn from(m: Misroute) -> Self {
+        match m {
+            Misroute::Epoch => Self::Epoch,
+            Misroute::Down => Self::Down,
+            Misroute::NoAddress => Self::NoAddress,
+        }
+    }
+}
+
 /// The client endpoint of `member`: the host name when one is set, else the IP.
 pub fn endpoint(member: &Member) -> Option<Endpoint> {
     let addr = member.client_addr?;

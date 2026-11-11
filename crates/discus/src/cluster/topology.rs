@@ -19,6 +19,17 @@ pub enum TopologyKind {
     Info,
 }
 
+impl From<TopologyKind> for discus_telemetry::attrs::TopologyCommand {
+    fn from(kind: TopologyKind) -> Self {
+        match kind {
+            TopologyKind::Slots => Self::Slots,
+            TopologyKind::Shards => Self::Shards,
+            TopologyKind::Nodes => Self::Nodes,
+            TopologyKind::Info => Self::Info,
+        }
+    }
+}
+
 /// The 40-character Redis form of a node ID: the 32 hex digits followed by `00000000`, so
 /// clients that check the length accept it.
 pub fn node_id(id: NodeId) -> String {

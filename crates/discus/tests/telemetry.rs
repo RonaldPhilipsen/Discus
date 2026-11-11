@@ -130,8 +130,11 @@ fn init_refuses_to_start_without_the_feature() {
 }
 
 #[cfg(feature = "otel")]
+#[allow(clippy::unwrap_used)]
 mod otel {
     use super::*;
+    use std::time::Duration;
+
     use discus_telemetry::attrs::{check, ALLOWED_KEYS};
     use discus_telemetry::testing::{Point, TraceHarness};
     use tracing_subscriber::layer::SubscriberExt;
@@ -334,5 +337,105 @@ mod otel {
             .find(|p| p.name == "discus.ring.epoch")
             .unwrap();
         assert_eq!(gauge.value, 7.0);
+    }
+
+    /// Send one command and read the first chunk of the reply. The replies here are small.
+    async fn ask(stream: &mut tokio::net::TcpStream, parts: &[&str]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut wire = format!("*{}\r\n", parts.len()).into_bytes();
+        for p in parts {
+            wire.extend(format!("${}\r\n{p}\r\n", p.len()).into_bytes());
+        }
+        stream.write_all(&wire).await.unwrap();
+        let mut buf = [0u8; 4096];
+        let read = tokio::time::timeout(Duration::from_secs(30), stream.read(&mut buf))
+            .await
+            .expect("no reply")
+            .unwrap();
+        String::from_utf8_lossy(&buf[..read]).into_owned()
+    }
+
+    #[tokio::test]
+    async fn redirect_metrics_count() {
+        use common::cluster::start_redirect_cluster;
+        use common::gossip::wait_until;
+        use discus_telemetry::testing::MetricHarness;
+        use tokio::net::TcpStream;
+
+        let h = MetricHarness::new();
+        assert!(discus_telemetry::install_global(h.metrics.clone()));
+        let (c, ports) = start_redirect_cluster(3, |_| {
+            vec![
+                "--replication-factor".into(),
+                "3".into(),
+                "--hold-budget-ms".into(),
+                "500".into(),
+            ]
+        })
+        .await;
+        let (a, b) = (&c.nodes[0], &c.nodes[1]);
+        let mut forward = TcpStream::connect(a.addr).await.unwrap();
+        for (j, to) in c.nodes.iter().enumerate().skip(1) {
+            let key = c.key_on(j, "warm");
+            assert_eq!(ask(&mut forward, &["SET", &key, "w"]).await, "+OK\r\n");
+            let link = a.node.link().unwrap();
+            assert!(wait_until(Duration::from_secs(10), || link.peer_epoch(to.id).is_some()).await);
+        }
+        let key = c.key_on(1, "moved");
+        let mut redirect = TcpStream::connect(ports[0]).await.unwrap();
+        let reply = ask(&mut redirect, &["SET", &key, "v"]).await;
+        assert!(reply.starts_with("-MOVED"), "{reply:?}");
+
+        b.kill();
+        let replicator = a.node.replicator().unwrap();
+        let down = wait_until(Duration::from_secs(20), || replicator.peer_down(b.id));
+        let fill = async {
+            let mut i = 0;
+            loop {
+                let local = c.key_on(0, &format!("fill{i}"));
+                ask(&mut forward, &["SET", &local, "v"]).await;
+                i += 1;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::select! {
+            up = down => assert!(up, "the queue to B never went down"),
+            () = fill => unreachable!(),
+        }
+        let reply = ask(&mut redirect, &["SET", &key, "v"]).await;
+        assert!(!reply.starts_with("-MOVED"), "{reply:?}");
+        ask(&mut redirect, &["CLUSTER", "SLOTS"]).await;
+
+        let points = h.points();
+        let count = |name: &str, attr: Option<(&str, &str)>| -> f64 {
+            points
+                .iter()
+                .filter(|p| p.name == name)
+                .filter(|p| {
+                    attr.is_none_or(|a| {
+                        p.attrs
+                            .iter()
+                            .any(|(k, v)| (k, v) == (&a.0.into(), &a.1.into()))
+                    })
+                })
+                .map(|p| p.value)
+                .sum()
+        };
+        assert_eq!(count("discus.client.redirects", None), 1.0);
+        assert_eq!(count("discus.client.misrouted", None), 1.0);
+        assert_eq!(
+            count("discus.client.misrouted", Some(("reason", "down"))),
+            1.0
+        );
+        assert_eq!(
+            count(
+                "discus.client.topology_requests",
+                Some(("command", "slots"))
+            ),
+            1.0
+        );
+        for p in &points {
+            check(p.attrs.iter().map(|(k, v)| (k.as_str(), v.as_str()))).unwrap();
+        }
     }
 }
