@@ -281,10 +281,14 @@ pub fn dbsize(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> Dis
                 sum += n;
             }
         }
-        let normal = discus_membership::normal_count(node.epochs().current());
-        let copies = node.config.replication_factor.min(normal).max(1) as i64;
-        Reply::value(Value::Integer(sum / copies))
+        Reply::value(Value::Integer(sum / copies(&node)))
     }))
+}
+
+/// How many members hold each key.
+pub(crate) fn copies(node: &Node) -> i64 {
+    let normal = discus_membership::normal_count(node.epochs().current());
+    node.config.replication_factor.min(normal).max(1) as i64
 }
 
 /// `FLUSHDB` and `FLUSHALL`: every member, best-effort.

@@ -321,3 +321,60 @@ async fn authorization_comes_before_moved() {
     assert!(reply.starts_with("-NOPERM"), "{reply:?}");
     assert_eq!(redirect.cmd(&["GET", &key]).await, moved(&key, ports[1]));
 }
+
+/// Write 3000 keys through a forward port. Return how many keys every node holds once
+/// replication settles, which includes the keys that `warm` wrote.
+async fn fill(c: &Cluster) -> usize {
+    let mut forward = Raw::connect(c.nodes[0].addr).await;
+    for i in 0..3000 {
+        assert_eq!(forward.cmd(&["SET", &format!("k{i}"), "v"]).await, "+OK");
+    }
+    let total = c.nodes[0].node.store.len();
+    assert!(
+        wait_until(Duration::from_secs(30), || {
+            c.nodes.iter().all(|n| n.node.store.len() == total)
+        })
+        .await
+    );
+    total
+}
+
+#[tokio::test]
+async fn dbsize_over_redirect_ports_sums_to_the_estimate() {
+    let (c, ports) = start(|_| vec![]).await;
+    fill(&c).await;
+    let mut forward = Raw::connect(c.nodes[0].addr).await;
+    let want = forward.cmd(&["DBSIZE"]).await[1..].parse::<i64>().unwrap();
+    let mut sum = 0i64;
+    for p in &ports {
+        let mut r = Raw::connect(*p).await;
+        sum += r.cmd(&["DBSIZE"]).await[1..].parse::<i64>().unwrap();
+    }
+    assert!(
+        (sum - want).abs() <= 3,
+        "the redirect ports sum to {sum}, not {want}"
+    );
+}
+
+#[tokio::test]
+async fn scan_over_primaries_lists_each_key_once() {
+    let (c, ports) = start(|_| vec![]).await;
+    let total = fill(&c).await;
+    let mut seen = std::collections::HashSet::new();
+    for p in &ports {
+        let mut r = Raw::connect(*p).await;
+        let mut cursor = "0".to_string();
+        loop {
+            let reply = r.cmd(&["SCAN", &cursor, "COUNT", "100"]).await;
+            let parts: Vec<&str> = reply.split("\r\n").collect();
+            cursor = parts[2].to_string();
+            for key in parts[5..].iter().step_by(2) {
+                assert!(seen.insert(key.to_string()), "{key} listed twice");
+            }
+            if cursor == "0" {
+                break;
+            }
+        }
+    }
+    assert_eq!(seen.len(), total);
+}
