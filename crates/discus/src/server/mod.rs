@@ -306,12 +306,25 @@ impl Server {
             lane,
         } = self;
         let stop_background = CancellationToken::new();
-        discus_store::spawn_sweeper(
-            node.store.clone(),
-            Duration::from_millis(100),
-            20,
-            stop_background.clone(),
-        );
+        {
+            let node = node.clone();
+            discus_store::every(
+                Duration::from_millis(100),
+                stop_background.clone(),
+                move || {
+                    #[cfg(feature = "testing")]
+                    if node
+                        .faults
+                        .hold_sweep
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        return std::future::ready(());
+                    }
+                    node.store.sweep_expired(20);
+                    std::future::ready(())
+                },
+            );
+        }
         node.security.start(stop_background.clone());
         let admin_task = {
             let (node, stop) = (node.clone(), stop_background.clone());

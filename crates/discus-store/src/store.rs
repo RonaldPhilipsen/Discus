@@ -285,7 +285,9 @@ impl Store {
             let mut guard = shard.inner.write();
             let mut old = 0;
             if let Some(cur) = guard.map.get_mut(key) {
-                if !cur.is_expired(now) && cur.version >= entry.version {
+                // An expired entry still refuses an older version, or a late copy would bring
+                // back a value that a newer write replaced before it expired.
+                if cur.version >= entry.version {
                     return false;
                 }
                 old = estimate_size(key, cur);
@@ -309,10 +311,12 @@ impl Store {
             return false;
         }
         let mut guard = shard.inner.write();
-        if let Some(cur) = guard.map.get(key) {
-            if !cur.is_expired(now) && cur.version >= entry.version {
-                return false;
-            }
+        if guard
+            .map
+            .get(key)
+            .is_some_and(|cur| cur.version >= entry.version)
+        {
+            return false;
         }
         self.replace(&mut guard, key, entry);
         true
@@ -333,6 +337,25 @@ impl Store {
         let shard = &self.shards[self.shard_index(key)];
         let guard = shard.inner.read();
         guard.map.get(key).filter(|e| !e.is_expired(now)).cloned()
+    }
+
+    /// Remove the entry of `key`, tombstone or not, when `f` accepts it. `f` runs under the
+    /// shard lock, so no write to `key` lands between the check and the removal. Returns true
+    /// when the entry was removed.
+    pub fn remove_if(&self, key: &[u8], f: impl FnOnce(&Entry) -> bool) -> bool {
+        let shard = &self.shards[self.shard_index(key)];
+        let mut guard = shard.inner.write();
+        if !guard.map.get(key).is_some_and(f) {
+            return false;
+        }
+        self.take(&mut guard, key).is_some()
+    }
+
+    /// The version of the stored entry, tombstone or not, expired or not.
+    pub fn stored_version(&self, key: &[u8]) -> Option<Version> {
+        let shard = &self.shards[self.shard_index(key)];
+        let guard = shard.inner.read();
+        guard.map.get(key).map(|e| e.version)
     }
 
     /// The version of the entry, tombstone or not. An expired entry is absent.

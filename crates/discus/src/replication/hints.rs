@@ -244,13 +244,17 @@ impl HintStore {
     }
 
     /// Drop every hint of `target`, which never returns.
-    pub fn drop_target(&mut self, target: NodeId) {
-        self.targets.remove(&target);
+    /// Drop every hint of `target`. Returns the keys of the dropped hints.
+    pub fn drop_target(&mut self, target: NodeId) -> Vec<Bytes> {
+        self.targets
+            .remove(&target)
+            .map(|t| t.hints.iter().map(|(k, _)| k.clone()).collect())
+            .unwrap_or_default()
     }
 
     /// Keep only the hints for which `keep(target, key)` holds. Dropped hints are not lost:
     /// the target no longer owns the key.
-    pub fn retain(&mut self, keep: impl Fn(NodeId, &Bytes) -> bool) {
+    pub fn retain(&mut self, mut keep: impl FnMut(NodeId, &Bytes) -> bool) {
         for (id, t) in &mut self.targets {
             let drop: Vec<Bytes> = t
                 .hints
@@ -390,7 +394,7 @@ mod tests {
         h.retain(|_, key| key.as_ref() == b"keep");
         assert_eq!(h.count(T), 1);
         assert!(h.lost(T).buckets.is_empty());
-        h.drop_target(T);
+        assert_eq!(h.drop_target(T), vec![k("keep")]);
         assert_eq!(h.bytes(), 0);
     }
 

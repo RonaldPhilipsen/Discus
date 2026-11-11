@@ -103,6 +103,12 @@ pub struct Replicator {
     scans: AtomicU64,
     ready: AtomicBool,
     probing: AtomicBool,
+    /// The newest epoch generation of a batch that a peer sent, recorded before its entries
+    /// apply. `handoff::drop_lost` keeps every key once it passes the current generation.
+    pub(crate) peer_generation: AtomicU64,
+    /// Adoptions since start, counted under the epoch lock in `register`. The drop of moved
+    /// keys keeps every key once this changes during its pass.
+    pub(crate) adoptions: AtomicU64,
 }
 
 impl Replicator {
@@ -125,6 +131,8 @@ impl Replicator {
             scans: AtomicU64::new(0),
             ready: AtomicBool::new(false),
             probing: AtomicBool::new(false),
+            peer_generation: AtomicU64::new(0),
+            adoptions: AtomicU64::new(0),
         });
         // Under memory pressure the store frees the oldest hints after its normal entries
         // (spec section 11).
@@ -234,6 +242,7 @@ impl Replicator {
         new: &Arc<Epoch>,
         mut pin: impl FnMut() -> Option<crate::node::EpochPin>,
     ) {
+        self.adoptions.fetch_add(1, Ordering::SeqCst);
         if !self.settings.handoff {
             return;
         }
@@ -355,7 +364,11 @@ impl Replicator {
                 rate_bytes: self.settings.handoff_rate,
                 rf: self.settings.rf,
             };
-            handoff::scan(&node, &changes, to, limits).await;
+            let watermark = node.hlc.current();
+            if handoff::scan(&node, &changes, to.clone(), limits).await {
+                let dropped = handoff::drop_lost(&node, &to, watermark, limits).await;
+                tracing::info!(dropped, "dropped the keys that moved to other owners");
+            }
             self.scans.fetch_add(1, Ordering::Relaxed);
             drop(changes);
             let more = {
@@ -447,7 +460,12 @@ impl Replicator {
 
     /// Queue `key`, which a local write just changed, for every other current owner.
     pub fn written(&self, node: &Node, key: &Bytes) {
-        for owner in node.owners(key) {
+        self.queue_for(node.owners(key), key);
+    }
+
+    /// Queue `key` for every owner in `owners` but this node.
+    fn queue_for(&self, owners: Vec<NodeId>, key: &Bytes) {
+        for owner in owners {
             if owner == self.id {
                 continue;
             }
@@ -492,31 +510,48 @@ impl Replicator {
     }
 
     /// The node adopted `new` after `old`, and `current` is its epoch now. Queues and hints stop
-    /// carrying keys that the target no longer owns in `current`, and queues stop carrying keys
-    /// that this node no longer owns (spec sections 5.1 and 9). A peer that left `current` is
-    /// `DEAD` or departed, so it loses its queue and hints. Only the promotion reconciliation
-    /// uses the `old` to `new` step.
+    /// carrying keys that the target no longer owns in `current`, and those keys go to the queues
+    /// of their current owners instead (spec sections 5.1 and 9). A write that this node
+    /// acknowledged while the epoch changed can be in no handoff scan, so it must not stay
+    /// behind on this node, also when this node no longer owns the key. A peer that left
+    /// `current` is `DEAD` or departed, so it loses its queue and hints. Only the promotion
+    /// reconciliation uses the `old` to `new` step.
     pub fn on_epoch(&self, old: &Arc<Epoch>, new: &Arc<Epoch>, current: &Epoch) {
         let rf = self.settings.rf;
+        let mut moved: Vec<Bytes> = Vec::new();
         self.peers.write().retain(|peer, q| {
-            if current.member(*peer).is_none() {
-                q.close();
-                return false;
-            }
+            let member = current.member(*peer).is_some();
             q.retain(|k| {
-                let owners = current.owners(k, rf);
-                owners.contains(peer) && owners.contains(&self.id)
+                let keep = member && current.owners(k, rf).contains(peer);
+                if !keep {
+                    moved.push(k.clone());
+                }
+                keep
             });
-            true
+            if !member {
+                q.close();
+            }
+            member
         });
         {
             let mut hints = self.hints.lock();
             for target in hints.targets() {
                 if current.member(target).is_none() {
-                    hints.drop_target(target);
+                    moved.extend(hints.drop_target(target));
                 }
             }
-            hints.retain(|target, k| current.owners(k, rf).contains(&target));
+            hints.retain(|target, k| {
+                let keep = current.owners(k, rf).contains(&target);
+                if !keep {
+                    moved.push(k.clone());
+                }
+                keep
+            });
+        }
+        moved.sort_unstable();
+        moved.dedup();
+        for k in &moved {
+            self.queue_for(current.owners(k, rf), k);
         }
         self.sync_charge();
         self.prune_handoffs(current);
@@ -602,6 +637,12 @@ impl Replicator {
                 if self.probe(&node, &q).await && self.replay(&node, q.peer).await {
                     q.set_up();
                 }
+                continue;
+            }
+            #[cfg(feature = "testing")]
+            if node.faults.hold_replication.load(Ordering::Relaxed) {
+                drop(node);
+                tokio::time::sleep(Duration::from_millis(10)).await;
                 continue;
             }
             let keys = q.take(self.settings.batch_keys);
@@ -753,10 +794,12 @@ impl Replicator {
         };
         match message {
             Message::Replicate(b) => {
+                self.saw_generation(&b);
                 let applied = self.apply_entries(&node, b.entries);
                 ack(&node, applied, Vec::new())
             }
             Message::HintReplay(b) => {
+                self.saw_generation(&b);
                 if !b.discard.is_empty() {
                     self.discard(&node, from, b.discard).await;
                 }
@@ -774,13 +817,17 @@ impl Replicator {
                 })
             }
             Message::Handoff(b) => {
+                self.saw_generation(&b);
+                // The entries apply first, so an offer of a key that the same batch carries
+                // confirms that this node stored it. An expired entry still counts: it was newer
+                // than the offer, so the offered copy must not come back.
+                let applied = self.apply_entries(&node, b.entries);
                 let want: Vec<Bytes> = b
                     .offers
                     .into_iter()
-                    .filter(|(k, v)| self.store.version(k).is_none_or(|local| local < *v))
+                    .filter(|(k, v)| self.store.stored_version(k).is_none_or(|local| local < *v))
                     .map(|(k, _)| k)
                     .collect();
-                let applied = self.apply_entries(&node, b.entries);
                 if let Some((_, to)) = b.done {
                     let finished = self.handoff.lock().done(from, to);
                     if !finished.is_empty() {
@@ -835,6 +882,11 @@ impl Replicator {
         }
     }
 
+    fn saw_generation(&self, b: &Batch) {
+        self.peer_generation
+            .fetch_max(b.epoch.generation, Ordering::SeqCst);
+    }
+
     /// Drop the keys of the lost refill buckets whose primary is `from`, before a replay
     /// refills what it can (spec section 9). The walk of the store runs off the async workers.
     async fn discard(&self, node: &Node, from: NodeId, buckets: Vec<u8>) {
@@ -852,6 +904,10 @@ impl Replicator {
     /// Apply entries that are newer than the local ones. An entry with a version too far ahead
     /// of the local clock is dropped (spec section 8.1).
     pub fn apply_entries(&self, node: &Node, entries: Vec<(Bytes, Entry)>) -> u32 {
+        #[cfg(feature = "testing")]
+        if node.faults.refuse_apply.load(Ordering::Relaxed) {
+            return 0;
+        }
         let mut applied = 0;
         for (k, e) in entries {
             if node.hlc.observe(e.version).is_err() {
@@ -886,10 +942,18 @@ fn fill(store: &Store, q: &PeerQueue, keys: Vec<Bytes>) -> Vec<(Bytes, Entry)> {
 }
 
 fn ack(node: &Node, applied: u32, want: Vec<Bytes>) -> Message {
+    #[cfg(feature = "testing")]
+    let epoch = node
+        .faults
+        .ack_epoch
+        .lock()
+        .unwrap_or_else(|| node.epoch_id());
+    #[cfg(not(feature = "testing"))]
+    let epoch = node.epoch_id();
     Message::BatchAck(BatchAck {
         applied,
         want,
-        epoch: node.epoch_id(),
+        epoch,
         idle: false,
     })
 }

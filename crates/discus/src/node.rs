@@ -108,6 +108,21 @@ pub struct Faults {
     pub hold_scan: std::sync::atomic::AtomicBool,
     /// A handoff scan waited on `hold_scan`.
     pub scan_held: std::sync::atomic::AtomicBool,
+    /// The drop of moved keys waits before each page while this is set.
+    pub hold_drop: std::sync::atomic::AtomicBool,
+    /// A drop of moved keys waited on `hold_drop`.
+    pub drop_held: std::sync::atomic::AtomicBool,
+    /// The replication senders keep their queued keys while this is set.
+    pub hold_replication: std::sync::atomic::AtomicBool,
+    /// Bulk acknowledgements carry this epoch in place of the current one, as from a node that
+    /// lags or runs ahead.
+    pub ack_epoch: parking_lot::Mutex<Option<discus_placement::EpochId>>,
+    /// Inbound replicated and handed-off entries are refused, as with clock drift.
+    pub refuse_apply: std::sync::atomic::AtomicBool,
+    /// Why the last drop of moved keys stopped early.
+    pub drop_stopped: parking_lot::Mutex<Option<&'static str>>,
+    /// The sweep of expired entries skips its runs while this is set.
+    pub hold_sweep: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "testing")]

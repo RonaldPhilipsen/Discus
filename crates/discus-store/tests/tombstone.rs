@@ -323,3 +323,31 @@ fn a_newer_apply_makes_room_under_memory_pressure() {
     assert!(s.used_memory() <= 4_000);
     assert_eq!(s.entry(key.as_bytes()).unwrap().version, v(20));
 }
+
+#[test]
+fn remove_if_checks_the_entry_and_keeps_the_accounting() {
+    let (s, _) = store(1 << 20, 1 << 20);
+    put(&s, "a", v(1));
+    put(&s, "b", v(1));
+    del(&s, "b", v(2));
+    assert!(!s.remove_if(b"a", |e| e.version == v(9)));
+    assert!(s.entry(b"a").is_some());
+    assert!(s.remove_if(b"a", |e| e.version == v(1)));
+    assert!(s.remove_if(b"b", |e| e.version == v(2)));
+    assert!(!s.remove_if(b"missing", |_| true));
+    assert_eq!((s.len(), s.tombstones(), s.used_memory()), (0, 0, 0));
+}
+
+#[test]
+fn an_expired_entry_still_refuses_an_older_version() {
+    let (s, clock) = store(1 << 20, 1 << 20);
+    let mut newer = value("new", v(20));
+    newer.expires_at_ms = Some(s.now_ms() + 10);
+    assert!(s.apply(b"k", newer));
+    clock.advance(20);
+    assert!(s.entry(b"k").is_none());
+    assert_eq!(s.stored_version(b"k"), Some(v(20)));
+    assert!(!s.apply(b"k", value("old", v(10))));
+    assert!(s.entry(b"k").is_none());
+    assert!(s.apply(b"k", value("newest", v(30))));
+}
