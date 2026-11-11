@@ -385,6 +385,10 @@ mod otel {
         let mut redirect = TcpStream::connect(ports[0]).await.unwrap();
         let reply = ask(&mut redirect, &["SET", &key, "v"]).await;
         assert!(reply.starts_with("-MOVED"), "{reply:?}");
+        let tag = c.key_on(1, "tag");
+        let (ka, kb) = (format!("{{{tag}}}a"), format!("{{{tag}}}b"));
+        let reply = ask(&mut redirect, &["MSET", &ka, "1", &kb, "2"]).await;
+        assert!(reply.starts_with("-MOVED"), "{reply:?}");
 
         b.kill();
         let replicator = a.node.replicator().unwrap();
@@ -421,7 +425,7 @@ mod otel {
                 .map(|p| p.value)
                 .sum()
         };
-        assert_eq!(count("discus.client.redirects", None), 1.0);
+        assert_eq!(count("discus.client.redirects", None), 2.0);
         assert_eq!(count("discus.client.misrouted", None), 1.0);
         assert_eq!(
             count("discus.client.misrouted", Some(("reason", "down"))),

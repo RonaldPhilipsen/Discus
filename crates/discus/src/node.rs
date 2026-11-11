@@ -102,6 +102,8 @@ pub struct Faults {
     pub blocked: parking_lot::Mutex<std::collections::HashSet<NodeId>>,
     /// Commands that this node forwarded to another node.
     pub forwards: AtomicU64,
+    /// `-MOVED` replies that this node returned.
+    pub redirects: AtomicU64,
 }
 
 #[cfg(feature = "testing")]

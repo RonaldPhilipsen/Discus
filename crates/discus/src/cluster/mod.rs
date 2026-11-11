@@ -498,7 +498,7 @@ fn single_planned(
             Some(Some(t)) if t == node.id => Plan::Local,
             Some(Some(t)) => match redirect::moved(node, &key, t) {
                 Ok(moved) => {
-                    discus_telemetry::global().redirect();
+                    redirect::note_moved(node);
                     Plan::Moved(moved)
                 }
                 Err(misroute) => {
