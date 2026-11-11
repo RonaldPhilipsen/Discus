@@ -28,23 +28,23 @@ These commands return `-ERR command not supported by Discus`:
 `PFCOUNT`, `MIGRATE`, `WAIT`, `DEBUG`, every stream command that starts with `X`, and every
 command that starts with `GEO`.
 
-`CLUSTER` answers only on a node with a redirect listener. See
-[Cluster commands](#cluster-commands). Without a redirect listener, `CLUSTER` returns an error that
+`CLUSTER` answers only on a node with a redirect listener or with `--cluster-topology on`. See
+[Cluster commands](#cluster-commands). On any other node, `CLUSTER` returns an error that
 explains that Discus is not a Redis Cluster and that clients do not need topology awareness.
 
 Any other unknown command returns `-ERR unknown command '<name>'`.
 
 ## Cluster commands
 
-A node with a redirect listener answers these commands. Clients use them to find the owner of each
-key. See [Cluster clients](cluster.md#cluster-clients).
+A node with a redirect listener or with `--cluster-topology on` answers these commands. Clients use
+them to find the owner of each key. See [Cluster clients](cluster.md#cluster-clients).
 
 | Command | Reply |
 | --- | --- |
 | `CLUSTER SLOTS` | One entry for each run of consecutive slots that have the same owners. The first node of an entry is the primary. The others are replicas. |
 | `CLUSTER SHARDS` | One shard for each distinct list of owners. |
 | `CLUSTER NODES` | One line for each member. The lines show no replicas. |
-| `CLUSTER INFO` | The state of the cluster as text. `cluster_state` is `ok` when every slot has a primary. |
+| `CLUSTER INFO` | The state of the cluster as text. If every slot has a primary, `cluster_state` is `ok`. |
 | `CLUSTER KEYSLOT <key>` | The slot of the key. |
 | `CLUSTER MYID` | The ID of this node. |
 | `CLUSTER COUNTKEYSINSLOT`, `CLUSTER GETKEYSINSLOT` | An error. Discus does not keep an index by slot. |
@@ -52,7 +52,7 @@ key. See [Cluster clients](cluster.md#cluster-clients).
 | `READONLY`, `READWRITE` | `OK`. On a redirect connection, they let this node serve reads of slots that it holds as a replica. |
 | `ASKING` | `OK`. It has no effect, because Discus never sends `-ASK`. |
 
-A Discus node ID has 32 hex digits. A reply adds `00000000` to it, so that clients that check for
+A Discus node ID has 32 hex digits. A reply adds `00000000` to it, so that clients that expect
 40 digits accept it.
 
 `COMMAND` returns the Redis 7 shape. Each entry has the name, the arity, the flags, the first key,
@@ -111,9 +111,10 @@ behave differently from Redis:
   its way during the flush can survive it. If a counter group has no leader or no quorum, the
   command returns `-TRYAGAIN FLUSHALL cleared the cache and <n> of <G> counter groups`.
 
-On a redirect connection, a command on keys of one slot gets `-MOVED` when another node serves
-the slot. Discus never returns `-CROSSSLOT`. It serves a command with keys in several slots, as it
-does on the forward listener. These commands differ on a redirect connection:
+If another node serves the slot of a command on a redirect connection, the command gets `-MOVED`.
+This applies to a command on keys of one slot. Discus never returns `-CROSSSLOT`. It serves a
+command with keys in several slots, as it does on the forward listener. These commands differ on a
+redirect connection:
 
 - `SCAN` lists only the keys of the slots that this node is the primary of. A cluster client scans
   every primary.
