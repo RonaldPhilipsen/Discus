@@ -42,6 +42,11 @@ const REPLAY_BATCH: usize = 256;
 const PROBE_AFTER: Duration = Duration::from_secs(2);
 /// How often the replicator reports its gauges and ages out hints.
 const TICK: Duration = Duration::from_secs(1);
+/// Scheduler turns the sender waits after a wake before it takes the queue. The first write of a
+/// burst wakes the sender, and tokio would run it right after that client task, so each batch
+/// would carry one key. Each yield lets the other ready tasks run first, so their writes join the
+/// batch. A timer would wait at least 1 ms.
+const SEND_YIELDS: usize = 2;
 
 /// The replication settings from the flags.
 #[derive(Debug, Clone, Copy)]
@@ -703,6 +708,9 @@ impl Replicator {
                 tokio::select! {
                     _ = self.stop.cancelled() => return,
                     _ = q.notify.notified() => {}
+                }
+                for _ in 0..SEND_YIELDS {
+                    tokio::task::yield_now().await;
                 }
                 continue;
             }
