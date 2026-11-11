@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use discus_placement::NodeId;
-use discus_wire::{Message, TraceContext};
+use discus_transport::Lane;
+use discus_wire::Message;
 
 use crate::Node;
 
@@ -46,29 +47,19 @@ pub async fn fetch(node: &Arc<Node>, key: &Bytes, sources: Vec<NodeId>) {
         return;
     };
     for source in sources {
-        let Some(addr) = node.epochs().current().member(source).map(|m| m.rpc_addr) else {
-            continue;
+        let build = |_: &_| {
+            Ok(Message::Fetch {
+                keys: vec![key.clone()],
+            })
         };
-        let reply = link
-            .transport
-            .request(
-                source,
-                addr,
-                Message::Fetch {
-                    keys: vec![key.clone()],
-                },
-                TraceContext::default(),
-                link.read_timeout,
-                false,
-            )
+        let reply = node
+            .request(source, Lane::Command, build, link.read_timeout, false)
             .await;
-        if let Ok(frame) = reply {
-            if let Message::Entries(batch) = frame.message {
-                let found = !batch.entries.is_empty();
-                replicator.apply_entries(node, batch.entries);
-                if found {
-                    return;
-                }
+        if let Ok(Message::Entries(batch)) = reply {
+            let found = !batch.entries.is_empty();
+            replicator.apply_entries(node, batch.entries);
+            if found {
+                return;
             }
         }
     }

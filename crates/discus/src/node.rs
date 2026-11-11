@@ -13,6 +13,7 @@ use discus_placement::{
 };
 use discus_resp::{Protocol, Value};
 use discus_store::{Slot, Store, StoreConfig, SystemClock, HASH_SEED};
+use discus_transport::TransportError;
 use parking_lot::{RwLock, RwLockReadGuard};
 
 use crate::cluster::topology::{self, TopologyKind};
@@ -515,6 +516,24 @@ impl Node {
             .map(|m| m.rpc_addr)
             .ok_or_else(|| format!("node {to} is not a member"))?;
         Ok((link, addr, epoch))
+    }
+
+    /// Send one request to member `to` on `lane` and return the reply. `build` makes the request
+    /// from the `PeerInfo` of the connection. See [`discus_transport::Transport::request_with`].
+    pub(crate) async fn request(
+        &self,
+        to: NodeId,
+        lane: discus_transport::Lane,
+        build: impl FnOnce(&discus_transport::PeerInfo) -> Result<discus_wire::Message, TransportError>,
+        timeout: std::time::Duration,
+        write: bool,
+    ) -> Result<discus_wire::Message, TransportError> {
+        let (link, addr, _) = self.peer(to).map_err(TransportError::Connect)?;
+        let frame = link
+            .transport
+            .request_with(lane, to, addr, build, Default::default(), timeout, write)
+            .await?;
+        Ok(frame.message)
     }
 
     /// Attach the node-to-node link. Only the first call has an effect.

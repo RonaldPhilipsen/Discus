@@ -25,7 +25,7 @@ use bytes::Bytes;
 use discus_placement::{ClusterId, Epoch, NodeId, Version};
 use discus_store::{refill_bucket, Entry, Store};
 use discus_transport::{Lane, PeerInfo, TransportError};
-use discus_wire::{Batch, BatchAck, Message, TraceContext};
+use discus_wire::{Batch, BatchAck, Message};
 use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
@@ -747,37 +747,22 @@ impl Replicator {
         let link = node
             .link()
             .ok_or_else(|| TransportError::Connect("no transport".into()))?;
-        let addr = node
-            .epochs()
-            .current()
-            .member(peer)
-            .map(|m| m.rpc_addr)
-            .ok_or_else(|| TransportError::Connect(format!("node {peer} is not a member")))?;
         let mut cluster = ClusterId::NIL;
         let build = |info: &PeerInfo| {
             cluster = info.cluster_id;
             link.saw_peer_epoch(peer, info.cluster_id, info.epoch);
             Ok(message)
         };
-        let frame = link
-            .transport
-            .request_with(
-                Lane::Bulk,
-                peer,
-                addr,
-                build,
-                TraceContext::default(),
-                self.settings.timeout,
-                true,
-            )
+        let reply = node
+            .request(peer, Lane::Bulk, build, self.settings.timeout, true)
             .await?;
         // An answered bulk message shows the peer is up (spec "Target health").
         link.note_forward(peer, true);
         // The ack carries the epoch that the peer adopted, so redirects need no forward first.
-        if let Message::BatchAck(a) = &frame.message {
+        if let Message::BatchAck(a) = &reply {
             link.saw_peer_epoch(peer, cluster, a.epoch);
         }
-        Ok(frame.message)
+        Ok(reply)
     }
 
     /// Answer an inbound bulk message from `from`.
