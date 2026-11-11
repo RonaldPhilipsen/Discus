@@ -353,7 +353,7 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
         }
         // Only the entry node fans out. A forwarded copy runs locally. These routes need no
         // owner, so the route span ends at once.
-        Route::Fanout if redirect::applies(job.redirect, &hop) => {
+        Route::Fanout if redirect::applies(job.redirect, &hop) && job.spec.name == "DBSIZE" => {
             drop(route);
             let count = node.store.len() as i64 / multi::copies(node);
             Dispatch::Ready(Reply::value(Value::Integer(count)))

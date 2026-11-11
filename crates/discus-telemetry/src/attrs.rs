@@ -1,7 +1,8 @@
 //! Metric attributes and the cardinality guard (spec §15.4).
 //!
-//! Every metric attribute is one of seven typed values. A command label is a `&'static str`, so it
-//! comes from the code, never from a client. A node or peer label is a short hex node ID, so the
+//! Every metric attribute is one of the eleven typed values of [`Attribute`], under one of the
+//! seven keys of [`ALLOWED_KEYS`]. A `command` value is a `&'static str` from the command table or
+//! a [`TopologyCommand`], so it comes from the code, never from a client. A node or peer label is a short hex node ID, so the
 //! number of values is bounded by the cluster size. [`check`] validates raw pairs against the
 //! same rules. The metrics handle runs it in debug builds, and the tests run it on every exported
 //! data point.

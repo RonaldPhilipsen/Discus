@@ -354,7 +354,6 @@ impl Node {
         })
     }
 
-    /// Attach the gossip membership. Only the first call has an effect.
     /// The target health of `id` (spec "Target health"): SWIM sees it `Alive`, or the node has no
     /// failure detector, and neither the last forward nor the replication queue to it failed.
     pub fn target_up(&self, id: NodeId) -> bool {
@@ -366,6 +365,7 @@ impl Node {
             && !self.replicator().is_some_and(|r| r.peer_down(id))
     }
 
+    /// Attach the gossip membership. Only the first call has an effect.
     pub fn set_membership(&self, membership: Arc<Membership>) {
         let _ = self.membership.set(membership);
     }
