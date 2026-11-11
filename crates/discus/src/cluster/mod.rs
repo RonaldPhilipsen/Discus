@@ -494,15 +494,8 @@ fn single_planned(
             Some(None) => Plan::Retry,
             Some(Some(t)) if t == node.id => Plan::Local,
             Some(Some(t)) => match redirect::moved(node, &key, t) {
-                Ok(moved) => {
-                    redirect::note_moved(node);
-                    Plan::Moved(moved)
-                }
-                Err(misroute) => {
-                    discus_telemetry::global().misrouted(misroute.into());
-                    tracing::trace!(?misroute, target = %t, "forwarding instead of MOVED");
-                    forward()
-                }
+                Some(moved) => Plan::Moved(moved),
+                None => forward(),
             },
         };
         (plan, owners)
