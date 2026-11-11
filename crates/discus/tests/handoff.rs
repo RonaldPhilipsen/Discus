@@ -65,24 +65,34 @@ async fn a_drain_hands_off_before_departing() {
     assert_eq!(hits(&nodes[0], &keys).await, keys.len());
 }
 
+/// A scan holds while the joins arrive. Every epoch that arrives during the scan waits, and one
+/// more scan covers them all.
 #[tokio::test]
 async fn epochs_during_a_scan_wait_for_one_more_scan() {
     let net = Net::new();
-    let slow = ["--handoff-rate-bytes", "10000"];
-    let nodes = net.start_agreed(2, &slow).await;
+    let nodes = net.start_agreed(2, &[]).await;
     fill(&nodes[0], "scan", 2000).await;
     let rep = nodes[0].node.replicator().unwrap();
     assert!(wait_until(Duration::from_secs(10), || !rep.scanning()).await);
     let before = rep.scans();
-    let mut joined = Vec::new();
-    for i in 0..3 {
-        joined.push(net.start(&[nodes[i % 2].cluster_addr], &slow).await);
+    let faults = &nodes[0].node.faults;
+    faults.hold_scan.store(true, Ordering::Relaxed);
+    let mut joined = vec![net.start(&[nodes[0].cluster_addr], &[]).await];
+    let held = wait_until(Duration::from_secs(20), || {
+        faults.scan_held.load(Ordering::Relaxed)
+    });
+    assert!(held.await, "the first join started no scan");
+    for i in 1..3 {
+        joined.push(net.start(&[nodes[i % 2].cluster_addr], &[]).await);
     }
     let all: Vec<&GossipNode> = nodes.iter().chain(joined.iter()).collect();
     wait_agreed(&all, Duration::from_secs(20)).await;
+    assert!(rep.scanning());
+    assert_eq!(rep.scans(), before);
+
+    faults.hold_scan.store(false, Ordering::Relaxed);
     assert!(wait_until(Duration::from_secs(60), || !rep.scanning()).await);
-    let scans = rep.scans() - before;
-    assert!((1..=2).contains(&scans), "{scans} scans");
+    assert_eq!(rep.scans() - before, 2);
 }
 
 /// Two nodes with `RF = 1`, a few keys, and a joiner whose inbound handoff hangs.

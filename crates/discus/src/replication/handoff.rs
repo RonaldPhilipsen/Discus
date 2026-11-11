@@ -162,6 +162,17 @@ pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits
     tracing::info!(from = %from.id(), to = %to.id(), targets = targets.len(), "handoff scan");
     let mut cursor = 0;
     loop {
+        #[cfg(feature = "testing")]
+        while node
+            .faults
+            .hold_scan
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            node.faults
+                .scan_held
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         let (next, entries) = node
             .store
             .scan_entries(cursor, STEP, |_, e| e.version.time() <= watermark);
