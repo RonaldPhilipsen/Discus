@@ -698,6 +698,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn group_voters_follow_hrw_by_group() {
+        let ids: Vec<NodeId> = (1..=5).map(NodeId::from_u128).collect();
+        let v = view(&ids);
+        for g in 0..64 {
+            assert_eq!(
+                v.ranked(g),
+                discus_placement::hrw::owners(
+                    &super::super::group_key(g),
+                    v.epoch.members(),
+                    usize::MAX
+                )
+            );
+        }
+    }
+
     fn raft_hint(leader: NodeId, term: u64, voters: &[NodeId]) -> GroupHint {
         GroupHint {
             mode: CounterMode::Raft,
