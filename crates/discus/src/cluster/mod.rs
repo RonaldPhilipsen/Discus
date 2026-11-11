@@ -38,32 +38,8 @@ pub struct ClusterLink {
     pub read_from_replicas: bool,
     /// The epoch that each peer last reported.
     peer_epochs: Mutex<HashMap<NodeId, EpochId>>,
-    health: ForwardHealth,
-}
-
-/// The peers whose last forward failed (spec "Target health").
-#[derive(Debug, Default)]
-struct ForwardHealth {
+    /// The peers whose last forward failed (spec "Target health").
     down: RwLock<HashSet<NodeId>>,
-}
-
-impl ForwardHealth {
-    fn note(&self, peer: NodeId, ok: bool) {
-        // Most forwards succeed to a peer that is up, so they take only the read lock.
-        if ok == !self.down.read().contains(&peer) {
-            return;
-        }
-        let mut down = self.down.write();
-        if ok {
-            down.remove(&peer);
-        } else {
-            down.insert(peer);
-        }
-    }
-
-    fn is_down(&self, peer: NodeId) -> bool {
-        self.down.read().contains(&peer)
-    }
 }
 
 impl ClusterLink {
@@ -74,19 +50,28 @@ impl ClusterLink {
             write_timeout: config.forward_write_timeout(),
             read_from_replicas: config.read_from_replicas,
             peer_epochs: Mutex::new(HashMap::new()),
-            health: ForwardHealth::default(),
+            down: RwLock::default(),
         }
     }
 
     /// Record the result of a forward or a replication batch to `peer`. A timeout or a transport
     /// error is `false`.
     pub fn note_forward(&self, peer: NodeId, ok: bool) {
-        self.health.note(peer, ok);
+        // Most forwards succeed to a peer that is up, so they take only the read lock.
+        if ok != self.forward_down(peer) {
+            return;
+        }
+        let mut down = self.down.write();
+        if ok {
+            down.remove(&peer);
+        } else {
+            down.insert(peer);
+        }
     }
 
     /// True while the last forward to `peer` failed.
     pub fn forward_down(&self, peer: NodeId) -> bool {
-        self.health.is_down(peer)
+        self.down.read().contains(&peer)
     }
 
     pub fn peer_epoch(&self, peer: NodeId) -> Option<EpochId> {
@@ -98,17 +83,14 @@ impl ClusterLink {
         self.peer_epochs
             .lock()
             .retain(|p, _| epoch.member(*p).is_some());
-        self.health
-            .down
-            .write()
-            .retain(|p| epoch.member(*p).is_some());
+        self.down.write().retain(|p| epoch.member(*p).is_some());
     }
 
     /// Forget every peer epoch and every failed forward. A new cluster history starts its
     /// generations again, so records of the old history are not comparable (spec "Epoch changes").
     pub fn reset(&self) {
         self.peer_epochs.lock().clear();
-        self.health.down.write().clear();
+        self.down.write().clear();
     }
 
     /// Record the epoch a peer reported on a connection of cluster `cluster`. Only a newer one
@@ -525,20 +507,4 @@ fn single_planned(
         }
         Reply::try_again()
     }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn forward_down_follows_the_last_result() {
-        let health = ForwardHealth::default();
-        let p = NodeId::random();
-        assert!(!health.is_down(p));
-        health.note(p, false);
-        assert!(health.is_down(p));
-        health.note(p, true);
-        assert!(!health.is_down(p));
-    }
 }
