@@ -265,3 +265,61 @@ fn retain_and_clear_drop_tombstones_too() {
     assert_eq!(s.tombstones(), 0);
     assert_eq!(s.used_memory(), 0);
 }
+
+#[test]
+fn apply_keeps_the_accounting_exact_through_every_transition() {
+    let (s, _) = store(1 << 20, 1 << 20);
+    let mut tomb = value("", v(30));
+    tomb.tombstone = true;
+    tomb.expires_at_ms = Some(1_000 + TTL);
+    let steps = [
+        value("a", v(10)),
+        value("a much longer value than before", v(20)),
+        tomb,
+        value("back", v(40)),
+    ];
+    for e in steps {
+        let (fresh, _) = store(1 << 20, 1 << 20);
+        assert!(s.apply(b"k", e.clone()));
+        assert!(fresh.apply(b"k", e));
+        assert_eq!(s.used_memory(), fresh.used_memory());
+        assert_eq!(s.len(), fresh.len());
+        assert_eq!(s.tombstones(), fresh.tombstones());
+        assert_eq!(s.tombstone_bytes(), fresh.tombstone_bytes());
+    }
+}
+
+#[test]
+fn a_stale_apply_never_evicts() {
+    let (s, _) = store(4_000, 1 << 20);
+    for i in 0..1_000 {
+        s.apply(format!("k{i}").as_bytes(), value("0123456789", v(10)));
+    }
+    let evicted = s.evictions();
+    assert!(evicted > 0, "the store must be full for this test");
+    let mut big = value(&"x".repeat(2_000), v(5));
+    big.version = v(5);
+    let key = (0..1_000)
+        .map(|i| format!("k{i}"))
+        .find(|k| s.entry(k.as_bytes()).is_some())
+        .unwrap();
+    assert!(!s.apply(key.as_bytes(), big));
+    assert_eq!(s.evictions(), evicted);
+}
+
+#[test]
+fn a_newer_apply_makes_room_under_memory_pressure() {
+    let (s, _) = store(4_000, 1 << 20);
+    for i in 0..1_000 {
+        s.apply(format!("k{i}").as_bytes(), value("0123456789", v(10)));
+    }
+    let key = (0..1_000)
+        .map(|i| format!("k{i}"))
+        .find(|k| s.entry(k.as_bytes()).is_some())
+        .unwrap();
+    let evicted = s.evictions();
+    assert!(s.apply(key.as_bytes(), value(&"y".repeat(1_000), v(20))));
+    assert!(s.evictions() > evicted);
+    assert!(s.used_memory() <= 4_000);
+    assert_eq!(s.entry(key.as_bytes()).unwrap().version, v(20));
+}
