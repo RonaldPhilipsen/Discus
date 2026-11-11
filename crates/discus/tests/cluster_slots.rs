@@ -9,7 +9,7 @@ mod security_support;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use discus_placement::{slot, NodeId};
+use discus_placement::{slot, ClusterId, Epoch, NodeId};
 use security_support::common::cluster::{free_port, start_redirect_cluster, Cluster};
 use security_support::common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -760,6 +760,41 @@ async fn replication_acks_teach_peer_epochs() {
     assert_eq!(
         redirect.cmd(&["SET", &key, "v"]).await,
         moved(&key, redirect_of(&nodes[1]))
+    );
+}
+
+/// Generations of two cluster histories are not comparable, so a new history forgets what the
+/// peers reported in the old one (spec "Epoch changes").
+#[tokio::test]
+async fn a_new_cluster_history_forgets_peer_epochs() {
+    let (c, _ports) = start(|_| vec![]).await;
+    let (a, b) = (&c.nodes[0], c.nodes[1].id);
+    let link = a.node.link().unwrap();
+    let old = a.node.epochs().current().clone();
+    assert!(link.peer_epoch(b).is_some());
+    link.note_forward(b, false);
+    assert!(!a.node.target_up(b));
+
+    let cluster = ClusterId::mint();
+    let fresh = Epoch::new(old.id(), cluster, old.members().to_vec()).unwrap();
+    link.transport.set_cluster_id(cluster);
+    a.node.reset_cluster(fresh);
+    assert_eq!(link.peer_epoch(b), None);
+    assert!(!link.forward_down(b));
+
+    link.saw_peer_epoch(b, old.cluster_id(), old.id());
+    assert_eq!(
+        link.peer_epoch(b),
+        None,
+        "a report of the old history counted"
+    );
+    link.saw_peer_epoch(b, cluster, old.id());
+    assert_eq!(link.peer_epoch(b), Some(old.id()));
+    link.saw_peer_epoch(b, old.cluster_id(), old.id());
+    assert_eq!(
+        link.peer_epoch(b),
+        None,
+        "a report of another history kept the record"
     );
 }
 

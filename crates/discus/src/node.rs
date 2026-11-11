@@ -398,6 +398,9 @@ impl Node {
         tracing::info!(epoch = %id, cluster = %epochs.cluster_id(), "took a new cluster history");
         crate::telemetry::record_epoch(discus_telemetry::global(), epochs.current());
         drop(epochs);
+        if let Some(link) = self.link() {
+            link.reset();
+        }
         if let Some(r) = self.replicator() {
             r.reset_handoffs();
         }
