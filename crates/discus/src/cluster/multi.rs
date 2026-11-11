@@ -233,11 +233,8 @@ pub fn multi(node: &Arc<Node>, job: Job, hop: Hop, route: tracing::Span) -> Disp
             return Reply::try_again();
         };
         Reply {
-            value,
             applied,
-            observed: None,
-            settled: false,
-            failed: None,
+            ..Reply::value(value)
         }
     }))
 }

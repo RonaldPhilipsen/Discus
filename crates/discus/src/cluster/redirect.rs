@@ -3,7 +3,7 @@
 
 use discus_placement::{slot, EpochId, Member, MemberState, NodeId, Version};
 
-use super::{candidates, Hop};
+use super::{candidates, replica_reads, Hop};
 use crate::command::CommandError;
 use crate::node::Node;
 
@@ -91,8 +91,7 @@ pub(crate) fn target(
             .first()
             .copied();
     }
-    let replicas = node.link().is_some_and(|l| l.read_from_replicas);
-    if !write && readonly && replicas && owners.contains(&node.id) {
+    if readonly && replica_reads(node, write) && owners.contains(&node.id) {
         return Some(node.id);
     }
     owners.first().copied()

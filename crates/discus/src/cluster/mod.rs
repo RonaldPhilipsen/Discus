@@ -193,6 +193,18 @@ pub struct Job {
 pub type Writes = Arc<Mutex<writeset::WriteSet>>;
 
 impl Job {
+    /// A job without a client connection: a forwarded command or a held retry.
+    pub fn plain(cmd: Command, spec: &'static CommandSpec) -> Job {
+        Job {
+            cmd,
+            spec,
+            rr: 0,
+            writes: None,
+            redirect: false,
+            readonly: false,
+        }
+    }
+
     pub fn keys(&self) -> Keys {
         keys_of(self.spec.route, &self.cmd)
     }
@@ -257,11 +269,8 @@ pub fn local(node: &Node, spec: &CommandSpec, cmd: &Command) -> Reply {
     Node::take_applied();
     let value = command::execute_local(node, spec, cmd);
     Reply {
-        value,
         applied: Node::take_applied(),
-        observed: None,
-        settled: false,
-        failed: None,
+        ..Reply::value(value)
     }
 }
 
@@ -358,8 +367,7 @@ pub fn candidates(
         }
         return owners.iter().take(1).copied().collect();
     }
-    let replicas = !write && node.link().is_some_and(|l| l.read_from_replicas);
-    if !replicas {
+    if !replica_reads(node, write) {
         return owners.iter().take(1).copied().collect();
     }
     if owners.contains(&node.id) {
@@ -373,10 +381,15 @@ pub fn candidates(
     owners
 }
 
+/// A read may go to any owner, with `--read-from-replicas`.
+pub(crate) fn replica_reads(node: &Node, write: bool) -> bool {
+    !write && node.link().is_some_and(|l| l.read_from_replicas)
+}
+
 /// The budget is spent or every target is on the path. Serve locally if this node was the
 /// required owner in the previous epoch, else `-TRYAGAIN`.
 fn spent(node: &Node, spec: &CommandSpec, cmd: &Command, keys: &[&[u8]], write: bool) -> Reply {
-    let replicas = !write && node.link().is_some_and(|l| l.read_from_replicas);
+    let replicas = replica_reads(node, write);
     let owned_before = keys.iter().all(|key| match node.previous_owners(key) {
         Some(owners) if replicas => owners.contains(&node.id),
         Some(owners) => owners.first() == Some(&node.id),

@@ -31,9 +31,7 @@ impl Service for NodeService {
         let node = self.0.upgrade();
         Box::pin(async move {
             let Some(node) = node else {
-                return Message::Unsupported {
-                    message_type: inbound.message.type_code(),
-                };
+                return unsupported(&inbound.message);
             };
             #[cfg(feature = "testing")]
             if let Some(d) = node.faults.delay(inbound.peer.node_id, &inbound.message) {
@@ -46,9 +44,7 @@ impl Service for NodeService {
                 Message::Ping { nonce } => Message::Pong { nonce },
                 Message::Gossip(g) => match node.membership().cloned() {
                     Some(m) => Message::Gossip(m.handle(inbound.peer.addr, g).await),
-                    None => Message::Unsupported {
-                        message_type: Message::Gossip(g).type_code(),
-                    },
+                    None => unsupported(&Message::Gossip(g)),
                 },
                 // The gossip HELLO admits other clusters and joiners, so it never carries data.
                 m @ (Message::Replicate(_)
@@ -59,9 +55,7 @@ impl Service for NodeService {
                     if inbound.peer.channel == Channel::Rpc =>
                 {
                     let Some(replicator) = node.replicator().cloned() else {
-                        return Message::Unsupported {
-                            message_type: m.type_code(),
-                        };
+                        return unsupported(&m);
                     };
                     replicator.handle(inbound.peer.node_id, m).await
                 }
@@ -75,24 +69,21 @@ impl Service for NodeService {
                     if inbound.peer.channel == Channel::Rpc =>
                 {
                     let Some(counters) = node.counters().cloned() else {
-                        return Message::Unsupported {
-                            message_type: m.type_code(),
-                        };
+                        return unsupported(&m);
                     };
                     counters.handle(inbound.peer.node_id, m).await
                 }
-                Message::Forward(_) if inbound.peer.channel == Channel::Gossip => {
-                    Message::Unsupported {
-                        message_type: discus_wire::fb::MessageType::FORWARD.0,
-                    }
+                m @ Message::Forward(_) if inbound.peer.channel == Channel::Gossip => {
+                    unsupported(&m)
                 }
-
                 Message::Forward(f) => {
                     let span =
                         telemetry::forwarded_span(discus_telemetry::global(), &inbound.trace);
                     let reply = forwarded(&node, &inbound.peer, f, inbound.trace)
-                        .instrument(span)
+                        .instrument(span.clone())
                         .await;
+                    // An error reply marks the command span.
+                    span.in_scope(|| telemetry::record_reply(&reply.value));
                     Message::ForwardReply(ForwardReply {
                         value: reply.value,
                         applied: reply.applied,
@@ -101,11 +92,15 @@ impl Service for NodeService {
                         settled: reply.settled,
                     })
                 }
-                other => Message::Unsupported {
-                    message_type: other.type_code(),
-                },
+                other => unsupported(&other),
             }
         })
+    }
+}
+
+fn unsupported(m: &Message) -> Message {
+    Message::Unsupported {
+        message_type: m.type_code(),
     }
 }
 
@@ -130,19 +125,8 @@ fn parse(node: &Node, raw: &[u8]) -> Result<discus_resp::Command, Value> {
     }
 }
 
-/// Run a forwarded command inside its command span, and mark the span on an error reply.
+/// Run a forwarded command.
 async fn forwarded(
-    node: &Arc<Node>,
-    sender: &discus_transport::PeerInfo,
-    f: Forward,
-    trace: TraceContext,
-) -> Reply {
-    let reply = run_forwarded(node, sender, f, trace).await;
-    telemetry::record_reply(&reply.value);
-    reply
-}
-
-async fn run_forwarded(
     node: &Arc<Node>,
     sender: &discus_transport::PeerInfo,
     f: Forward,
@@ -187,15 +171,7 @@ async fn run_forwarded(
         track: f.track,
         held: false,
     };
-    let job = Job {
-        cmd,
-        spec,
-        rr: 0,
-        writes: None,
-        redirect: false,
-        readonly: false,
-    };
-    run_hop(node, job, hop, telemetry::route_span())
+    run_hop(node, Job::plain(cmd, spec), hop, telemetry::route_span())
         .finish()
         .await
 }
