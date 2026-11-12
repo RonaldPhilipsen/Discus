@@ -1,4 +1,4 @@
-//! OAuth 2.0 bearer tokens on the RESP listener (spec §14.3, §16 Auth row).
+//! OAuth 2.0 bearer tokens on the RESP listener (spec §14.3).
 #![cfg(feature = "oauth2")]
 #![allow(clippy::unwrap_used)]
 mod security_support;

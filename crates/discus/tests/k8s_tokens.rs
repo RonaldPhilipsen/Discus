@@ -1,4 +1,4 @@
-//! Kubernetes service account tokens (spec §14.4, §16 Auth row).
+//! Kubernetes service account tokens (spec §14.4).
 #![cfg(all(feature = "k8s", feature = "oauth2"))]
 #![allow(clippy::unwrap_used)]
 mod security_support;
