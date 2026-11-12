@@ -18,6 +18,9 @@ CHART = "oci://ghcr.io/ronaldphilipsen/charts/discus"
 IMAGES = {"redis": "docker.io/library/redis:8", "valkey": "docker.io/valkey/valkey:9"}
 MEMTIER = "docker.io/redislabs/memtier_benchmark:2.2.1"
 KEYS = 1_000_000
+# The CPU of each server pod, and the io-threads of each Valkey or Redis process.
+CPUS = os.environ.get("BENCH_CPUS", "1")
+IO_THREADS = os.environ.get("BENCH_VALKEY_IO_THREADS")
 VALUE = 256
 
 WORKLOADS = {
@@ -62,6 +65,12 @@ SYSTEMS = {
     "discus-cluster-6-1.1.1": ("discus-cluster", "discus", 6, "1.1.1"),
     "discus-cluster-3-1.1.1": ("discus-cluster", "discus", 3, "1.1.1"),
     "discus-cluster-1-1.1.1": ("discus-cluster", "discus", 1, "1.1.1"),
+    "discus-3-hot-path-pyro": ("discus", "discus", 3, "hot-path-3bc4fea-pyroscope"),
+    "discus-cluster-3-hot-path-pyro": ("discus-cluster", "discus", 3, "hot-path-3bc4fea-pyroscope"),
+    "discus-1-hot-path-pyro": ("discus", "discus", 1, "hot-path-3bc4fea-pyroscope"),
+    "discus-6-hot-path-pyro": ("discus", "discus", 6, "hot-path-3bc4fea-pyroscope"),
+    "discus-cluster-1-hot-path-pyro": ("discus-cluster", "discus", 1, "hot-path-3bc4fea-pyroscope"),
+    "discus-cluster-6-hot-path-pyro": ("discus-cluster", "discus", 6, "hot-path-3bc4fea-pyroscope"),
     "redis-sentinel-6": ("sentinel", "redis", 6),
     "valkey-sentinel-6": ("sentinel", "valkey", 6),
     "redis-cluster-noreplica-6": ("cluster0", "redis", 6),
@@ -160,8 +169,8 @@ def server_sts(name, engine, n, script):
                  "containers": [{
                      "name": "s", "image": IMAGES[engine], "command": ["sh", "-c", script],
                      "env": [{"name": "POD_IP", "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}}}],
-                     "resources": {"requests": {"cpu": "1", "memory": "2Gi"},
-                                   "limits": {"cpu": "1", "memory": "2Gi"}},
+                     "resources": {"requests": {"cpu": CPUS, "memory": "2Gi"},
+                                   "limits": {"cpu": CPUS, "memory": "2Gi"}},
                  }],
              }},
          }},
@@ -170,7 +179,8 @@ def server_sts(name, engine, n, script):
 
 def common(mem):
     return (f"--bind 0.0.0.0 --protected-mode no --save '' --appendonly no "
-            f"--maxmemory {mem} --maxmemory-policy allkeys-lru")
+            f"--maxmemory {mem} --maxmemory-policy allkeys-lru"
+            + (f" --io-threads {IO_THREADS}" if IO_THREADS else ""))
 
 
 def pods(name):
@@ -287,16 +297,25 @@ def deploy_discus(name, n, tag, tmp, cluster_mode=False, pyroscope_url=None):
     kc("delete", "secret", "discus-tls", "--ignore-not-found")
     kc("create", "secret", "generic", "discus-tls", f"--from-file=ca.crt={tmp}/ca.crt",
        f"--from-file=tls.crt={tmp}/tls.crt", f"--from-file=tls.key={tmp}/tls.key")
-    run(["helm", "--kube-context", CTX, "-n", NS, "upgrade", "--install", release, CHART, "--version", tag,
+    # DISCUS_CHART installs a local chart, for an image tag that has no published chart.
+    chart = os.environ.get("DISCUS_CHART")
+    chart_args = [chart] if chart else [CHART, "--version", tag]
+    run(["helm", "--kube-context", CTX, "-n", NS, "upgrade", "--install", release, *chart_args,
          "--wait", "--timeout", "5m",
          "--set", f"replicaCount={n}", "--set", f"image.tag={tag}",
          "--set", "cluster.tls.secretName=discus-tls",
-         "--set", "resources.requests.cpu=1", "--set", "resources.limits.cpu=1",
+         "--set", f"resources.requests.cpu={CPUS}", "--set", f"resources.limits.cpu={CPUS}",
          "--set", "resources.requests.memory=2Gi", "--set", "resources.limits.memory=2Gi",
          "--set-string", f"nodeSelector.kubernetes\\.io/hostname={NODE}",
          "--set", "podDisruptionBudget.enabled=false",
          "--set", f"clusterClients.enabled={'true' if cluster_mode else 'false'}",
-         *(["--set-string", f"pyroscope.url={pyroscope_url}"] if pyroscope_url else [])],
+         *(["--set-string", f"pyroscope.url={pyroscope_url}"] if pyroscope_url else []),
+         # DISCUS_HELM_SET adds one more --set, for example extraArgs={--replication-factor=1}.
+         *(["--set", os.environ["DISCUS_HELM_SET"]] if os.environ.get("DISCUS_HELM_SET") else []),
+         # DISCUS_HELM_SET_STRING adds one more --set-string, for values that must stay strings,
+         # for example extraEnv[0].name=TOKIO_WORKER_THREADS,extraEnv[0].value=2.
+         *(["--set-string", os.environ["DISCUS_HELM_SET_STRING"]]
+           if os.environ.get("DISCUS_HELM_SET_STRING") else [])],
         timeout=400)
     out = json.loads(kc("get", "pods", "-l", "app.kubernetes.io/name=discus", "-o", "json"))
     ips = [p["status"]["podIP"] for p in out["items"] if p["metadata"].get("deletionTimestamp") is None]
