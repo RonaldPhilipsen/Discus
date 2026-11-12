@@ -126,6 +126,120 @@ async fn a_lost_hint_makes_the_target_discard_the_key() {
     }
 }
 
+/// The primary sends a replica every entry of the buckets that it told the replica to discard.
+/// No read misses on the replica, as with primary reads and cluster clients, so without this the
+/// replica would keep only one copy of those keys until they are written again.
+#[tokio::test]
+async fn a_discarded_bucket_refills_without_reads() {
+    let args = [
+        "--replication-factor",
+        "3",
+        "--replication-queue-keys",
+        "8",
+        "--replication-batch-keys",
+        "4",
+        "--hint-max-entries",
+        "4",
+    ];
+    let c = start_cluster(3, &args).await;
+    let (p, r) = (&c.nodes[0], &c.nodes[1]);
+    let keys: Vec<String> = (0..200)
+        .map(|i| c.key_on(0, &format!("refill{i}")))
+        .collect();
+    let mut client = p.redis().await;
+    let same =
+        |k: &String| r.node.store.version(k.as_bytes()) == p.node.store.version(k.as_bytes());
+    for k in &keys {
+        let _: () = client.set(k, "old").await.unwrap();
+    }
+    assert!(wait_until(Duration::from_secs(10), || keys.iter().all(same)).await);
+    p.node
+        .faults
+        .hold_replication
+        .store(true, Ordering::Relaxed);
+    for k in &keys {
+        let _: () = client.set(k, "new").await.unwrap();
+    }
+    for k in &keys[..20] {
+        let _: i64 = client.del(k).await.unwrap();
+    }
+    // The queue holds 8 keys and the hints 4, so most of the overflow was lost.
+    assert_eq!(hints(p, r), 4);
+    p.node
+        .faults
+        .hold_replication
+        .store(false, Ordering::Relaxed);
+    assert!(
+        wait_until(Duration::from_secs(20), || hints(p, r) == 0
+            && keys.iter().all(same))
+        .await,
+        "{} of {} keys differ on the replica, {} of them missing",
+        keys.iter().filter(|k| !same(k)).count(),
+        keys.len(),
+        keys.iter().filter(|k| value_of(r, k).is_none()).count()
+    );
+    for k in &keys[..20] {
+        assert!(
+            r.node
+                .store
+                .entry(k.as_bytes())
+                .is_some_and(|e| e.tombstone),
+            "{k} lost its delete"
+        );
+    }
+}
+
+/// While a queue is down, every write becomes a hint, also while the replay after the outage
+/// refills discarded buckets. Those hints still reach the replica once the queue is up.
+#[tokio::test]
+async fn hints_written_during_a_refill_reach_the_replica() {
+    let mut args = OUTAGE.to_vec();
+    args.extend(["--hint-max-entries", "8"]);
+    let c = start_cluster(3, &args).await;
+    let (p, r) = (&c.nodes[0], &c.nodes[1]);
+    let keys: Vec<String> = (0..20).map(|i| c.key_on(0, &format!("down{i}"))).collect();
+    let late: Vec<String> = (0..3).map(|i| c.key_on(0, &format!("late{i}"))).collect();
+    let mut client = p.redis().await;
+    let same =
+        |k: &String| r.node.store.version(k.as_bytes()) == p.node.store.version(k.as_bytes());
+    for k in &keys {
+        let _: () = client.set(k, "old").await.unwrap();
+    }
+    assert!(wait_until(Duration::from_secs(10), || keys.iter().all(same)).await);
+    let replicator = p.node.replicator().unwrap();
+    r.node.faults.stall_bulk_ms.store(3_000, Ordering::Relaxed);
+    let _: () = client.set(&keys[0], "new").await.unwrap();
+    assert!(wait_until(Duration::from_secs(5), || replicator.peer_down(r.id)).await);
+    for k in &keys {
+        let _: () = client.set(k, "new").await.unwrap();
+    }
+    assert_eq!(hints(p, r), 8);
+    p.node.faults.hold_refill.store(true, Ordering::Relaxed);
+    r.node.faults.stall_bulk_ms.store(0, Ordering::Relaxed);
+    assert!(
+        wait_until(Duration::from_secs(10), || p
+            .node
+            .faults
+            .refill_held
+            .load(Ordering::Relaxed))
+        .await
+    );
+    for k in &late {
+        let _: () = client.set(k, "late").await.unwrap();
+    }
+    assert!(replicator.peer_down(r.id));
+    p.node.faults.hold_refill.store(false, Ordering::Relaxed);
+    assert!(
+        wait_until(Duration::from_secs(20), || !replicator.peer_down(r.id)
+            && hints(p, r) == 0
+            && keys.iter().chain(&late).all(same))
+        .await,
+        "{} hints left, {} keys differ on the replica",
+        hints(p, r),
+        keys.iter().chain(&late).filter(|k| !same(k)).count()
+    );
+}
+
 async fn tombstone_overflow() -> (common::cluster::Cluster, String) {
     let c = start_cluster(
         1,
