@@ -2,86 +2,66 @@
 
 Date: 2026-11-11. Cluster: `home-ops`. Discus 0.5.0-rc.1, Valkey 9.
 
-This run follows the [benchmark methodology](../methodology.md). Every node was one pod with
-1 CPU and 2 GiB. Every setup got 96 client connections per node. The Discus runs took place from
-14:50 to 15:39.
+This run follows the [benchmark methodology](../methodology.md). The Discus runs took place from
+14:50 to 15:39. The Valkey numbers come from the
+[2026-11-10 report](../2026-11-10-k8s-v0.3.0/report.md).
 
 Discus 0.5.0-rc.1 adds slot-aware client routing. A redirect listener on port 6380 answers the
-Redis Cluster topology commands, such as `CLUSTER SLOTS`. If a command arrives at a node that is
-not the primary of its key, the listener returns `-MOVED`. A Redis Cluster client then sends each
-command straight to the primary of its key. Ordinary clients use port 6379, and the node forwards
-their commands as before.
+Redis Cluster topology commands, such as `CLUSTER SLOTS`. It returns `-MOVED` for a key that the
+node does not own. This report measures Discus in two modes:
 
-This report compares three setups at 1, 3, and 6 nodes:
-
-- **Forward mode**: memtier connects to port 6379 of every pod, as in the earlier reports. The
-  nodes forward each command that they do not own. The chart value `clusterClients.enabled` was
-  `false`, so the redirect listener did not run.
-- **Cluster mode**: one memtier process runs with `--cluster-mode` against port 6380 of one pod.
-  It reads the slot map and connects to every node. It uses 8 threads with 12 connections each,
-  as the Valkey Cluster runs did. Each node gets 96 connections.
-- **Valkey**: the numbers come from the [2026-11-10 report](../2026-11-10-k8s-v0.3.0/report.md)
-  and its files `results-matrix.jsonl` and `results-valkey-cluster-6.jsonl`. This run did not
-  repeat them. With 1 node, Valkey ran without Cluster. With 3 and 6 nodes, Valkey Cluster had 2
-  replicas for each primary.
+- **Forward mode**: memtier connects to port 6379 of every pod. A node forwards each command that
+  it does not own. The redirect listener does not run.
+- **Cluster mode**: one memtier process with `--cluster-mode` reads the slot map from port 6380.
+  It sends each command to the primary of its key, with 96 connections to each node.
 
 ## Main results
 
-- Discus 0.5.0-rc.1 completed every run at 1, 3, and 6 nodes in both modes. No GET missed, and
-  every node reported 1,000,000 keys before and after the runs.
-- No cluster-mode run got a `-MOVED` or `-ASK` reply after the prefill. memtier reported 0 MOVED
-  and 0 ASK replies per second in all 36 runs.
+- Discus completed every run in both modes. No GET missed, and every node reported 1,000,000 keys
+  before and after the runs.
+- No cluster-mode run got a `-MOVED` or `-ASK` reply after the prefill.
+- Cluster mode doubled the 6-node rates of forward mode.
 - In cluster mode with 6 nodes, Discus did 96% of the Valkey Cluster GET rate. The spec target is
   80%. Discus met it.
-- In cluster mode, Discus did 64% of the Valkey Cluster SET rate with 3 nodes and with 6 nodes.
-  The spec target is 70%. Discus did not meet it.
-- Cluster mode doubled the 6-node rates of forward mode. The GET rate went from 198,100 to
-  397,700. The SET rate went from 116,600 to 244,900.
-- Forward mode in 0.5.0-rc.1 did 97% to 100% of the 0.4.1-rc.1 rate in every workload. The
-  difference is within the noise between sessions, so the forward path did not get slower.
+- In cluster mode, Discus did 64% of the Valkey Cluster SET rate with 3 and 6 nodes. The spec
+  target is 70%. Discus did not meet it.
+- In cluster mode, Discus did 148% to 458% of the Valkey Sentinel rate with 3 and 6 nodes.
 
-## Results
+## Throughput
 
-Operations per second. Each value is the median of 3 runs of 30 seconds. The 0.4.1-rc.1 values
-come from the [0.4.1-rc.1 report](../2026-11-11-k8s-v0.4.1-rc.1/report.md).
+Operations per second, median of 3 runs of 30 seconds. A share is the cluster-mode rate divided by
+the Valkey rate.
 
 ### Throughput, 1 node
 
-| Workload | Forward mode | Cluster mode | 0.4.1-rc.1 | Valkey |
+| Workload | Forward | Cluster | Valkey | Share |
 | --- | ---: | ---: | ---: | ---: |
-| GET | 81,400 | 83,200 | 82,300 | 87,500 |
-| SET | 73,900 | 75,100 | 74,600 | 85,200 |
-| Mixed (1 write, 9 reads) | 79,800 | 81,900 | 81,200 | 86,700 |
-| Mixed, 16 in flight | 426,700 | 431,300 | 427,800 | 669,500 |
+| GET | 81,400 | 83,200 | 87,500 | 95% |
+| SET | 73,900 | 75,100 | 85,200 | 88% |
+| Mixed (1 write, 9 reads) | 79,800 | 81,900 | 86,700 | 94% |
+| Mixed, 16 in flight | 426,700 | 431,300 | 669,500 | 64% |
 
 ### Throughput, 3 nodes
 
-| Workload | Forward mode | Cluster mode | 0.4.1-rc.1 | Valkey Cluster |
-| --- | ---: | ---: | ---: | ---: |
-| GET | 220,900 | 219,300 | 221,500 | 226,700 |
-| SET | 84,200 | 133,200 | 86,800 | 207,700 |
-| Mixed (1 write, 9 reads) | 170,200 | 185,500 | 172,100 | 217,900 |
-| Mixed, 16 in flight | 625,500 | 951,300 | 635,500 | 1,774,200 |
+| Workload | Forward | Cluster | Valkey Cluster | Valkey Sentinel | Share of Cluster | Share of Sentinel |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| GET | 220,900 | 219,300 | 226,700 | 87,000 | 97% | 252% |
+| SET | 84,200 | 133,200 | 207,700 | 80,600 | 64% | 165% |
+| Mixed (1 write, 9 reads) | 170,200 | 185,500 | 217,900 | 85,100 | 85% | 218% |
+| Mixed, 16 in flight | 625,500 | 951,300 | 1,774,200 | 641,800 | 54% | 148% |
 
 ### Throughput, 6 nodes
 
-| Workload | Forward mode | Cluster mode | 0.4.1-rc.1 | Valkey Cluster |
-| --- | ---: | ---: | ---: | ---: |
-| GET | 198,100 | 397,700 | 198,500 | 413,300 |
-| SET | 116,600 | 244,900 | 120,700 | 381,200 |
-| Mixed (1 write, 9 reads) | 170,500 | 327,200 | 171,100 | 403,200 |
-| Mixed, 16 in flight | 482,600 | 1,574,100 | 496,900 | 3,126,600 |
-
-### Discus as a share of Valkey
-
-With 1 node, the share is of Valkey without Cluster. With 3 and 6 nodes, it is of Valkey Cluster.
-
-| Workload | Forward, 1 | Cluster, 1 | Forward, 3 | Cluster, 3 | Forward, 6 | Cluster, 6 |
+| Workload | Forward | Cluster | Valkey Cluster | Valkey Sentinel | Share of Cluster | Share of Sentinel |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| GET | 93% | 95% | 97% | 97% | 48% | 96% |
-| SET | 87% | 88% | 41% | 64% | 31% | 64% |
-| Mixed (1 write, 9 reads) | 92% | 94% | 78% | 85% | 42% | 81% |
-| Mixed, 16 in flight | 64% | 64% | 35% | 54% | 15% | 50% |
+| GET | 198,100 | 397,700 | 413,300 | 86,800 | 96% | 458% |
+| SET | 116,600 | 244,900 | 381,200 | 77,900 | 64% | 314% |
+| Mixed (1 write, 9 reads) | 170,500 | 327,200 | 403,200 | 83,400 | 81% | 392% |
+| Mixed, 16 in flight | 482,600 | 1,574,100 | 3,126,600 | 603,300 | 50% | 261% |
+
+In forward mode, the range of the three runs was within 6% of the median. In cluster mode, it was
+within 7%, except with 3 nodes. There, the three SET runs did 145,100, 133,200, and 132,400, so 64%
+to 70% of Valkey Cluster.
 
 ### Spec targets
 
@@ -93,24 +73,10 @@ With 1 node, the share is of Valkey without Cluster. With 3 and 6 nodes, it is o
 
 The spec calls these values targets, not gates.
 
-### Spread of the three runs
-
-In forward mode, the range of the three runs was within 6% of the median for every setup. In
-cluster mode with 1 and 6 nodes, the range was within 7%. The cluster-mode runs with 3 nodes
-varied more:
-
-| Workload, cluster mode, 3 nodes | Run 1 | Run 2 | Run 3 |
-| --- | ---: | ---: | ---: |
-| SET | 145,100 | 133,200 | 132,400 |
-| Mixed (1 write, 9 reads) | 174,500 | 185,500 | 194,500 |
-| Mixed, 16 in flight | 833,400 | 951,300 | 973,400 |
-
-The best SET run with 3 nodes did 70% of the Valkey Cluster rate. The median did 64%.
-
 ## Latency
 
-Latency in milliseconds, median of the 3 runs. In forward mode, each value is the highest
-percentile of the memtier processes. Cluster mode has one memtier process.
+p50 and p99 in milliseconds, median of the 3 runs. In forward mode, each value is the highest
+percentile of the memtier processes.
 
 ### Latency, 1 node
 
@@ -123,30 +89,29 @@ percentile of the memtier processes. Cluster mode has one memtier process.
 
 ### Latency, 3 nodes
 
-| Workload | Forward p50 | Forward p99 | Cluster p50 | Cluster p99 | Valkey Cluster p50 | Valkey Cluster p99 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| GET | 1.27 | 2.24 | 1.32 | 2.08 | 1.22 | 2.37 |
-| SET | 4.03 | 6.94 | 2.04 | 3.73 | 1.34 | 2.02 |
-| Mixed (1 write, 9 reads) | 1.40 | 6.97 | 1.47 | 2.32 | 1.27 | 2.43 |
-| Mixed, 16 in flight | 8.32 | 12.35 | 4.77 | 6.97 | 2.51 | 4.42 |
+| Workload | Forward p50 | Forward p99 | Cluster p50 | Cluster p99 | Valkey Cluster p50 | Valkey Cluster p99 | Sentinel p50 | Sentinel p99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| GET | 1.27 | 2.24 | 1.32 | 2.08 | 1.22 | 2.37 | 3.25 | 4.83 |
+| SET | 4.03 | 6.94 | 2.04 | 3.73 | 1.34 | 2.02 | 3.52 | 4.61 |
+| Mixed (1 write, 9 reads) | 1.40 | 6.97 | 1.47 | 2.32 | 1.27 | 2.43 | 3.31 | 4.58 |
+| Mixed, 16 in flight | 8.32 | 12.35 | 4.77 | 6.97 | 2.51 | 4.42 | 7.07 | 8.89 |
 
 ### Latency, 6 nodes
 
-| Workload | Forward p50 | Forward p99 | Cluster p50 | Cluster p99 | Valkey Cluster p50 | Valkey Cluster p99 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| GET | 2.90 | 7.55 | 1.40 | 2.29 | 1.36 | 2.42 |
-| SET | 5.28 | 9.47 | 2.37 | 4.09 | 1.45 | 2.65 |
-| Mixed (1 write, 9 reads) | 3.74 | 8.32 | 1.71 | 2.85 | 1.36 | 2.45 |
-| Mixed, 16 in flight | 17.41 | 50.17 | 5.60 | 8.38 | 3.02 | 4.80 |
+| Workload | Forward p50 | Forward p99 | Cluster p50 | Cluster p99 | Valkey Cluster p50 | Valkey Cluster p99 | Sentinel p50 | Sentinel p99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| GET | 2.90 | 7.55 | 1.40 | 2.29 | 1.36 | 2.42 | 6.46 | 8.83 |
+| SET | 5.28 | 9.47 | 2.37 | 4.09 | 1.45 | 2.65 | 7.23 | 9.66 |
+| Mixed (1 write, 9 reads) | 3.74 | 8.32 | 1.71 | 2.85 | 1.36 | 2.45 | 6.75 | 9.21 |
+| Mixed, 16 in flight | 17.41 | 50.17 | 5.60 | 8.38 | 3.02 | 4.80 | 15.04 | 18.43 |
 
-In cluster mode, the SET p50 is 0.7 ms to 0.9 ms above Valkey Cluster. The GET p50 is within
-0.1 ms. Without pipelining, the latency sets the rate. Thus the SET latency gap gives the SET
+In cluster mode, the SET p50 is 0.7 ms to 0.9 ms above Valkey Cluster, and the GET p50 is within
+0.1 ms. Without pipelining, the latency sets the rate, so the SET latency gap gives the SET
 throughput gap.
 
 ## CPU use
 
-CPU use in cores, as the mean over the server pods, median of the 3 runs. The values come from
-`usage_seconds` in the `cfs` field, divided by the run duration.
+CPU use in cores, as the mean over the server pods, median of the 3 runs.
 
 | Workload | Forward, 1 | Cluster, 1 | Valkey, 1 | Forward, 3 | Cluster, 3 | Valkey Cluster, 3 | Forward, 6 | Cluster, 6 | Valkey Cluster, 6 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -155,37 +120,23 @@ CPU use in cores, as the mean over the server pods, median of the 3 runs. The va
 | Mixed (1 write, 9 reads) | 0.51 | 0.54 | 0.48 | 0.57 | 0.41 | 0.54 | 0.63 | 0.51 | 0.54 |
 | Mixed, 16 in flight | 0.62 | 0.69 | 0.51 | 0.65 | 0.71 | 0.69 | 0.76 | 0.66 | 0.75 |
 
-No server pod and no client pod was throttled in any Discus run. The client used at most 4.9 of
-its 8 CPU, in a cluster-mode GET run with 6 nodes. With 6 nodes, cluster mode did about 2.1 times
-the SET rate of forward mode with less CPU per pod. No pod used its full CPU, so these runs
-measure latency more than capacity.
+No server pod and no client pod was throttled. The client used at most 4.9 of its 8 CPU.
 
-## Forwards and redirects
+## Proof that cluster mode reached the primaries
 
-The spec asks for the forward counter and `discus.client.redirects` of each node before and after
-each run. Discus exports these metrics only over OTLP. `INFO` shows the redirect and client
-addresses, but no forward or redirect counts. This benchmark did not add a new export path.
+Discus exports its forward and redirect counters only over OTLP, so this report does not have
+them. The evidence comes from memtier and a manual check:
 
-The evidence for cluster mode comes from memtier instead:
-
-- memtier counts the `-MOVED` and `-ASK` replies that it gets. All 36 cluster-mode runs reported 0
-  per second. The prefill also ran in cluster mode, so memtier had the slot map before the runs.
-- In cluster mode, the 6-node rates were about twice the forward-mode rates. Forwards cannot
-  give that change, so the clients reached the primaries directly.
-
-Before the runs, a manual check on a 3-node setup gave these results:
-
-- `CLUSTER SLOTS` on port 6380 returned the slot map with 3 nodes on port 6380.
-- A `SET` without `-c` returned `-MOVED` for keys on other nodes.
-- A 10-second memtier run in cluster mode reported 0 MOVED replies per second.
-
-The client pod has no `redis-cli`, so the check used the `toolbox` pod.
+- memtier reported 0 MOVED and 0 ASK replies per second in all 36 cluster-mode runs.
+- With 6 nodes, cluster mode did about twice the forward-mode rate. Forwards cannot give that
+  change.
+- Before the runs, `CLUSTER SLOTS` on port 6380 returned the slot map of a 3-node setup. A `SET`
+  without `-c` returned `-MOVED` for keys on other nodes.
 
 ## Scale-out from 3 to 4 nodes
 
-One extra run tested a node that joins under load. Discus ran with 3 nodes in cluster mode. After
-the prefill, memtier ran SET for 60 seconds with 96 connections per node. After 20 seconds, the
-command `kubectl scale deployment discus --replicas=4` added a fourth pod.
+Discus ran with 3 nodes in cluster mode, and memtier ran SET for 60 seconds. After 20 seconds,
+`kubectl scale deployment discus --replicas=4` added a fourth pod.
 
 | Phase | Seconds | SET ops/s |
 | --- | --- | ---: |
@@ -194,71 +145,39 @@ command `kubectl scale deployment discus --replicas=4` added a fourth pod.
 | Join in progress | 24 to 31 | 132,700 to 150,200 |
 | 4 nodes | 40 to 59 | 162,800 to 179,100 |
 
-The values come from the per-second output of memtier. The rate fell to 114,600 for one second.
-That value is about 20% below the mean of 143,700 before the scale command. From second 32, the
-rate went up. From second 40 to 59, the mean was 170,900, about 19% above the rate with 3 nodes.
-
-The run had no errors. memtier reported 3.3 MOVED replies per second over the 60 seconds, about
-200 in all. These replies sent memtier to the new owners of the moved slots. A GET run of 5
-seconds after the scale-out had no misses.
-
-The spec also asks for the topology requests and their bytes. Discus exports these values only
-over OTLP, so this report does not have them.
+The rate fell by about 20% for one second. With 4 nodes, the mean was 170,900, about 19% above
+the rate with 3 nodes. The run had no errors. memtier got about 200 MOVED replies in all, and a GET
+run after the scale-out had no misses. This was one run, so it shows the size of the dip, not its
+spread.
 
 Two anomalies came after the scale-out:
 
-- `DBSIZE` reported 1,254,945 keys on each of the 4 nodes. The key space has 1,000,000 keys. The
+- `DBSIZE` reported 1,254,945 keys on each of the 4 nodes, for a key space of 1,000,000 keys. The
   value did not go back to 1,000,000 in the 2 minutes after the run.
 - Two of the three original nodes started a Raft election about every 2 seconds. The other nodes
-  rejected each vote request because their leader lease had not expired. The terms went from 7
-  to 25 in 2 minutes. The elections did not stop before the teardown.
-
-The scale-out was one run. It shows the size of the dip, not its spread.
-
-## Copies of each key
-
-| Nodes | Discus | Valkey Cluster |
-| --- | ---: | ---: |
-| 1 | 1 | |
-| 3 | 3 | 3 |
-| 6 | 3 | 3 |
-
-Valkey Cluster had 2 replicas for each primary. Each Cluster pod ran one primary and two replicas
-of other primaries, and the three processes shared the 1 CPU of the pod. The single Valkey node
-had no replicas.
+  rejected each vote, because their leader lease had not expired. The elections did not stop
+  before the teardown.
 
 ## Limits of this benchmark
 
-- The Discus and Valkey numbers come from two sessions on two days. Load from other pods on the
-  host can differ between sessions.
-- The forward and redirect counters of Discus are not in the results. Discus exports them only
-  over OTLP, and this benchmark did not collect OTLP data.
+The [methodology](../methodology.md#limits-of-every-benchmark) lists the limits of every run. This
+run also has these limits:
+
 - `INFO discus` reported `discus_build:dev` on the 0.5.0-rc.1 image. The image tag and the chart
   version were 0.5.0-rc.1.
-- The cluster-mode runs with 3 nodes varied by up to 15% between runs. Three runs do not show
-  whether the SET median is near 64% or near 70%.
-- The CPU values come from the cAdvisor counters of the kubelet. The kubelet updates them at
-  intervals, so a value can be off by a part of the run.
-- In forward mode, the client connects to each pod IP, not through the ClusterIP Service. A real
-  client connects through the Service and gets a less even spread.
-- In cluster mode, memtier gets the slot map from one pod. A real Redis Cluster client does the
-  same.
-- All pods and the client ran on one host, `k8s-neo-alpha`, with 32 cores. The network round trip
-  does not cross a physical network.
+- Three runs do not show whether the 3-node SET median is near 64% or near 70%.
 
 ## Files in this directory
 
 | File | Content |
 | --- | --- |
-| `report.md` | This report. |
-| `results-discus.jsonl` | Discus 0.5.0-rc.1 with 1, 3, and 6 nodes, in forward mode and in cluster mode. |
+| `results-discus.jsonl` | Discus with 1, 3, and 6 nodes, in forward mode and in cluster mode. |
 | `scale-out-memtier.txt` | The memtier output of the scale-out run, with the per-second rates. |
 | `scale-out-memtier.json` | The memtier JSON result of the scale-out run. |
 
 `results-discus.jsonl` has one JSON line per run, with the CFS counters of each pod in `cfs`. The
-fields `moved_s` and `ask_s` hold the MOVED and ASK replies per second. The lines with a `verify`
-field hold the key count of each node before and after the runs. The Valkey results are in the
-[2026-11-10 directory](../2026-11-10-k8s-v0.3.0/).
+fields `moved_s` and `ask_s` hold the MOVED and ASK replies per second. The Valkey results are in
+the [2026-11-10 directory](../2026-11-10-k8s-v0.3.0/).
 
 To run the Discus part again, with the `home-ops` context and Helm available, run this command
 from the repository root:
@@ -269,5 +188,4 @@ python3 -I scripts/bench-k8s.py --duration 30 --reps 3 \
   --systems discus-cluster-1-0.5.0-rc.1,discus-cluster-3-0.5.0-rc.1,discus-cluster-6-0.5.0-rc.1,discus-1-0.5.0-rc.1,discus-3-0.5.0-rc.1,discus-6-0.5.0-rc.1
 ```
 
-The scale-out run is not part of the script. It used the same setup as
-`discus-cluster-3-0.5.0-rc.1`.
+The scale-out run is not part of the script. It used the setup `discus-cluster-3-0.5.0-rc.1`.

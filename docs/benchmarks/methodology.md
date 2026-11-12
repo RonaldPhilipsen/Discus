@@ -28,6 +28,10 @@ too, so both setups do the same replication work. Each Cluster pod runs one prim
 replicas of other primaries, and the three processes share the 1 CPU of the pod. The three copies
 of a slot are always on three different pods.
 
+Valkey Sentinel keeps a copy on every node: 3 copies with 3 nodes and 6 copies with 6 nodes. Only
+the primary takes writes, so the Sentinel write rate does not go up with more nodes. A single
+Valkey node has no replicas.
+
 ## The same load for every setup
 
 Every setup gets the same number of client connections per node. The default is 96 connections
@@ -69,18 +73,17 @@ uses most of its 8 CPU or is throttled, the client sets the result, not the serv
 the report must say so. With 4 memtier threads, the client limited Cluster to about 230,000
 operations per second.
 
-## Earlier reports
+## Limits of every benchmark
 
-Three earlier reports did not follow these rules. They are in the git history up to commit
-`4e02d95`: the three-node report `2026-11-09-k8s`, the six-node report `2026-11-10-k8s-6`, and
-the rc.2 report `2026-11-10-k8s-6-rc2`. To read one, run this command:
+These limits apply to every report. A report lists only its own extra limits.
 
-```bash
-git show 4e02d95:docs/benchmarks/2026-11-10-k8s-6-rc2/report.md
-```
-
-In those reports, Discus got 100 connections in all, through the Service. Cluster got 96 connections
-to each of the six primaries, 576 in all. At a GET p50 of 0.54 ms for Discus and 1.36 ms for Valkey
-Cluster, Discus did more operations per connection. Its lower total came mostly from the smaller
-number of connections. The CPU figures in those reports come from `kubectl top` and are not
-reliable.
+- All pods and the client run on one host, `k8s-neo-alpha`, with 32 cores. The network round trip
+  does not cross a physical network.
+- The kubelet updates the cAdvisor counters at intervals, so a CPU value can be off by a part of
+  the run. Use the CPU values only for large differences.
+- The CPU limit does not count kernel network work. This favors Valkey, which replicates over
+  kernel TCP. Discus runs QUIC in user space, and that work counts against its 1 CPU.
+- Without pipelining, no pod reaches its full CPU. The latency sets the rate, so these runs
+  measure latency more than capacity. The pipelined runs come closer to capacity.
+- A report that reuses the Valkey numbers of an earlier day compares two sessions. Load from other
+  pods on the host can differ between sessions.
