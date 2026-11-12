@@ -12,7 +12,7 @@ use discus::{Config, Server};
 use discus_placement::{ClusterId, EpochId, NodeId};
 use discus_resp::Value;
 use discus_transport::testing::{TestCa, TEST_SAN};
-use discus_transport::{Inbound, Service, TlsMaterial, Transport, TransportConfig};
+use discus_transport::{Inbound, Service, Transport, TransportConfig};
 use discus_wire::{encode_command, Forward, ForwardMode, ForwardReply, Message, TraceContext};
 use futures::future::BoxFuture;
 use parking_lot::Mutex;
@@ -50,17 +50,6 @@ impl Service for Capture {
     }
 }
 
-fn tls(ca: &TestCa) -> TlsMaterial {
-    let (cert, key) = ca.issue(TEST_SAN);
-    TlsMaterial::from_pem(
-        ca.ca_pem().as_bytes(),
-        cert.as_bytes(),
-        key.as_bytes(),
-        TEST_SAN,
-    )
-    .unwrap()
-}
-
 struct Setup {
     /// The real node in the middle.
     node: Arc<discus::Node>,
@@ -92,7 +81,12 @@ async fn setup() -> Setup {
         origin: node_id.min(sender_id).min(owner_id),
     };
     let fake = |id, service: Arc<dyn Service>| {
-        let config = TransportConfig::new("127.0.0.1:0".parse().unwrap(), tls(&ca), id, cluster_id);
+        let config = TransportConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            ca.material(TEST_SAN),
+            id,
+            cluster_id,
+        );
         Transport::bind(config, service)
     };
     let owner = Arc::new(Capture {
