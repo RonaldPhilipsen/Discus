@@ -70,10 +70,11 @@ impl PeerQueue {
         if s.down {
             return Pushed::Down;
         }
-        // A key already queued moves to the back.
-        if s.keys.insert(key.clone(), ()).is_some() {
+        // A key already queued moves to the back. Only a new key is cloned.
+        if s.keys.to_back(key).is_some() {
             return Pushed::Queued;
         }
+        s.keys.insert(key.clone(), ());
         let out = if s.keys.len() > self.cap {
             s.lagging = true;
             match s.keys.pop_front() {
