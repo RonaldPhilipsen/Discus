@@ -7,7 +7,7 @@ use discus_placement::{
     ClusterId, Epoch, EpochId, Member, MemberState, NodeId, Version, Weight, NTP64,
 };
 use discus_store::{Entry, Value};
-use flatbuffers::{FlatBufferBuilder, WIPOffset};
+use flatbuffers::{FlatBufferBuilder, Vector, VerifierOptions, WIPOffset};
 
 use crate::fb;
 use crate::message::*;
@@ -35,6 +35,31 @@ pub(crate) fn invalid(e: impl std::fmt::Display) -> DecodeError {
     DecodeError::Invalid(e.to_string())
 }
 
+/// Verify `payload` as a `T` root with the limits of `opts`.
+#[inline]
+pub(crate) fn root<'a, T>(
+    opts: &VerifierOptions,
+    payload: &'a [u8],
+) -> Result<T::Inner, DecodeError>
+where
+    T: 'a + flatbuffers::Follow<'a> + flatbuffers::Verifiable,
+{
+    flatbuffers::root_with_opts::<T>(opts, payload).map_err(invalid)
+}
+
+/// A copy of an optional byte vector. A missing vector is empty.
+#[inline]
+pub(crate) fn bytes_of(v: Option<Vector<'_, u8>>) -> Bytes {
+    v.map(|b| Bytes::copy_from_slice(b.bytes()))
+        .unwrap_or_default()
+}
+
+/// A required socket address. A missing or unparsable one is the error `what`.
+#[inline]
+fn addr_of(s: Option<&str>, what: &'static str) -> Result<SocketAddr, DecodeError> {
+    s.and_then(|a| a.parse().ok()).ok_or_else(|| invalid(what))
+}
+
 pub(crate) fn id128(bytes: [u8; 16]) -> fb::Id128 {
     fb::Id128::new(&bytes)
 }
@@ -58,17 +83,31 @@ fn epoch_id_of(e: &fb::EpochId) -> EpochId {
 /// error named by `$what`.
 macro_rules! wire_enum {
     ($to:ident, $of:ident, $ty:ident, $what:literal, { $($v:ident => $w:ident),+ $(,)? }) => {
-        fn $to(x: $ty) -> fb::$ty {
-            match x {
-                $($ty::$v => fb::$ty::$w,)+
-            }
-        }
+        wire_enum!(@to $to, $ty, { $($v => $w),+ });
 
         fn $of(x: fb::$ty) -> Result<$ty, DecodeError> {
             Ok(match x {
                 $(fb::$ty::$w => $ty::$v,)+
                 other => return Err(invalid(format!(concat!("unknown ", $what, " {}"), other.0))),
             })
+        }
+    };
+    // An unknown wire value maps to `$fallback` instead of an error.
+    ($to:ident, $of:ident, $ty:ident, _ => $fallback:ident, { $($v:ident => $w:ident),+ $(,)? }) => {
+        wire_enum!(@to $to, $ty, { $($v => $w),+ });
+
+        fn $of(x: fb::$ty) -> $ty {
+            match x {
+                $(fb::$ty::$w => $ty::$v,)+
+                _ => $ty::$fallback,
+            }
+        }
+    };
+    (@to $to:ident, $ty:ident, { $($v:ident => $w:ident),+ }) => {
+        fn $to(x: $ty) -> fb::$ty {
+            match x {
+                $($ty::$v => fb::$ty::$w,)+
+            }
         }
     };
 }
@@ -98,28 +137,20 @@ wire_enum!(kind_to, kind_of, GossipKind, "gossip kind", {
     Leave => LEAVE,
 });
 
-fn code_to(c: HandshakeCode) -> fb::HandshakeCode {
-    match c {
-        HandshakeCode::Other => fb::HandshakeCode::OTHER,
-        HandshakeCode::ClusterMismatch => fb::HandshakeCode::CLUSTER_MISMATCH,
-        HandshakeCode::FrameTooSmall => fb::HandshakeCode::FRAME_TOO_SMALL,
-        HandshakeCode::NotHello => fb::HandshakeCode::NOT_HELLO,
-        HandshakeCode::UnexpectedNode => fb::HandshakeCode::UNEXPECTED_NODE,
-        HandshakeCode::PlacementMismatch => fb::HandshakeCode::PLACEMENT_MISMATCH,
-    }
-}
+// An unknown code from a newer build is still a failed handshake.
+wire_enum!(code_to, code_of, HandshakeCode, _ => Other, {
+    Other => OTHER,
+    ClusterMismatch => CLUSTER_MISMATCH,
+    FrameTooSmall => FRAME_TOO_SMALL,
+    NotHello => NOT_HELLO,
+    UnexpectedNode => UNEXPECTED_NODE,
+    PlacementMismatch => PLACEMENT_MISMATCH,
+});
 
-fn code_of(c: fb::HandshakeCode) -> HandshakeCode {
-    match c {
-        fb::HandshakeCode::CLUSTER_MISMATCH => HandshakeCode::ClusterMismatch,
-        fb::HandshakeCode::FRAME_TOO_SMALL => HandshakeCode::FrameTooSmall,
-        fb::HandshakeCode::NOT_HELLO => HandshakeCode::NotHello,
-        fb::HandshakeCode::UNEXPECTED_NODE => HandshakeCode::UnexpectedNode,
-        fb::HandshakeCode::PLACEMENT_MISMATCH => HandshakeCode::PlacementMismatch,
-        // An unknown code from a newer build is still a failed handshake.
-        _ => HandshakeCode::Other,
-    }
-}
+wire_enum!(mode_to, mode_of, ForwardMode, "forward mode", {
+    Route => ROUTE,
+    Local => LOCAL,
+});
 
 fn version_to(v: Version) -> fb::Version {
     fb::Version::new(v.time().0, &id128(v.as_uhlc().get_id().to_le_bytes()))
@@ -140,15 +171,35 @@ fn client_addr_of(s: Option<&str>) -> Result<Option<SocketAddr>, DecodeError> {
         .transpose()
 }
 
+type Str<'a> = WIPOffset<&'a str>;
+
+/// The address strings of a member, in the order that `Member` and `MemberInfo` list them.
+fn addrs_to<'a>(
+    fbb: &mut FlatBufferBuilder<'a>,
+    addr: SocketAddr,
+    rpc_addr: SocketAddr,
+    client_addr: Option<SocketAddr>,
+    client_host: Option<&str>,
+) -> (Str<'a>, Str<'a>, Option<Str<'a>>, Option<Str<'a>>) {
+    let addr = fbb.create_string(&addr.to_string());
+    let rpc_addr = fbb.create_string(&rpc_addr.to_string());
+    let client_addr = client_addr.map(|a| fbb.create_string(&a.to_string()));
+    let client_host = client_host.map(|h| fbb.create_string(h));
+    (addr, rpc_addr, client_addr, client_host)
+}
+
 fn epoch_to<'a>(fbb: &mut FlatBufferBuilder<'a>, epoch: &Epoch) -> WIPOffset<fb::Epoch<'a>> {
     let members: Vec<_> = epoch
         .members()
         .iter()
         .map(|m| {
-            let addr = fbb.create_string(&m.addr.to_string());
-            let rpc_addr = fbb.create_string(&m.rpc_addr.to_string());
-            let client_addr = m.client_addr.map(|a| fbb.create_string(&a.to_string()));
-            let client_host = m.client_host.as_deref().map(|h| fbb.create_string(h));
+            let (addr, rpc_addr, client_addr, client_host) = addrs_to(
+                fbb,
+                m.addr,
+                m.rpc_addr,
+                m.client_addr,
+                m.client_host.as_deref(),
+            );
             fb::Member::create(
                 fbb,
                 &fb::MemberArgs {
@@ -182,30 +233,17 @@ fn epoch_of(e: fb::Epoch<'_>) -> Result<Epoch, DecodeError> {
     let mut members = Vec::new();
     for m in e.members().into_iter().flatten() {
         let mid = m.id().ok_or_else(|| invalid("member without an id"))?;
-        let addr = m
-            .addr()
-            .and_then(|a| a.parse().ok())
-            .ok_or_else(|| invalid("member without a valid address"))?;
-        let rpc_addr = m
-            .rpc_addr()
-            .and_then(|a| a.parse().ok())
-            .ok_or_else(|| invalid("member without a valid RPC address"))?;
         members.push(Member {
             id: node_of(mid),
-            addr,
-            rpc_addr,
+            addr: addr_of(m.addr(), "member without a valid address")?,
+            rpc_addr: addr_of(m.rpc_addr(), "member without a valid RPC address")?,
             client_addr: client_addr_of(m.client_addr())?,
             client_host: client_host_of(m.client_host()),
             state: state_of(m.state())?,
             weight: Weight::new(m.weight()).ok_or_else(|| invalid("member with a bad weight"))?,
         });
     }
-    Epoch::new(
-        epoch_id_of(id),
-        ClusterId::from_u128(u128::from_be_bytes(cluster.bytes().into())),
-        members,
-    )
-    .map_err(invalid)
+    Epoch::new(epoch_id_of(id), cluster_of(cluster), members).map_err(invalid)
 }
 
 fn cluster_of(id: &fb::Id128) -> ClusterId {
@@ -213,10 +251,13 @@ fn cluster_of(id: &fb::Id128) -> ClusterId {
 }
 
 fn info_to<'a>(fbb: &mut FlatBufferBuilder<'a>, m: &MemberInfo) -> WIPOffset<fb::MemberInfo<'a>> {
-    let addr = fbb.create_string(&m.addr.to_string());
-    let rpc_addr = fbb.create_string(&m.rpc_addr.to_string());
-    let client_addr = m.client_addr.map(|a| fbb.create_string(&a.to_string()));
-    let client_host = m.client_host.as_deref().map(|h| fbb.create_string(h));
+    let (addr, rpc_addr, client_addr, client_host) = addrs_to(
+        fbb,
+        m.addr,
+        m.rpc_addr,
+        m.client_addr,
+        m.client_host.as_deref(),
+    );
     let hints = (!m.leader_hints.is_empty()).then(|| fbb.create_vector(&m.leader_hints));
     fb::MemberInfo::create(
         fbb,
@@ -241,14 +282,8 @@ fn info_to<'a>(fbb: &mut FlatBufferBuilder<'a>, m: &MemberInfo) -> WIPOffset<fb:
 fn info_of(m: fb::MemberInfo<'_>) -> Result<MemberInfo, DecodeError> {
     Ok(MemberInfo {
         id: node_of(m.id().ok_or_else(|| invalid("member info without an id"))?),
-        addr: m
-            .addr()
-            .and_then(|a| a.parse().ok())
-            .ok_or_else(|| invalid("member info without a valid address"))?,
-        rpc_addr: m
-            .rpc_addr()
-            .and_then(|a| a.parse().ok())
-            .ok_or_else(|| invalid("member info without a valid RPC address"))?,
+        addr: addr_of(m.addr(), "member info without a valid address")?,
+        rpc_addr: addr_of(m.rpc_addr(), "member info without a valid RPC address")?,
         client_addr: client_addr_of(m.client_addr())?,
         client_host: client_host_of(m.client_host()),
         state: state_of(m.state())?,
@@ -263,10 +298,7 @@ fn info_of(m: fb::MemberInfo<'_>) -> Result<MemberInfo, DecodeError> {
             used: m.capacity_used(),
             max: m.capacity_max(),
         },
-        leader_hints: m
-            .leader_hints()
-            .map(|h| Bytes::copy_from_slice(h.bytes()))
-            .unwrap_or_default(),
+        leader_hints: bytes_of(m.leader_hints()),
     })
 }
 
@@ -314,8 +346,7 @@ fn gossip_of(g: fb::Gossip<'_>) -> Result<Gossip, DecodeError> {
     let target = match (g.target_id(), g.target_addr()) {
         (Some(id), Some(addr)) => Some((
             node_of(id),
-            addr.parse()
-                .map_err(|_| invalid("gossip with a bad target address"))?,
+            addr_of(Some(addr), "gossip with a bad target address")?,
         )),
         _ => None,
     };
@@ -358,11 +389,7 @@ fn blobs_of(
 ) -> Vec<Bytes> {
     v.into_iter()
         .flatten()
-        .map(|b| {
-            b.data()
-                .map(|d| Bytes::copy_from_slice(d.bytes()))
-                .unwrap_or_default()
-        })
+        .map(|b| bytes_of(b.data()))
         .collect()
 }
 
@@ -418,11 +445,7 @@ fn stored_of(s: fb::StoredEntry<'_>) -> Result<(Bytes, Entry), DecodeError> {
         .ok_or_else(|| invalid("entry without a key"))?;
     let items = blobs_of(s.items());
     let value = match s.kind() {
-        fb::ValueKind::STRING => Value::Str(
-            s.bytes()
-                .map(|b| Bytes::copy_from_slice(b.bytes()))
-                .unwrap_or_default(),
-        ),
+        fb::ValueKind::STRING => Value::Str(bytes_of(s.bytes())),
         fb::ValueKind::HASH => {
             if !items.len().is_multiple_of(2) {
                 return Err(invalid("a hash entry with an odd item count"));
@@ -588,10 +611,7 @@ fn build_body(fbb: &mut FlatBufferBuilder<'_>, message: &Message) {
                     epoch_body: body,
                     hops: f.hops,
                     path: Some(path),
-                    mode: match f.mode {
-                        ForwardMode::Route => fb::ForwardMode::ROUTE,
-                        ForwardMode::Local => fb::ForwardMode::LOCAL,
-                    },
+                    mode: mode_to(f.mode),
                     track: f.track,
                 },
             );
@@ -752,7 +772,7 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
         )));
     }
     let opts = limits.verifier();
-    let env = flatbuffers::root_with_opts::<fb::Envelope>(&opts, bytes).map_err(invalid)?;
+    let env = root::<fb::Envelope>(&opts, bytes)?;
     let trace = TraceContext {
         traceparent: env.traceparent().map(str::to_owned),
         tracestate: env.tracestate().map(str::to_owned),
@@ -762,45 +782,38 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
     use fb::MessageType as T;
     let message = match env.type_() {
         T::HELLO => {
-            let h = flatbuffers::root_with_opts::<fb::Hello>(&opts, payload).map_err(invalid)?;
+            let h = root::<fb::Hello>(&opts, payload)?;
             Message::Hello(Hello {
                 node_id: node_of(
                     h.node_id()
                         .ok_or_else(|| invalid("HELLO without a node id"))?,
                 ),
-                cluster_id: ClusterId::from_u128(u128::from_be_bytes(
+                cluster_id: cluster_of(
                     h.cluster_id()
-                        .ok_or_else(|| invalid("HELLO without a cluster id"))?
-                        .bytes()
-                        .into(),
-                )),
+                        .ok_or_else(|| invalid("HELLO without a cluster id"))?,
+                ),
                 capabilities: h.capabilities(),
                 epoch: epoch_id_of(h.epoch().ok_or_else(|| invalid("HELLO without an epoch"))?),
                 max_frame: h.max_frame(),
             })
         }
         T::HANDSHAKE_FAILED => {
-            let f = flatbuffers::root_with_opts::<fb::HandshakeFailed>(&opts, payload)
-                .map_err(invalid)?;
+            let f = root::<fb::HandshakeFailed>(&opts, payload)?;
             Message::HandshakeFailed(HandshakeFailed {
                 code: code_of(f.code()),
                 reason: f.reason().unwrap_or_default().to_owned(),
             })
         }
         T::UNSUPPORTED => {
-            let u =
-                flatbuffers::root_with_opts::<fb::Unsupported>(&opts, payload).map_err(invalid)?;
+            let u = root::<fb::Unsupported>(&opts, payload)?;
             Message::Unsupported {
                 message_type: u.message_type(),
             }
         }
         T::FORWARD => {
-            let f = flatbuffers::root_with_opts::<fb::Forward>(&opts, payload).map_err(invalid)?;
+            let f = root::<fb::Forward>(&opts, payload)?;
             Message::Forward(Forward {
-                command: f
-                    .command()
-                    .map(|c| Bytes::copy_from_slice(c.bytes()))
-                    .unwrap_or_default(),
+                command: bytes_of(f.command()),
                 epoch: epoch_id_of(
                     f.epoch()
                         .ok_or_else(|| invalid("FORWARD without an epoch"))?,
@@ -808,17 +821,12 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
                 epoch_body: f.epoch_body().map(epoch_of).transpose()?,
                 hops: f.hops(),
                 path: f.path().into_iter().flatten().map(node_of).collect(),
-                mode: match f.mode() {
-                    fb::ForwardMode::ROUTE => ForwardMode::Route,
-                    fb::ForwardMode::LOCAL => ForwardMode::Local,
-                    other => return Err(invalid(format!("unknown forward mode {}", other.0))),
-                },
+                mode: mode_of(f.mode())?,
                 track: f.track(),
             })
         }
         T::FORWARD_REPLY => {
-            let r =
-                flatbuffers::root_with_opts::<fb::ForwardReply>(&opts, payload).map_err(invalid)?;
+            let r = root::<fb::ForwardReply>(&opts, payload)?;
             Message::ForwardReply(ForwardReply {
                 value: from_wire(r.value().ok_or_else(|| invalid("reply without a value"))?)?,
                 applied: r.applied().map(version_of),
@@ -828,7 +836,7 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
             })
         }
         T::PING | T::PONG => {
-            let p = flatbuffers::root_with_opts::<fb::Ping>(&opts, payload).map_err(invalid)?;
+            let p = root::<fb::Ping>(&opts, payload)?;
             if env.type_() == T::PING {
                 Message::Ping { nonce: p.nonce() }
             } else {
@@ -836,12 +844,11 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
             }
         }
         T::GOSSIP => {
-            let g = flatbuffers::root_with_opts::<fb::Gossip>(&opts, payload).map_err(invalid)?;
+            let g = root::<fb::Gossip>(&opts, payload)?;
             Message::Gossip(gossip_of(g)?)
         }
         T::REPLICATE | T::HINT_REPLAY | T::HANDOFF | T::ENTRIES => {
-            let b =
-                flatbuffers::root_with_opts::<fb::EntryBatch>(&opts, payload).map_err(invalid)?;
+            let b = root::<fb::EntryBatch>(&opts, payload)?;
             let b = batch_of(b)?;
             match env.type_() {
                 T::REPLICATE => Message::Replicate(b),
@@ -851,7 +858,7 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
             }
         }
         T::BATCH_ACK => {
-            let a = flatbuffers::root_with_opts::<fb::BatchAck>(&opts, payload).map_err(invalid)?;
+            let a = root::<fb::BatchAck>(&opts, payload)?;
             Message::BatchAck(BatchAck {
                 applied: a.applied(),
                 want: blobs_of(a.want()),
@@ -860,21 +867,21 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
             })
         }
         T::FETCH => {
-            let f = flatbuffers::root_with_opts::<fb::Fetch>(&opts, payload).map_err(invalid)?;
+            let f = root::<fb::Fetch>(&opts, payload)?;
             Message::Fetch {
                 keys: blobs_of(f.keys()),
             }
         }
         T::DIGEST => {
-            let d = flatbuffers::root_with_opts::<fb::Digest>(&opts, payload).map_err(invalid)?;
+            let d = root::<fb::Digest>(&opts, payload)?;
             Message::Digest {
                 from: epoch_id_of(d.from().ok_or_else(|| invalid("digest without an epoch"))?),
                 to: epoch_id_of(d.to().ok_or_else(|| invalid("digest without an epoch"))?),
                 sums: d.sums().map(|s| s.iter().collect()).unwrap_or_default(),
             }
         }
-        other => match crate::counter::decode(other, payload, &opts) {
-            Some(decoded) => decoded?,
+        other => match crate::counter::decode_known(other, payload, &opts)? {
+            Some(decoded) => decoded,
             None => {
                 return Err(DecodeError::UnknownType {
                     message_type: other.0,

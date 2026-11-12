@@ -341,27 +341,41 @@ impl Swim {
         scale(ms, self.health.multiplier())
     }
 
-    fn token(&mut self, pending: Pending) -> u64 {
-        let t = self.next_token;
+    /// A request whose outcome resolves `pending`.
+    fn action(
+        &mut self,
+        pending: Pending,
+        to: SocketAddr,
+        expected: Option<NodeId>,
+        msg: Gossip,
+        timeout_ms: Millis,
+    ) -> Action {
+        let token = self.next_token;
         self.next_token += 1;
-        self.pending.insert(t, pending);
-        t
+        self.pending.insert(token, pending);
+        Action {
+            token,
+            to,
+            expected,
+            msg,
+            timeout_ms,
+        }
+    }
+
+    /// The members that are not dead.
+    fn live(&self) -> impl Iterator<Item = (&NodeId, &Record)> {
+        self.members
+            .iter()
+            .filter(|(_, r)| r.liveness != Liveness::Dead)
     }
 
     fn alive_count(&self) -> usize {
-        self.members
-            .values()
-            .filter(|r| r.liveness != Liveness::Dead)
-            .count()
+        self.live().count()
     }
 
     fn rumor_of(&self, id: NodeId) -> Option<Rumor> {
         if id == self.me.id {
-            return Some(Rumor {
-                info: self.me.clone(),
-                liveness: Liveness::Alive,
-                accuser: None,
-            });
+            return Some(Rumor::alive(self.me.clone()));
         }
         self.members.get(&id).map(|r| Rumor {
             info: r.info.clone(),
@@ -387,15 +401,10 @@ impl Swim {
         let epoch = host.epoch();
         self.me.epoch = epoch.id();
         Gossip {
-            kind,
-            from: self.me.clone(),
             cluster_id: self.cluster_id,
             cluster_size: normal_count(&epoch) as u32,
-            epoch_body: None,
             hlc: host.hlc(),
-            target: None,
-            rumors: Vec::new(),
-            retry_after_ms: 0,
+            ..Gossip::new(kind, self.me.clone())
         }
     }
 
@@ -529,15 +538,7 @@ impl Swim {
         } else {
             &self.members.get(&id)?.info
         };
-        Some(Member {
-            id,
-            addr: info.addr,
-            rpc_addr: info.rpc_addr,
-            client_addr: info.client_addr,
-            client_host: info.client_host.clone(),
-            state,
-            weight: info.weight,
-        })
+        Some(info.to_member(state))
     }
 
     fn on_change(&mut self, now: Millis, id: NodeId) {
@@ -692,15 +693,7 @@ impl Swim {
         if g.cluster_id == ClusterId::NIL || self.cluster_id == ClusterId::NIL {
             return;
         }
-        self.learn(
-            now,
-            Rumor {
-                info: g.from.clone(),
-                liveness: Liveness::Alive,
-                accuser: None,
-            },
-            true,
-        );
+        self.learn(now, Rumor::alive(g.from.clone()), true);
         if let Some(r) = self.members.get_mut(&g.from.id) {
             r.hlc = Some((g.hlc, now));
         }
@@ -769,19 +762,11 @@ impl Swim {
     }
 
     /// Form a new cluster: epoch `(1, self)`, the HLC stays on the wall clock (spec section 6.2).
-    pub fn form(&mut self, now: Millis, cluster_id: ClusterId, host: &mut dyn Host) {
+    pub(crate) fn form(&mut self, now: Millis, cluster_id: ClusterId, host: &mut dyn Host) {
         if self.phase != Phase::Seeking || self.cluster_id != ClusterId::NIL {
             return;
         }
-        let me = Member {
-            id: self.me.id,
-            addr: self.me.addr,
-            rpc_addr: self.me.rpc_addr,
-            client_addr: self.me.client_addr,
-            client_host: self.me.client_host.clone(),
-            state: MemberState::Normal,
-            weight: self.me.weight,
-        };
+        let me = self.me.to_member(MemberState::Normal);
         host.reset_cluster(Epoch::bootstrap(me, cluster_id));
         self.cluster_id = cluster_id;
         self.last_epoch = Some(host.epoch());
@@ -832,14 +817,8 @@ impl Swim {
                 liveness: Liveness::Dead,
                 accuser: None,
             }];
-            let token = self.token(Pending::Leave);
-            out.push(Action {
-                token,
-                to: addr,
-                expected: Some(id),
-                msg,
-                timeout_ms: self.cfg.probe_timeout_ms,
-            });
+            let timeout = self.cfg.probe_timeout_ms;
+            out.push(self.action(Pending::Leave, addr, Some(id), msg, timeout));
         }
         out
     }
@@ -867,12 +846,7 @@ impl Swim {
         }
         if now >= self.next_sync {
             self.next_sync = now + self.cfg.sync_interval_ms;
-            let alive: Vec<NodeId> = self
-                .members
-                .iter()
-                .filter(|(_, r)| r.liveness != Liveness::Dead)
-                .map(|(id, _)| *id)
-                .collect();
+            let alive: Vec<NodeId> = self.live().map(|(id, _)| *id).collect();
             if let Some(&target) = self.rng.choice(&alive) {
                 out.extend(self.sync_to(target, host));
             }
@@ -893,14 +867,8 @@ impl Swim {
             for i in 0..targets.len().min(JOIN_FANOUT) {
                 let to = targets[(self.join_cursor + i) % targets.len()];
                 let msg = self.message(GossipKind::Join, None, host);
-                let token = self.token(Pending::Join);
-                out.push(Action {
-                    token,
-                    to,
-                    expected: None,
-                    msg,
-                    timeout_ms: self.cfg.period_ms,
-                });
+                let timeout = self.cfg.period_ms;
+                out.push(self.action(Pending::Join, to, None, msg, timeout));
             }
             self.join_cursor = self.join_cursor.wrapping_add(JOIN_FANOUT);
         }
@@ -916,12 +884,7 @@ impl Swim {
         if let Some(e) = self.last_epoch.as_ref().filter(|e| e.id().generation >= 1) {
             targets.extend(e.members().iter().map(|m| m.addr));
         }
-        targets.extend(
-            self.members
-                .values()
-                .filter(|r| r.liveness != Liveness::Dead)
-                .map(|r| r.info.addr),
-        );
+        targets.extend(self.live().map(|(_, r)| r.info.addr));
         let mut seen = BTreeSet::new();
         targets.retain(|a| *a != self.me.addr && seen.insert(*a));
         targets
@@ -930,12 +893,7 @@ impl Swim {
     /// A sync with a dead member or a seed that is not a live member. This is how a healed
     /// partition and a second cluster find each other.
     fn reconnect(&mut self, host: &dyn Host) -> Option<Action> {
-        let live: BTreeSet<SocketAddr> = self
-            .members
-            .values()
-            .filter(|r| r.liveness != Liveness::Dead)
-            .map(|r| r.info.addr)
-            .collect();
+        let live: BTreeSet<SocketAddr> = self.live().map(|(_, r)| r.info.addr).collect();
         let mut targets: Vec<(Option<NodeId>, SocketAddr)> = self
             .members
             .iter()
@@ -950,27 +908,15 @@ impl Swim {
         );
         let &(expected, to) = self.rng.choice(&targets)?;
         let msg = self.message(GossipKind::Sync, expected, host);
-        let token = self.token(Pending::Sync);
-        Some(Action {
-            token,
-            to,
-            expected,
-            msg,
-            timeout_ms: self.cfg.period_ms,
-        })
+        let timeout = self.cfg.period_ms;
+        Some(self.action(Pending::Sync, to, expected, msg, timeout))
     }
 
     fn sync_to(&mut self, target: NodeId, host: &dyn Host) -> Option<Action> {
         let addr = self.members.get(&target)?.info.addr;
         let msg = self.message(GossipKind::Sync, Some(target), host);
-        let token = self.token(Pending::Sync);
-        Some(Action {
-            token,
-            to: addr,
-            expected: Some(target),
-            msg,
-            timeout_ms: self.cfg.period_ms,
-        })
+        let timeout = self.cfg.period_ms;
+        Some(self.action(Pending::Sync, addr, Some(target), msg, timeout))
     }
 
     fn rescale_detectors(&mut self, now: Millis) {
@@ -1054,12 +1000,7 @@ impl Swim {
     fn next_target(&mut self) -> Option<NodeId> {
         loop {
             if self.order.is_empty() {
-                self.order = self
-                    .members
-                    .iter()
-                    .filter(|(_, r)| r.liveness != Liveness::Dead)
-                    .map(|(id, _)| *id)
-                    .collect();
+                self.order = self.live().map(|(id, _)| *id).collect();
                 self.rng.shuffle(&mut self.order);
                 if self.order.is_empty() {
                     return None;
@@ -1089,11 +1030,7 @@ impl Swim {
     /// target would count its misses twice and add load to a node that is already slow. A
     /// skipped target comes first in the next period.
     fn next_free_target(&mut self) -> Option<NodeId> {
-        let candidates = self
-            .members
-            .values()
-            .filter(|r| r.liveness != Liveness::Dead)
-            .count();
+        let candidates = self.alive_count();
         let mut skipped = Vec::new();
         let mut found = None;
         // The rest of the current round, then one full round, sees every candidate.
@@ -1132,14 +1069,13 @@ impl Swim {
             },
         );
         let msg = self.message(GossipKind::Ping, Some(target), host);
-        let token = self.token(Pending::Direct { target, probe: seq });
-        Some(Action {
-            token,
-            to: addr,
-            expected: Some(target),
+        Some(self.action(
+            Pending::Direct { target, probe: seq },
+            addr,
+            Some(target),
             msg,
             timeout_ms,
-        })
+        ))
     }
 
     fn missed(&mut self, now: Millis, target: NodeId) {
@@ -1294,14 +1230,13 @@ impl Swim {
             };
             let mut msg = self.message(GossipKind::PingReq, Some(helper), host);
             msg.target = Some((target, target_addr));
-            let token = self.token(Pending::Indirect { target, probe });
-            out.push(Action {
-                token,
-                to: addr,
-                expected: Some(helper),
+            out.push(self.action(
+                Pending::Indirect { target, probe },
+                addr,
+                Some(helper),
                 msg,
-                timeout_ms: timeout,
-            });
+                timeout,
+            ));
         }
         out
     }
@@ -1337,17 +1272,12 @@ impl Swim {
                     return self.reply(GossipKind::Nack, sender, host);
                 };
                 let ping = self.message(GossipKind::Ping, Some(target), host);
-                let token = self.token(Pending::Relay { target });
                 let timeout = self.scaled(self.cfg.probe_timeout_ms);
+                let relay =
+                    self.action(Pending::Relay { target }, addr, Some(target), ping, timeout);
                 Handled {
                     reply: self.message(GossipKind::Nack, sender, host),
-                    relay: Some(Action {
-                        token,
-                        to: addr,
-                        expected: Some(target),
-                        msg: ping,
-                        timeout_ms: timeout,
-                    }),
+                    relay: Some(relay),
                 }
             }
             GossipKind::Sync => self.reply(GossipKind::SyncReply, sender, host),
@@ -1375,15 +1305,7 @@ impl Swim {
             g.retry_after_ms = wait.max(1);
             return g;
         }
-        self.learn(
-            now,
-            Rumor {
-                info: msg.from.clone(),
-                liveness: Liveness::Alive,
-                accuser: None,
-            },
-            true,
-        );
+        self.learn(now, Rumor::alive(msg.from.clone()), true);
         let mut g = self.message(GossipKind::JoinReply, Some(msg.from.id), host);
         g.hlc = self.cluster_max_hlc(now, host);
         g

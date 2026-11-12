@@ -4,7 +4,7 @@ use bytes::Bytes;
 use discus_placement::NodeId;
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, Vector, WIPOffset};
 
-use crate::codec::{id128, invalid, node_of, DecodeError};
+use crate::codec::{bytes_of, id128, invalid, node_of, root, DecodeError};
 use crate::fb;
 use crate::message::*;
 use crate::Limits;
@@ -448,22 +448,20 @@ pub(crate) fn encode(fbb: &mut FlatBufferBuilder<'_>, message: &Message) -> bool
 }
 
 /// Decode the payload of a counter message type. `None` for any other type.
-pub(crate) fn decode(
+pub(crate) fn decode_known(
     message_type: fb::MessageType,
     payload: &[u8],
     opts: &flatbuffers::VerifierOptions,
-) -> Option<Result<Message, DecodeError>> {
+) -> Result<Option<Message>, DecodeError> {
     use fb::MessageType as T;
-    let decoded = match message_type {
-        T::RAFT_LEADER => (|| {
-            let t =
-                flatbuffers::root_with_opts::<fb::LeaderHints>(opts, payload).map_err(invalid)?;
-            Ok(Message::RaftLeader(hints_of(t.groups())?))
-        })(),
-        T::RAFT_CONFIG => (|| {
-            let c =
-                flatbuffers::root_with_opts::<fb::RaftConfig>(opts, payload).map_err(invalid)?;
-            Ok(Message::RaftConfig(RaftConfig {
+    Ok(Some(match message_type {
+        T::RAFT_LEADER => {
+            let t = root::<fb::LeaderHints>(opts, payload)?;
+            Message::RaftLeader(hints_of(t.groups())?)
+        }
+        T::RAFT_CONFIG => {
+            let c = root::<fb::RaftConfig>(opts, payload)?;
+            Message::RaftConfig(RaftConfig {
                 group: c.group(),
                 regime: regime_of(c.regime())?,
                 replica: c.replica(),
@@ -471,21 +469,19 @@ pub(crate) fn decode(
                     c.leader()
                         .ok_or_else(|| invalid("RAFT_CONFIG without a leader"))?,
                 ),
-            }))
-        })(),
-        T::RAFT_VOTE => (|| {
-            let v = flatbuffers::root_with_opts::<fb::RaftVoteRequest>(opts, payload)
-                .map_err(invalid)?;
-            Ok(Message::RaftVote(RaftVoteReq {
+            })
+        }
+        T::RAFT_VOTE => {
+            let v = root::<fb::RaftVoteRequest>(opts, payload)?;
+            Message::RaftVote(RaftVoteReq {
                 header: header_of(v.header())?,
                 vote: vote_of(v.vote())?,
                 last: v.last().map(log_of),
-            }))
-        })(),
-        T::RAFT_APPEND => (|| {
-            let a =
-                flatbuffers::root_with_opts::<fb::RaftAppend>(opts, payload).map_err(invalid)?;
-            Ok(Message::RaftAppend(RaftAppend {
+            })
+        }
+        T::RAFT_APPEND => {
+            let a = root::<fb::RaftAppend>(opts, payload)?;
+            Message::RaftAppend(RaftAppend {
                 header: header_of(a.header())?,
                 vote: vote_of(a.vote())?,
                 prev: a.prev().map(log_of),
@@ -496,12 +492,11 @@ pub(crate) fn decode(
                     .map(entry_of)
                     .collect::<Result<_, _>>()?,
                 committed: a.committed().map(log_of),
-            }))
-        })(),
-        T::RAFT_SNAPSHOT => (|| {
-            let s =
-                flatbuffers::root_with_opts::<fb::RaftSnapshot>(opts, payload).map_err(invalid)?;
-            Ok(Message::RaftSnapshot(RaftSnapshot {
+            })
+        }
+        T::RAFT_SNAPSHOT => {
+            let s = root::<fb::RaftSnapshot>(opts, payload)?;
+            Message::RaftSnapshot(RaftSnapshot {
                 header: header_of(s.header())?,
                 vote: vote_of(s.vote())?,
                 last: s.last().map(log_of),
@@ -509,16 +504,13 @@ pub(crate) fn decode(
                 membership: membership_of(s.membership())?,
                 snapshot_id: s.snapshot_id().unwrap_or_default().to_owned(),
                 offset: s.offset(),
-                data: s
-                    .data()
-                    .map(|d| Bytes::copy_from_slice(d.bytes()))
-                    .unwrap_or_default(),
+                data: bytes_of(s.data()),
                 done: s.done(),
-            }))
-        })(),
-        T::RAFT_REPLY => (|| {
-            let r = flatbuffers::root_with_opts::<fb::RaftReply>(opts, payload).map_err(invalid)?;
-            Ok(Message::RaftReply(RaftReply {
+            })
+        }
+        T::RAFT_REPLY => {
+            let r = root::<fb::RaftReply>(opts, payload)?;
+            Message::RaftReply(RaftReply {
                 outcome: match r.outcome() {
                     fb::RaftOutcome::OK => RaftOutcome::Ok,
                     fb::RaftOutcome::CONFLICT => RaftOutcome::Conflict,
@@ -530,12 +522,11 @@ pub(crate) fn decode(
                 vote: vote_of(r.vote())?,
                 granted: r.granted(),
                 last: r.last().map(log_of),
-            }))
-        })(),
-        T::COUNTER_SYNC => (|| {
-            let s =
-                flatbuffers::root_with_opts::<fb::CounterSync>(opts, payload).map_err(invalid)?;
-            Ok(Message::CounterSync(CounterSync {
+            })
+        }
+        T::COUNTER_SYNC => {
+            let s = root::<fb::CounterSync>(opts, payload)?;
+            Message::CounterSync(CounterSync {
                 group: s.group(),
                 regime: regime_of(s.regime())?,
                 seq: s.seq(),
@@ -550,28 +541,18 @@ pub(crate) fn decode(
                         Ok((op.stamp_ms(), Bytes::copy_from_slice(command.bytes())))
                     })
                     .collect::<Result<_, DecodeError>>()?,
-                snapshot: if s.has_snapshot() {
-                    Some(
-                        s.snapshot()
-                            .map(|b| Bytes::copy_from_slice(b.bytes()))
-                            .unwrap_or_default(),
-                    )
-                } else {
-                    None
-                },
-            }))
-        })(),
-        T::COUNTER_ACK => (|| {
-            let a =
-                flatbuffers::root_with_opts::<fb::CounterAck>(opts, payload).map_err(invalid)?;
-            Ok(Message::CounterAck(CounterAck {
+                snapshot: s.has_snapshot().then(|| bytes_of(s.snapshot())),
+            })
+        }
+        T::COUNTER_ACK => {
+            let a = root::<fb::CounterAck>(opts, payload)?;
+            Message::CounterAck(CounterAck {
                 group: a.group(),
                 regime: regime_of(a.regime())?,
                 seq: a.seq(),
                 need_snapshot: a.need_snapshot(),
-            }))
-        })(),
-        _ => return None,
-    };
-    Some(decoded)
+            })
+        }
+        _ => return Ok(None),
+    }))
 }

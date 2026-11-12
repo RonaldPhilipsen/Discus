@@ -1,28 +1,25 @@
 //! `HELLO` checks and negotiation (spec section 13.3).
 
+use std::net::SocketAddr;
+
 use discus_placement::{ClusterId, NodeId};
 use discus_wire::{caps, HandshakeCode, Hello, HELLO_FRAME_LIMIT};
 
-use crate::endpoint::Channel;
+use crate::endpoint::{Channel, PeerInfo};
 
-/// What both sides agreed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Agreed {
-    pub capabilities: u64,
-    pub max_frame: usize,
-}
-
-/// Check the peer `HELLO` against the local identity. `expected` is the node that the dialer
-/// meant to reach. The gossip channel accepts another cluster: membership needs it to admit a
-/// joiner and to find a second cluster (spec section 6.3).
+/// Check the peer `HELLO` from `addr` against the local identity, and return what both sides
+/// agreed. `expected` is the node that the dialer meant to reach. The gossip channel accepts
+/// another cluster: membership needs it to admit a joiner and to find a second cluster (spec
+/// section 6.3).
 pub(crate) fn check(
     cluster_id: ClusterId,
     capabilities: u64,
     max_frame: usize,
     theirs: &Hello,
+    addr: SocketAddr,
     expected: Option<NodeId>,
     channel: Channel,
-) -> Result<Agreed, (HandshakeCode, String)> {
+) -> Result<PeerInfo, (HandshakeCode, String)> {
     if channel == Channel::Rpc && theirs.cluster_id != cluster_id {
         return Err((
             HandshakeCode::ClusterMismatch,
@@ -52,8 +49,13 @@ pub(crate) fn check(
             ));
         }
     }
-    Ok(Agreed {
+    Ok(PeerInfo {
+        node_id: theirs.node_id,
+        addr,
         capabilities: capabilities & theirs.capabilities & caps::KNOWN,
         max_frame: max_frame.min(theirs.max_frame as usize),
+        epoch: theirs.epoch,
+        cluster_id: theirs.cluster_id,
+        channel,
     })
 }

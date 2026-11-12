@@ -218,17 +218,11 @@ pub enum GossipError {
     Refused(String),
 }
 
+#[derive(Clone)]
 struct Conn {
     conn: quinn::Connection,
     info: PeerInfo,
     /// The shared stream of a command-lane connection.
-    shared: Option<Arc<Shared>>,
-}
-
-/// A pooled connection as a request uses it.
-struct Pooled {
-    conn: quinn::Connection,
-    info: PeerInfo,
     shared: Option<Arc<Shared>>,
 }
 
@@ -376,7 +370,7 @@ impl Transport {
         timeout: Duration,
     ) -> Result<(PeerInfo, Message), GossipError> {
         let pool = &self.0.gossip_pool;
-        let Pooled { conn, info, .. } = self
+        let Conn { conn, info, .. } = self
             .cached_or_dial(pool, addr, None, addr, Channel::Gossip, false)
             .await
             .map_err(|e| match e {
@@ -454,7 +448,7 @@ impl Transport {
         Ok(pooled.info)
     }
 
-    /// Send one request on the command lane. See [`Transport::request_on`].
+    /// Send one request on the command lane. See [`Transport::request_with`].
     pub async fn request(
         &self,
         node: NodeId,
@@ -464,24 +458,8 @@ impl Transport {
         timeout: Duration,
         write: bool,
     ) -> Result<Frame, TransportError> {
-        self.request_on(Lane::Command, node, addr, message, trace, timeout, write)
-            .await
-    }
-
-    /// Send one request on `lane`. See [`Transport::request_with`].
-    #[allow(clippy::too_many_arguments)]
-    pub async fn request_on(
-        &self,
-        lane: Lane,
-        node: NodeId,
-        addr: SocketAddr,
-        message: Message,
-        trace: TraceContext,
-        timeout: Duration,
-        write: bool,
-    ) -> Result<Frame, TransportError> {
         let build = |_: &PeerInfo| Ok(message);
-        self.request_with(lane, node, addr, build, trace, timeout, write)
+        self.request_with(Lane::Command, node, addr, build, trace, timeout, write)
             .await
     }
 
@@ -503,7 +481,7 @@ impl Transport {
         timeout: Duration,
         write: bool,
     ) -> Result<Frame, TransportError> {
-        let Pooled { conn, info, shared } = self
+        let Conn { conn, info, shared } = self
             .cached_or_dial(
                 self.pool(lane),
                 node,
@@ -595,6 +573,13 @@ impl Transport {
         Shared::open(&conn.conn, conn.info.max_frame, rejected).await
     }
 
+    fn client(&self, channel: Channel) -> Option<&quinn::ClientConfig> {
+        match channel {
+            Channel::Rpc => self.0.client.as_ref(),
+            Channel::Gossip => self.0.gossip_client.as_ref(),
+        }
+    }
+
     fn pool(&self, lane: Lane) -> &Mutex<HashMap<NodeId, Slot>> {
         match lane {
             Lane::Command => &self.0.pool,
@@ -614,15 +599,11 @@ impl Transport {
         addr: SocketAddr,
         channel: Channel,
         share: bool,
-    ) -> Result<Pooled, TransportError> {
+    ) -> Result<Conn, TransportError> {
         if self.0.closed.is_cancelled() {
             return Err(TransportError::Connect("the transport is closed".into()));
         }
-        let configured = match channel {
-            Channel::Rpc => self.0.client.is_some(),
-            Channel::Gossip => self.0.gossip_client.is_some(),
-        };
-        if !configured {
+        if self.client(channel).is_none() {
             return Err(TransportError::Connect(format!(
                 "this endpoint does not serve {channel:?}"
             )));
@@ -631,11 +612,7 @@ impl Transport {
         let mut guard = slot.lock().await;
         if let Some(c) = guard.as_ref() {
             if c.conn.close_reason().is_none() {
-                return Ok(Pooled {
-                    conn: c.conn.clone(),
-                    info: c.info,
-                    shared: c.shared.clone(),
-                });
+                return Ok(c.clone());
             }
         }
         *guard = None;
@@ -652,13 +629,8 @@ impl Transport {
                 if share {
                     conn.shared = self.open_shared(&conn).await;
                 }
-                let out = Pooled {
-                    conn: conn.conn.clone(),
-                    info: conn.info,
-                    shared: conn.shared.clone(),
-                };
-                *guard = Some(conn);
-                Ok(out)
+                *guard = Some(conn.clone());
+                Ok(conn)
             }
             (Err(e), Some(node)) => {
                 TransportStats::bump(&self.0.stats.handshake_failures);
@@ -677,11 +649,10 @@ impl Transport {
         channel: Channel,
     ) -> Result<Conn, TransportError> {
         let connect = |e: &dyn std::fmt::Display| TransportError::Connect(e.to_string());
-        let client = match channel {
-            Channel::Rpc => self.0.client.clone(),
-            Channel::Gossip => self.0.gossip_client.clone(),
-        }
-        .ok_or_else(|| connect(&"this endpoint does not serve the channel"))?;
+        let client = self
+            .client(channel)
+            .cloned()
+            .ok_or_else(|| connect(&"this endpoint does not serve the channel"))?;
         let conn = self
             .0
             .endpoint
@@ -690,15 +661,9 @@ impl Transport {
             .await
             .map_err(|e| connect(&e))?;
         let (mut send, mut recv) = conn.open_bi().await.map_err(|e| connect(&e))?;
-        let hello = Frame {
-            request_id: 0,
-            trace: TraceContext::default(),
-            message: Message::Hello(local_hello(&self.0)),
-        };
-        write_frame(&mut send, &encode_frame(&hello))
+        send_control(&mut send, Message::Hello(local_hello(&self.0)))
             .await
             .map_err(|e| connect(&e))?;
-        let _ = send.finish();
         let bytes = read_frame(&mut recv, HELLO_FRAME_LIMIT)
             .await
             .map_err(|e| connect(&e))?
@@ -718,31 +683,22 @@ impl Transport {
             TransportError::Handshake { code, reason }
         };
         match reply.message {
-            Message::Hello(theirs) => {
-                match hello::check(
-                    *self.0.cluster_id.read(),
-                    self.0.capabilities,
-                    self.0.max_frame,
-                    &theirs,
-                    node,
-                    channel,
-                ) {
-                    Ok(agreed) => Ok(Conn {
-                        shared: None,
-                        info: PeerInfo {
-                            node_id: theirs.node_id,
-                            addr,
-                            capabilities: agreed.capabilities,
-                            max_frame: agreed.max_frame,
-                            epoch: theirs.epoch,
-                            cluster_id: theirs.cluster_id,
-                            channel,
-                        },
-                        conn,
-                    }),
-                    Err((code, reason)) => Err(fail(code, reason)),
-                }
-            }
+            Message::Hello(theirs) => match hello::check(
+                *self.0.cluster_id.read(),
+                self.0.capabilities,
+                self.0.max_frame,
+                &theirs,
+                addr,
+                node,
+                channel,
+            ) {
+                Ok(info) => Ok(Conn {
+                    conn,
+                    info,
+                    shared: None,
+                }),
+                Err((code, reason)) => Err(fail(code, reason)),
+            },
             Message::HandshakeFailed(f) => Err(fail(f.code, f.reason)),
             other => Err(fail(
                 HandshakeCode::Other,
@@ -750,6 +706,18 @@ impl Transport {
             )),
         }
     }
+}
+
+/// Write one handshake frame on `send` and finish the stream.
+async fn send_control(send: &mut quinn::SendStream, message: Message) -> std::io::Result<()> {
+    let frame = Frame {
+        request_id: 0,
+        trace: TraceContext::default(),
+        message,
+    };
+    write_frame(send, &encode_frame(&frame)).await?;
+    let _ = send.finish();
+    Ok(())
 }
 
 /// Write one encoded request frame on a new stream and read the reply frame.
@@ -854,21 +822,14 @@ async fn serve_connection(inner: Arc<Inner>, incoming: quinn::Incoming) {
         let info = accept_hello(&inner, &conn, channel).await?;
         Ok::<_, String>((conn, info))
     };
-    let (conn, info) = match tokio::time::timeout(inner.handshake_timeout, handshake).await {
-        Ok(Ok(pair)) => pair,
-        Ok(Err(reason)) => {
+    let handshake = tokio::time::timeout(inner.handshake_timeout, handshake)
+        .await
+        .unwrap_or_else(|_| Err("the handshake timed out".into()));
+    let (conn, info) = match handshake {
+        Ok(pair) => pair,
+        Err(reason) => {
             TransportStats::bump(&inner.stats.handshake_failures);
             emit(&inner, None, addr, PeerEventKind::HandshakeFailed(reason));
-            return;
-        }
-        Err(_) => {
-            TransportStats::bump(&inner.stats.handshake_failures);
-            emit(
-                &inner,
-                None,
-                addr,
-                PeerEventKind::HandshakeFailed("the handshake timed out".into()),
-            );
             return;
         }
     };
@@ -909,10 +870,10 @@ async fn accept_hello(
             inner.capabilities,
             inner.max_frame,
             &theirs,
+            conn.remote_address(),
             None,
             channel,
-        )
-        .map(|agreed| (theirs, agreed)),
+        ),
         Ok(_) | Err(DecodeError::UnknownType { .. }) => Err((
             HandshakeCode::NotHello,
             "the first stream did not carry HELLO".into(),
@@ -920,37 +881,18 @@ async fn accept_hello(
         Err(e) => Err((HandshakeCode::NotHello, e.to_string())),
     };
     match checked {
-        Ok((theirs, agreed)) => {
-            let reply = Frame {
-                request_id: 0,
-                trace: TraceContext::default(),
-                message: Message::Hello(local_hello(inner)),
-            };
-            write_frame(&mut send, &encode_frame(&reply))
+        Ok(info) => {
+            send_control(&mut send, Message::Hello(local_hello(inner)))
                 .await
                 .map_err(|e| e.to_string())?;
-            let _ = send.finish();
-            Ok(PeerInfo {
-                node_id: theirs.node_id,
-                addr: conn.remote_address(),
-                capabilities: agreed.capabilities,
-                max_frame: agreed.max_frame,
-                epoch: theirs.epoch,
-                cluster_id: theirs.cluster_id,
-                channel,
-            })
+            Ok(info)
         }
         Err((code, reason)) => {
-            let reply = Frame {
-                request_id: 0,
-                trace: TraceContext::default(),
-                message: Message::HandshakeFailed(HandshakeFailed {
-                    code,
-                    reason: reason.clone(),
-                }),
+            let failed = HandshakeFailed {
+                code,
+                reason: reason.clone(),
             };
-            let _ = write_frame(&mut send, &encode_frame(&reply)).await;
-            let _ = send.finish();
+            let _ = send_control(&mut send, Message::HandshakeFailed(failed)).await;
             // Let the reply reach the dialer before the close.
             let _ = tokio::time::timeout(Duration::from_millis(500), send.stopped()).await;
             conn.close(

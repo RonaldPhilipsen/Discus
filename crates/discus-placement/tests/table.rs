@@ -75,8 +75,7 @@ proptest! {
         let e = epoch(members);
         let table = e.table(rf);
         for r in 0..RANGES {
-            let got: Vec<NodeId> = table.owners(r).map(|m| m.id).collect();
-            prop_assert_eq!(got, hrw::owners(&r.to_be_bytes(), e.members(), rf));
+            prop_assert_eq!(table.owner_ids(r), &hrw::owners(&r.to_be_bytes(), e.members(), rf)[..]);
         }
     }
 
@@ -257,7 +256,6 @@ fn the_table_ignores_the_member_order() {
     unsorted.swap(1, 4);
     let (a, b) = (SlotTable::build(&sorted, 3), SlotTable::build(&unsorted, 3));
     for r in 0..RANGES {
-        let ids = |t: &SlotTable| t.owners(r).map(|m| m.id).collect::<Vec<_>>();
-        assert_eq!(ids(&a), ids(&b), "range {r}");
+        assert_eq!(a.owner_ids(r), b.owner_ids(r), "range {r}");
     }
 }

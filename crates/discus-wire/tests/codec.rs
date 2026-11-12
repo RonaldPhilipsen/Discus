@@ -1,8 +1,11 @@
 #![allow(clippy::unwrap_used)]
 
+mod common;
+
 use std::net::SocketAddr;
 
 use bytes::Bytes;
+use common::round_trip;
 use discus_placement::{
     ClusterId, Epoch, EpochId, Member, MemberState, NodeId, Version, Weight, NTP64,
 };
@@ -70,24 +73,8 @@ fn all_kinds() -> Value {
     ])
 }
 
-fn round_trip(message: Message) {
-    let frame = Frame {
-        request_id: 7,
-        trace: trace(),
-        message,
-    };
-    let bytes = encode_frame(&frame);
-    assert_eq!(decode_frame(&bytes, &limits()).unwrap(), frame);
-}
-
 #[test]
 fn every_message_round_trips() {
-    round_trip(Message::Hello(hello()));
-    round_trip(Message::HandshakeFailed(HandshakeFailed {
-        code: HandshakeCode::ClusterMismatch,
-        reason: "another cluster".into(),
-    }));
-    round_trip(Message::Unsupported { message_type: 999 });
     let cluster = ClusterId::from_u128(5);
     let body = Epoch::new(
         epoch_id(4, 2),
@@ -98,40 +85,50 @@ fn every_message_round_trips() {
         ],
     )
     .unwrap();
-    round_trip(Message::Forward(Forward {
-        command: discus_wire::encode_command(&[Bytes::from("SET"), Bytes::from("k")]),
-        epoch: epoch_id(4, 2),
-        epoch_body: Some(body),
-        hops: 1,
-        path: vec![id(1), id(2)],
-        mode: ForwardMode::Route,
-        track: false,
-    }));
-    round_trip(Message::Forward(Forward {
-        command: Bytes::from_static(b"*1\r\n$6\r\nDBSIZE\r\n"),
-        epoch: epoch_id(1, 1),
-        epoch_body: None,
-        hops: 1,
-        path: vec![],
-        mode: ForwardMode::Local,
-        track: false,
-    }));
-    round_trip(Message::ForwardReply(ForwardReply {
-        value: all_kinds(),
-        applied: Some(Version::new(NTP64(123_456), id(99))),
-        epoch: epoch_id(4, 2),
-        observed: None,
-        settled: false,
-    }));
-    round_trip(Message::ForwardReply(ForwardReply {
-        value: Value::Null,
-        applied: None,
-        epoch: epoch_id(1, 1),
-        observed: None,
-        settled: false,
-    }));
-    round_trip(Message::Ping { nonce: 11 });
-    round_trip(Message::Pong { nonce: 12 });
+    for m in [
+        Message::Hello(hello()),
+        Message::HandshakeFailed(HandshakeFailed {
+            code: HandshakeCode::ClusterMismatch,
+            reason: "another cluster".into(),
+        }),
+        Message::Unsupported { message_type: 999 },
+        Message::Forward(Forward {
+            command: discus_wire::encode_command(&[Bytes::from("SET"), Bytes::from("k")]),
+            epoch: epoch_id(4, 2),
+            epoch_body: Some(body),
+            hops: 1,
+            path: vec![id(1), id(2)],
+            mode: ForwardMode::Route,
+            track: false,
+        }),
+        Message::Forward(Forward {
+            command: Bytes::from_static(b"*1\r\n$6\r\nDBSIZE\r\n"),
+            epoch: epoch_id(1, 1),
+            epoch_body: None,
+            hops: 1,
+            path: vec![],
+            mode: ForwardMode::Local,
+            track: false,
+        }),
+        Message::ForwardReply(ForwardReply {
+            value: all_kinds(),
+            applied: Some(Version::new(NTP64(123_456), id(99))),
+            epoch: epoch_id(4, 2),
+            observed: None,
+            settled: false,
+        }),
+        Message::ForwardReply(ForwardReply {
+            value: Value::Null,
+            applied: None,
+            epoch: epoch_id(1, 1),
+            observed: None,
+            settled: false,
+        }),
+        Message::Ping { nonce: 11 },
+        Message::Pong { nonce: 12 },
+    ] {
+        assert_eq!(round_trip(m.clone()), m);
+    }
 }
 
 #[test]
@@ -360,7 +357,7 @@ fn an_epoch_round_trips_client_addresses() {
     b.client_addr = Some(SocketAddr::from(([10, 0, 0, 2], 6380)));
     let c = member(3, 7003, MemberState::Normal);
     let epoch = Epoch::new(epoch_id(4, 1), ClusterId::from_u128(77), vec![a, b, c]).unwrap();
-    round_trip(Message::Forward(Forward {
+    let m = Message::Forward(Forward {
         command: Bytes::from_static(b"*1\r\n$6\r\nDBSIZE\r\n"),
         epoch: epoch_id(4, 1),
         epoch_body: Some(epoch),
@@ -368,5 +365,6 @@ fn an_epoch_round_trips_client_addresses() {
         path: vec![],
         mode: ForwardMode::Route,
         track: false,
-    }));
+    });
+    assert_eq!(round_trip(m.clone()), m);
 }

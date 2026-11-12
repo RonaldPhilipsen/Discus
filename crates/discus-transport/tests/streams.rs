@@ -280,11 +280,11 @@ async fn bulk_and_command_lanes_both_answer() {
     let (b, _) = start(config(&ca, b_id, cluster)).await;
     for lane in [Lane::Command, Lane::Bulk] {
         let reply = a
-            .request_on(
+            .request_with(
                 lane,
                 b_id,
                 b.local_addr(),
-                Message::Ping { nonce: 1 },
+                |_| Ok(Message::Ping { nonce: 1 }),
                 TraceContext::default(),
                 Duration::from_secs(2),
                 false,
@@ -307,11 +307,11 @@ async fn a_stalled_bulk_request_does_not_block_a_command() {
     let bulk = {
         let a = a.clone();
         tokio::spawn(async move {
-            a.request_on(
+            a.request_with(
                 Lane::Bulk,
                 b_id,
                 addr,
-                Message::Replicate(discus_wire::Batch::new(epoch(1, b_id))),
+                |_| Ok(Message::Replicate(discus_wire::Batch::new(epoch(1, b_id)))),
                 TraceContext::default(),
                 Duration::from_secs(5),
                 false,
@@ -351,11 +351,11 @@ async fn a_bulk_timeout_is_not_evidence() {
     a.peer(b_id, b.local_addr()).await.unwrap();
     let mut events = a.events();
     let err = a
-        .request_on(
+        .request_with(
             Lane::Bulk,
             b_id,
             b.local_addr(),
-            Message::Replicate(discus_wire::Batch::new(epoch(1, b_id))),
+            |_| Ok(Message::Replicate(discus_wire::Batch::new(epoch(1, b_id)))),
             TraceContext::default(),
             Duration::from_millis(50),
             true,

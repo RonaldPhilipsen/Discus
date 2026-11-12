@@ -183,16 +183,7 @@ async fn a_loop_is_detected() {
     let epoch = c.nodes[0].node.epochs().current().id();
     let config = TransportConfig::new(
         "127.0.0.1:0".parse().unwrap(),
-        {
-            let (cert, key) = c.ca.issue(TEST_SAN);
-            discus_transport::TlsMaterial::from_pem(
-                c.ca.ca_pem().as_bytes(),
-                cert.as_bytes(),
-                key.as_bytes(),
-                TEST_SAN,
-            )
-            .unwrap()
-        },
+        c.ca.material(TEST_SAN),
         me,
         c.cluster_id,
     );

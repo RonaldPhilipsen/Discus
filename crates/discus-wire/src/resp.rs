@@ -6,7 +6,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use discus_resp::Value;
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
 
-use crate::codec::DecodeError;
+use crate::codec::{bytes_of, DecodeError};
 use crate::fb;
 
 /// Encode a command as a RESP multibulk, the raw form that a forward carries.
@@ -70,19 +70,13 @@ pub(crate) fn to_wire<'a>(
     fb::RespValue::create(fbb, &args)
 }
 
-fn bytes_of(v: &fb::RespValue<'_>) -> Bytes {
-    v.bytes()
-        .map(|b| Bytes::copy_from_slice(b.bytes()))
-        .unwrap_or_default()
-}
-
 pub(crate) fn from_wire(v: fb::RespValue<'_>) -> Result<Value, DecodeError> {
     let items = || v.items().into_iter().flatten().map(from_wire);
     Ok(match v.kind() {
-        fb::RespKind::SIMPLE => Value::Simple(bytes_of(&v)),
-        fb::RespKind::ERROR => Value::Error(bytes_of(&v)),
+        fb::RespKind::SIMPLE => Value::Simple(bytes_of(v.bytes())),
+        fb::RespKind::ERROR => Value::Error(bytes_of(v.bytes())),
         fb::RespKind::INTEGER => Value::Integer(v.integer()),
-        fb::RespKind::BULK => Value::Bulk(bytes_of(&v)),
+        fb::RespKind::BULK => Value::Bulk(bytes_of(v.bytes())),
         fb::RespKind::NULL => Value::Null,
         fb::RespKind::ARRAY => Value::Array(items().collect::<Result<_, _>>()?),
         fb::RespKind::MAP => {

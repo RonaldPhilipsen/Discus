@@ -3,74 +3,23 @@
 mod common;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
-use common::{config, epoch, start};
-use discus_placement::{ClusterId, EpochId, MemberState, NodeId, Weight};
+use common::{config, epoch, gossip_ping, start, TestService};
+use discus_placement::{ClusterId, NodeId};
 use discus_transport::testing::TestCa;
-use discus_transport::{Channel, GossipError, Inbound, Service, Transport, TransportError};
-use discus_wire::{Capacity, Gossip, GossipKind, HandshakeCode, MemberInfo, Message};
-use futures::future::BoxFuture;
-
-/// Answers every gossip message with an ACK, or never answers when `silent`.
-struct GossipService {
-    epoch: EpochId,
-    silent: bool,
-}
-
-impl Service for GossipService {
-    fn epoch(&self) -> EpochId {
-        self.epoch
-    }
-
-    fn call(self: Arc<Self>, inbound: Inbound) -> BoxFuture<'static, Message> {
-        Box::pin(async move {
-            match inbound.message {
-                Message::Gossip(g) if !self.silent => {
-                    let mut reply = g.clone();
-                    reply.kind = GossipKind::Ack;
-                    Message::Gossip(reply)
-                }
-                Message::Gossip(_) => std::future::pending().await,
-                Message::Ping { nonce } => Message::Pong { nonce },
-                other => Message::Unsupported {
-                    message_type: other.type_code(),
-                },
-            }
-        })
-    }
-}
+use discus_transport::{Channel, GossipError, Transport, TransportError};
+use discus_wire::{GossipKind, HandshakeCode, Message};
 
 async fn start_gossip(ca: &TestCa, id: NodeId, cluster: ClusterId, silent: bool) -> Transport {
-    let service = Arc::new(GossipService {
-        epoch: epoch(5, id),
-        silent,
-    });
+    let service = if silent {
+        TestService::silent(epoch(5, id))
+    } else {
+        TestService::new(epoch(5, id))
+    };
     Transport::bind(config(ca, id, cluster), service)
         .await
         .unwrap()
-}
-
-fn ping(from: NodeId) -> Message {
-    Message::Gossip(Gossip::new(
-        GossipKind::Ping,
-        MemberInfo {
-            id: from,
-            addr: "127.0.0.1:1".parse().unwrap(),
-            rpc_addr: "127.0.0.1:1".parse().unwrap(),
-            client_addr: None,
-            client_host: None,
-            state: MemberState::Joining,
-            incarnation: 0,
-            weight: Weight::default(),
-            epoch: epoch(0, from),
-            capabilities: 0,
-            capacity: Capacity::default(),
-            leader_hints: Bytes::new(),
-        },
-    ))
 }
 
 const SECOND: Duration = Duration::from_secs(1);
@@ -83,7 +32,7 @@ async fn gossip_crosses_clusters() {
     let (a, _) = start(config(&ca, a_id, a_cluster)).await;
     let b = start_gossip(&ca, b_id, b_cluster, false).await;
     let (info, reply) = a
-        .gossip(b.local_addr(), Some(b_id), ping(a_id), SECOND)
+        .gossip(b.local_addr(), Some(b_id), gossip_ping(a_id), SECOND)
         .await
         .unwrap();
     assert_eq!(info.node_id, b_id);
@@ -112,7 +61,7 @@ async fn a_nil_cluster_joins_over_gossip() {
     let (a, _) = start(config(&ca, a_id, ClusterId::NIL)).await;
     let b = start_gossip(&ca, b_id, ClusterId::mint(), false).await;
     let (info, _) = a
-        .gossip(b.local_addr(), None, ping(a_id), SECOND)
+        .gossip(b.local_addr(), None, gossip_ping(a_id), SECOND)
         .await
         .unwrap();
     assert_eq!(info.node_id, b_id);
@@ -127,7 +76,12 @@ async fn a_silent_peer_is_reported_as_silent() {
     let b = start_gossip(&ca, b_id, cluster, true).await;
     let started = std::time::Instant::now();
     let err = a
-        .gossip(b.local_addr(), None, ping(a_id), Duration::from_millis(200))
+        .gossip(
+            b.local_addr(),
+            None,
+            gossip_ping(a_id),
+            Duration::from_millis(200),
+        )
         .await
         .unwrap_err();
     match err {
@@ -151,7 +105,7 @@ async fn an_unreachable_address_is_unreachable() {
         s.local_addr().unwrap()
     };
     let err = a
-        .gossip(closed, None, ping(a.node_id()), SECOND)
+        .gossip(closed, None, gossip_ping(a.node_id()), SECOND)
         .await
         .unwrap_err();
     assert!(matches!(err, GossipError::Unreachable(_)), "{err:?}");
@@ -167,21 +121,21 @@ async fn the_wrong_node_at_an_address_is_refused() {
         .gossip(
             b.local_addr(),
             Some(NodeId::random()),
-            ping(a.node_id()),
+            gossip_ping(a.node_id()),
             SECOND,
         )
         .await
         .unwrap_err();
     assert!(matches!(err, GossipError::Refused(_)), "{err:?}");
     // A pooled connection to the right node gives the same answer for the wrong ID.
-    a.gossip(b.local_addr(), None, ping(a.node_id()), SECOND)
+    a.gossip(b.local_addr(), None, gossip_ping(a.node_id()), SECOND)
         .await
         .unwrap();
     let err = a
         .gossip(
             b.local_addr(),
             Some(NodeId::random()),
-            ping(a.node_id()),
+            gossip_ping(a.node_id()),
             SECOND,
         )
         .await
@@ -204,10 +158,17 @@ async fn gossip_failures_are_not_evidence() {
     };
     let me = a.node_id();
     let short = Duration::from_millis(100);
-    let _ = a.gossip(silent.local_addr(), None, ping(me), short).await;
-    let _ = a.gossip(closed, None, ping(me), short).await;
     let _ = a
-        .gossip(silent.local_addr(), Some(NodeId::random()), ping(me), short)
+        .gossip(silent.local_addr(), None, gossip_ping(me), short)
+        .await;
+    let _ = a.gossip(closed, None, gossip_ping(me), short).await;
+    let _ = a
+        .gossip(
+            silent.local_addr(),
+            Some(NodeId::random()),
+            gossip_ping(me),
+            short,
+        )
         .await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(events.try_recv().is_err());
