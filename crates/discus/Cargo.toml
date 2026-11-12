@@ -9,6 +9,7 @@ workspace = true
 [dependencies]
 bytes = "1"
 arc-swap = "1"
+hashlink = "0.12"
 lru = "0.19"
 num-bigint = "0.5"
 openraft = { version = "0.10.0", default-features = false, features = ["tokio-rt"] }
