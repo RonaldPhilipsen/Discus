@@ -37,8 +37,12 @@ impl Service for NodeService {
             if let Some(d) = node.faults.delay(inbound.peer.node_id, &inbound.message) {
                 tokio::time::sleep(d).await;
             }
-            if let Some(r) = node.replicator() {
-                r.touch(inbound.peer.node_id);
+            // Forwards skip the contact time: they are the request path, and gossip already
+            // refreshes it every period, which is all the rejoin absence needs.
+            if !matches!(inbound.message, Message::Forward(_)) {
+                if let Some(r) = node.replicator() {
+                    r.touch(inbound.peer.node_id);
+                }
             }
             match inbound.message {
                 Message::Ping { nonce } => Message::Pong { nonce },
