@@ -5,7 +5,7 @@ Authelia session store (2026-11-09), the overload control lane (2026-11-10), and
 (2026-11-11).
 
 Code comments cite this document as "spec section N". Sections 1 to 18 keep the numbers of the base
-design, so those references stay valid. Section 19 holds the session store for Authelia.
+design, so those references stay valid. Section 19 holds primary-read keys and `RENAME`.
 
 ## 1. Summary
 
@@ -1460,27 +1460,28 @@ These choices keep their current default until the project owner decides otherwi
 port is 6380, `--tls-mode lb` with a redirect listener is a start error, and `--listen` never sends
 `-MOVED`.
 
-## 19. Application support
+## 19. Primary-read keys and RENAME
 
-### 19.1 Session store for Authelia
+### 19.1 Design
 
-Authelia can use Discus as its session store. A user can sign in with a second factor, stay signed
-in across pooled connections, and sign out. Authelia renames the session after each authentication
-step, so this needs `RENAME`.
+Primary-read keys are keys under a listed prefix that always read from the primary and whose deletes
+wait for one secondary. With `RENAME`, they let an application keep session-like state in Discus:
+every pooled connection sees the latest write, and a deleted key does not come back in the normal
+case. Authelia is the first such client. It renames its session after each authentication step.
 
 Decisions:
 
-- Sessions are safe to lose. A lost session makes the user sign in again. A full cold restart signs
-  out every user.
-- Sessions stay on the asynchronous replication path. They do not use Raft.
-- A signed-out session must not come back in the normal case. Authelia keeps no second record of a
-  session.
+- The data is safe to lose. For a session store, a lost session makes the user sign in again. A
+  full cold restart loses every key.
+- Primary-read keys stay on the asynchronous replication path. They do not use Raft.
+- A deleted key must not come back in the normal case, because the application can keep no second
+  record of it.
 - A delete fails open. If no secondary acknowledges it in time, the command returns success.
 
-Authelia uses `github.com/fasthttp/session/v2` v2.5.9. Its Redis provider sends `PING`, `HELLO`,
-`AUTH`, `CLIENT SETINFO`, `SELECT`, `GET`, `SET` with an expiry, `EXISTS`, `RENAME`, `EXPIRE`, and
-`DEL`. All session keys start with `authelia-session`. The go-redis read timeout is 3 s, with 3
-retries.
+As an example, Authelia uses `github.com/fasthttp/session/v2` v2.5.9. Its Redis provider sends
+`PING`, `HELLO`, `AUTH`, `CLIENT SETINFO`, `SELECT`, `GET`, `SET` with an expiry, `EXISTS`,
+`RENAME`, `EXPIRE`, and `DEL`. All session keys start with `authelia-session`. The go-redis read
+timeout is 3 s, with 3 retries.
 
 `RENAME source destination` becomes a supported command for normal keys. It orders on both keys and
 has two steps:
