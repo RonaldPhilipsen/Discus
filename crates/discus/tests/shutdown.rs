@@ -51,3 +51,30 @@ async fn drain_gives_up_after_the_timeout_and_closes_idle_connections() {
         "the connection must be closed after the drain timeout"
     );
 }
+
+#[tokio::test]
+async fn drain_timeout_closes_a_connection_that_never_reads() {
+    let mut node = common::try_start_full(&["--shutdown-timeout-secs", "1"])
+        .await
+        .unwrap();
+    let (addr, shutdown) = (node.addr, node.shutdown.clone());
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let value = vec![b'x'; 100_000];
+    let mut set = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$100000\r\n".to_vec();
+    set.extend_from_slice(&value);
+    set.extend_from_slice(b"\r\n");
+    s.write_all(&set).await.unwrap();
+    let mut ok = [0u8; 5];
+    s.read_exact(&mut ok).await.unwrap();
+    assert_eq!(&ok, b"+OK\r\n");
+    // Far more reply bytes than the socket buffers hold, so the server blocks in its write.
+    let gets = b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\n".repeat(2_000);
+    s.write_all(&gets).await.unwrap();
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(20), &mut node.handle)
+        .await
+        .expect("the hard stop must end a connection that is blocked in a write")
+        .unwrap()
+        .unwrap();
+}

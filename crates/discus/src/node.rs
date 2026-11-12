@@ -1,11 +1,12 @@
 //! State shared by every connection on a node.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use discus_placement::{
     hlc, Adopt, Clock, ClusterId, Epoch, EpochError, EpochHistory, EpochId, Hlc, Member,
@@ -32,6 +33,8 @@ thread_local! {
     /// The last stamp that `Node::stamp` issued on this thread. Local execution reads it back to
     /// report the applied HLC of a command.
     static APPLIED: Cell<Option<Version>> = const { Cell::new(None) };
+    /// The current epoch of a node as this thread last read it, with its generation.
+    static EPOCH_CACHE: RefCell<Option<(u64, Arc<Epoch>)>> = const { RefCell::new(None) };
 }
 
 /// Where the node is in its life.
@@ -60,6 +63,12 @@ pub struct Node {
     /// The clock that stamps every write.
     pub hlc: Hlc,
     epochs: Arc<RwLock<EpochHistory>>,
+    /// The current epoch of `epochs`, for reads on the command path without the lock. It changes
+    /// only under the write lock, after the work that a reader must see with the new epoch.
+    current: ArcSwap<Epoch>,
+    /// The generation of `current`, unique across all nodes of the process. A thread keeps its
+    /// last read of `current` while the generation stays, so a lookup costs one atomic load.
+    current_generation: AtomicU64,
     pub started_at: Instant,
     pub store: Arc<Store>,
     pub security: Arc<Security>,
@@ -245,6 +254,8 @@ impl Node {
             config,
             id,
             hlc: Hlc::new(id, hlc_clock),
+            current: ArcSwap::new(epochs.current().clone()),
+            current_generation: AtomicU64::new(next_generation()),
             epochs: Arc::new(RwLock::new(epochs)),
             started_at: Instant::now(),
             store,
@@ -421,6 +432,7 @@ impl Node {
         *epochs = EpochHistory::new(epoch);
         tracing::info!(epoch = %id, cluster = %epochs.cluster_id(), "took a new cluster history");
         crate::telemetry::record_epoch(discus_telemetry::global(), epochs.current());
+        self.publish(epochs.current().clone());
         drop(epochs);
         if let Some(link) = self.link() {
             link.reset();
@@ -525,7 +537,7 @@ impl Node {
         to: NodeId,
     ) -> Result<(&ClusterLink, SocketAddr, Arc<Epoch>), String> {
         let link = self.link().ok_or("this node has no transport")?;
-        let epoch = self.epochs().current().clone();
+        let epoch = self.current_epoch();
         let addr = epoch
             .member(to)
             .map(|m| m.rpc_addr)
@@ -582,6 +594,7 @@ impl Node {
         }
         // Adoptions run on the control lane and on the data runtime, so the send happens under
         // the lock to keep the work in adoption order.
+        self.publish(new.clone());
         let unsent = match self.epoch_work.get() {
             Some(tx) => tx.send((old, new)).err().map(|e| e.0),
             None => Some((old, new)),
@@ -649,7 +662,7 @@ impl Node {
     }
 
     pub fn epoch_id(&self) -> EpochId {
-        self.epochs.read().current().id()
+        self.with_current(Epoch::id)
     }
 
     /// The owner set of `key` in the previous epoch, if the history holds one.
@@ -703,10 +716,36 @@ impl Node {
 
     /// The owner set of `key` in the current epoch with the configured replication factor.
     pub fn owners(&self, key: &[u8]) -> Owners {
-        self.epochs
-            .read()
-            .current()
-            .owner_set(key, self.config.replication_factor)
+        self.with_current(|e| e.owner_set(key, self.config.replication_factor))
+    }
+
+    /// Run `f` on the current epoch. `f` must not call back into this function.
+    fn with_current<R>(&self, f: impl FnOnce(&Epoch) -> R) -> R {
+        let generation = self.current_generation.load(Ordering::Acquire);
+        EPOCH_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let cached = cache.as_ref().filter(|(g, _)| *g == generation);
+            let epoch = match cached {
+                Some((_, epoch)) => epoch,
+                // A newer epoch than `generation` can arrive here. It is cached under the older
+                // generation, so the next call reads it again.
+                None => &cache.insert((generation, self.current.load_full())).1,
+            };
+            f(epoch)
+        })
+    }
+
+    /// Make `epoch` the current epoch for readers without the lock. The caller holds the write
+    /// lock of `epochs`.
+    fn publish(&self, epoch: Arc<Epoch>) {
+        self.current.store(epoch);
+        self.current_generation
+            .store(next_generation(), Ordering::Release);
+    }
+
+    /// The current epoch, without the lock of the history.
+    pub fn current_epoch(&self) -> Arc<Epoch> {
+        self.current.load_full()
     }
 
     /// A fresh HLC version for one write command. A clock pinned at its drift bound refuses, and
@@ -827,6 +866,12 @@ impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         self.0.connected.fetch_sub(1, Ordering::Relaxed);
     }
+}
+
+/// A new epoch generation for `Node::current_generation`.
+fn next_generation() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 #[cfg(test)]

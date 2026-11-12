@@ -151,6 +151,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-swap"
+version = "1.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84a22b5d51209f6de83d37a0b33d320acb8da88823e42a94c075140708f032a5"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "arcstr"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -972,6 +981,7 @@ dependencies = [
 name = "discus"
 version = "0.0.0"
 dependencies = [
+ "arc-swap",
  "aws-lc-rs",
  "axum",
  "base64 0.23.1",
@@ -988,7 +998,9 @@ dependencies = [
  "discus-transport",
  "discus-wire",
  "fastrand",
+ "foldhash",
  "futures",
+ "hashlink",
  "ipnet",
  "jsonwebtoken",
  "libc",
@@ -1684,6 +1696,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
  "foldhash",
+]
+
+[[package]]
+name = "hashlink"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
+dependencies = [
+ "hashbrown 0.17.1",
 ]
 
 [[package]]

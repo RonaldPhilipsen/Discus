@@ -18,17 +18,18 @@
 //! A client that does not read its replies stalls the flush, which stalls the next read, so memory
 //! stays bounded.
 
+use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::BytesMut;
 use discus_resp::{encode, Command, Limits, Parser, Protocol, Value};
 use discus_telemetry::Metrics;
-use futures::future::BoxFuture;
+use futures::future::{AbortHandle, Abortable, BoxFuture};
 use futures::stream::{FuturesOrdered, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use super::order::{KeyOrder, Keys, WaitFor};
@@ -58,22 +59,76 @@ impl Slot {
     }
 }
 
-/// Write `out` to the client, giving up when the node force-closes connections. A client that
-/// never reads would otherwise hold the write open forever. Returns false to end the connection.
-async fn flush<S: AsyncWrite + Unpin>(
-    stream: &mut S,
-    out: &mut BytesMut,
-    hard_stop: &CancellationToken,
-) -> bool {
+/// Write `out` to the client. Returns false to end the connection. A client that never reads
+/// holds the write open until the node force-closes connections with `HardStop`.
+async fn flush<S: AsyncWrite + Unpin>(stream: &mut S, out: &mut BytesMut) -> bool {
     if out.is_empty() {
         return true;
     }
-    let sent = tokio::select! {
-        _ = hard_stop.cancelled() => false,
-        written = stream.write_all(out) => written.is_ok(),
-    };
+    let sent = stream.write_all(out).await.is_ok();
     out.clear();
     sent
+}
+
+/// Ends every connection at once when the drain runs out of time. A connection task checks one
+/// atomic flag at each poll. A `CancellationToken` takes a mutex at each poll instead, and a
+/// connection polls at each command.
+#[derive(Default)]
+pub struct HardStop {
+    /// The abort handle of each running connection. `None` after `stop`.
+    conns: parking_lot::Mutex<Option<HashMap<u64, AbortHandle>>>,
+    next: std::sync::atomic::AtomicU64,
+}
+
+impl HardStop {
+    pub fn new() -> Arc<HardStop> {
+        Arc::new(HardStop {
+            conns: parking_lot::Mutex::new(Some(HashMap::new())),
+            next: Default::default(),
+        })
+    }
+
+    /// Run `conn` until it ends or `stop` aborts it.
+    pub fn run(self: &Arc<Self>, conn: impl Future<Output = ()>) -> impl Future<Output = ()> {
+        let (handle, registration) = AbortHandle::new_pair();
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        match self.conns.lock().as_mut() {
+            Some(conns) => {
+                conns.insert(id, handle);
+            }
+            None => handle.abort(),
+        }
+        let registered = Registered {
+            stop: self.clone(),
+            id,
+        };
+        async move {
+            let _registered = registered;
+            let _ = Abortable::new(conn, registration).await;
+        }
+    }
+
+    /// Abort every running connection and every later one.
+    pub fn stop(&self) {
+        let conns = self.conns.lock().take();
+        for handle in conns.into_iter().flat_map(HashMap::into_values) {
+            handle.abort();
+        }
+    }
+}
+
+/// Removes the abort handle of a connection when it ends.
+struct Registered {
+    stop: Arc<HardStop>,
+    id: u64,
+}
+
+impl Drop for Registered {
+    fn drop(&mut self) {
+        if let Some(conns) = self.stop.conns.lock().as_mut() {
+            conns.remove(&self.id);
+        }
+    }
 }
 
 struct Pipeline {
@@ -196,20 +251,10 @@ impl Pipeline {
 
 /// Run the transport setup of a new connection (TLS or the PROXY header), then serve it.
 /// `redirect` marks a connection of the redirect listener.
-pub async fn accept(
-    tcp: TcpStream,
-    peer: SocketAddr,
-    node: Arc<Node>,
-    hard_stop: CancellationToken,
-    redirect: bool,
-) {
+pub async fn accept(tcp: TcpStream, peer: SocketAddr, node: Arc<Node>, redirect: bool) {
     let local_addr = tcp.local_addr().ok();
-    let accepted = tokio::select! {
-        _ = hard_stop.cancelled() => return,
-        accepted = node.security.accept(tcp, peer) => accepted,
-    };
-    match accepted {
-        Ok((stream, auth)) => serve(stream, auth, node, hard_stop, redirect, local_addr).await,
+    match node.security.accept(tcp, peer).await {
+        Ok((stream, auth)) => serve(stream, auth, node, redirect, local_addr).await,
         Err(e) => tracing::debug!(%peer, error = %e, "client connection setup failed"),
     }
 }
@@ -219,7 +264,6 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     mut stream: S,
     auth: ConnAuth,
     node: Arc<Node>,
-    hard_stop: CancellationToken,
     redirect: bool,
     local_addr: Option<SocketAddr>,
 ) {
@@ -286,30 +330,26 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
                     break;
                 }
             }
-            if p.out.len() >= FLUSH_BYTES && !flush(&mut stream, &mut p.out, &hard_stop).await {
+            if p.out.len() >= FLUSH_BYTES && !flush(&mut stream, &mut p.out).await {
                 return;
             }
         }
         if p.finished {
-            flush(&mut stream, &mut p.out, &hard_stop).await;
+            flush(&mut stream, &mut p.out).await;
             return;
         }
         if p.pending.is_empty() {
-            if !flush(&mut stream, &mut p.out, &hard_stop).await || p.closing {
+            if !flush(&mut stream, &mut p.out).await || p.closing {
                 return;
             }
-            tokio::select! {
-                _ = hard_stop.cancelled() => return,
-                read = stream.read_buf(parser.buffer()) => match read {
-                    Ok(0) | Err(_) => return,
-                    Ok(_) => {}
-                },
-            };
+            match stream.read_buf(parser.buffer()).await {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
             continue;
         }
         let can_read = starved && !p.closing && p.pending.len() < max_pipeline;
         tokio::select! {
-            _ = hard_stop.cancelled() => return,
             Some(slot) = p.pending.next() => {
                 p.encode(slot);
                 // Drain every reply that is already done before deciding to flush.
@@ -317,7 +357,7 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
                     p.encode(slot);
                 }
                 if (p.pending.is_empty() || p.out.len() >= FLUSH_BYTES || p.finished)
-                    && !flush(&mut stream, &mut p.out, &hard_stop).await
+                    && !flush(&mut stream, &mut p.out).await
                 {
                     return;
                 }

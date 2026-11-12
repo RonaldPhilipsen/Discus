@@ -5,14 +5,13 @@
 //! at least as new. The key leaves the set after a read that observes a new enough version that
 //! every replica holds, after the maximum age, or by LRU. The set ends with the connection.
 
-use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use discus_placement::Version;
 use discus_store::Store;
-use lru::LruCache;
+use hashlink::LinkedHashMap;
 use xxhash_rust::xxh3::xxh3_64;
 
 /// The bookkeeping cost of one recorded key on top of the key bytes.
@@ -104,8 +103,9 @@ impl SetKey {
 }
 
 pub struct WriteSet {
-    /// Bounded by the key limit, so a push to a full set reuses the node of the key it evicts.
-    map: LruCache<u64, Recorded>,
+    /// Oldest key first, at most `limits.keys` keys. A removed key leaves its node on the free
+    /// list of the map, so a write that evicts the oldest key allocates nothing.
+    map: LinkedHashMap<u64, Recorded>,
     /// The bytes of the recorded keys.
     bytes: usize,
     /// The node budget that this set holds, at least `bytes`.
@@ -116,9 +116,8 @@ pub struct WriteSet {
 
 impl WriteSet {
     pub fn new(limits: WriteSetLimits, budget: Arc<WriteSetBudget>) -> WriteSet {
-        let cap = NonZeroUsize::new(limits.keys).unwrap_or(NonZeroUsize::MIN);
         WriteSet {
-            map: LruCache::new(cap),
+            map: LinkedHashMap::new(),
             bytes: 0,
             held: 0,
             limits,
@@ -135,15 +134,18 @@ impl WriteSet {
     }
 
     fn remove(&mut self, key: SetKey) {
-        if let Some(r) = self.map.pop(&key.hash) {
+        if let Some(r) = self.map.remove(&key.hash) {
             self.bytes -= r.size;
+            if self.map.is_empty() {
+                self.map.shrink_to_fit();
+            }
             self.trim();
         }
     }
 
     /// Drop the oldest key from the set but keep its budget share. False when the set is empty.
     fn evict_oldest(&mut self) -> bool {
-        let Some((_, r)) = self.map.pop_lru() else {
+        let Some((_, r)) = self.map.pop_front() else {
             return false;
         };
         self.bytes -= r.size;
@@ -175,7 +177,7 @@ impl WriteSet {
     /// Record a write of `key` that the primary acknowledged at `version`. A key that does not
     /// fit the node budget even after this set gave up its own oldest keys is not recorded.
     pub fn record(&mut self, key: SetKey, version: Version, now: Instant) {
-        if let Some(r) = self.map.get_mut(&key.hash) {
+        if let Some(r) = self.map.to_back(&key.hash) {
             r.version = version;
             r.at = now;
             return;
@@ -186,11 +188,12 @@ impl WriteSet {
                 return self.trim();
             }
         }
-        // A full set evicts its oldest key in `push`. The budget of evicted keys passes to the
-        // new key first.
+        // A full set evicts its oldest key for the new one. The budget of evicted keys passes to
+        // the new key first.
+        let cap = self.limits.keys.max(1);
         loop {
-            let pushed_out = match self.map.len() >= self.map.cap().get() {
-                true => self.map.peek_lru().map_or(0, |(_, r)| r.size),
+            let pushed_out = match self.map.len() >= cap {
+                true => self.map.front().map_or(0, |(_, r)| r.size),
                 false => 0,
             };
             let short = (self.bytes - pushed_out + size).saturating_sub(self.held);
@@ -206,9 +209,12 @@ impl WriteSet {
             at: now,
             size,
         };
-        if let Some((_, old)) = self.map.push(key.hash, recorded) {
-            self.bytes -= old.size;
+        if self.map.len() >= cap {
+            if let Some((_, old)) = self.map.pop_front() {
+                self.bytes -= old.size;
+            }
         }
+        self.map.insert(key.hash, recorded);
         self.bytes += size;
         self.trim();
     }
@@ -216,7 +222,7 @@ impl WriteSet {
     /// The version that a read of `key` has to see, while the key is in the set. `now` is called
     /// only for a key in the set.
     pub fn required(&mut self, key: SetKey, now: impl FnOnce() -> Instant) -> Option<Version> {
-        let r = self.map.peek(&key.hash)?;
+        let r = self.map.get(&key.hash)?;
         if now().duration_since(r.at) >= self.limits.max_age {
             self.remove(key);
             return None;
@@ -229,7 +235,7 @@ impl WriteSet {
     pub fn observed(&mut self, key: SetKey, version: Option<Version>, settled: bool) {
         let done = self
             .map
-            .peek(&key.hash)
+            .get(&key.hash)
             .is_some_and(|r| settled && version.is_some_and(|v| v >= r.version));
         if done {
             self.remove(key);
