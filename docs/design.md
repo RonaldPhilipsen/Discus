@@ -5,7 +5,7 @@ Authelia session store (2026-11-09), the overload control lane (2026-11-10), and
 (2026-11-11).
 
 Code comments cite this document as "spec section N". Sections 1 to 18 keep the numbers of the base
-design, so those references stay valid. Section 19 holds designs that are not implemented yet.
+design, so those references stay valid. Section 19 holds the session store for Authelia.
 
 ## 1. Summary
 
@@ -971,7 +971,8 @@ Supported commands:
 - Sets: `SADD`, `SREM`, `SMEMBERS`, `SISMEMBER`, `SMISMEMBER`, `SCARD`, `SPOP`, and `SRANDMEMBER`.
 - Sorted sets: `ZADD`, `ZSCORE`, `ZMSCORE`, `ZREM`, `ZCARD`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE`,
   `ZINCRBY`, and `ZCOUNT`.
-- Keys: `SCAN`, `RANDOMKEY`, `DBSIZE`, `FLUSHDB`, and `FLUSHALL`, with the limits in §7.3.
+- Keys: `RENAME` (§19.1), `SCAN`, `RANDOMKEY`, `DBSIZE`, `FLUSHDB`, and `FLUSHALL`, with the limits
+  in §7.3.
 - Strong counter keys accept the string and expiry commands above.
 
 `INFO` reports `redis_version:7.2.0`, and the `HELLO` reply carries `version` `7.2.0`, because
@@ -981,9 +982,9 @@ section shows `cluster_enabled:1` while the topology commands answer, else `clus
 
 These commands return `-ERR command not supported by Discus`: `MULTI`, `EXEC`, `DISCARD`, `WATCH`,
 `UNWATCH`, `EVAL`, `EVALSHA`, `SCRIPT`, `FUNCTION`, `SUBSCRIBE`, `PSUBSCRIBE`, `PUBLISH`, `PUBSUB`,
-`BLPOP`, `BRPOP`, `BLMOVE`, `BRPOPLPUSH`, all stream commands, `SORT`, `RENAME`, `RENAMENX`,
-`SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE`, `BITOP`, `BITFIELD`, `PFADD`, `PFCOUNT`, `GEO*`,
-`MIGRATE`, `WAIT`, and `DEBUG`. §19.1 plans support for `RENAME`.
+`BLPOP`, `BRPOP`, `BLMOVE`, `BRPOPLPUSH`, all stream commands, `SORT`, `RENAMENX`, `SUNIONSTORE`,
+`SINTERSTORE`, `SDIFFSTORE`, `BITOP`, `BITFIELD`, `PFADD`, `PFCOUNT`, `GEO*`, `MIGRATE`, `WAIT`,
+and `DEBUG`.
 
 ### 12.1 Documented deviations
 
@@ -993,6 +994,8 @@ These commands return `-ERR command not supported by Discus`: `MULTI`, `EXEC`, `
   and excludes counter keys. `FLUSHALL` is best-effort. If a counter group has no quorum, it reports
   partial success.
 - Reads can be stale. Read-your-writes is best-effort and per connection.
+- `RENAME` is not atomic. A failure between its two steps loses the value. A cluster `RENAME`
+  refuses a value whose encoded form is larger than `--max-value-bytes`, and the source then stays.
 - A node failure can lose the last writes, including deletes. After a lost `DEL`, the old value
   stays until its TTL expires. A cache that relies on invalidation needs a TTL as a backstop.
 - A normal-key `INCR` can lose increments across a failover. Collections replicate as whole
@@ -1457,15 +1460,13 @@ These choices keep their current default until the project owner decides otherwi
 port is 6380, `--tls-mode lb` with a redirect listener is a start error, and `--listen` never sends
 `-MOVED`.
 
-## 19. Planned
-
-The designs in this section are approved but not implemented.
+## 19. Application support
 
 ### 19.1 Session store for Authelia
 
 Authelia can use Discus as its session store. A user can sign in with a second factor, stay signed
-in across pooled connections, and sign out. Today this fails, because Discus rejects `RENAME`, and
-Authelia renames the session after each authentication step.
+in across pooled connections, and sign out. Authelia renames the session after each authentication
+step, so this needs `RENAME`.
 
 Decisions:
 
@@ -1505,7 +1506,7 @@ If the delivery of a take is in doubt, the entry node does not send it again. It
 `-TRYAGAIN`, as for `GETDEL`. Every `-TRYAGAIN` reply includes a message, because go-redis retries
 only on the prefix `TRYAGAIN` followed by a space. `RENAMENX` stays unsupported.
 
-A new repeatable flag, `--primary-read-prefix`, is empty by default. A key under a listed prefix
+The repeatable flag `--primary-read-prefix` is empty by default. A key under a listed prefix
 has this behavior:
 
 - Every read goes to the primary, so pooled connections see the same value.
@@ -1540,10 +1541,20 @@ sequenceDiagram
     Note over E,D: if the write of new fails, the value is lost and the reply is -TRYAGAIN
 ```
 
-Deployment for Authelia: set `--primary-read-prefix authelia-session` and `--hold-budget-ms` 2000 or
-less, so that a held write ends before the 3 s client timeout. Use TLS and a shared token. Set
-`database_index` to 0. Do not configure the Authelia `high_availability` section, because Discus has
-no Sentinel support.
+The redirect listener changes nothing for these keys. `READONLY` reads of a primary-read key go to
+the primary, because `replica_reads` is false for it. The take and the put inside `RENAME` are
+internal steps, so they forward and never return `-MOVED`. `COMMAND` reports the keys of `RENAME`
+at positions 1, 2, and step 1.
+
+Deployment for Authelia, as `docs/cluster.md` describes it:
+
+- Set `--primary-read-prefix authelia-session`.
+- Keep `--hold-budget-ms` plus `--replication-timeout-ms` plus two times
+  `--forward-write-timeout-ms` below the 3 s client timeout. With the other defaults, that is
+  `--hold-budget-ms 1500`.
+- Set `--forward-read-timeout-ms 200`, because a read of a listed key has no replica fallback.
+- Use TLS and a shared token, set `database_index` to 0, and do not configure the Authelia
+  `high_availability` section, because Discus has no Sentinel support.
 
 Tests: `scripts/compat.sh` covers `RENAME` on one node. Store tests cover the take. Cluster tests
 cover three cases:
@@ -1552,5 +1563,5 @@ cover three cases:
 - An acknowledged tombstone that survives a failover.
 - A read under a listed prefix on a new connection.
 
-An end-to-end test runs
-Authelia against three nodes through sign-in, a second factor, a later request, and sign-out.
+An end-to-end test (`mise run authelia-e2e`, needs Docker) runs Authelia against three nodes
+through sign-in, a second factor, a later request, and sign-out.
