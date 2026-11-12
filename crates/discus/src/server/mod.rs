@@ -332,7 +332,7 @@ impl Server {
             })
         };
         let tracker = TaskTracker::new();
-        let hard_stop = CancellationToken::new();
+        let hard_stop = connection::HardStop::new();
         node.set_phase(Phase::Serving);
         tracing::info!(
             node_id = %node.id,
@@ -416,14 +416,14 @@ impl Server {
                 accepted = listener.accept() => match accepted {
                     Ok((stream, peer)) => {
                         let _ = stream.set_nodelay(true);
-                        tracker.spawn(connection::accept(stream, peer, node.clone(), hard_stop.clone(), false));
+                        tracker.spawn(hard_stop.run(connection::accept(stream, peer, node.clone(), false)));
                     }
                     Err(e) => break Err(e),
                 },
                 accepted = accept_on(redirect.as_ref()) => match accepted {
                     Ok((stream, peer)) => {
                         let _ = stream.set_nodelay(true);
-                        tracker.spawn(connection::accept(stream, peer, node.clone(), hard_stop.clone(), true));
+                        tracker.spawn(hard_stop.run(connection::accept(stream, peer, node.clone(), true)));
                     }
                     Err(e) => break Err(e),
                 },
@@ -456,7 +456,7 @@ impl Server {
         };
         if tokio::time::timeout(timeout, drained).await.is_err() {
             tracing::warn!("drain timeout, closing remaining connections");
-            hard_stop.cancel();
+            hard_stop.stop();
             tracker.wait().await;
         }
         if let Some(membership) = node.membership().cloned() {
