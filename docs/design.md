@@ -37,7 +37,6 @@ The main choices:
 - Clients authenticate with OAuth 2.0 bearer tokens, mTLS, or a shared token. Kubernetes workloads
   can use their service account token.
 - Metrics and traces export through OpenTelemetry over OTLP/gRPC.
-- A cluster runs from one node to about 30 nodes, with no per-size configuration.
 
 ## 2. Scope
 
@@ -262,8 +261,7 @@ replica after a death starts cold.
 - Each scan first computes the set of ranges whose owner set changed, as 2048 bits. A key in an
   unchanged range costs one CRC16 and no HRW.
 - Scans are rate-limited, run in the background behind a snapshot watermark, and respect
-  `maxmemory`. A scan is O(dataset) per surviving owner. An index of the store by range is a later
-  option.
+  `maxmemory`. A scan is O(dataset) per surviving owner.
 - Previous-epoch fallback: while its handoff is incomplete, a new owner that misses a key asks the
   previous owners that are not current owners. The fallback ends in three cases: the handoff
   completes, the handoff is abandoned after bounded retries, or the previous owners leave. After
@@ -319,8 +317,7 @@ point.
 - SWIM uses a periodic ping, an indirect ping through peers, suspicion before death, and
   incarnation numbers that refute stale rumors. Dissemination is delta-based with a constant
   message rate per node and O(log n) propagation.
-- Gossip runs over reliable QUIC streams with mTLS on its own UDP port (§13.1). QUIC datagrams are a
-  later option.
+- Gossip runs over reliable QUIC streams with mTLS on its own UDP port (§13.1).
 - The payload is the `NodeId`, the gossip, RPC, and client addresses, state (`JOINING`, `NORMAL`,
   `LEAVING`, `DEAD`), weight, epoch, capability bits, capacity hints, and counter leader hints.
 - A phi-accrual detector with configurable thresholds decides suspicion and death. Data-path
@@ -400,8 +397,6 @@ create epochs that mark the other side `DEAD`.
 - If two clusters formed independently, the cluster whose `cluster_id` matches the lease wins.
   Without lease access, the larger cluster wins, then the higher `cluster_id`. The losing nodes
   discard their store and counters and rejoin.
-- A later hardening is a soft lease: a primary that has not heard from a secondary within a window
-  stops accepting writes.
 
 ### 6.4 Local health
 
@@ -429,20 +424,10 @@ multiplier = clamp(1 + max(score - deadband, 0) / unit, 1, max_multiplier)
 The score is a Holt forecast: a smoothed level plus a smoothed trend. Only a rising trend counts.
 The level follows a rise in about 5 samples and a fall in about 100.
 
-| `SwimConfig` field | Default | Meaning |
-| --- | --- | --- |
-| `health_alpha_up` | 0.2 | Level smoothing for a rising lag |
-| `health_alpha_down` | 0.01 | Level smoothing for a falling lag |
-| `health_beta` | 0.3 | Trend smoothing |
-| `health_horizon_ticks` | 5 | How far ahead the trend projects |
-| `health_deadband_ms` | 10 | Lag below this is scheduling noise |
-| `health_unit_ms` | 10 | Lag above the deadband per step of the multiplier |
-| `health_max_multiplier` | 9.0 | Upper bound of the multiplier |
-| `health_evidence_cutoff` | 1.5 | At or above this multiplier, data-path evidence is dropped |
-
-These fields have no command-line flags. `validate` rejects alphas and beta outside (0, 1], a unit
-of 0, a maximum below 1, and a cutoff below 1. With the defaults, a step to 200 ms of lag reaches
-the maximum multiplier on the first sample. After the lag returns to 0, the multiplier falls below
+The parameters are the `health_*` fields of `SwimConfig`, with no command-line flags. Lag below
+the 10 ms deadband counts as scheduling noise, the multiplier stops at 9, and the evidence cutoff
+is 1.5. With the defaults, a step to 200 ms of lag reaches the maximum multiplier on the first
+sample. After the lag returns to 0, the multiplier falls below
 1.5 after about 2.6 s and reaches 1 after about 3 s.
 
 The SWIM core reads the multiplier `m` at each decision point:
@@ -459,8 +444,6 @@ The SWIM core reads the multiplier `m` at each decision point:
 - Join, lease, and sync timers do not scale. Missed-probe evidence still counts, so a dead peer
   still becomes Dead, within `9 × suspicion_max_ms` plus the scaled probe time (90 s with the
   defaults).
-
-Admission control can later read the same lag value.
 
 The diagram shows how lag turns into a multiplier and how the multiplier gates data-path
 evidence.
@@ -670,10 +653,9 @@ redirects has at most one redirect per newer epoch, and nodes never send a clien
 A draining node leaves placement in the next epoch, and its redirect connections then get `-MOVED`
 to the new owners. A joining node receives redirects once it reports the new epoch.
 
-Failover. A cluster client talks to the primary directly, so it sees the failure of the primary as
-a connection error or a timeout. It then fetches the topology from another node and retries. Until
-the detector declares the primary `DEAD`, a redirect node sees it as down, so it forwards the write
-and holds it (§7.5). After the epoch removes the primary, the client gets `-MOVED` to the new one.
+Failover. A cluster client sees a failed primary as a connection error and retries through another
+node. That node sees the primary as down, so it forwards and holds the write (§7.5). After the epoch
+removes the primary, the client gets `-MOVED` to the new one.
 
 Counter keys. A slot holds normal keys and counter keys, and the leader of a counter group is not
 the owner of the slot. A `-MOVED` to the leader makes the client send the normal keys of that slot
@@ -707,7 +689,6 @@ Keyspace commands on a redirect connection:
 | --- | --- |
 | `SCAN` | Lists only the keys of the slots that this node is the primary of. A cluster client scans every primary, so each key appears once. |
 | `DBSIZE` | The local key count divided by the copies per key. The sum over all primaries equals the cluster estimate. |
-| `RANDOMKEY` | As on the forward listener. |
 | `FLUSHDB`, `FLUSHALL` | Every member, best-effort. A cluster client sends the command to every primary, so the flush runs several times. That is safe. |
 
 `--cluster-topology` takes `auto` (default), `on`, or `off`. With `auto`, if the node has a redirect
@@ -935,16 +916,14 @@ stateDiagram-v2
 
 ### 10.5 Growth from one node to three
 
-- One node holds the cluster lease and every group lease. The effective `RF` is 1.
-- A second node gains every range, so it receives a handoff of the whole store and a snapshot of
-  every group as follower. The effective `RF` is 2.
-- A third node gains about a third of the owner slots. After the dwell time, every group switches
-  to Raft with three voters, and `RF` is 3.
-- Shrinking runs the same steps in reverse.
+A single node holds every lease, with an effective `RF` of 1. A second node gains every range, so
+it receives a handoff of the whole store and becomes the follower of every group (`RF` 2). A third
+node makes `RF` 3, and after the dwell time every group switches to Raft. Shrinking runs the same
+steps in reverse.
 
 ## 11. Storage
 
-- The store has `2^k` shards (for example 256). Each shard has its own map, TTL index, eviction
+- The store has `--shards` shards (default 256). Each shard has its own map, TTL index, eviction
   state, and lock. There is no global lock.
 - Value types are strings, hashes, sets, and sorted sets. A collection is stored and replicated as
   one value, with a configurable size guard.
@@ -953,9 +932,10 @@ stateDiagram-v2
   the limit, the node evicts normal entries, then the oldest hints, then the oldest tombstones with
   `needs_refill`. It never evicts counter state or write sets. Counters return `-OOM`, and write
   sets are bounded at admission.
-- Eviction is sampled approximate LRU or LFU per shard. Replicas evict independently, and read
-  repair covers the resulting misses.
-- Expiry uses a timing wheel or sampled buckets, not one timer per key.
+- Eviction is sampled approximate LRU per shard. Replicas evict independently, and read repair
+  covers the resulting misses.
+- Expiry has no timer per key (§8.1). The sampled sweep keeps a cursor per shard, so repeated sweeps
+  cover the whole shard.
 - The default limits are 64 KiB per key, 64 MiB per value, and 10000 in-flight commands per
   connection. A connection over the pipeline limit is not read until replies drain.
 - There is no persistence.
@@ -993,26 +973,23 @@ and `DEBUG`.
 
 ### 12.1 Documented deviations
 
-- `MSET` and multi-key `DEL` are not atomic. A partial failure returns `-TRYAGAIN` with some parts
-  applied. Discus never returns `-CROSSSLOT`.
-- On the forward listener, `SCAN` is local and excludes counter keys, and `DBSIZE` is approximate
-  and excludes counter keys. `FLUSHALL` is best-effort. If a counter group has no quorum, it reports
-  partial success.
-- Reads can be stale. Read-your-writes is best-effort and per connection.
-- `RENAME` is not atomic. A failure between its two steps loses the value. A cluster `RENAME`
-  refuses a value whose encoded form is larger than `--max-value-bytes`, and the source then stays.
-- A node failure can lose the last writes, including deletes. After a lost `DEL`, the old value
-  stays until its TTL expires. A cache that relies on invalidation needs a TTL as a backstop. A
-  delete of a primary-read key narrows this window but does not close it, because it fails open.
-- A normal-key `INCR` can lose increments across a failover. Collections replicate as whole
-  values, so under split-brain only one side's field updates survive.
+Each deviation is explained in the section in parentheses.
+
+- `MSET` and multi-key `DEL` are not atomic, and Discus never returns `-CROSSSLOT` (§7.3).
+- `SCAN` is local, `DBSIZE` is approximate, and both exclude counter keys. `FLUSHALL` is
+  best-effort (§7.3).
+- Reads can be stale. Read-your-writes is best-effort and per connection (§7.4).
 - Non-idempotent writes can return `-TRYAGAIN` during a failover. A retried `SET NX` can report
-  failure for a value that the client did set.
-- Below three nodes, a counter failover can lose increments. Counters accepted on the losing side
-  of a partition are discarded. A full cold restart loses every counter.
-- Discus never sends `-ASK`, and it does not support slot management or
-  `CLUSTER COUNTKEYSINSLOT` and `CLUSTER GETKEYSINSLOT`.
-- `CLUSTER NODES` shows no replicas (§12.2).
+  failure for a value that the client did set (§7.5).
+- A node failure can lose the last writes, including deletes (§8.2). After a lost `DEL`, the old
+  value stays until its TTL expires, so a cache that relies on invalidation needs a TTL as a
+  backstop. A delete of a primary-read key narrows this window but does not close it (§19.1).
+- A normal-key `INCR` can lose increments across a failover (§8.1). Under split-brain, only one
+  side's field updates of a collection survive (§6.3, §11).
+- Counters can lose increments below three nodes, on the losing side of a partition, and in a full
+  cold restart (§10).
+- `RENAME` is not atomic, and a failure can lose the value (§19.1).
+- Discus never sends `-ASK`, has no slot management, and `CLUSTER NODES` shows no replicas (§12.2).
 
 ### 12.2 Cluster and COMMAND replies
 
@@ -1099,10 +1076,9 @@ tips, key specifications, and subcommands are empty arrays.
   at the same time. A frame that fails the verifier resets the shared stream, and the dialer sends
   later requests on streams of their own.
 - Allow at most 1024 concurrent streams per connection. Flow-control windows provide backpressure.
-- Use 0-RTT only for idempotent reads and gossip, because 0-RTT data can be replayed.
+- 0-RTT is off, because 0-RTT data can be replayed.
 - If an address changes, use connection migration. Configure idle timeout, keep-alive, and a
   handshake timeout. A failed handshake, a reset, or a forward timeout feeds the failure detector.
-- Start with the default congestion control and benchmark BBR.
 
 ### 13.2 Messages
 
@@ -1118,8 +1094,8 @@ tips, key specifications, and subcommands are empty arrays.
   change epoch identity.
 - Other messages are `PING`, `STATS`, `SCAN`, `HANDOFF`, `HINT_REPLAY`, `RAFT_LEADER`, and
   `RAFT_CONFIG`.
-- The `.fbs` files in the repository are the wire contract. The default code generator is `flatc`
-  with the `flatbuffers` crate.
+- The `.fbs` files in the repository are the wire contract. `flatc` generates the code for the
+  `flatbuffers` crate.
 - A receiver runs the FlatBuffers verifier, with depth and table limits, on every frame and nested
   payload before it reads them. A frame that fails is dropped, logged, and counted.
 - Reads are retried freely. Writes are retried only under §7.5.
@@ -1279,8 +1255,7 @@ access for clients sets `clusterClients.enabled=false`.
   as a handoff source until the shutdown deadline. The deadline must cover the handoff and the Raft
   moves. Then the node flushes its queues and leaves gossip. Keys not copied in time refill as
   misses.
-- A draining node leaves placement in the next epoch, so its redirect connections get `-MOVED` to
-  the new owners and cluster clients move away before it stops.
+- Cluster clients move away before the node stops, because it leaves placement first (§7.6).
 - A restarted pod is a new, cold node. Use `maxSurge` so the new pod joins before the old pod
   drains, and `minReadySeconds` so one replacement finishes before the next begins.
 
@@ -1315,7 +1290,7 @@ access for clients sets `clusterClients.enabled=false`.
   `discus.ring.epoch`, and the Kubernetes detector attributes.
 - Logs are structured, rate-limited, written to stdout, and carry trace IDs. The log records each
   crossing of the evidence cutoff at INFO, in both directions, and a failed `setpriority` at WARN
-  once. OTLP log export is a later option.
+  once.
 
 ### 15.5 Build features
 
@@ -1365,28 +1340,19 @@ and `INFO` list the enabled features.
 No assertion depends on the speed of the machine. Unit and simulator tests use virtual time. A
 test that waits for a state polls it with a deadline of several seconds.
 
-| Area | Must cover |
-| --- | --- |
-| Unit | RESP parsing and encoding, slots and hash tags, HRW placement, HLC ordering, TTL, eviction, every store operation, `COMMAND` key positions. |
-| Property | Slots match `CLUSTER KEYSLOT` of Valkey for a vector table (empty tag, `{` without `}`, nested braces, binary bytes). The slot table equals HRW per range, is independent of member order, and lists `min(RF, N)` distinct `NORMAL` members. Minimal movement per range. The largest primary share stays below 1.5 times the mean with 3, 6, and 12 members. One primary per key per epoch, epoch convergence after a partition, pipeline and `MGET`/`MSET` order, same-key order across streams. |
-| Startup and lease | HLC floor from the cluster maximum, the drift bound, no writes while a `NORMAL` peer is silent, wall-clock bootstrap, exactly one node forms a cluster, lease takeover, API server outage, full cold restart. |
-| Failover | A held `SET` succeeds on the new primary, a transmitted `INCR` returns `-TRYAGAIN`, an untransmitted `INCR` is retried, the hold budget expires, data-path evidence speeds up `DEAD`. |
-| Local health | A step to 200 ms reaches the cutoff within 5 samples. After the lag ends, the multiplier stays above 1 for 50 samples and reaches 1 within 500. Lag below the deadband keeps it at 1. It never exceeds the maximum. In the simulator, a lagging node with data-path failures keeps healthy peers Alive and still marks a killed peer Dead within the bound. A node without lag still suspects after one data-path failure. |
-| Control lane | With both data workers blocked for 3 s, `/healthz` answers and one gossip round completes. With the workers blocked for 500 ms, the published lag is at least 400 ms. Member records carry both addresses, and forwards reach the RPC port. |
-| Handoff | Join, death, and drain handoff, scan coalescing, the changed-range filter, previous-epoch fallback and its end, epoch history across a rolling restart. |
-| Hinted handoff | Replay after an outage and after a lagging queue drains, coalescing, overflow, tombstones, epoch changes, cold rejoin, primary death. |
-| Write set | `SET` then `GET` on one connection, stale read on another, reconnect, eviction, global cap, multi-key commands. |
-| Primary-read keys and `RENAME` | `RENAME` on one node: missing source, one key as both arguments, overwritten destination, kept deadline. Node loss after the take and before the acknowledgment. An acknowledged tombstone survives a failover. A read under a listed prefix returns the latest write on a new connection. Authelia end to end against three nodes (`mise run authelia-e2e`, needs Docker). |
-| Cluster clients | The redirect decision as a table. A model test: from any node, a chain of `-MOVED` reaches a serving node, never goes to an older epoch, and has at most one redirect per epoch. With a redis-rs cluster client: topology replies cover every slot once and agree on every node, direct routing does no forwards, `-MOVED` on the redirect listener and success on `--listen`, writes during a join and a drain, failover, `READONLY`, target health in a static cluster, counter keys never redirected, hash tags, keyspace commands, `-NOAUTH` before `AUTH` and `-NOPERM` before `-MOVED`, TLS, placement mismatch, single node. |
-| Counters | Election, replication, snapshots, minority rejection, learner-only entry, two-of-three and total voter loss, false `DEAD`, leader-follower failover and lag, fencing, both mode switches and the dwell time, identical expiry under clock skew, `-OOM`, offline re-shard. Linearizability: the final value equals the number of successful increments under concurrent load. |
-| Transport and compatibility | mTLS and SAN rejection, ALPN, flow control, migration, no writes in 0-RTT, verifier rejection, unknown fields and message types, failed `HELLO`, placement mismatch. |
-| Auth | Valid, expired, `nbf`, wrong issuer or audience, bad signature, unknown `kid`, scopes, introspection, expiry mid-connection, plaintext rejection, `any` and `all` policies, JWKS outage. Service accounts: `sub` rules and wildcards, wrong audience, legacy token, rotation, two issuers. |
-| Probes | Startup waits for counter promotion, a join leaves serving nodes ready, `LEAVING` turns readiness off. |
-| Telemetry | In-memory exporter, trace context across a forward, cardinality guards, exporter backpressure. |
-| Builds | Default features, every optional subsystem off, each TLS backend, each trust root feature. |
-| Simulation | Deterministic network simulation (for example `turmoil`) for partitions, delays, kills, split-brain, and clock skew. |
-| Integration and load | `redis-cli` (also `-c` against a redirect listener), `redis-rs`, `redis-py`, `ioredis`, and the compatibility matrix in `scripts/compat.sh`. `memtier_benchmark` (also with `--cluster-mode`) and `redis-benchmark` for near-linear scaling, stable p99, and hot keys. |
-| Scaling and chaos | Grow from one node to ten and back under load with only cache misses and correct counters. Kill primaries and secondaries, rolling restarts, memory pressure, partitions, clock skew, a hung replica. |
+Each crate tests its own rules in its `tests/` directory. These layers exist:
+
+- Unit and property tests (proptest) for parsing, placement, slots, the slot table, HLC, the store,
+  and local health. Placement tests compare slots with `CLUSTER KEYSLOT` of Valkey and check
+  minimal movement and balance.
+- The deterministic membership simulator (`discus-membership/src/sim.rs`) for partitions,
+  isolation, kills, and lag.
+- Cluster tests in `crates/discus/tests` that run several nodes in one process. They cover
+  failover, handoff, hints, counters, cluster clients, security, drain, and probes. Counter tests
+  check linearizability: the final value equals the number of successful increments.
+- `scripts/compat.sh`, the `redis-cli` compatibility matrix, and `mise run authelia-e2e` (needs
+  Docker).
+- Benchmarks and chaos runs on Kubernetes.
 
 Acceptance: a node loss causes no read errors, only misses. Writes can see a brief retryable error
 during detection. A join causes no errors, and the handoff keeps the hit-rate dip below a cold
@@ -1434,8 +1400,8 @@ Main risks:
 - The control thread shares the cgroup quota with the data workers. With a very small quota, a
   throttled period can delay a probe answer by up to 100 ms.
 - The local health defaults come from reasoning, not measurement. Benchmarks can move them.
-- With 8 slots per range, the busiest node has about 6% more primaries than the mean with 6 nodes,
-  and 12% more with 12 nodes. Under uniform load at full CPU, that node sets the pace.
+- The busiest node has more primaries than the mean (§5.3). Under uniform load at full CPU, that
+  node sets the pace.
 - After an epoch change, each cluster client fetches about 0.5 MB of topology. Many clients
   multiply that.
 - Client libraries differ in their use of `CLUSTER NODES`, `CLUSTER SHARDS`, and `COMMAND`. The
@@ -1443,32 +1409,21 @@ Main risks:
 - Host names depend on CoreDNS naming the pods of a headless Service by their dashed IP.
 - A hot hash tag puts its load on one primary.
 
-## 18. Open choices
+## 18. Later options
 
-Every numeric default in this document is tunable. The builder also decides these items without a
-design change:
+Every numeric default in this document is tunable. These options are not built, and none of them
+needs a change to the design above:
 
-- The FlatBuffers code generator (`flatc` with `flatbuffers` by default, or `planus`).
-- The storage engine (a custom sharded store, `moka`, or `foyer` behind a trait) and the eviction
-  policy (LRU, LFU, or TinyLFU).
-- The exact command list within the supported types.
-- The OAuth 2.0 algorithm allowlist, whether introspection is built, and whether a small static
-  user list is added.
-- The client TLS mode, the authentication policy, and the feature set of a deployed binary.
-- Deployment manifests and load-balancer configuration.
-- An index of the store by range for handoff, hedged reads, neighbor-hosted hints, an error-biased
-  sampler, and SWIM over QUIC datagrams.
-- The digest format for promotion reconciliation and the HLC startup exchange.
-- `ReadIndex` or leader-lease reads for counters, the Raft snapshot format, compaction thresholds,
-  and the learner catch-up threshold.
-- The syntax of the `INCR ... EX` extension.
+- An index of the store by range, so a handoff scan does not walk the whole store.
+- Hedged reads, neighbor-hosted hints, and an error-biased trace sampler.
+- SWIM over QUIC datagrams.
+- A soft lease: a primary that has not heard from a secondary within a window stops accepting
+  writes.
+- `ReadIndex` or leader-lease reads for counters.
 - Admission control based on the published lag, and the other Lifeguard inputs (missed nacks and
   self-refutation).
 - QUIC stream priorities inside data connections.
-
-These choices keep their current default until the project owner decides otherwise: the redirect
-port is 6380, `--tls-mode lb` with a redirect listener is a start error, and `--listen` never sends
-`-MOVED`.
+- OTLP log export.
 
 ## 19. Primary-read keys and RENAME
 
@@ -1487,11 +1442,6 @@ Decisions:
 - A deleted key must not come back in the normal case, because the application can keep no second
   record of it.
 - A delete fails open. If no secondary acknowledges it in time, the command returns success.
-
-As an example, Authelia uses `github.com/fasthttp/session/v2` v2.5.9. Its Redis provider sends
-`PING`, `HELLO`, `AUTH`, `CLIENT SETINFO`, `SELECT`, `GET`, `SET` with an expiry, `EXISTS`,
-`RENAME`, `EXPIRE`, and `DEL`. All session keys start with `authelia-session`. The go-redis read
-timeout is 3 s, with 3 retries.
 
 `RENAME source destination` works on normal keys. It orders on both keys and has two steps:
 
@@ -1513,8 +1463,10 @@ race, only one receives the value.
 | A retry after a lost value | `-ERR no such key` |
 
 If the delivery of a take is in doubt, the entry node does not send it again. It returns
-`-TRYAGAIN`, as for `GETDEL`. Every `-TRYAGAIN` reply includes a message, because go-redis retries
-only on the prefix `TRYAGAIN` followed by a space. `RENAMENX` stays unsupported.
+`-TRYAGAIN`, as for `GETDEL`. Every `-TRYAGAIN` reply includes a message, because some clients,
+for example go-redis, retry only on `TRYAGAIN` followed by a space. A cluster `RENAME` refuses a
+value whose encoded form is larger than `--max-value-bytes`, and the source then stays.
+`RENAMENX` is not supported.
 
 The repeatable flag `--primary-read-prefix` is empty by default. A key under a listed prefix
 has this behavior:
@@ -1527,11 +1479,9 @@ has this behavior:
   secondary does not wait.
 - A key that also matches `--counter-prefix` is a counter key, and only the counter rules apply.
 
-After a failover, a new primary can lack a recent login, and the user signs in again. A delete that
-a secondary acknowledged survives a failover, because the new primary pulls newer entries from the
-other owners. If the primary is lost during the fail-open window, a deleted session can return
-until its TTL ends. `RENAME` is not atomic across nodes, and a failure can lose the value. That is a
-documented deviation.
+After a failover, a new primary can lack a recent write. A delete that a secondary acknowledged
+survives a failover, because the new primary pulls newer entries from the other owners. If the
+primary is lost during the fail-open window, a deleted key can return until its TTL ends.
 
 The diagram shows a `RENAME` across two primaries.
 
@@ -1556,14 +1506,4 @@ the primary, because `replica_reads` is false for it. The take and the put insid
 internal steps, so they forward and never return `-MOVED`. `COMMAND` reports the keys of `RENAME`
 at positions 1, 2, and step 1.
 
-Deployment for Authelia, as `docs/cluster.md` describes it:
-
-- Set `--primary-read-prefix authelia-session`.
-- Keep `--hold-budget-ms` plus `--replication-timeout-ms` plus two times
-  `--forward-write-timeout-ms` below the 3 s client timeout. With the other defaults, that is
-  `--hold-budget-ms 1500`.
-- Set `--forward-read-timeout-ms 200`, because a read of a listed key has no replica fallback.
-- Use TLS and a shared token, set `database_index` to 0, and do not configure the Authelia
-  `high_availability` section, because Discus has no Sentinel support.
-
-Section 16 lists the tests.
+`docs/cluster.md` describes how to run Authelia on Discus, with the timeouts that fit its client.
