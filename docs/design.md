@@ -96,6 +96,7 @@ Hard rules:
 | Handoff | Streaming entries to a node that gained ownership of them. |
 | Hint | A write that the primary holds for an unreachable secondary. |
 | Write set | The recently written keys of one connection. Reads of those keys go to the primary. |
+| Primary-read key | A key under a `--primary-read-prefix`. It always reads from the primary, and its deletes wait for one secondary (§19). |
 | Strong keyspace | Keys under the `cnt:` prefix, served linearizably by counter groups. |
 | HLC | Hybrid logical clock. Every entry carries an HLC timestamp and the origin `NodeId`. |
 | Tombstone | A delete marker with a TTL (default one hour). |
@@ -493,7 +494,7 @@ flowchart LR
 4. The router finds the owners of the slot in the slot table and checks the write set.
 5. A write goes to the primary. If the local node is an owner, it serves a read. Otherwise an owner
    chosen by per-connection round-robin serves it, so reads of a hot key spread over every replica.
-   A key in the write set reads from the primary.
+   A key in the write set, or a primary-read key, reads from the primary.
 6. If the target is another node, the forward listener forwards over QUIC. On the redirect
    listener, if the redirect rule allows it (§7.6), the node returns `-MOVED`. Otherwise it
    forwards.
@@ -553,7 +554,9 @@ sequenceDiagram
   the primary, or to a replica that reports an applied HLC at least as new.
 - An entry leaves the set after a read that observes a new enough HLC, after 5 s, or by LRU. The
   bounds are 4096 keys or 1 MiB per connection, and 1% of `maxmemory` per node.
-- The set does not survive a reconnect or a move to another entry node. Counter keys do not use it.
+- The set does not survive a reconnect or a move to another entry node. Counter keys and
+  primary-read keys do not use it. A primary-read key always reads from the primary, so it needs
+  no write set.
 - On a redirect connection, a client writes to the primary directly, so reads on the same
   connection go to the same primary. Read-your-writes follows from the routing.
 
@@ -569,7 +572,8 @@ sequenceDiagram
   no reply, the entry node sends it again only for these idempotent commands: `SET` without `NX` or
   `XX`, `DEL`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `PERSIST`, `MSET`, `HSET`, `HDEL`,
   `SADD`, `SREM`, `ZADD` without `INCR`, and `ZREM`. Every other command, for example `INCR`,
-  `APPEND`, `GETDEL`, `SPOP`, or `SET NX`, returns `-TRYAGAIN` once its delivery is in doubt.
+  `APPEND`, `GETDEL`, `SPOP`, `SET NX`, or the take inside `RENAME`, returns `-TRYAGAIN` once its
+  delivery is in doubt.
 
 The diagram shows a held write during a failover.
 
@@ -735,7 +739,8 @@ directly but never gets `-MOVED`. That setting is for tests.
 ### 8.2 Replication
 
 - The primary acknowledges after it applies the write locally (`W = 1`) and then enqueues it per
-  peer. There is no `WAIT`.
+  peer. There is no `WAIT`. The one exception is a delete of a primary-read key: it waits up to
+  `--replication-timeout-ms` for one secondary, then replies with success anyway (§19).
 - A queue keeps only the latest full entry per key. If the HLC of an entry is newer, the replica
   applies it. Replication is therefore idempotent and order-tolerant.
 - On queue overflow, the primary drops the oldest entries, marks the peer lagging, and records
@@ -997,7 +1002,8 @@ and `DEBUG`.
 - `RENAME` is not atomic. A failure between its two steps loses the value. A cluster `RENAME`
   refuses a value whose encoded form is larger than `--max-value-bytes`, and the source then stays.
 - A node failure can lose the last writes, including deletes. After a lost `DEL`, the old value
-  stays until its TTL expires. A cache that relies on invalidation needs a TTL as a backstop.
+  stays until its TTL expires. A cache that relies on invalidation needs a TTL as a backstop. A
+  delete of a primary-read key narrows this window but does not close it, because it fails open.
 - A normal-key `INCR` can lose increments across a failover. Collections replicate as whole
   values, so under split-brain only one side's field updates survive.
 - Non-idempotent writes can return `-TRYAGAIN` during a failover. A retried `SET NX` can report
@@ -1231,7 +1237,7 @@ provider or client secret.
   `system:service-account-issuer-discovery` ClusterRole.
 - The configuration covers discovery, listen addresses, leases and fencing, `RF` and weight, memory
   and request limits, timeouts, TLS and authentication, trusted issuers and scope rules, hint and
-  write-set limits, counters, client addresses, and telemetry.
+  write-set limits, primary-read prefixes, counters, client addresses, and telemetry.
 
 Client addresses. Each member advertises a client address in its member record. Topology replies
 and `-MOVED` carry it. A member without one is never the target of a `-MOVED`.
@@ -1291,6 +1297,9 @@ access for clients sets `clusterClients.enabled=false`.
 - Local health metrics: `discus.local_health.lag` (ms, gauge), `discus.local_health.score` (ms,
   gauge), `discus.local_health.multiplier` (gauge), and `discus.local_health.evidence_dropped`
   (counter).
+- `discus.primary_read.delete_unacked` (counter, exported as
+  `discus_primary_read_delete_unacked_total`) counts deletes of primary-read keys that returned
+  success with no secondary acknowledgment.
 - Client routing metrics: `discus.client.redirects` counts `-MOVED` replies.
   `discus.client.misrouted` counts commands on a redirect connection that the node forwarded
   instead, with `reason` set to `epoch`, `down`, or `no_address`. `discus.client.topology_requests`
@@ -1367,6 +1376,7 @@ test that waits for a state polls it with a deadline of several seconds.
 | Handoff | Join, death, and drain handoff, scan coalescing, the changed-range filter, previous-epoch fallback and its end, epoch history across a rolling restart. |
 | Hinted handoff | Replay after an outage and after a lagging queue drains, coalescing, overflow, tombstones, epoch changes, cold rejoin, primary death. |
 | Write set | `SET` then `GET` on one connection, stale read on another, reconnect, eviction, global cap, multi-key commands. |
+| Primary-read keys and `RENAME` | `RENAME` on one node: missing source, one key as both arguments, overwritten destination, kept deadline. Node loss after the take and before the acknowledgment. An acknowledged tombstone survives a failover. A read under a listed prefix returns the latest write on a new connection. Authelia end to end against three nodes (`mise run authelia-e2e`, needs Docker). |
 | Cluster clients | The redirect decision as a table. A model test: from any node, a chain of `-MOVED` reaches a serving node, never goes to an older epoch, and has at most one redirect per epoch. With a redis-rs cluster client: topology replies cover every slot once and agree on every node, direct routing does no forwards, `-MOVED` on the redirect listener and success on `--listen`, writes during a join and a drain, failover, `READONLY`, target health in a static cluster, counter keys never redirected, hash tags, keyspace commands, `-NOAUTH` before `AUTH` and `-NOPERM` before `-MOVED`, TLS, placement mismatch, single node. |
 | Counters | Election, replication, snapshots, minority rejection, learner-only entry, two-of-three and total voter loss, false `DEAD`, leader-follower failover and lag, fencing, both mode switches and the dwell time, identical expiry under clock skew, `-OOM`, offline re-shard. Linearizability: the final value equals the number of successful increments under concurrent load. |
 | Transport and compatibility | mTLS and SAN rejection, ALPN, flow control, migration, no writes in 0-RTT, verifier rejection, unknown fields and message types, failed `HELLO`, placement mismatch. |
@@ -1483,8 +1493,7 @@ As an example, Authelia uses `github.com/fasthttp/session/v2` v2.5.9. Its Redis 
 `RENAME`, `EXPIRE`, and `DEL`. All session keys start with `authelia-session`. The go-redis read
 timeout is 3 s, with 3 retries.
 
-`RENAME source destination` becomes a supported command for normal keys. It orders on both keys and
-has two steps:
+`RENAME source destination` works on normal keys. It orders on both keys and has two steps:
 
 1. The entry node sends a take to the primary of the source. A take is one atomic step that
    returns the value and the absolute deadline, and writes a tombstone.
@@ -1528,7 +1537,7 @@ The diagram shows a `RENAME` across two primaries.
 
 ```mermaid
 sequenceDiagram
-    participant C as Authelia
+    participant C as client
     participant E as entry node
     participant S as primary of the source
     participant D as primary of the destination
@@ -1557,12 +1566,4 @@ Deployment for Authelia, as `docs/cluster.md` describes it:
 - Use TLS and a shared token, set `database_index` to 0, and do not configure the Authelia
   `high_availability` section, because Discus has no Sentinel support.
 
-Tests: `scripts/compat.sh` covers `RENAME` on one node. Store tests cover the take. Cluster tests
-cover three cases:
-
-- A node loss after the take, and a node loss before the acknowledgment.
-- An acknowledged tombstone that survives a failover.
-- A read under a listed prefix on a new connection.
-
-An end-to-end test (`mise run authelia-e2e`, needs Docker) runs Authelia against three nodes
-through sign-in, a second factor, a later request, and sign-out.
+Section 16 lists the tests.
