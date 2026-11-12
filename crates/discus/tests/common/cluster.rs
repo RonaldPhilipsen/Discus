@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 
+use discus::server::BindOptions;
 use discus::{Config, Server};
 use discus_placement::{ClusterId, NodeId};
 use discus_transport::testing::TestCa;
@@ -85,7 +86,11 @@ async fn try_start_cluster_clients(
         flags.extend(extra(i));
         let config = Config::parse_from(argv(&dir, addr, peers, DEFAULTS, &flags))
             .expect("valid cluster arguments");
-        match Server::bind_with_cluster_socket(config, socket).await {
+        let opts = BindOptions {
+            cluster_socket: Some(socket),
+            ..BindOptions::default()
+        };
+        match Server::bind_with(config, opts).await {
             Ok(server) => nodes.push(spawn(server, addr)),
             Err(e) => {
                 nodes.iter().for_each(ClusterNode::kill);

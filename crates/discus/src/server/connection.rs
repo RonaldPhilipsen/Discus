@@ -24,7 +24,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::BytesMut;
-use discus_resp::{encode, Command, Limits, Parser, Protocol, Value};
+use discus_resp::{encode, Command, Parser, Protocol, Value};
 use discus_telemetry::Metrics;
 use futures::future::{AbortHandle, Abortable, BoxFuture};
 use futures::stream::{FuturesOrdered, StreamExt};
@@ -73,7 +73,6 @@ async fn flush<S: AsyncWrite + Unpin>(stream: &mut S, out: &mut BytesMut) -> boo
 /// Ends every connection at once when the drain runs out of time. A connection task checks one
 /// atomic flag at each poll. A `CancellationToken` takes a mutex at each poll instead, and a
 /// connection polls at each command.
-#[derive(Default)]
 pub struct HardStop {
     /// The abort handle of each running connection. `None` after `stop`.
     conns: parking_lot::Mutex<Option<HashMap<u64, AbortHandle>>>,
@@ -269,18 +268,9 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
 ) {
     let _guard = node.track_connection();
     let cfg = &node.config;
-    // The parser limit is looser than the value limit so a moderately oversize value gets a clean
-    // `value too large` error. A hugely oversize one still closes the connection.
-    let limits = Limits {
-        max_bulk_bytes: cfg
-            .max_value_bytes
-            .max(cfg.max_key_bytes)
-            .saturating_add(1 << 20),
-        ..Limits::default()
-    };
     let max_pipeline = cfg.max_pipeline.max(1);
     let max_request = cfg.max_request_bytes;
-    let mut parser = Parser::new(limits);
+    let mut parser = Parser::new(cfg.parser_limits());
     let mut conn = ConnState::new(node.next_conn_id(), auth);
     conn.redirect = redirect;
     conn.local_addr = local_addr;

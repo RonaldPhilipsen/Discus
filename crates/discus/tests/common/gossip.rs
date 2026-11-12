@@ -9,7 +9,7 @@ use std::time::Duration;
 use discus::server::BindOptions;
 use discus::{Config, Node, Server};
 use discus_membership::{LeaseProvider, MemoryLease};
-use discus_placement::{Clock, NodeId, NTP64};
+use discus_placement::NodeId;
 use discus_transport::testing::{TestCa, TEST_SAN};
 use redis::AsyncCommands;
 use tokio_util::sync::CancellationToken;
@@ -101,8 +101,7 @@ pub fn socket() -> (UdpSocket, SocketAddr) {
     (s, a)
 }
 
-/// The HLC clock and the wall clock of one node.
-pub type Clocks = (fn() -> NTP64, Arc<dyn Clock>);
+pub use discus::server::Clocks;
 
 /// Extra parts for one node.
 #[derive(Default)]
@@ -146,15 +145,13 @@ impl Net {
         let lease = opts
             .lease
             .unwrap_or_else(|| Arc::new(self.lease.clone()) as Arc<dyn LeaseProvider>);
-        let (hlc_clock, wall) = opts.clocks.unzip();
         let server = Server::bind_with(
             config,
             BindOptions {
                 cluster_socket: Some(socket),
                 rpc_socket: None,
                 lease: Some(lease),
-                hlc_clock,
-                wall,
+                clocks: opts.clocks,
                 counter_leases: opts.counter_leases,
             },
         )

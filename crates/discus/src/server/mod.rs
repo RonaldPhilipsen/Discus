@@ -23,6 +23,9 @@ use crate::membership::{discovery, Membership};
 use crate::security::Security;
 use crate::{Config, Node, Phase};
 
+/// The HLC clock and the wall clock of one node.
+pub type Clocks = (fn() -> NTP64, Arc<dyn Clock>);
+
 /// Parts that tests supply instead of the defaults.
 #[derive(Default)]
 pub struct BindOptions {
@@ -33,20 +36,33 @@ pub struct BindOptions {
     /// The cluster lease instead of the one `--lease-provider` names.
     pub lease: Option<Arc<dyn LeaseProvider>>,
     /// The HLC clock and the wall clock, for example two halves of one mock clock slot.
-    pub hlc_clock: Option<fn() -> NTP64>,
-    pub wall: Option<Arc<dyn Clock>>,
+    pub clocks: Option<Clocks>,
     /// The counter group leases instead of the ones `--lease-provider` names.
     pub counter_leases: Option<crate::counter::CounterLeases>,
 }
 
+/// The Kubernetes lease `name` in the namespace of `--lease-namespace` or of the pod.
 #[cfg(feature = "k8s")]
-fn lease_namespace(config: &Config) -> String {
+fn k8s_lease(
+    config: &Config,
+    name: &str,
+    duration_ms: u64,
+) -> Result<Arc<dyn LeaseProvider>, String> {
     const NAMESPACE_FILE: &str = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
-    config.lease_namespace.clone().unwrap_or_else(|| {
+    let namespace = config.lease_namespace.clone().unwrap_or_else(|| {
         std::fs::read_to_string(NAMESPACE_FILE)
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "default".into())
-    })
+    });
+    let duration = Duration::from_millis(duration_ms);
+    discus_membership::lease::K8sLease::in_cluster(&namespace, name, duration)
+        .map(|l| Arc::new(l) as Arc<dyn LeaseProvider>)
+        .map_err(|e| format!("--lease-provider k8s: {e}"))
+}
+
+#[cfg(not(feature = "k8s"))]
+fn k8s_lease(_: &Config, _: &str, _: u64) -> Result<Arc<dyn LeaseProvider>, String> {
+    Err("--lease-provider k8s needs the k8s build feature".into())
 }
 
 /// The counter group leases that `--lease-provider` names: one per group with `k8s`, none with
@@ -55,21 +71,13 @@ fn counter_leases(config: &Config) -> Result<Option<crate::counter::CounterLease
     if !config.gossip_enabled() || config.lease_provider == LeaseKind::None {
         return Ok(None);
     }
-    #[cfg(feature = "k8s")]
-    {
-        let namespace = lease_namespace(config);
-        let duration = Duration::from_millis(config.counter_lease_duration_ms);
-        let mut leases: Vec<Arc<dyn LeaseProvider>> = Vec::new();
-        for g in 0..config.counter_groups {
+    let leases = (0..config.counter_groups)
+        .map(|g| {
             let name = config.counter_lease_name(g);
-            let lease = discus_membership::lease::K8sLease::in_cluster(&namespace, &name, duration)
-                .map_err(|e| format!("--lease-provider k8s: {e}"))?;
-            leases.push(Arc::new(lease));
-        }
-        Ok(Some(Arc::new(move |g: u16| leases[usize::from(g)].clone())))
-    }
-    #[cfg(not(feature = "k8s"))]
-    Err("--lease-provider k8s needs the k8s build feature".into())
+            k8s_lease(config, &name, config.counter_lease_duration_ms)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(Arc::new(move |g: u16| leases[usize::from(g)].clone())))
 }
 
 /// The lease that `--lease-provider` names.
@@ -82,16 +90,7 @@ fn lease_provider(config: &Config) -> Result<Arc<dyn LeaseProvider>, String> {
             );
             Ok(Arc::new(NoneLease))
         }
-        #[cfg(feature = "k8s")]
-        LeaseKind::K8s => {
-            let namespace = lease_namespace(config);
-            let duration = Duration::from_millis(config.lease_duration_ms);
-            discus_membership::lease::K8sLease::in_cluster(&namespace, &config.lease_name, duration)
-                .map(|l| Arc::new(l) as Arc<dyn LeaseProvider>)
-                .map_err(|e| format!("--lease-provider k8s: {e}"))
-        }
-        #[cfg(not(feature = "k8s"))]
-        LeaseKind::K8s => Err("--lease-provider k8s needs the k8s build feature".into()),
+        LeaseKind::K8s => k8s_lease(config, &config.lease_name, config.lease_duration_ms),
     }
 }
 
@@ -108,6 +107,17 @@ async fn bind_transport(
 
 mod connection;
 mod order;
+
+/// Export the metrics of `transport`. Its events feed the peer error and QUIC failure metrics.
+/// The events task runs on the runtime of the caller.
+fn observe(transport: &Transport, channel: TransportChannel, stop: CancellationToken) {
+    let metrics = discus_telemetry::global();
+    crate::telemetry::observe_transport(metrics, transport, channel);
+    let transport = transport.clone();
+    tokio::spawn(async move {
+        crate::telemetry::observe_peer_events(metrics, &transport, channel, stop).await;
+    });
+}
 
 /// Accept on `listener`, or wait forever without one.
 async fn accept_on(listener: Option<&TcpListener>) -> io::Result<(TcpStream, SocketAddr)> {
@@ -131,19 +141,6 @@ impl Server {
     /// certificates.
     pub async fn bind(config: Config) -> io::Result<Server> {
         Server::bind_with(config, BindOptions::default()).await
-    }
-
-    /// Like `bind`, with the QUIC port already bound. Tests use it to learn every address
-    /// before they configure the peers.
-    pub async fn bind_with_cluster_socket(
-        config: Config,
-        socket: std::net::UdpSocket,
-    ) -> io::Result<Server> {
-        let opts = BindOptions {
-            cluster_socket: Some(socket),
-            ..BindOptions::default()
-        };
-        Server::bind_with(config, opts).await
     }
 
     pub async fn bind_with(mut config: Config, opts: BindOptions) -> io::Result<Server> {
@@ -194,9 +191,9 @@ impl Server {
             (true, None) => Some(lease_provider(&config).map_err(invalid)?),
             (false, _) => None,
         };
-        let node = Arc::new(match (opts.wall, opts.hlc_clock) {
-            (Some(wall), Some(hlc_clock)) => Node::with_clocks(config, security, wall, hlc_clock),
-            _ => Node::new(config, security),
+        let node = Arc::new(match opts.clocks {
+            Some((hlc_clock, wall)) => Node::with_clocks(config, security, wall, hlc_clock),
+            None => Node::new(config, security),
         });
         let leases = match opts.counter_leases {
             Some(leases) => Some(leases),
@@ -351,21 +348,11 @@ impl Server {
             crate::telemetry::observe_health(discus_telemetry::global(), membership);
             let _lane = lane.handle().enter();
             membership.spawn(stop_background.clone());
-            let (transport, stop) = (
-                membership.gossip_transport().clone(),
+            observe(
+                membership.gossip_transport(),
+                TransportChannel::Gossip,
                 stop_background.clone(),
             );
-            let metrics = discus_telemetry::global();
-            crate::telemetry::observe_transport(metrics, &transport, TransportChannel::Gossip);
-            tokio::spawn(async move {
-                crate::telemetry::observe_peer_events(
-                    metrics,
-                    &transport,
-                    TransportChannel::Gossip,
-                    stop,
-                )
-                .await;
-            });
         }
         if let Some(replicator) = node.replicator() {
             replicator.spawn(stop_background.clone());
@@ -380,22 +367,7 @@ impl Server {
             } else {
                 TransportChannel::Cluster
             };
-            crate::telemetry::observe_transport(
-                discus_telemetry::global(),
-                &link.transport,
-                channel,
-            );
-            // The transport events feed the peer error and QUIC failure metrics.
-            let (transport, stop) = (link.transport.clone(), stop_background.clone());
-            tokio::spawn(async move {
-                crate::telemetry::observe_peer_events(
-                    discus_telemetry::global(),
-                    &transport,
-                    channel,
-                    stop,
-                )
-                .await;
-            });
+            observe(&link.transport, channel, stop_background.clone());
             // Dial every peer early, so the first forward does not pay the handshake.
             let epoch = node.epochs().current().clone();
             for m in epoch.members().iter().filter(|m| m.id != node.id) {

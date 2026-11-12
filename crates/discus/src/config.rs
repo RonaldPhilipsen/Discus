@@ -558,6 +558,19 @@ impl Config {
     pub fn hold_budget(&self) -> Duration {
         Duration::from_millis(self.hold_budget_ms)
     }
+
+    /// The RESP parser limits of a client connection and of a forwarded command. The bulk limit
+    /// is looser than the value limit so a moderately oversize value gets a clean `value too
+    /// large` error. A hugely oversize one still closes the connection.
+    pub fn parser_limits(&self) -> discus_resp::Limits {
+        discus_resp::Limits {
+            max_bulk_bytes: self
+                .max_value_bytes
+                .max(self.max_key_bytes)
+                .saturating_add(1 << 20),
+            ..discus_resp::Limits::default()
+        }
+    }
 }
 
 fn parse_peer(s: &str) -> Result<Peer, String> {

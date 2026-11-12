@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use discus::server::BindOptions;
 use discus::{Config, Server};
 use discus_placement::{ClusterId, EpochId, NodeId};
 use discus_resp::Value;
@@ -141,9 +142,11 @@ async fn setup() -> Setup {
         "1".into(),
     ];
     let config = Config::parse_from(argv).unwrap();
-    let server = Server::bind_with_cluster_socket(config, socket)
-        .await
-        .unwrap();
+    let opts = BindOptions {
+        cluster_socket: Some(socket),
+        ..BindOptions::default()
+    };
+    let server = Server::bind_with(config, opts).await.unwrap();
     let node = server.node().clone();
     let shutdown = CancellationToken::new();
     tokio::spawn(server.run(shutdown.clone()));
