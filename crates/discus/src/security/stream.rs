@@ -9,8 +9,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_rustls::server::TlsStream;
 
-const HANDSHAKE: Duration = Duration::from_secs(10);
-
 /// The peer of a TLS connection on an HTTP listener.
 #[derive(Debug, Clone)]
 pub struct TlsPeer {
@@ -47,16 +45,12 @@ impl TlsListener {
                 };
                 let (tx, acceptor) = (tx.clone(), acceptor.clone());
                 tokio::spawn(async move {
-                    let handshake = tokio::time::timeout(HANDSHAKE, acceptor.accept(tcp)).await;
+                    let handshake =
+                        tokio::time::timeout(super::HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await;
                     let Ok(Ok(tls)) = handshake else {
                         return;
                     };
-                    let identity = tls
-                        .get_ref()
-                        .1
-                        .peer_certificates()
-                        .and_then(|c| c.first())
-                        .and_then(|leaf| super::identity::cert_identity(leaf));
+                    let identity = super::identity::peer_identity(tls.get_ref().1);
                     let _ = tx.send((tls, TlsPeer { addr, identity })).await;
                 });
             }

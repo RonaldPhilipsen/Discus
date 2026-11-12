@@ -185,21 +185,6 @@ impl Scopes {
     pub fn is_admin(self) -> bool {
         self.0 & Scopes::ADMIN.0 != 0
     }
-
-    /// The scope names in the set.
-    pub fn names(self) -> Vec<&'static str> {
-        let mut out = Vec::new();
-        for (bit, name) in [
-            (Scopes::READ, "discus.read"),
-            (Scopes::WRITE, "discus.write"),
-            (Scopes::ADMIN, "discus.admin"),
-        ] {
-            if self.0 & bit.0 != 0 {
-                out.push(name);
-            }
-        }
-        out
-    }
 }
 
 #[cfg(test)]

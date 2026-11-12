@@ -52,7 +52,7 @@ fn fail<T>(msg: impl Into<String>) -> Result<T, SecurityError> {
     Err(SecurityError(msg.into()))
 }
 
-/// How long a client has to finish the TLS handshake.
+/// How long a client has to finish the connection setup, the TLS handshake included.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The security state of a node.
@@ -231,18 +231,12 @@ impl Security {
                  --dev-insecure-oauth2 for development",
             );
         }
-        #[cfg_attr(not(feature = "k8s"), allow(unused_mut))]
-        let mut oauth = oauth2::OAuth2::from_file(
+        let oauth = oauth2::OAuth2::from_file(
             &file.issuer,
+            file.kubernetes.as_ref(),
             args.auth_clock_skew_secs,
             args.dev_insecure_oauth2,
         )?;
-        #[cfg(feature = "k8s")]
-        if let Some(k) = &file.kubernetes {
-            let source =
-                oauth2::k8s::source(k, oauth.generation_handle(), args.dev_insecure_oauth2)?;
-            oauth.extend(vec![source]);
-        }
         if oauth.is_empty() {
             return fail("the policy uses oauth2, but --auth-config lists no trusted issuer");
         }
@@ -356,20 +350,14 @@ impl Security {
         let _ = (conn, cmd);
     }
 
-    pub fn mode(&self) -> TlsMode {
-        self.mode
-    }
-
-    pub fn policy(&self) -> &Policy {
-        &self.policy
-    }
-
-    /// The scopes of a verified certificate identity. Read-write without a matching rule.
-    pub fn cert_scopes(&self, identity: &str) -> Scopes {
-        self.cert_rules
+    /// The grant of a verified certificate identity. Read-write without a matching rule.
+    fn cert_grant(&self, identity: String) -> CertGrant {
+        let scopes = self
+            .cert_rules
             .iter()
-            .find(|(pattern, _)| identity::pattern_matches(pattern, identity))
-            .map_or(Scopes::READ_WRITE, |(_, scopes)| *scopes)
+            .find(|(pattern, _)| identity::pattern_matches(pattern, &identity))
+            .map_or(Scopes::READ_WRITE, |(_, scopes)| *scopes);
+        CertGrant { identity, scopes }
     }
 
     /// Run the transport setup of a new client connection: nothing in `off` mode, the TLS
@@ -414,18 +402,18 @@ impl Security {
             }
             auth.tls = header.client_tls != Some(false);
             if let Some(identity) = header.identity {
-                let scopes = self.cert_scopes(&identity);
                 tracing::debug!(%identity, "forwarded client identity");
-                auth.cert = Some(CertGrant { identity, scopes });
+                auth.cert = Some(self.cert_grant(identity));
             }
             return Ok((ClientStream::Right(Box::new(tls)), auth));
         }
         auth.tls = true;
-        if let Some(leaf) = tls.get_ref().1.peer_certificates().and_then(|c| c.first()) {
-            let identity = identity::cert_identity(leaf).unwrap_or_default();
-            let scopes = self.cert_scopes(&identity);
+        let conn = tls.get_ref().1;
+        if conn.peer_certificates().is_some_and(|c| !c.is_empty()) {
+            // A verified certificate without a SAN or CN still meets mtls.
+            let identity = identity::peer_identity(conn).unwrap_or_default();
             tracing::debug!(%identity, "client certificate verified");
-            auth.cert = Some(CertGrant { identity, scopes });
+            auth.cert = Some(self.cert_grant(identity));
         }
         Ok((ClientStream::Right(Box::new(tls)), auth))
     }
