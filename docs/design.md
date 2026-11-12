@@ -117,6 +117,49 @@ Each node contains these parts:
 - Transport: QUIC with mTLS and FlatBuffers RPC, on two UDP ports (§13.1).
 - Admin: health, drain, configuration, and telemetry.
 
+The diagram shows how data moves through one node. Thick arrows carry client data. The gossip
+path on the control runtime only changes the epoch that the router reads.
+
+```mermaid
+flowchart LR
+    client["Redis client"]
+    cclient["Redis Cluster client"]
+    peers["other nodes"]
+    subgraph discus["Discus node"]
+        subgraph dataRt["data runtime"]
+            fwdl["forward listener, TCP 6379"]
+            redl["redirect listener, TCP 6380"]
+            edge["RESP edge: parse, authenticate, order"]
+            router["router: slot table and write set"]
+            store[("store")]
+            counters["counter tier"]
+            repl["replicator: one queue per peer"]
+            hints[("hint store")]
+            rpc["RPC endpoint, UDP 7380"]
+        end
+        subgraph controlRt["control runtime"]
+            gossip["gossip endpoint, UDP 7379"]
+            swim["SWIM, failure detector, local health"]
+        end
+    end
+    client ==> fwdl ==> edge
+    cclient ==> redl ==> edge
+    edge ==> router
+    router ==>|"this node owns the key"| store
+    router ==>|"counter key"| counters
+    router ==>|"another node owns the key"| rpc
+    store ==>|"applied write"| repl
+    repl ==> rpc
+    repl -->|"peer unreachable"| hints
+    hints -->|"replay"| rpc
+    counters ==> rpc
+    rpc <--> peers
+    gossip <--> peers
+    gossip --> swim
+    swim -->|"new epoch"| router
+    rpc -.->|"forward timeouts"| swim
+```
+
 ### 4.1 Threads and runtimes
 
 A node runs two tokio runtimes.
@@ -418,6 +461,29 @@ The SWIM core reads the multiplier `m` at each decision point:
 
 Admission control can later read the same lag value.
 
+The diagram shows how lag turns into a multiplier and how the multiplier gates data-path
+evidence.
+
+```mermaid
+flowchart LR
+    probe["lag probe: 10 ms timer on the data runtime"]
+    atomic[("lag in an atomic value")]
+    tick["membership tick on the control thread"]
+    health["LocalHealth: level, trend, score"]
+    mult["multiplier m"]
+    scale["probe and suspicion timeouts times m"]
+    fwd["forward timeout or reset"]
+    gatem at or above 1.5?
+    drop["drop the evidence and count it"]
+    phi["add the evidence to phi for the peer"]
+    probe --> atomic --> tick --> health --> mult
+    mult --> scale
+    mult --> gate
+    fwd --> gate
+    gate -->|"yes"| drop
+    gate -->|"no"| phi
+```
+
 ## 7. Request path
 
 1. The client connects to any node. An ordinary client goes through the load balancer to the
@@ -505,6 +571,27 @@ sequenceDiagram
   `SADD`, `SREM`, `ZADD` without `INCR`, and `ZREM`. Every other command, for example `INCR`,
   `APPEND`, `GETDEL`, `SPOP`, or `SET NX`, returns `-TRYAGAIN` once its delivery is in doubt.
 
+The diagram shows a held write during a failover.
+
+```mermaid
+sequenceDiagram
+    participant C as client
+    participant E as entry node
+    participant P as old primary
+    participant D as failure detector
+    participant N as new primary
+    C->>E: SET k v
+    E->>P: forward
+    P--xE: timeout or connection reset
+    E->>D: data-path evidence against P
+    E->>E: hold the SET, at most the hold budget
+    D-->>E: new epoch without P
+    E->>N: forward again, SET is idempotent
+    N-->>E: OK with HLC
+    E-->>C: OK
+    Note over E: an INCR whose delivery is in doubt returns -TRYAGAIN instead
+```
+
 ### 7.6 Cluster clients and MOVED
 
 A node has one or two RESP listeners. Both accept every command and use the same TLS mode,
@@ -536,6 +623,36 @@ command:
 Only hop 0 can return `-MOVED`. A forwarded command never gets one. The decision in step 4 is a
 pure function in `cluster/redirect.rs`.
 
+The diagram shows the redirect rule as a decision.
+
+```mermaid
+flowchart TD
+    cmd["command on a redirect connection"]
+    authauthorized?
+    noperm["reply -NOPERM"]
+    cntcounter key?
+    leader["forward to the group leader"]
+    oneall keys in one slot?
+    plan["serve or fan out, as on the forward listener"]
+    target["find the target: primary, or this node for a READONLY read"]
+    selftarget is this node?
+    serve["serve locally"]
+    checktarget T is NORMAL with a client address, up, and at the same or a newer epoch?
+    moved["reply -MOVED slot T"]
+    forward["forward to T, holds apply"]
+    cmd --> auth
+    auth -->|"no"| noperm
+    auth -->|"yes"| cnt
+    cnt -->|"yes"| leader
+    cnt -->|"no"| one
+    one -->|"no, or no key"| plan
+    one -->|"yes"| target --> self
+    self -->|"yes"| serve
+    self -->|"no"| check
+    check -->|"yes"| moved
+    check -->|"no"| forward
+```
+
 Target health. Two signals must both say that `T` is up. With gossip, SWIM must see `T` as `Alive`.
 Static membership has no detector, so this signal always passes there. The transport sees `T` as
 down while its replication queue to `T` is down, or while its last forward to `T` failed. A later
@@ -558,6 +675,27 @@ Counter keys. A slot holds normal keys and counter keys, and the leader of a cou
 the owner of the slot. A `-MOVED` to the leader makes the client send the normal keys of that slot
 to the leader too, so Discus does not send it. A counter command from a cluster client therefore
 takes one forward, unless the client reaches the leader by chance.
+
+The diagram shows a cluster client that follows an epoch change.
+
+```mermaid
+sequenceDiagram
+    participant C as cluster client
+    participant A as node A
+    participant B as node B
+    C->>A: CLUSTER SLOTS
+    A-->>C: slot map with redirect addresses
+    C->>B: SET k v, B is the primary of the slot of k
+    B->>B: apply and replicate
+    B-->>C: OK
+    Note over A,B: a new epoch moves the slot of k from B to A
+    C->>B: SET k v2
+    B-->>C: -MOVED slot A
+    C->>A: SET k v2
+    A-->>C: OK
+    C->>A: CLUSTER SLOTS
+    A-->>C: new slot map
+```
 
 Keyspace commands on a redirect connection:
 
@@ -627,6 +765,29 @@ directly but never gets `-MOVED`. That setting is for tests.
   that target, and the target discards them on rejoin.
 - Hints die with the primary. Promotion reconciliation covers that case.
 
+The diagram shows the path of a write from the primary to one secondary, with and without hints.
+
+```mermaid
+flowchart TD
+    write["primary applies the write and assigns an HLC"]
+    ack["acknowledge to the entry node, W = 1"]
+    queue["queue for the secondary, latest entry per key"]
+    sentdelivered?
+    apply["secondary applies the entry if its HLC is newer"]
+    hint["record a hint: target, key, entry, epoch"]
+    readytarget NORMAL and reconnected, or queue below the low-water mark?
+    replay["HINT_REPLAY batches in HLC order"]
+    drop["drop the hint"]
+    refill["mark the refill bucket needs_refill"]
+    write --> ack
+    write --> queue --> sent
+    sent -->|"yes"| apply
+    sent -->|"failure, timeout, or overflow"| hint --> ready
+    ready -->|"yes"| replay --> apply
+    ready -->|"target DEAD, no longer an owner, or hint too old"| drop
+    hint -->|"evicted before replay"| refill
+```
+
 ## 10. Strong counters
 
 Keys under a configurable prefix (`--counter-prefix`, default `cnt:`) are linearizable. Every
@@ -694,6 +855,30 @@ two-voter Raft group cannot survive a loss, so small clusters use leader-followe
   voters `DEAD`.
 - A false `DEAD` during a partition lets both sides rebuild a group. On heal, the losing side
   discards its counter state, and the increments it accepted are lost.
+
+The diagram shows a counter write in Raft mode.
+
+```mermaid
+sequenceDiagram
+    participant C as client
+    participant E as entry node
+    participant L as group leader
+    participant V2 as voter 2
+    participant V3 as voter 3
+    C->>E: INCR cnt:x
+    E->>E: group is slot(key) mod G, leader from hints or RAFT_LEADER
+    E->>L: forward
+    L->>L: append to the log, batched
+    par replicate
+        L->>V2: append entries
+    and
+        L->>V3: append entries
+    end
+    V2-->>L: ack
+    Note over L: 2 of 3 acknowledged, commit and apply
+    L-->>E: new value
+    E-->>C: new value
+```
 
 ### 10.3 Mode switches
 
@@ -1336,6 +1521,24 @@ a secondary acknowledged survives a failover, because the new primary pulls newe
 other owners. If the primary is lost during the fail-open window, a deleted session can return
 until its TTL ends. `RENAME` is not atomic across nodes, and a failure can lose the value. That is a
 documented deviation.
+
+The diagram shows a `RENAME` across two primaries.
+
+```mermaid
+sequenceDiagram
+    participant C as Authelia
+    participant E as entry node
+    participant S as primary of the source
+    participant D as primary of the destination
+    C->>E: RENAME old new
+    E->>S: take old
+    S->>S: read value and deadline, write a tombstone
+    S-->>E: value and deadline
+    E->>D: write new with the value and deadline
+    D-->>E: OK
+    E-->>C: OK
+    Note over E,D: if the write of new fails, the value is lost and the reply is -TRYAGAIN
+```
 
 Deployment for Authelia: set `--primary-read-prefix authelia-session` and `--hold-budget-ms` 2000 or
 less, so that a held write ends before the 3 s client timeout. Use TLS and a shared token. Set
