@@ -47,6 +47,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 serde_json = { version = "1", optional = true }
 sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 mimalloc = "0.1.52"
+pyroscope = { version = "2.1.5", default-features = false, features = ["backend-pprof-rs", "rustls-no-provider"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
@@ -74,10 +75,12 @@ discus-telemetry = { path = "../discus-telemetry", features = ["testing"] }
 # The TLS backend selects the one cryptography provider of the build. discus-transport owns it
 # (`discus_transport::crypto_provider()`), and the client listener, outbound HTTPS, and QUIC use it.
 # `otel` turns on the telemetry crate's OpenTelemetry code. The TLS and root features also select
-# the provider and the roots for TLS to the OTLP collector.
+# the provider and the roots for TLS to the OTLP collector. `pyroscope` adds the in-process CPU
+# profiler behind --pyroscope-url. It is off by default because sampling costs CPU.
 [features]
 default = ["otel", "oauth2", "k8s", "tls-aws-lc", "roots-system"]
 otel = ["discus-telemetry/otel"]
+pyroscope = ["dep:pyroscope"]
 oauth2 = ["dep:jsonwebtoken", "dep:reqwest", "dep:serde_json"]
 oauth2-introspection = ["oauth2"]
 k8s = ["discus-membership/k8s"]

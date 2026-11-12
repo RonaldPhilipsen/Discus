@@ -38,6 +38,13 @@ async fn run(mut config: Config, nice_target: Option<i32>) -> std::io::Result<()
             std::process::exit(2);
         }
     };
+    let _profiling = match discus::profiling::start(&config) {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("discus: {e}");
+            std::process::exit(2);
+        }
+    };
     if let Some(e) = discus::priority::first_failure() {
         tracing::warn!(
             error = %e,

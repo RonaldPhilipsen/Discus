@@ -32,6 +32,8 @@ pub const FEATURES: &[&str] = &[
     "oauth2-introspection",
     #[cfg(feature = "k8s")]
     "k8s",
+    #[cfg(feature = "pyroscope")]
+    "pyroscope",
 ];
 
 /// The cryptography provider for QUIC and the client listener.
@@ -57,6 +59,7 @@ mod tests {
         feature = "oauth2",
         not(feature = "oauth2-introspection"),
         feature = "k8s",
+        not(feature = "pyroscope"),
         feature = "tls-aws-lc",
         feature = "roots-system"
     ))]

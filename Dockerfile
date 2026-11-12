@@ -6,7 +6,9 @@ RUN apt-get update \
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN cargo build --release --locked -p discus --target x86_64-unknown-linux-musl
+# Extra Cargo features, for example --build-arg FEATURES=pyroscope.
+ARG FEATURES=""
+RUN cargo build --release --locked -p discus --target x86_64-unknown-linux-musl --features "$FEATURES"
 
 FROM scratch
 COPY --from=build /src/target/x86_64-unknown-linux-musl/release/discus /discus
