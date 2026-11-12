@@ -472,18 +472,39 @@ impl Replicator {
         self.queue_for(node.owners(key), key);
     }
 
-    /// Queue `key` for every owner in `owners` but this node.
+    /// Queue `key` for every owner in `owners` but this node. One read of the peer map serves
+    /// every owner that has a queue. Hints wait until the read ends, because `hint` reads the
+    /// map again and a second read can deadlock behind a waiting writer.
     fn queue_for(&self, owners: impl IntoIterator<Item = NodeId>, key: &Bytes) {
-        for owner in owners {
-            if owner == self.id {
-                continue;
+        let mut missing = Vec::new();
+        let mut hints = Vec::new();
+        {
+            let peers = self.peers.read();
+            for owner in owners {
+                if owner == self.id {
+                    continue;
+                }
+                let Some(q) = peers.get(&owner) else {
+                    missing.push(owner);
+                    continue;
+                };
+                match q.push(key) {
+                    Pushed::Queued => {}
+                    Pushed::Overflow(old) => hints.push((q.clone(), old)),
+                    Pushed::Down => hints.push((q.clone(), key.clone())),
+                }
             }
+        }
+        for owner in missing {
             let q = self.queue(owner);
             match q.push(key) {
                 Pushed::Queued => {}
-                Pushed::Overflow(old) => self.hint(&q, old),
-                Pushed::Down => self.hint(&q, key.clone()),
+                Pushed::Overflow(old) => hints.push((q, old)),
+                Pushed::Down => hints.push((q, key.clone())),
             }
+        }
+        for (q, k) in hints {
+            self.hint(&q, k);
         }
     }
 

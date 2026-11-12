@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use bytes::Bytes;
-use lru::LruCache;
+use hashlink::LinkedHashMap;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
@@ -24,7 +24,9 @@ pub struct PeerQueue {
 }
 
 struct QueueState {
-    keys: LruCache<Bytes, ()>,
+    /// Oldest key first. A removed key leaves its node on the free list of the map, so a queue
+    /// that keeps its size allocates nothing for a new key.
+    keys: LinkedHashMap<Bytes, ()>,
     /// Keys of the batch on the wire, until the peer acknowledges it.
     inflight: HashSet<Bytes>,
     /// The last batch failed. Writes go to hints until a probe succeeds.
@@ -51,7 +53,7 @@ impl PeerQueue {
             peer,
             label: crate::telemetry::node_label(peer),
             state: Mutex::new(QueueState {
-                keys: LruCache::unbounded(),
+                keys: LinkedHashMap::new(),
                 inflight: HashSet::new(),
                 down: false,
                 lagging: false,
@@ -68,13 +70,13 @@ impl PeerQueue {
         if s.down {
             return Pushed::Down;
         }
-        // The cache is unbounded, so a returned entry can only be this key, now moved to the back.
-        if s.keys.push(key.clone(), ()).is_some() {
+        // A key already queued moves to the back.
+        if s.keys.insert(key.clone(), ()).is_some() {
             return Pushed::Queued;
         }
         let out = if s.keys.len() > self.cap {
             s.lagging = true;
-            match s.keys.pop_lru() {
+            match s.keys.pop_front() {
                 Some((old, ())) => Pushed::Overflow(old),
                 None => Pushed::Queued,
             }
@@ -91,7 +93,7 @@ impl PeerQueue {
         let mut s = self.state.lock();
         let mut out = Vec::new();
         while out.len() < max {
-            let Some((k, ())) = s.keys.pop_lru() else {
+            let Some((k, ())) = s.keys.pop_front() else {
                 break;
             };
             s.inflight.insert(k.clone());
@@ -106,10 +108,10 @@ impl PeerQueue {
         let mut s = self.state.lock();
         for k in keys.rev() {
             s.inflight.remove(&k);
-            if !s.keys.contains(&k) {
-                s.keys.push(k.clone(), ());
+            if !s.keys.contains_key(&k) {
+                s.keys.insert(k.clone(), ());
             }
-            s.keys.demote(&k);
+            s.keys.to_front(&k);
         }
     }
 
@@ -124,7 +126,7 @@ impl PeerQueue {
         let mut s = self.state.lock();
         s.down = true;
         let mut out: Vec<Bytes> = s.inflight.drain().collect();
-        while let Some((k, ())) = s.keys.pop_lru() {
+        while let Some((k, ())) = s.keys.pop_front() {
             out.push(k);
         }
         out
@@ -135,6 +137,8 @@ impl PeerQueue {
         let mut s = self.state.lock();
         if s.lagging && s.keys.len() < self.cap / 4 {
             s.lagging = false;
+            // Free the nodes that the backlog left on the free list.
+            s.keys.shrink_to_fit();
             return true;
         }
         false
@@ -174,22 +178,13 @@ impl PeerQueue {
     /// The key is queued or in flight.
     pub fn holds(&self, key: &[u8]) -> bool {
         let s = self.state.lock();
-        s.keys.contains(key) || s.inflight.contains(key)
+        s.keys.contains_key(key) || s.inflight.contains(key)
     }
 
     /// Drop the queued keys for which `keep` is false.
     pub fn retain(&self, mut keep: impl FnMut(&Bytes) -> bool) {
         let mut s = self.state.lock();
-        let drop: Vec<Bytes> = s
-            .keys
-            .iter()
-            .map(|(k, _)| k)
-            .filter(|k| !keep(k))
-            .cloned()
-            .collect();
-        for k in drop {
-            s.keys.pop(&k);
-        }
+        s.keys.retain(|k, _| keep(k));
     }
 }
 
