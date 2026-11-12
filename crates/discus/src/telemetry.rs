@@ -7,7 +7,7 @@ use std::sync::Arc;
 use discus_placement::NodeId;
 use discus_resp::{Command, Value};
 use discus_telemetry::attrs::{NodeLabel, TransportChannel};
-use discus_telemetry::context::{TraceContext, TRACEPARENT, TRACESTATE};
+use discus_telemetry::context::TraceContext;
 use discus_telemetry::pipeline::{
     ResourceInfo, DEFAULT_ENDPOINT, DEFAULT_EXPORT_INTERVAL, DEFAULT_SAMPLING_RATIO,
     DEFAULT_SPAN_QUEUE,
@@ -353,28 +353,21 @@ pub fn dispatch_with(metrics: &Metrics, node: &Node, conn: &mut ConnState, cmd: 
 /// The wire form of a trace context, as the telemetry carrier. An invalid `traceparent` is
 /// dropped with its `tracestate`, so it is never forwarded.
 pub fn from_wire(wire: &discus_wire::TraceContext) -> TraceContext {
-    let parent = wire.traceparent.as_deref().map(|v| (TRACEPARENT, v));
-    let state = wire.tracestate.as_deref().map(|v| (TRACESTATE, v));
-    TraceContext::from_pairs(parent.into_iter().chain(state))
+    TraceContext::new(wire.traceparent.clone(), wire.tracestate.clone())
 }
 
 /// The telemetry carrier in its wire form.
-pub fn to_wire(cx: &TraceContext) -> discus_wire::TraceContext {
-    let mut wire = discus_wire::TraceContext::default();
-    for (name, value) in cx.to_pairs() {
-        match name {
-            TRACEPARENT => wire.traceparent = Some(value),
-            TRACESTATE => wire.tracestate = Some(value),
-            _ => {}
-        }
+pub fn to_wire(cx: TraceContext) -> discus_wire::TraceContext {
+    discus_wire::TraceContext {
+        traceparent: cx.traceparent,
+        tracestate: cx.tracestate,
     }
-    wire
 }
 
 /// The trace context for a forward (spec §15.4). With `otel`, it carries the context of the
 /// current span when that span records. Otherwise the inbound context passes through unchanged.
 pub fn outbound(inbound: &discus_wire::TraceContext) -> discus_wire::TraceContext {
-    to_wire(&discus_telemetry::context::outbound(&from_wire(inbound)))
+    to_wire(discus_telemetry::context::outbound(&from_wire(inbound)))
 }
 
 /// Child spans of the current span. Each opens only under a command span, so a node without
