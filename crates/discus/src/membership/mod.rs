@@ -15,37 +15,19 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use discus_membership::{
-    normal_count, Action, Event as CoreEvent, LeaseHolder, LeaseProvider, LeaseState, Millis,
-    Outcome, Phase, Swim,
+    normal_count, Action, Event, LeaseHolder, LeaseProvider, LeaseState, Millis, Outcome, Phase,
+    Swim,
 };
-use discus_placement::{ClusterId, EpochId, MemberState, NodeId, Weight};
-use discus_store::every;
+use discus_placement::{ClusterId, MemberState, NodeId, Weight};
+use discus_store::{every, on_events};
 use discus_transport::{GossipError, Transport};
 use discus_wire::{Capacity, Gossip, Liveness, MemberInfo, Message};
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::node::EpochPin;
 use crate::Node;
 use host::NodeHost;
-
-/// Events that subscribers see.
-#[derive(Debug, Clone)]
-pub enum Event {
-    Core(CoreEvent),
-    /// The new epoch gives owner slots to `gained`. The pin keeps `old` in the history until
-    /// every holder drops it, so a subscriber can compute the moved keys.
-    OwnershipGained(OwnershipGained),
-}
-
-#[derive(Debug, Clone)]
-pub struct OwnershipGained {
-    pub old: EpochId,
-    pub new: EpochId,
-    pub gained: Vec<NodeId>,
-    pub pin: Arc<EpochPin>,
-}
 
 const EVENT_CAPACITY: usize = 256;
 const TICK: Duration = Duration::from_millis(10);
@@ -187,16 +169,9 @@ impl Membership {
             "gossip membership starting"
         );
         let me = self.clone();
-        let s = stop.clone();
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(TICK);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    _ = s.cancelled() => return,
-                    _ = ticker.tick() => me.tick(),
-                }
-            }
+        every(TICK, stop.clone(), move || {
+            me.tick();
+            std::future::ready(())
         });
         let me = self.clone();
         let s = stop.clone();
@@ -314,25 +289,14 @@ impl Membership {
     }
 
     async fn read_evidence(self: Arc<Self>, stop: CancellationToken) {
-        use tokio::sync::broadcast::error::RecvError;
-        let mut events = self.rpc.events();
-        loop {
-            let event = tokio::select! {
-                _ = stop.cancelled() => return,
-                event = events.recv() => event,
-            };
-            match event {
-                Ok(event) => {
-                    if let Some(peer) = event.peer {
-                        self.evidence_received.fetch_add(1, Ordering::Relaxed);
-                        let now = self.now();
-                        self.inner.lock().swim.evidence(now, peer);
-                    }
-                }
-                Err(RecvError::Lagged(_)) => {}
-                Err(RecvError::Closed) => return,
+        on_events(self.rpc.events(), stop, |event| {
+            if let Some(peer) = event.peer {
+                self.evidence_received.fetch_add(1, Ordering::Relaxed);
+                let now = self.now();
+                self.inner.lock().swim.evidence(now, peer);
             }
-        }
+        })
+        .await;
     }
 
     fn holder(&self) -> LeaseHolder {
@@ -380,38 +344,26 @@ impl Membership {
         r
     }
 
-    fn publish(self: &Arc<Self>, events: Vec<CoreEvent>) {
+    fn publish(self: &Arc<Self>, events: Vec<Event>) {
         let node = self.node.upgrade();
         for event in events {
             match &event {
-                CoreEvent::OwnershipGained { old, new, gained } => {
-                    let pin = node.as_ref().and_then(|n| n.pin_epoch(*old).ok());
-                    if let Some(pin) = pin {
-                        let _ = self.events.send(Event::OwnershipGained(OwnershipGained {
-                            old: *old,
-                            new: *new,
-                            gained: gained.clone(),
-                            pin: Arc::new(pin),
-                        }));
-                    }
-                    continue;
-                }
-                CoreEvent::LeaseWanted => {
+                Event::LeaseWanted => {
                     tokio::spawn(self.clone().lease_call());
                 }
-                CoreEvent::ClusterLost { old, winner } => {
+                Event::ClusterLost { old, winner } => {
                     tracing::warn!(%old, %winner, "lost a cluster merge, discarding the store");
                     if let Some(n) = &node {
                         n.store.clear();
                     }
                 }
-                CoreEvent::StateChanged { state, incarnation } => {
+                Event::StateChanged { state, incarnation } => {
                     tracing::info!(state = state.name(), incarnation, "member state changed");
                 }
-                CoreEvent::Rejoining { incarnation } => {
+                Event::Rejoining { incarnation } => {
                     tracing::warn!(incarnation, "dropped from the epoch, joining again");
                 }
-                CoreEvent::MemberChanged {
+                Event::MemberChanged {
                     id,
                     state,
                     liveness,
@@ -427,9 +379,9 @@ impl Membership {
                         }
                     }
                 }
-                CoreEvent::EpochAdopted { .. } => {}
+                Event::EpochAdopted { .. } => {}
             }
-            let _ = self.events.send(Event::Core(event));
+            let _ = self.events.send(event);
         }
         if self.is_normal() {
             self.reached_normal.store(true, Ordering::Release);

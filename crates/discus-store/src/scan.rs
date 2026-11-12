@@ -1,13 +1,12 @@
 //! Cursor iteration, random key, and clearing.
 
 use std::collections::BinaryHeap;
-use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 use crate::glob::glob_match;
-use crate::{Entry, Store};
+use crate::{Entry, Store, HASH_SEED};
 
 const ORDER_BITS: u32 = 48;
 const ORDER_MAX: u64 = (1 << ORDER_BITS) - 1;
@@ -20,7 +19,7 @@ impl Store {
     /// The place of a key in the walk order of its shard: the top 48 bits of its shard hash.
     /// The shard comes from the low bits of the same hash.
     fn order(&self, key: &[u8]) -> u64 {
-        xxh3_64_with_seed(key, self.config.seed) >> (64 - ORDER_BITS)
+        xxh3_64_with_seed(key, HASH_SEED) >> (64 - ORDER_BITS)
     }
 
     /// Walk the map with a cursor and give `f` every entry that is not expired. `count` is the
@@ -150,13 +149,8 @@ impl Store {
 
     /// Drop every entry and tombstone, and every refill mark.
     pub fn clear(&self) {
-        for shard in &self.shards {
-            let mut guard = shard.inner.write();
-            let keys: Vec<Bytes> = guard.map.keys().cloned().collect();
-            for k in keys {
-                self.take(&mut guard, &k);
-            }
-            shard.needs_refill.store(false, Ordering::Relaxed);
+        for i in 0..self.shards.len() {
+            self.clear_shard(i);
         }
     }
 }

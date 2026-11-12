@@ -1,6 +1,6 @@
 use discus_placement::ManualClock;
 use discus_store::Version;
-use discus_store::{Admit, Entry, Store, StoreConfig, Value, HASH_SEED};
+use discus_store::{Admit, Entry, Store, StoreConfig, Value};
 use std::sync::Arc;
 
 fn entry(size: usize) -> Entry {
@@ -13,7 +13,6 @@ fn reserve_evicts_oldest_first_and_stays_under_budget() {
     let cfg = StoreConfig {
         shards: 1,
         max_memory: 10_000,
-        seed: HASH_SEED,
         ..StoreConfig::default()
     };
     let s = Store::new(cfg, clock.clone());
@@ -36,7 +35,6 @@ fn a_value_larger_than_maxmemory_is_rejected_not_evicted_for() {
     let cfg = StoreConfig {
         shards: 1,
         max_memory: 10_000,
-        seed: HASH_SEED,
         ..StoreConfig::default()
     };
     let s = Store::new(cfg, clock.clone());
@@ -52,7 +50,6 @@ fn reserve_on_an_empty_store_does_not_loop() {
     let cfg = StoreConfig {
         shards: 4,
         max_memory: 10_000,
-        seed: HASH_SEED,
         ..StoreConfig::default()
     };
     let s = Store::new(cfg, clock);

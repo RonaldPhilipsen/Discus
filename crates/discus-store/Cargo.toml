@@ -11,7 +11,7 @@ bytes = "1"
 discus-placement = { path = "../discus-placement" }
 fastrand = "2"
 parking_lot = "0.13"
-tokio = { version = "1", features = ["rt", "time", "macros"] }
+tokio = { version = "1", features = ["rt", "time", "macros", "sync"] }
 tokio-util = "0.7"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 

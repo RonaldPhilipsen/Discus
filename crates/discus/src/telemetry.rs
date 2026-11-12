@@ -470,21 +470,10 @@ pub async fn observe_peer_events(
     channel: TransportChannel,
     stop: tokio_util::sync::CancellationToken,
 ) {
-    use tokio::sync::broadcast::error::RecvError;
-    let mut events = transport.events();
-    loop {
-        let event = tokio::select! {
-            _ = stop.cancelled() => return,
-            event = events.recv() => event,
-        };
-        match event {
-            Ok(event) => record_peer_event(metrics, &event, channel),
-            Err(RecvError::Lagged(missed)) => {
-                tracing::debug!(missed, "telemetry missed transport events");
-            }
-            Err(RecvError::Closed) => return,
-        }
-    }
+    discus_store::on_events(transport.events(), stop, |event| {
+        record_peer_event(metrics, &event, channel);
+    })
+    .await;
 }
 
 /// The command span of a command that another node forwarded. Its parent is the span context

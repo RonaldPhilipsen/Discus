@@ -13,7 +13,7 @@ use discus_placement::{
     MemberState, NodeId, Owners, Version, Weight, NTP64,
 };
 use discus_resp::{Protocol, Value};
-use discus_store::{Slot, Store, StoreConfig, SystemClock, HASH_SEED};
+use discus_store::{Slot, Store, StoreConfig, SystemClock};
 use discus_transport::TransportError;
 use parking_lot::{RwLock, RwLockReadGuard};
 
@@ -141,6 +141,14 @@ pub struct Faults {
 
 #[cfg(feature = "testing")]
 impl Faults {
+    /// Wait while `hold` is set, and note in `held` that the wait happened.
+    pub async fn wait(hold: &std::sync::atomic::AtomicBool, held: &std::sync::atomic::AtomicBool) {
+        while hold.load(Ordering::Relaxed) {
+            held.store(true, Ordering::Relaxed);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
     /// How long to hold an inbound message from `peer` before it runs. `Duration::MAX` means
     /// that it never gets an answer.
     pub fn delay(&self, peer: NodeId, m: &discus_wire::Message) -> Option<std::time::Duration> {
@@ -177,23 +185,11 @@ pub struct EpochPin {
     id: EpochId,
 }
 
-impl EpochPin {
-    pub fn id(&self) -> EpochId {
-        self.id
-    }
-}
-
 impl Drop for EpochPin {
     fn drop(&mut self) {
         if let Some(epochs) = self.epochs.upgrade() {
             epochs.write().unpin(self.id);
         }
-    }
-}
-
-impl std::fmt::Debug for EpochPin {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "EpochPin({})", self.id)
     }
 }
 
@@ -214,7 +210,6 @@ impl Node {
             StoreConfig {
                 shards: config.shards,
                 max_memory: config.max_memory,
-                seed: HASH_SEED,
                 tombstone_ttl_ms: config.tombstone_ttl_ms,
                 tombstone_reserve: config.max_memory / 100 * config.tombstone_reserve_percent,
             },
@@ -441,15 +436,6 @@ impl Node {
             r.reset_handoffs();
         }
         self.epoch_tx.send_replace(id);
-    }
-
-    /// Keep epoch `id` in the history until the pin is dropped.
-    pub fn pin_epoch(&self, id: EpochId) -> Result<EpochPin, EpochError> {
-        self.epochs.write().pin(id)?;
-        Ok(EpochPin {
-            epochs: Arc::downgrade(&self.epochs),
-            id,
-        })
     }
 
     /// The replicator, when the transport runs.
