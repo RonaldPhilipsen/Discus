@@ -262,6 +262,18 @@ async fn one_slot_multi_key_moves_and_cross_slot_fans_out() {
     for k in &keys {
         assert_eq!(forward.cmd(&["SET", k, k]).await, "+OK");
     }
+    // Read-your-writes holds per connection, and the MGET runs on another connection.
+    assert!(
+        wait_until(Duration::from_secs(30), || {
+            c.nodes.iter().all(|n| {
+                keys.iter().all(|k| {
+                    n.node.store.version(k.as_bytes()).is_some()
+                        || !n.node.owners(k.as_bytes()).contains(&n.id)
+                })
+            })
+        })
+        .await
+    );
     let mut parts = vec!["MGET"];
     parts.extend(keys.iter().map(String::as_str));
     let got = redirect.cmd(&parts).await;
@@ -311,11 +323,14 @@ async fn authorization_comes_before_moved() {
 /// Write 3000 keys through a forward port. Return how many keys every node holds once
 /// replication settles, which includes the keys that `warm` wrote.
 async fn fill(c: &Cluster) -> usize {
+    let before = c.nodes.iter().map(|n| n.node.store.len()).max().unwrap();
     let mut forward = Raw::connect(c.nodes[0].addr).await;
     for i in 0..3000 {
         assert_eq!(forward.cmd(&["SET", &format!("k{i}"), "v"]).await, "+OK");
     }
-    let total = c.nodes[0].node.store.len();
+    // A SET returns once its primary applies it, so node 0 can still miss keys that it holds as
+    // a replica. Every key is new, so the count settles at `before + 3000` on every node.
+    let total = before + 3000;
     assert!(
         wait_until(Duration::from_secs(30), || {
             c.nodes.iter().all(|n| n.node.store.len() == total)
