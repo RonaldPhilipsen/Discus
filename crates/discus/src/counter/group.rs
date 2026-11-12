@@ -67,7 +67,8 @@ pub struct Inner {
     /// The best hint this node knows. It stays after its leader dies, so the next leader can
     /// follow the epoch rule.
     pub known: Option<GroupHint>,
-    /// The largest regime generation seen. A new regime takes the next one.
+    /// The largest regime generation seen. A new regime takes the next one. It never decreases,
+    /// and [`Group::set_role_if`] raises it to the regime of every role it installs.
     pub max_generation: u64,
     /// A leader that refused a command recently. Routing skips it until the time passes.
     pub distrusted: Option<(NodeId, Instant)>,
@@ -79,6 +80,12 @@ pub struct Inner {
     pub tried: Option<Instant>,
     /// The first role this node had in the current regime, for tests.
     pub first_role: Option<(Regime, &'static str)>,
+}
+
+impl Inner {
+    fn saw(&mut self, regime: Regime) {
+        self.max_generation = self.max_generation.max(regime.generation);
+    }
 }
 
 /// How long routing skips a leader that refused a command.
@@ -136,7 +143,7 @@ impl Group {
         let old = std::mem::replace(&mut inner.role, role);
         inner.version += 1;
         if let Some(regime) = inner.role.regime() {
-            inner.max_generation = inner.max_generation.max(regime.generation);
+            inner.saw(regime);
             if inner.first_role.is_none_or(|(r, _)| r != regime) {
                 inner.first_role = Some((regime, inner.role.name()));
             }
@@ -217,7 +224,7 @@ impl Group {
             }
             return;
         };
-        inner.max_generation = inner.max_generation.max(best.regime.generation);
+        inner.saw(best.regime);
         let take = inner
             .known
             .as_ref()
@@ -244,7 +251,7 @@ impl Group {
             .reduce(|a, b| if newer(b, a) { b } else { a });
         let mut inner = self.inner.lock();
         if let Some(best) = best {
-            inner.max_generation = inner.max_generation.max(best.regime.generation);
+            inner.saw(best.regime);
         }
         let next = match (&inner.known, best) {
             (None, Some(best)) => Some(best.clone()),
@@ -467,13 +474,8 @@ impl Group {
                 return;
             }
         }
-        let lease_until = if self.lease.is_some() {
-            match self.acquire(counters).await {
-                Some(Ok(until)) => Some(until),
-                _ => return,
-            }
-        } else {
-            None
+        let Some(lease_until) = self.lease_for_leader(counters).await else {
+            return;
         };
         let state = role.state().unwrap_or_default();
         let previous = self.inner.lock().known.as_ref().map(|k| k.leader);
@@ -526,6 +528,21 @@ impl Group {
             counters.settings.lease_renew,
         ));
         self.lead(counters, view, self.version(), &leader).await;
+    }
+
+    /// The lease end of a node about to lead: `Some(None)` when no lease fences the group, and
+    /// `None` when this node did not get the lease.
+    pub(super) async fn lease_for_leader(
+        &self,
+        counters: &Arc<Counters>,
+    ) -> Option<Option<Instant>> {
+        if self.lease.is_none() {
+            return Some(None);
+        }
+        match self.acquire(counters).await {
+            Some(Ok(until)) => Some(Some(until)),
+            _ => None,
+        }
     }
 
     /// One lease call: `Some(Ok(until))` when this node holds the lease, `Some(Err(()))` when
@@ -605,7 +622,6 @@ impl Group {
         };
         {
             let mut inner = self.inner.lock();
-            inner.max_generation = inner.max_generation.max(s.regime.generation);
             if inner.known.as_ref().is_none_or(|k| !newer(k, &hint)) {
                 inner.known = Some(hint);
             }
@@ -660,8 +676,8 @@ pub(super) fn pick(
 fn stop(role: &Role) {
     match role {
         Role::Raft(r) => {
-            let replica = r.replica.clone();
-            tokio::spawn(async move { replica.shutdown().await });
+            let r = r.clone();
+            tokio::spawn(async move { r.replica.shutdown().await });
         }
         Role::Leader(l) => l.stop(),
         _ => {}

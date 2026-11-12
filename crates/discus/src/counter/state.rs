@@ -10,11 +10,11 @@
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
-use discus_resp::{Command, Value};
+use discus_resp::{Command, Limits as RespLimits, Parser, Value};
 
 use crate::command::float::{incr_by_float, parse_float_delta, FloatDelta};
 use crate::command::keys::{span, ttl_value};
-use crate::command::string::{deadline, set_options, Expiry};
+use crate::command::string::{expiry_option, getex_expiry, set_options, Expiry};
 use crate::command::util::{parse_i64, upper};
 use crate::command::CommandError;
 
@@ -106,22 +106,49 @@ pub fn is_shrinking(cmd: &Command) -> bool {
 
 type Reply = Result<Value, CommandError>;
 
+/// Parse a raw RESP command of a log entry or a sync op.
+pub fn parse_command(raw: &[u8]) -> Option<Command> {
+    let mut parser = Parser::new(RespLimits {
+        max_bulk_bytes: usize::MAX / 2,
+        ..RespLimits::default()
+    });
+    parser.feed(raw);
+    parser.next().ok().flatten()
+}
+
 impl CounterState {
     pub fn new() -> CounterState {
         CounterState::default()
     }
 
-    /// A state from a snapshot.
-    pub fn from_parts(clock_ms: u64, entries: Vec<(Bytes, CounterEntry)>) -> CounterState {
+    /// The state as a counter snapshot.
+    pub fn encode(&self) -> Vec<u8> {
+        let entries = self
+            .map
+            .iter()
+            .map(|(k, e)| (&k[..], &e.value[..], e.expires_at_ms.unwrap_or(0)));
+        discus_wire::encode_counter_snapshot(self.clock_ms, entries)
+    }
+
+    /// A state from a counter snapshot. `None` when the snapshot is invalid.
+    pub fn decode(bytes: &[u8]) -> Option<CounterState> {
+        let (clock_ms, entries) = discus_wire::decode_counter_snapshot(bytes).ok()?;
         let mut state = CounterState {
             clock_ms,
             ..CounterState::default()
         };
-        for (key, entry) in entries {
-            state.bytes += cost(&key, &entry.value);
-            state.map.insert(key, entry);
+        for (key, value, t) in entries {
+            state.bytes += cost(&key, &value);
+            let expires_at_ms = (t != 0).then_some(t);
+            state.map.insert(
+                key,
+                CounterEntry {
+                    value,
+                    expires_at_ms,
+                },
+            );
         }
-        state
+        Some(state)
     }
 
     pub fn clock_ms(&self) -> u64 {
@@ -138,10 +165,6 @@ impl CounterState {
 
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
-    }
-
-    pub fn entries(&self) -> impl Iterator<Item = (&Bytes, &CounterEntry)> {
-        self.map.iter()
     }
 
     pub fn get(&self, key: &[u8]) -> Option<&CounterEntry> {
@@ -348,30 +371,14 @@ impl CounterState {
     }
 
     fn getex(&mut self, now: u64, cmd: &Command) -> Reply {
-        enum Change {
-            None,
-            At(u64),
-            Persist,
-        }
-        let change = match cmd.len() {
-            2 => Change::None,
-            3 if upper(&cmd[2]) == "PERSIST" => Change::Persist,
-            4 => {
-                let opt = upper(&cmd[2]);
-                if !matches!(opt.as_str(), "EX" | "PX" | "EXAT" | "PXAT") {
-                    return Err(CommandError::Syntax);
-                }
-                Change::At(deadline(&opt, &cmd[3], now, "getex")?)
-            }
-            _ => return Err(CommandError::Syntax),
-        };
+        let expiry = getex_expiry(cmd, now)?;
         Ok(match self.live(&cmd[1], now) {
             None => Value::Null,
             Some(e) => {
-                match change {
-                    Change::At(t) => e.expires_at_ms = Some(t),
-                    Change::Persist => e.expires_at_ms = None,
-                    Change::None => {}
+                match expiry {
+                    Some(Expiry::At(t)) => e.expires_at_ms = Some(t),
+                    Some(Expiry::Persist) => e.expires_at_ms = None,
+                    Some(Expiry::Keep) | None => {}
                 }
                 Value::Bulk(e.value.clone())
             }
@@ -446,13 +453,7 @@ impl CounterState {
 fn increment_expiry(rest: &[Bytes], now: u64, name: &str) -> Result<Option<u64>, CommandError> {
     match rest {
         [] => Ok(None),
-        [opt, arg] => {
-            let opt = upper(opt);
-            if !matches!(opt.as_str(), "EX" | "PX" | "EXAT" | "PXAT") {
-                return Err(CommandError::Syntax);
-            }
-            deadline(&opt, arg, now, &name.to_lowercase()).map(Some)
-        }
+        [opt, arg] => expiry_option(opt, arg, now, &name.to_lowercase()).map(Some),
         _ => Err(CommandError::Syntax),
     }
 }

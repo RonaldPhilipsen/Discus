@@ -7,7 +7,6 @@ use std::io::{self, Cursor};
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use discus_resp::Value;
 use futures::{Stream, TryStreamExt};
 use openraft::storage::{EntryResponder, IOFlushed, LogState, RaftLogStorage, RaftStateMachine};
@@ -22,7 +21,7 @@ type SnapshotData = Cursor<Vec<u8>>;
 type Snapshot = SnapshotOf<TypeConfig, SnapshotData>;
 type SnapshotMeta = SnapshotMetaOf<TypeConfig>;
 use crate::counter::budget::{Budget, Tracked};
-use crate::counter::state::{CounterEntry, CounterState, Limits};
+use crate::counter::state::{CounterState, Limits};
 
 /// The internal command that replaces the state with a snapshot. A new instance writes it first,
 /// so the state it starts from reaches every learner through the log or a snapshot.
@@ -148,33 +147,6 @@ impl Sm {
     }
 }
 
-pub fn encode_state(state: &CounterState) -> Vec<u8> {
-    let entries: Vec<(Bytes, Bytes, u64)> = state
-        .entries()
-        .map(|(k, e)| (k.clone(), e.value.clone(), e.expires_at_ms.unwrap_or(0)))
-        .collect();
-    discus_wire::encode_counter_snapshot(state.clock_ms(), &entries)
-}
-
-pub fn decode_state(bytes: &[u8]) -> Option<CounterState> {
-    let (clock, entries) = discus_wire::decode_counter_snapshot(bytes).ok()?;
-    Some(CounterState::from_parts(
-        clock,
-        entries
-            .into_iter()
-            .map(|(k, v, t)| {
-                (
-                    k,
-                    CounterEntry {
-                        value: v,
-                        expires_at_ms: (t != 0).then_some(t),
-                    },
-                )
-            })
-            .collect(),
-    ))
-}
-
 #[derive(Debug, Clone)]
 pub struct SmStore(pub Arc<Mutex<Sm>>);
 
@@ -183,7 +155,7 @@ impl RaftSnapshotBuilder<TypeConfig> for SmStore {
 
     async fn build_snapshot(&mut self) -> Result<Snapshot, io::Error> {
         let mut sm = self.0.lock();
-        let data = encode_state(sm.state.get());
+        let data = sm.state.get().encode();
         let meta = SnapshotMeta {
             last_log_id: sm.last_applied,
             last_membership: sm.membership.clone(),
@@ -220,7 +192,7 @@ impl RaftStateMachine<TypeConfig> for SmStore {
             let reply = match e.payload {
                 EntryPayload::Blank => Value::Null,
                 EntryPayload::Normal(op) if op.command[0][..] == *RESTORE => {
-                    if let Some(state) = op.command.get(1).and_then(|b| decode_state(b)) {
+                    if let Some(state) = op.command.get(1).and_then(|b| CounterState::decode(b)) {
                         sm.state.replace(state);
                     }
                     Value::ok()
@@ -251,7 +223,7 @@ impl RaftStateMachine<TypeConfig> for SmStore {
         snapshot: SnapshotData,
     ) -> Result<(), io::Error> {
         let data = snapshot.into_inner();
-        let state = decode_state(&data).ok_or_else(|| {
+        let state = CounterState::decode(&data).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "a counter snapshot is invalid")
         })?;
         let mut sm = self.0.lock();

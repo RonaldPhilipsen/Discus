@@ -1,6 +1,6 @@
 //! The Raft network: openraft RPCs as `RAFT_*` messages on the bulk lane (spec section 13.2).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -37,29 +37,32 @@ pub trait RaftLink: Send + Sync + 'static {
 /// after it installed that replica, so "not started yet" is impossible. A reply that succeeded
 /// before the refusal can arrive after it, so a contact does not clear the mark.
 #[derive(Debug, Default)]
-pub struct Contacts {
-    seen: Mutex<HashMap<u64, Instant>>,
-    refused: Mutex<HashSet<u64>>,
+pub struct Contacts(Mutex<HashMap<u64, Contact>>);
+
+#[derive(Debug, Default)]
+struct Contact {
+    seen: Option<Instant>,
+    refused: bool,
 }
 
 impl Contacts {
     pub fn saw(&self, replica: u64) {
-        self.seen.lock().insert(replica, Instant::now());
+        self.0.lock().entry(replica).or_default().seen = Some(Instant::now());
     }
 
     /// The time since the last reply, counted from `since` at the earliest. A reply from before
     /// `since` is from an earlier term of this leader, which sent nothing in between.
     pub fn silent_for(&self, replica: u64, since: Instant) -> Duration {
-        let seen = self.seen.lock().get(&replica).copied();
+        let seen = self.0.lock().get(&replica).and_then(|c| c.seen);
         seen.map_or(since, |s| s.max(since)).elapsed()
     }
 
     pub fn refuse(&self, replica: u64) {
-        self.refused.lock().insert(replica);
+        self.0.lock().entry(replica).or_default().refused = true;
     }
 
     pub fn refused(&self, replica: u64) -> bool {
-        self.refused.lock().contains(&replica)
+        self.0.lock().get(&replica).is_some_and(|c| c.refused)
     }
 }
 

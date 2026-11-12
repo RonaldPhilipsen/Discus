@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::Bytes;
-use discus_resp::{Command, Limits as RespLimits, Parser};
 use discus_wire::{
     encode_command, RaftAppend, RaftEntry, RaftHeader, RaftLogId, RaftMembership, RaftOutcome,
     RaftPayload, RaftReply, RaftSnapshot, RaftVote, RaftVoteReq,
@@ -15,6 +14,7 @@ use openraft::{EntryPayload, Membership, StoredMembership};
 use openraft_legacy::network_v1::{InstallSnapshotRequest, InstallSnapshotResponse, SnapshotMeta};
 
 use super::{Entry, LogId, Op, Peer, Peers, TypeConfig, Vote};
+use crate::counter::state::parse_command;
 
 pub fn log_to(l: &LogId) -> RaftLogId {
     RaftLogId {
@@ -79,16 +79,6 @@ pub fn membership_of(m: RaftMembership) -> Option<Peers> {
         nodes.entry(*id).or_default();
     }
     Membership::new(configs, nodes).ok()
-}
-
-/// Parse a raw RESP command of a log entry or a sync op.
-pub fn parse_command(raw: &[u8]) -> Option<Command> {
-    let mut parser = Parser::new(RespLimits {
-        max_bulk_bytes: usize::MAX / 2,
-        ..RespLimits::default()
-    });
-    parser.feed(raw);
-    parser.next().ok().flatten()
 }
 
 fn entry_to(e: &Entry) -> RaftEntry {
