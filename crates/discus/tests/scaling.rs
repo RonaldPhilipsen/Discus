@@ -1,5 +1,6 @@
-//! Growth from one node to five and back under steady load (spec section 16). The load enters on the first node, which stays for the whole test. Reads see only
-//! cache misses, never errors or wrong values, and the counter equals its successful increments.
+//! Growth from one node to five and back under steady load (spec section 16). The load enters on
+//! the first node, which stays for the whole test. Reads see only cache misses, never errors or
+//! wrong values, and the counter equals its successful increments.
 
 #![allow(clippy::unwrap_used)]
 
