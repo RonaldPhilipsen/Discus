@@ -14,6 +14,8 @@ pub enum Route {
     MultiRead { sum: bool },
     /// `MSET` (key-value pairs) or `DEL` (keys).
     MultiWrite { pairs: bool },
+    /// `RENAME`: a source at argument 1 and a destination at argument 2.
+    Rename,
     /// `SCAN` and `RANDOMKEY`: the entry node only.
     Local,
     /// `DBSIZE`: a sum over every member.
@@ -42,6 +44,7 @@ pub fn keys_of(route: Route, cmd: &Command) -> Keys {
         Route::MultiWrite { pairs: true } => {
             Keys::Some(cmd[1..].iter().step_by(2).cloned().collect())
         }
+        Route::Rename => Keys::Some(vec![cmd[1].clone(), cmd[2].clone()]),
         Route::Local | Route::Fanout | Route::Broadcast => Keys::Barrier,
     }
 }

@@ -9,6 +9,7 @@ pub enum CommandError {
     UnknownCommand(String),
     WrongArity(String),
     Syntax,
+    NoSuchKey,
     WrongType,
     NotInteger,
     NotFloat,
@@ -43,6 +44,7 @@ impl CommandError {
                 )
             }
             CommandError::Syntax => "ERR syntax error".into(),
+            CommandError::NoSuchKey => "ERR no such key".into(),
             CommandError::WrongType => {
                 "WRONGTYPE Operation against a key holding the wrong kind of value".into()
             }

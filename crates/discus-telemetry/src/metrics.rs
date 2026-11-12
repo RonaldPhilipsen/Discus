@@ -135,6 +135,8 @@ mod imp {
         #[inline]
         pub fn tombstones(&self, count: u64) {}
         #[inline]
+        pub fn primary_read_delete_unacked(&self, count: u64) {}
+        #[inline]
         pub fn counter_roles(&self, role: CounterRole, count: u64) {}
         #[inline]
         pub fn counter_memory(&self, bytes: u64) {}
@@ -199,6 +201,7 @@ mod imp {
         topology_requests: Counter<u64>,
         quic_failures: Counter<u64>,
         tombstones: Gauge<u64>,
+        primary_read_delete_unacked: Counter<u64>,
         counter_roles: Gauge<u64>,
         counter_memory: Gauge<u64>,
         counter_mode_switches: Counter<u64>,
@@ -488,6 +491,10 @@ mod imp {
                 ),
                 quic_failures: counter("discus.quic.failures", "QUIC connection failures"),
                 tombstones: gauge("discus.tombstones", "Stored tombstones"),
+                primary_read_delete_unacked: counter(
+                    "discus.primary_read.delete_unacked",
+                    "Deletes of listed keys that replied before a secondary acknowledged them",
+                ),
                 counter_roles: gauge(
                     "discus.counter.roles",
                     "Counter groups by the role of this node",
@@ -679,6 +686,10 @@ mod imp {
 
         pub fn tombstones(&self, count: u64) {
             self.with(|i| i.tombstones.record(count, &[]));
+        }
+
+        pub fn primary_read_delete_unacked(&self, count: u64) {
+            self.with(|i| i.primary_read_delete_unacked.add(count, &[]));
         }
 
         pub fn counter_roles(&self, role: CounterRole, count: u64) {

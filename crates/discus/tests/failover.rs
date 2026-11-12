@@ -65,6 +65,7 @@ fn the_idempotent_list_is_exact() {
         "ZADD z 1 m",
         "ZADD z NX CH 1 incr",
         "ZREM z m",
+        "DISCUS.PUT k x",
     ] {
         assert!(idempotent(&cmd(yes)), "{yes}");
     }
@@ -78,9 +79,47 @@ fn the_idempotent_list_is_exact() {
         "GETDEL k",
         "SPOP s",
         "HINCRBY h f 1",
+        "DISCUS.TAKE k",
     ] {
         assert!(!idempotent(&cmd(no)), "{no}");
     }
+}
+
+#[tokio::test]
+async fn an_acknowledged_delete_survives_a_failover() {
+    let net = Net::new();
+    let nodes = net
+        .start_agreed(
+            3,
+            &["--replication-factor", "2", "--primary-read-prefix", "sess"],
+        )
+        .await;
+    let k = key_of(&nodes, 0, 1, "sess");
+    let mut c = nodes[1].redis().await;
+    let _: () = c.set(&k, "v").await.unwrap();
+    let primary = nodes[0].node.clone();
+    assert!(
+        wait_until(Duration::from_secs(10), || primary
+            .replicator()
+            .unwrap()
+            .settled(k.as_bytes()))
+        .await
+    );
+    let del: i64 = c.del(&k).await.unwrap();
+    assert_eq!(del, 1);
+    nodes[0].kill();
+    assert!(
+        wait_until(Duration::from_secs(60), || nodes[1]
+            .node
+            .epochs()
+            .current()
+            .members()
+            .len()
+            == 2)
+        .await
+    );
+    let get_after_failover: Option<String> = c.get(&k).await.unwrap();
+    assert_eq!(get_after_failover, None);
 }
 
 #[tokio::test]

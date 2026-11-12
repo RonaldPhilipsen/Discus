@@ -91,7 +91,7 @@ pub(crate) fn target(
             .first()
             .copied();
     }
-    if readonly && replica_reads(node, write) && owners.contains(&node.id) {
+    if readonly && replica_reads(node, write, key) && owners.contains(&node.id) {
         return Some(node.id);
     }
     owners.first().copied()

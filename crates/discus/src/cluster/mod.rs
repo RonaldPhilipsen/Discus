@@ -4,6 +4,7 @@ pub mod forward;
 pub mod hold;
 pub mod multi;
 pub mod redirect;
+pub mod rename;
 pub mod route;
 pub mod service;
 pub mod topology;
@@ -13,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use discus_placement::{ClusterId, EpochId, NodeId, Version};
 use discus_resp::{Command, Value};
 use discus_transport::Transport;
@@ -274,6 +276,38 @@ pub fn local(node: &Node, spec: &CommandSpec, cmd: &Command) -> Reply {
     }
 }
 
+/// The keys of `cmd` that must reach a secondary before the reply: the listed keys of a command
+/// that deletes them. A deleted session must stay deleted when the primary fails.
+pub(crate) fn acked_delete_keys(node: &Node, spec: &CommandSpec, cmd: &Command) -> Vec<Bytes> {
+    if !matches!(spec.name, "DEL" | "GETDEL" | "DISCUS.TAKE") {
+        return Vec::new();
+    }
+    cmd[1..]
+        .iter()
+        .filter(|k| node.is_primary_read_key(k))
+        .cloned()
+        .collect()
+}
+
+/// Run `cmd` here like [`local`]. A delete of a listed key then waits for one secondary. After
+/// the wait it replies with success anyway (fail open), and the hints deliver the tombstone.
+pub fn local_acked(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> Dispatch {
+    let reply = local(node, spec, &cmd);
+    if reply.applied.is_none() {
+        return Dispatch::Ready(reply);
+    }
+    let keys = acked_delete_keys(node, spec, &cmd);
+    let Some(replicator) = node.replicator().filter(|_| !keys.is_empty()).cloned() else {
+        return Dispatch::Ready(reply);
+    };
+    let node = node.clone();
+    Dispatch::Pending(Box::pin(async move {
+        let unacked = replicator.unacked_after_wait(&node, &keys).await;
+        discus_telemetry::global().primary_read_delete_unacked(unacked);
+        reply
+    }))
+}
+
 /// Fill `observed` and `settled` of a read of `key` that ran here.
 fn track_here(node: &Node, key: &[u8], reply: &mut Reply) {
     if reply.observed.is_none() {
@@ -294,12 +328,12 @@ pub fn serve_here(
     let key = cmd[1].clone();
     let sources = crate::replication::repair::sources(node, &key, write, owners);
     if sources.is_empty() {
-        return Dispatch::Ready(local(node, spec, &cmd));
+        return local_acked(node, spec, cmd);
     }
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
         crate::replication::repair::fetch(&node, &key, sources).await;
-        local(&node, spec, &cmd)
+        local_acked(&node, spec, cmd).finish().await
     }))
 }
 
@@ -342,6 +376,10 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
             drop(route);
             Dispatch::Ready(Reply::value(command::keys::scan_primary(node, &job.cmd)))
         }
+        Route::Rename => {
+            drop(route);
+            rename::run(node, job, hop)
+        }
         Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => {
             drop(route);
             Dispatch::Ready(local(node, job.spec, &job.cmd))
@@ -350,6 +388,8 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
 }
 
 /// The nodes that may serve `key`, in the order to try them. Empty when no member is `NORMAL`.
+///
+/// A read of a primary-read key (`--primary-read-prefix`) goes to the primary only.
 ///
 /// A read that must see `need` (a key in the write set, spec section 7.4) goes to the primary,
 /// unless this node owns the key and already holds a version at least as new.
@@ -367,7 +407,7 @@ pub fn candidates(
         }
         return owners.iter().take(1).copied().collect();
     }
-    if !replica_reads(node, write) {
+    if !replica_reads(node, write, key) {
         return owners.iter().take(1).copied().collect();
     }
     if owners.contains(&node.id) {
@@ -381,24 +421,31 @@ pub fn candidates(
     owners
 }
 
-/// A read may go to any owner, with `--read-from-replicas`.
-pub(crate) fn replica_reads(node: &Node, write: bool) -> bool {
-    !write && node.link().is_some_and(|l| l.read_from_replicas)
+/// A read may go to any owner, with `--read-from-replicas`, unless the key reads from the primary
+/// only (`--primary-read-prefix`).
+pub(crate) fn replica_reads(node: &Node, write: bool, key: &[u8]) -> bool {
+    !write && node.link().is_some_and(|l| l.read_from_replicas) && !node.is_primary_read_key(key)
 }
 
 /// The budget is spent or every target is on the path. Serve locally if this node was the
 /// required owner in the previous epoch, else `-TRYAGAIN`.
-fn spent(node: &Node, spec: &CommandSpec, cmd: &Command, keys: &[&[u8]], write: bool) -> Reply {
-    let replicas = replica_reads(node, write);
+fn spent(
+    node: &Arc<Node>,
+    spec: &'static CommandSpec,
+    cmd: Command,
+    keys: &[&[u8]],
+    write: bool,
+) -> Dispatch {
+    let replicas = keys.iter().all(|k| replica_reads(node, write, k));
     let owned_before = keys.iter().all(|key| match node.previous_owners(key) {
         Some(owners) if replicas => owners.contains(&node.id),
         Some(owners) => owners.first() == Some(&node.id),
         None => false,
     });
     if owned_before {
-        local(node, spec, cmd)
+        local_acked(node, spec, cmd)
     } else {
-        Reply::try_again()
+        Dispatch::Ready(Reply::try_again())
     }
 }
 
@@ -424,9 +471,13 @@ enum Plan {
     Moved(CommandError),
 }
 
-fn single(node: &Arc<Node>, job: Job, hop: Hop, write: bool, route: Span) -> Dispatch {
+fn single(node: &Arc<Node>, mut job: Job, hop: Hop, write: bool, route: Span) -> Dispatch {
     let key = job.cmd[1].clone();
-    let need = match (&job.writes, write) {
+    let writes = job
+        .writes
+        .take()
+        .filter(|_| !node.is_primary_read_key(&key));
+    let need = match (&writes, write) {
         (Some(w), false) => w.lock().required(&key, std::time::Instant::now()),
         _ => None,
     };
@@ -434,7 +485,7 @@ fn single(node: &Arc<Node>, job: Job, hop: Hop, write: bool, route: Span) -> Dis
     let dispatch = single_planned(
         node, job.spec, job.cmd, hop, write, job.rr, need, readonly, route,
     );
-    let Some(writes) = job.writes else {
+    let Some(writes) = writes else {
         return dispatch;
     };
     // The write set changes before the key order releases the next command on this key.
@@ -500,15 +551,26 @@ fn single_planned(
         Plan::Retry => return Dispatch::Ready(Reply::try_again()),
         Plan::Moved(moved) => return Dispatch::Ready(Reply::error(moved)),
         Plan::Local if need.is_some() || hop.track => {
-            let mut reply = local(node, spec, &cmd);
-            track_here(node, &key, &mut reply);
-            return Dispatch::Ready(reply);
+            return match local_acked(node, spec, cmd) {
+                Dispatch::Ready(mut reply) => {
+                    track_here(node, &key, &mut reply);
+                    Dispatch::Ready(reply)
+                }
+                Dispatch::Pending(f) => {
+                    let node = node.clone();
+                    Dispatch::Pending(Box::pin(async move {
+                        let mut reply = f.await;
+                        track_here(&node, &key, &mut reply);
+                        reply
+                    }))
+                }
+            };
         }
         Plan::Local => return serve_here(node, spec, cmd, write, &owners),
         Plan::Forward(targets) => targets,
     };
     if targets.is_empty() {
-        return Dispatch::Ready(spent(node, spec, &cmd, &[&key], write));
+        return spent(node, spec, cmd, &[&key], write);
     }
     hop.track |= need.is_some();
     let node = node.clone();

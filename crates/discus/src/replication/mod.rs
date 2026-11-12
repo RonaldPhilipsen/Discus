@@ -27,6 +27,7 @@ use discus_store::{refill_bucket, Entry, Store};
 use discus_transport::{Lane, PeerInfo, TransportError};
 use discus_wire::{Batch, BatchAck, Message};
 use parking_lot::{Mutex, RwLock};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::{Config, Node};
@@ -90,6 +91,8 @@ pub struct Replicator {
     settings: Settings,
     peers: RwLock<HashMap<NodeId, Arc<PeerQueue>>>,
     hints: Mutex<HintStore>,
+    /// Changes after a batch ends, so a command that waits for an acknowledgment looks again.
+    progress: watch::Sender<u64>,
     /// The hint bytes charged to the store budget.
     charged: AtomicU64,
     /// The last message from each peer, to measure an absence on rejoin.
@@ -122,6 +125,7 @@ impl Replicator {
             settings,
             peers: RwLock::new(HashMap::new()),
             hints: Mutex::new(HintStore::new(settings.hints)),
+            progress: watch::Sender::new(0),
             charged: AtomicU64::new(0),
             contacts: Mutex::new(HashMap::new()),
             started: Instant::now(),
@@ -509,6 +513,54 @@ impl Replicator {
         self.peers.read().values().all(|q| !q.holds(key)) && !self.hints.lock().holds(key)
     }
 
+    /// Wait until each of `keys` reached one other owner, for at most the replication timeout.
+    /// Returns the number of keys without an acknowledgment. The caller replies anyway, because
+    /// the queues and the hints go on delivering those keys.
+    pub async fn unacked_after_wait(&self, node: &Node, keys: &[Bytes]) -> u64 {
+        let deadline = tokio::time::Instant::now() + self.settings.timeout;
+        loop {
+            // Subscribed before the evaluation, so a batch that ends after it wakes the wait.
+            let mut progress = self.progress.subscribe();
+            let unacked = self.unacked(node, keys);
+            if unacked == 0 {
+                return 0;
+            }
+            if tokio::time::timeout_at(deadline, progress.changed())
+                .await
+                .is_err()
+            {
+                return self.unacked(node, keys);
+            }
+        }
+    }
+
+    fn unacked(&self, node: &Node, keys: &[Bytes]) -> u64 {
+        keys.iter().filter(|k| !self.acked(node, k)).count() as u64
+    }
+
+    fn acked(&self, node: &Node, key: &Bytes) -> bool {
+        // Read before the locks below: `adopt_epoch` takes them under the epoch lock.
+        let owners = node.owners(key);
+        let mut others = owners.iter().filter(|o| **o != self.id).peekable();
+        if others.peek().is_none() {
+            return true;
+        }
+        let peers = self.peers.read();
+        let hints = self.hints.lock();
+        others.any(|o| {
+            // No queue means that no write reached this owner, for example a new owner of the
+            // key, so it has acknowledged nothing.
+            peers
+                .get(o)
+                .is_some_and(|q| !q.is_down() && !q.holds(key) && !hints.holds_for(*o, key))
+        })
+    }
+
+    /// Wake the commands in `unacked_after_wait`.
+    fn bump_progress(&self) {
+        self.progress.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
     /// The node adopted `new` after `old`, and `current` is its epoch now. Queues and hints stop
     /// carrying keys that the target no longer owns in `current`, and those keys go to the queues
     /// of their current owners instead (spec sections 5.1 and 9). A write that this node
@@ -660,6 +712,7 @@ impl Replicator {
             match self.send(&node, q.peer, Message::Replicate(batch)).await {
                 Ok(_) => {
                     q.acked();
+                    self.bump_progress();
                     self.touch(q.peer);
                     if let Some(label) = &q.label {
                         discus_telemetry::global().replication_lag(label, started.elapsed());
@@ -668,14 +721,19 @@ impl Replicator {
                         for k in q.failed() {
                             self.hint(&q, k);
                         }
+                        self.bump_progress();
                     }
                 }
-                Err(TransportError::PeerUnsupported(_)) => q.acked(),
+                Err(TransportError::PeerUnsupported(_)) => {
+                    q.acked();
+                    self.bump_progress();
+                }
                 Err(e) => {
                     tracing::debug!(peer = %q.peer, error = %e, "a replication batch failed");
                     for k in q.failed() {
                         self.hint(&q, k);
                     }
+                    self.bump_progress();
                 }
             }
         }

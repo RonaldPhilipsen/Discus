@@ -128,3 +128,87 @@ async fn del_then_exists_type_dbsize_ignore_the_tombstone() {
         .unwrap();
     assert_eq!(keys, vec!["kept".to_string()]);
 }
+
+#[tokio::test]
+async fn rename_moves_the_value_and_keeps_the_deadline() {
+    let mut c = common::connect(&[]).await;
+    let _: () = redis::cmd("SET")
+        .arg("a")
+        .arg("v")
+        .arg("EX")
+        .arg(100)
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    let reply: String = redis::cmd("RENAME")
+        .arg("a")
+        .arg("b")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(reply, "OK");
+    let get_b: String = c.get("b").await.unwrap();
+    let exists_a: i64 = c.exists("a").await.unwrap();
+    let pttl_b: i64 = redis::cmd("PTTL")
+        .arg("b")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(get_b, "v");
+    assert_eq!(exists_a, 0);
+    assert!(pttl_b > 0 && pttl_b <= 100_000, "{pttl_b}");
+}
+
+#[tokio::test]
+async fn rename_of_a_missing_key_fails() {
+    let mut c = common::connect(&[]).await;
+    let err = redis::cmd("RENAME")
+        .arg("a")
+        .arg("b")
+        .query_async::<String>(&mut c)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("no such key"), "{err}");
+}
+
+#[tokio::test]
+async fn rename_overwrites_the_destination() {
+    let mut c = common::connect(&[]).await;
+    let _: () = c.set("a", "from-a").await.unwrap();
+    let _: () = c.set("b", "from-b").await.unwrap();
+    let _: () = redis::cmd("RENAME")
+        .arg("a")
+        .arg("b")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    let get_b: String = c.get("b").await.unwrap();
+    assert_eq!(get_b, "from-a");
+}
+
+#[tokio::test]
+async fn rename_to_the_same_key_changes_nothing() {
+    let mut c = common::connect(&[]).await;
+    let _: () = c.set("a", "v").await.unwrap();
+    let reply: String = redis::cmd("RENAME")
+        .arg("a")
+        .arg("a")
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert_eq!(reply, "OK");
+    let get_a: String = c.get("a").await.unwrap();
+    assert_eq!(get_a, "v");
+}
+
+#[tokio::test]
+async fn rename_of_a_counter_key_is_refused() {
+    let mut c = common::connect(&[]).await;
+    let err = redis::cmd("RENAME")
+        .arg("cnt:a")
+        .arg("cnt:b")
+        .query_async::<String>(&mut c)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("counter keys"), "{err}");
+}

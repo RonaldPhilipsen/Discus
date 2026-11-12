@@ -383,6 +383,7 @@ the CPU limit of the container from the cgroup (the Linux resource control group
 | `--write-set-ttl-ms` | 5000 | Time that a written key stays in the write set. |
 | `--hold-budget-ms` | 3000 | Time that a write to a failed primary waits for a new primary. |
 | `--counter-prefix` | `cnt:` | Keys with this prefix are counter keys. The counter groups serve them. |
+| `--primary-read-prefix` | none | Keys with this prefix read from the primary only and never enter a write set. A counter key stays a counter key. Repeat the flag for more prefixes. An empty value stops the node. |
 | `--counter-groups` | 8 | The number of counter groups. A change is an offline procedure. |
 | `--counter-memory-percent` | 5 | The share of `--max-memory` for counter state. |
 | `--counter-timeout-ms` | 1000 | Time that a counter command waits for a leader, a quorum, or a commit. |
@@ -926,6 +927,64 @@ Multi-key commands on counter keys split by group. The keys of one group run as 
 its leader, so they are atomic. Keys of several groups fan out like normal keys. A command that
 mixes counter keys and other keys returns
 `-ERR counter keys and other keys cannot be mixed in one command`.
+
+## Run Authelia on Discus
+
+[Authelia](https://www.authelia.com/) is an authentication server. It can keep its user sessions
+in a Discus cluster through its `session.redis` settings. Discus does not make sessions strongly
+consistent. A node loss can lose the last session writes that the primary did not replicate yet.
+
+Follow these requirements:
+
+- Set `--primary-read-prefix authelia-session` on every node. Authelia names each session key
+  with this prefix. A read of a session then goes to the primary and returns the latest write,
+  also on a new connection.
+- Keep `--hold-budget-ms` plus `--replication-timeout-ms` plus two times
+  `--forward-write-timeout-ms` below the 3 s read timeout of the Authelia client. A delete of a
+  listed key can spend the write forward timeout and the replication timeout before the hold
+  starts. With the other defaults, set `--hold-budget-ms 1500`.
+- Set `--forward-read-timeout-ms 200`. A read of a listed key makes one attempt and has no
+  replica fallback, so the default of 20 ms can fail a read on a busy primary.
+- Use TLS and a shared token between Authelia and Discus. Set `--tls-mode`, `--tls-cert`, and
+  `--tls-key`. Set `--shared-token` and `--auth-policy all:tls,shared_token`.
+- Set `database_index` to 0.
+- Do not configure the `high_availability` section of `session.redis`, because Discus has no
+  Sentinel support. To survive a node loss, point `host` at a load balancer or a DNS name that
+  resolves to the nodes.
+
+Start each node with these flags, in addition to the cluster flags:
+
+```bash
+discus \
+  --primary-read-prefix authelia-session \
+  --hold-budget-ms 1500 \
+  --forward-read-timeout-ms 200 \
+  --tls-mode node \
+  --tls-cert /etc/discus/tls.crt \
+  --tls-key /etc/discus/tls.key \
+  --auth-policy all:tls,shared_token \
+  --shared-token "$SESSION_TOKEN"
+```
+
+Configure Authelia with the same token:
+
+```yaml
+session:
+  redis:
+    host: 'cache.example.com'
+    port: 6379
+    password: 'the value of SESSION_TOKEN'
+    database_index: 0
+    tls:
+      server_name: 'cache.example.com'
+      minimum_version: 'TLS1.2'
+```
+
+Sessions live in memory only. A full restart of the cluster signs out every user.
+
+The task `mise run authelia-e2e` runs Authelia in a container against three nodes. It needs
+Docker. It covers sign-in, a second factor, a session on later requests, and sign-out. It runs
+without TLS and without a token.
 
 ## Limits of this release
 

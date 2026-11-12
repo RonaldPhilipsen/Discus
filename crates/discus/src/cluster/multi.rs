@@ -8,7 +8,10 @@ use discus_wire::ForwardMode;
 use futures::future::join_all;
 
 use super::route::{keys_of, Keys, Route};
-use super::{allowed, candidates, forward, hold, local, spent, Dispatch, Failure, Hop, Job, Reply};
+use super::{
+    allowed, candidates, forward, hold, local, local_acked, spent, Dispatch, Failure, Hop, Job,
+    Reply,
+};
 use std::time::Instant;
 
 use crate::command::util::check_mset;
@@ -60,14 +63,18 @@ async fn run_group(
     write: bool,
 ) -> Option<Reply> {
     if g.target == node.id {
-        return Some(local(node, spec, &g.cmd));
+        return Some(local_acked(node, spec, g.cmd.clone()).finish().await);
     }
     if allowed(node, hop, vec![g.target]).is_empty() {
         let Keys::Some(keys) = keys_of(spec.route, &g.cmd) else {
             return Some(Reply::try_again());
         };
         let keys: Vec<&[u8]> = keys.iter().map(|k| &k[..]).collect();
-        return Some(spent(node, spec, &g.cmd, &keys, write));
+        return Some(
+            spent(node, spec, g.cmd.clone(), &keys, write)
+                .finish()
+                .await,
+        );
     }
     hold::send_or_hold(node, spec, g.target, &g.cmd, hop, write).await
 }
@@ -185,20 +192,33 @@ pub fn multi(node: &Arc<Node>, job: Job, hop: Hop, route: tracing::Span) -> Disp
         return Dispatch::Ready(Reply::try_again());
     };
     // Each written key enters the write set with the stamp of its own part.
+    let owner = node.clone();
     let note = move |keys: &[Bytes], reply: &Reply| {
         if let (Some(w), Some(v)) = (&writes, reply.applied) {
             if write && !matches!(reply.value, Value::Error(_)) {
                 let mut w = w.lock();
-                for k in keys.iter().step_by(width) {
+                for k in keys
+                    .iter()
+                    .step_by(width)
+                    .filter(|k| !owner.is_primary_read_key(k))
+                {
                     w.record(k, v, Instant::now());
                 }
             }
         }
     };
     if groups.iter().all(|g| g.target == node.id) {
-        let reply = local(node, spec, &cmd);
-        note(&cmd[1..], &reply);
-        return Dispatch::Ready(reply);
+        return match local_acked(node, spec, cmd.clone()) {
+            Dispatch::Ready(reply) => {
+                note(&cmd[1..], &reply);
+                Dispatch::Ready(reply)
+            }
+            Dispatch::Pending(f) => Dispatch::Pending(Box::pin(async move {
+                let reply = f.await;
+                note(&cmd[1..], &reply);
+                reply
+            })),
+        };
     }
     let node = node.clone();
     let total = (cmd.len() - 1) / width;

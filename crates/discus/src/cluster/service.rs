@@ -9,7 +9,7 @@ use discus_wire::{Forward, ForwardMode, ForwardReply, Message, TraceContext};
 use futures::future::BoxFuture;
 
 use super::route::Route;
-use super::{local, run_hop, Hop, Job, Reply};
+use super::{local, local_acked, run_hop, Hop, Job, Reply};
 use crate::command;
 use crate::node::Node;
 use crate::telemetry;
@@ -151,7 +151,7 @@ async fn forwarded(
         Ok(cmd) => cmd,
         Err(value) => return Reply::value(value),
     };
-    let spec = command::lookup(&cmd[0]);
+    let spec = command::lookup(&cmd[0]).or_else(|| command::lookup_internal(&cmd[0]));
     telemetry::record_operation(spec, &cmd);
     // The sender authorized the command on its entry node, and cluster mTLS authenticated the
     // sender, so only the lookup and the arity run here.
@@ -159,8 +159,11 @@ async fn forwarded(
         Ok(spec) => spec,
         Err(e) => return Reply::error(e),
     };
-    if f.mode == ForwardMode::Local || spec.route == Route::Connection {
+    if spec.route == Route::Connection {
         return local(node, spec, &cmd);
+    }
+    if f.mode == ForwardMode::Local {
+        return local_acked(node, spec, cmd).finish().await;
     }
     // The hop keeps the inbound context. A further forward sends the context of its own span
     // with `otel`, else this context unchanged.

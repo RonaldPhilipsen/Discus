@@ -4,9 +4,11 @@ use discus_resp::{Command, Value};
 
 use super::error::CommandError;
 use super::table::CommandSpec;
-use super::util::{parse_i64, upper};
+use super::util::{admit, check_key, parse_i64, upper};
 use crate::cluster::route::Route;
 use crate::node::{ConnState, Node};
+use discus_store::entry::{estimate_size, ENTRY_OVERHEAD};
+use discus_store::Entry;
 
 pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::write("EXPIRE", 3, expire),
@@ -16,6 +18,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::read("TTL", 2, ttl),
     CommandSpec::read("PTTL", 2, pttl),
     CommandSpec::write("PERSIST", 2, persist),
+    CommandSpec::write("RENAME", 3, rename).with_route(Route::Rename),
     CommandSpec::read("SCAN", -2, scan).with_route(Route::Local),
     CommandSpec::read("RANDOMKEY", 1, randomkey).with_route(Route::Local),
     CommandSpec::read("DBSIZE", 1, dbsize).with_route(Route::Fanout),
@@ -111,6 +114,29 @@ fn persist(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         }
         Ok(Value::Integer(1))
     })
+}
+
+/// Move the entry of `cmd[1]` to `cmd[2]`, with its deadline. The take and the put are two
+/// writes, so the move is not atomic.
+fn rename(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+    let (from, to) = (&cmd[1], &cmd[2]);
+    check_key(node, to)?;
+    let size = node.store.read(from, |e| e.map(|e| estimate_size(to, e)));
+    let Some(size) = size else {
+        return Err(CommandError::NoSuchKey);
+    };
+    if from == to {
+        return Ok(Value::ok());
+    }
+    admit(node, size.saturating_sub(ENTRY_OVERHEAD) as usize)?;
+    let stamp = node.stamp()?;
+    let Some(taken) = node.write(from, stamp, |slot| slot.take()) else {
+        return Err(CommandError::NoSuchKey);
+    };
+    node.write(to, stamp, |slot| {
+        slot.set(Some(Entry::new(taken.value, taken.expires_at_ms)));
+    });
+    Ok(Value::ok())
 }
 
 fn scan(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
