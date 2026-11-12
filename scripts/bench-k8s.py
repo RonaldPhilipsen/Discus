@@ -290,7 +290,7 @@ def deploy_discus(name, n, tag, tmp, cluster_mode=False, pyroscope_url=None):
          "--set-string", f"nodeSelector.kubernetes\\.io/hostname={NODE}",
          "--set", "podDisruptionBudget.enabled=false",
          "--set", f"clusterClients.enabled={'true' if cluster_mode else 'false'}",
-         *(["--set-string", f"extraArgs[0]=--pyroscope-url={pyroscope_url}"] if pyroscope_url else [])],
+         *(["--set-string", f"pyroscope.url={pyroscope_url}"] if pyroscope_url else [])],
         timeout=400)
     out = json.loads(kc("get", "pods", "-l", "app.kubernetes.io/name=discus", "-o", "json"))
     ips = [p["status"]["podIP"] for p in out["items"] if p["metadata"].get("deletionTimestamp") is None]

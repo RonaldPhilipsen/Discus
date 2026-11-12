@@ -280,8 +280,20 @@ discus: profiling is enabled (--pyroscope-url) but this binary was built without
 | `--pyroscope-sample-rate` | `100` | CPU samples per second, from 1 to 1000. |
 
 Each profile has the label `node_id`. In Kubernetes, it also has the labels `namespace`, `pod` and
-`node` from the variables of the Helm chart. To turn on profiling with the chart, add the flag to
-`extraArgs` and use an image with the feature:
+`node` from the variables of the Helm chart.
+
+The profiler writes samples to a temporary file in `$TMPDIR`, or in `/tmp` when `$TMPDIR` is not
+set. The release image has no `/tmp`, and the chart makes the root file system read-only. If the
+profiler cannot create the file, the node prints `cannot start the profiler` and exits with code 2.
+
+The profiler also needs system CA certificates, also for an `http://` URL, because its HTTP client
+loads them at start. The release image has none. An image built with `FEATURES=pyroscope` gets the
+CA bundle of the Debian build image. If the node finds no certificates, it prints
+`cannot start the profiler` and exits with code 2.
+
+To turn on profiling with the chart, set `pyroscope.url` and use an image with the feature. The
+chart then passes `--pyroscope-url` and mounts an `emptyDir` volume at `/tmp`. The value
+`pyroscope.tmpSizeLimit` sets its size limit, which is `64Mi` by default.
 
 ```sh
 helm upgrade <release> oci://ghcr.io/ronaldphilipsen/charts/discus \
@@ -289,9 +301,9 @@ helm upgrade <release> oci://ghcr.io/ronaldphilipsen/charts/discus \
   --version <version> \
   --set image.repository=<registry>/discus \
   --set image.tag=pyroscope \
-  --set-string 'extraArgs[0]=--pyroscope-url=http://pyroscope.observability:4040'
+  --set pyroscope.url=http://pyroscope.observability:4040
 ```
 
-The benchmark script `scripts/bench-k8s.py` has the option `--pyroscope-url`, which adds the same
-flag. Each result line has `start_ms` and `end_ms`. Use them to select the time range of one run in
-Pyroscope.
+The benchmark script `scripts/bench-k8s.py` has the option `--pyroscope-url`, which sets
+`pyroscope.url`. Each result line has `start_ms` and `end_ms`. Use them to select the time range of
+one run in Pyroscope.

@@ -80,7 +80,7 @@ discus-telemetry = { path = "../discus-telemetry", features = ["testing"] }
 [features]
 default = ["otel", "oauth2", "k8s", "tls-aws-lc", "roots-system"]
 otel = ["discus-telemetry/otel"]
-pyroscope = ["dep:pyroscope"]
+pyroscope = ["dep:pyroscope", "dep:reqwest"]
 oauth2 = ["dep:jsonwebtoken", "dep:reqwest", "dep:serde_json"]
 oauth2-introspection = ["oauth2"]
 k8s = ["discus-membership/k8s"]

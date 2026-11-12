@@ -87,8 +87,20 @@ pub fn start(config: &Config) -> Result<ProfilingGuard, String> {
         let Some(url) = &args.pyroscope_url else {
             return Ok(ProfilingGuard { agent: None });
         };
-        let agent = start_agent(url, args, &labels(config))
-            .map_err(|e| format!("cannot start the profiler: {e}"))?;
+        // The agent builds the same client on its own thread and panics there if it fails, so the
+        // node would run without profiles. Without system trust roots the build fails.
+        reqwest::Client::builder().build().map_err(|e| {
+            format!(
+                "cannot start the profiler: {e:?} (the profiler needs system CA certificates, \
+                 also for an http:// URL)"
+            )
+        })?;
+        let agent = start_agent(url, args, &labels(config)).map_err(|e| {
+            format!(
+                "cannot start the profiler: {e} (it needs a writable temporary directory, \
+                     $TMPDIR or /tmp)"
+            )
+        })?;
         tracing::info!(url = %url, sample_rate = args.pyroscope_sample_rate, "profiling");
         Ok(ProfilingGuard { agent: Some(agent) })
     }

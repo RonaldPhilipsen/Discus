@@ -112,6 +112,9 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
+            {{- with .Values.pyroscope.url }}
+            - --pyroscope-url={{ . }}
+            {{- end }}
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -157,6 +160,10 @@ spec:
               mountPath: /otel-tls
               readOnly: true
             {{- end }}
+            {{- if .Values.pyroscope.url }}
+            - name: tmp
+              mountPath: /tmp
+            {{- end }}
       volumes:
         - name: tls
           secret:
@@ -165,6 +172,11 @@ spec:
         - name: otel-tls
           secret:
             secretName: {{ .Values.otel.tls.secretName }}
+        {{- end }}
+        {{- if .Values.pyroscope.url }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.pyroscope.tmpSizeLimit }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
