@@ -14,7 +14,8 @@ use discus_resp::{Command, Value};
 use discus_wire::ForwardMode;
 use futures::future::join_all;
 
-use super::{state, Counters, Refusal};
+use super::state::Kind;
+use super::{Counters, Refusal};
 use crate::cluster::multi::{split, Merge};
 use crate::cluster::route::key_args;
 use crate::cluster::{forward, Dispatch, Hop, Job, Reply, MAX_HOPS};
@@ -57,29 +58,29 @@ pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
     if strong != keys {
         return Some(Dispatch::Ready(error(MIXED)));
     }
-    if !state::accepts(job.spec.name) {
+    let Some(kind) = Kind::of(job.spec.name.as_bytes()) else {
         return Some(Dispatch::Ready(error(ONLY_STRINGS)));
-    }
-    if let Err(e) = check_sizes(node, job.spec.name, &job.cmd) {
+    };
+    if let Err(e) = check_sizes(node, kind, &job.cmd) {
         return Some(Dispatch::Ready(Reply::error(e)));
     }
     let (node, counters, cmd, hop) = (node.clone(), counters.clone(), job.cmd.clone(), hop.clone());
     let route = job.spec.route;
     Some(Dispatch::Pending(Box::pin(async move {
         match Merge::of(route) {
-            Some((merge, width)) => fan_out(&node, &counters, cmd, hop, merge, width).await,
+            Some((merge, width)) => fan_out(&node, &counters, kind, cmd, hop, merge, width).await,
             None => {
                 let g = counters.group_of(&cmd[1]);
-                run(&node, &counters, g, cmd, hop).await
+                run(&node, &counters, g, kind, cmd, hop).await
             }
         }
     })))
 }
 
-fn check_sizes(node: &Node, name: &str, cmd: &Command) -> Result<(), CommandError> {
-    let (keys, values) = match name {
-        "MSET" => return check_mset(node, cmd),
-        "SET" | "APPEND" => (1, 1),
+fn check_sizes(node: &Node, kind: Kind, cmd: &Command) -> Result<(), CommandError> {
+    let (keys, values) = match kind {
+        Kind::MSet => return check_mset(node, cmd),
+        Kind::Set | Kind::Append => (1, 1),
         _ => (1, 0),
     };
     let every_other = |from| cmd[from..].iter().step_by(2);
@@ -111,6 +112,7 @@ fn failed(parts: &[Reply]) -> Option<Reply> {
 async fn fan_out(
     node: &Arc<Node>,
     counters: &Arc<Counters>,
+    kind: Kind,
     cmd: Command,
     hop: Hop,
     merge: Merge,
@@ -120,13 +122,18 @@ async fn fan_out(
         return Reply::try_again();
     };
     if groups.len() == 1 {
-        return run(node, counters, groups[0].target, cmd, hop).await;
+        return run(node, counters, groups[0].target, kind, cmd, hop).await;
     }
-    let parts = join_all(
-        groups
-            .iter_mut()
-            .map(|g| run(node, counters, g.target, mem::take(&mut g.cmd), hop.clone())),
-    )
+    let parts = join_all(groups.iter_mut().map(|g| {
+        run(
+            node,
+            counters,
+            g.target,
+            kind,
+            mem::take(&mut g.cmd),
+            hop.clone(),
+        )
+    }))
     .await;
     if let Some(reply) = failed(&parts) {
         return reply;
@@ -145,17 +152,18 @@ pub async fn run(
     node: &Arc<Node>,
     counters: &Arc<Counters>,
     g: u16,
+    kind: Kind,
     cmd: Command,
     hop: Hop,
 ) -> Reply {
     let entry = hop.hops == 0;
-    let read = state::is_read(&cmd);
+    let read = kind.is_read();
     let deadline = Instant::now() + counters.settings.timeout;
     let group = counters.group(g);
     loop {
         let changed = group.changed.notified();
         match counters.leader(g) {
-            Some(leader) if leader == node.id => match counters.execute(g, &cmd).await {
+            Some(leader) if leader == node.id => match counters.execute(g, kind, &cmd).await {
                 Ok(v) => return Reply::value(v),
                 Err(Refusal::InDoubt) => return error(IN_DOUBT),
                 Err(Refusal::NotLeader) => {}
@@ -202,9 +210,17 @@ pub fn broadcast(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> 
         }
         let flush: Command = vec![Bytes::from_static(b"FLUSHALL")];
         let groups = counters.settings.groups;
-        let parts =
-            join_all((0..groups).map(|g| run(&node, &counters, g, flush.clone(), Hop::default())))
-                .await;
+        let parts = join_all((0..groups).map(|g| {
+            run(
+                &node,
+                &counters,
+                g,
+                Kind::FlushAll,
+                flush.clone(),
+                Hop::default(),
+            )
+        }))
+        .await;
         let cleared = parts
             .iter()
             .filter(|r| !matches!(r.value, Value::Error(_)))

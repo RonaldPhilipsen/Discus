@@ -29,7 +29,7 @@ use crate::{Config, Node};
 use budget::Budget;
 use group::{Group, Role};
 use raft::Replica;
-use state::Limits;
+use state::{Kind, Limits};
 
 #[cfg(test)]
 pub(crate) fn cmd(parts: &[&str]) -> Command {
@@ -574,9 +574,8 @@ impl Counters {
     }
 
     /// Execute a counter command on this node, which believes it leads group `g`.
-    pub async fn execute(&self, g: u16, cmd: &Command) -> Result<Value, Refusal> {
-        let write = !state::is_read(cmd);
-        if write && !state::is_shrinking(cmd) && self.budget.full() {
+    pub async fn execute(&self, g: u16, kind: Kind, cmd: &Command) -> Result<Value, Refusal> {
+        if !kind.is_read() && !kind.is_shrinking() && self.budget.full() {
             return Ok(Value::error(
                 "OOM command not allowed when the counter reserve is full",
             ));
@@ -585,6 +584,7 @@ impl Counters {
         match self.group(g).role() {
             Role::Leader(l) => {
                 l.execute(
+                    kind,
                     cmd,
                     now_ms,
                     &self.settings.limits,
@@ -592,7 +592,7 @@ impl Counters {
                 )
                 .await
             }
-            Role::Raft(r) if r.leads() => r.execute(cmd, now_ms, self.settings.timeout).await,
+            Role::Raft(r) if r.leads() => r.execute(kind, cmd, now_ms, self.settings.timeout).await,
             Role::Idle | Role::Follower(_) | Role::Raft(_) => Err(Refusal::NotLeader),
         }
     }

@@ -53,55 +53,103 @@ fn cost(key: &[u8], value: &[u8]) -> u64 {
     key.len() as u64 + value.len() as u64 + ENTRY_OVERHEAD
 }
 
-const COMMANDS: &[&str] = &[
-    "GET",
-    "SET",
-    "GETDEL",
-    "GETEX",
-    "MGET",
-    "MSET",
-    "INCR",
-    "DECR",
-    "INCRBY",
-    "DECRBY",
-    "INCRBYFLOAT",
-    "APPEND",
-    "STRLEN",
-    "DEL",
-    "EXISTS",
-    "TYPE",
-    "EXPIRE",
-    "PEXPIRE",
-    "EXPIREAT",
-    "PEXPIREAT",
-    "TTL",
-    "PTTL",
-    "PERSIST",
-];
-
-/// True for the commands that counter keys accept (spec section 12).
-pub fn accepts(name: &str) -> bool {
-    COMMANDS.contains(&name)
+/// A command of the counter state machine: one that counter keys accept (spec section 12), a
+/// flush, or the internal `PURGE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Get,
+    Set,
+    GetDel,
+    GetEx,
+    MGet,
+    MSet,
+    Incr,
+    Decr,
+    IncrBy,
+    DecrBy,
+    IncrByFloat,
+    Append,
+    StrLen,
+    Del,
+    Exists,
+    Type,
+    Expire,
+    PExpire,
+    ExpireAt,
+    PExpireAt,
+    Ttl,
+    PTtl,
+    Persist,
+    FlushAll,
+    FlushDb,
+    Purge,
 }
 
-/// True when the command is one of the space-separated `names`, in any case.
-fn named(cmd: &Command, names: &str) -> bool {
-    names
-        .split(' ')
-        .any(|n| cmd[0].eq_ignore_ascii_case(n.as_bytes()))
+impl Kind {
+    /// The kind of the command named `name`, in any case. `None` for any other command.
+    pub fn of(name: &[u8]) -> Option<Kind> {
+        // Long enough for the longest name, INCRBYFLOAT.
+        let mut buf = [0u8; 11];
+        let upper = buf.get_mut(..name.len())?;
+        upper.copy_from_slice(name);
+        upper.make_ascii_uppercase();
+        Some(match &*upper {
+            b"GET" => Kind::Get,
+            b"SET" => Kind::Set,
+            b"GETDEL" => Kind::GetDel,
+            b"GETEX" => Kind::GetEx,
+            b"MGET" => Kind::MGet,
+            b"MSET" => Kind::MSet,
+            b"INCR" => Kind::Incr,
+            b"DECR" => Kind::Decr,
+            b"INCRBY" => Kind::IncrBy,
+            b"DECRBY" => Kind::DecrBy,
+            b"INCRBYFLOAT" => Kind::IncrByFloat,
+            b"APPEND" => Kind::Append,
+            b"STRLEN" => Kind::StrLen,
+            b"DEL" => Kind::Del,
+            b"EXISTS" => Kind::Exists,
+            b"TYPE" => Kind::Type,
+            b"EXPIRE" => Kind::Expire,
+            b"PEXPIRE" => Kind::PExpire,
+            b"EXPIREAT" => Kind::ExpireAt,
+            b"PEXPIREAT" => Kind::PExpireAt,
+            b"TTL" => Kind::Ttl,
+            b"PTTL" => Kind::PTtl,
+            b"PERSIST" => Kind::Persist,
+            b"FLUSHALL" => Kind::FlushAll,
+            b"FLUSHDB" => Kind::FlushDb,
+            b"PURGE" => Kind::Purge,
+            _ => return None,
+        })
+    }
+
+    /// True for the commands that only read. The leader serves them without a log entry.
+    pub fn is_read(self) -> bool {
+        use Kind::*;
+        matches!(self, Get | Exists | Ttl | PTtl | Type | MGet | StrLen)
+    }
+
+    /// True for the writes that never grow the state. A full reserve still accepts them.
+    pub fn is_shrinking(self) -> bool {
+        use Kind::*;
+        matches!(
+            self,
+            Del | GetDel
+                | Persist
+                | Expire
+                | PExpire
+                | ExpireAt
+                | PExpireAt
+                | FlushAll
+                | FlushDb
+                | Purge
+        )
+    }
 }
 
-/// True for the commands that only read. The leader serves them without a log entry.
-pub fn is_read(cmd: &Command) -> bool {
-    named(cmd, "GET EXISTS TTL PTTL TYPE MGET STRLEN")
-}
-
-/// True for the writes that never grow the state. A full reserve still accepts them.
-pub fn is_shrinking(cmd: &Command) -> bool {
-    named(
-        cmd,
-        "DEL GETDEL PERSIST EXPIRE PEXPIRE EXPIREAT PEXPIREAT FLUSHALL FLUSHDB PURGE",
-    )
+fn unknown(cmd: &Command) -> CommandError {
+    CommandError::UnknownCommand(upper(&cmd[0]).to_lowercase())
 }
 
 type Reply = Result<Value, CommandError>;
@@ -206,54 +254,56 @@ impl CounterState {
     pub fn apply(&mut self, stamp_ms: u64, cmd: &Command, limits: &Limits) -> Value {
         self.clock_ms = self.clock_ms.max(stamp_ms);
         let now = self.clock_ms;
-        if is_read(cmd) {
-            return self.read(now, cmd);
+        match Kind::of(&cmd[0]) {
+            Some(kind) if kind.is_read() => self.read_at(now, kind, cmd),
+            Some(kind) => self.write(now, kind, cmd, limits),
+            None => Err(unknown(cmd)),
         }
-        self.write(now, cmd, limits)
+        .unwrap_or_else(|e| e.to_value())
+    }
+
+    /// Answer a read of `kind` at `max(clock, now_ms)` without changing the state.
+    pub fn read(&self, now_ms: u64, kind: Kind, cmd: &Command) -> Value {
+        let now = now_ms.max(self.clock_ms);
+        self.read_at(now, kind, cmd)
             .unwrap_or_else(|e| e.to_value())
     }
 
-    /// Answer a read at `max(clock, now_ms)` without changing the state.
-    pub fn read(&self, now_ms: u64, cmd: &Command) -> Value {
-        let now = now_ms.max(self.clock_ms);
-        self.read_at(now, cmd).unwrap_or_else(|e| e.to_value())
-    }
-
-    fn read_at(&self, now: u64, cmd: &Command) -> Reply {
-        let name = upper(&cmd[0]);
+    fn read_at(&self, now: u64, kind: Kind, cmd: &Command) -> Reply {
         let bulk = |key: &[u8]| {
             self.peek(key, now)
                 .map_or(Value::Null, |e| Value::Bulk(e.value.clone()))
         };
         let expires = |key: &[u8]| self.peek(key, now).map(|e| e.expires_at_ms);
-        Ok(match name.as_str() {
-            "GET" => bulk(&cmd[1]),
-            "MGET" => Value::Array(cmd[1..].iter().map(|k| bulk(k)).collect()),
-            "STRLEN" => Value::Integer(self.peek(&cmd[1], now).map_or(0, |e| e.value.len() as i64)),
-            "EXISTS" => Value::Integer(
+        Ok(match kind {
+            Kind::Get => bulk(&cmd[1]),
+            Kind::MGet => Value::Array(cmd[1..].iter().map(|k| bulk(k)).collect()),
+            Kind::StrLen => {
+                Value::Integer(self.peek(&cmd[1], now).map_or(0, |e| e.value.len() as i64))
+            }
+            Kind::Exists => Value::Integer(
                 cmd[1..]
                     .iter()
                     .filter(|k| self.peek(k, now).is_some())
                     .count() as i64,
             ),
-            "TYPE" => Value::simple(if self.peek(&cmd[1], now).is_some() {
+            Kind::Type => Value::simple(if self.peek(&cmd[1], now).is_some() {
                 "string"
             } else {
                 "none"
             }),
-            "TTL" => ttl_value(expires(&cmd[1]), now, |ms| ((ms + 500) / 1000) as i64),
-            "PTTL" => ttl_value(expires(&cmd[1]), now, |ms| ms as i64),
-            other => return Err(CommandError::UnknownCommand(other.to_lowercase())),
+            Kind::Ttl => ttl_value(expires(&cmd[1]), now, |ms| ((ms + 500) / 1000) as i64),
+            Kind::PTtl => ttl_value(expires(&cmd[1]), now, |ms| ms as i64),
+            _ => return Err(unknown(cmd)),
         })
     }
 
-    fn write(&mut self, now: u64, cmd: &Command, limits: &Limits) -> Reply {
-        let name = upper(&cmd[0]);
-        match name.as_str() {
-            "SET" => self.set(now, cmd),
-            "GETDEL" => Ok(self.getdel(now, &cmd[1])),
-            "GETEX" => self.getex(now, cmd),
-            "MSET" => {
+    fn write(&mut self, now: u64, kind: Kind, cmd: &Command, limits: &Limits) -> Reply {
+        match kind {
+            Kind::Set => self.set(now, cmd),
+            Kind::GetDel => Ok(self.getdel(now, &cmd[1])),
+            Kind::GetEx => self.getex(now, cmd),
+            Kind::MSet => {
                 if cmd.len().is_multiple_of(2) {
                     return Err(CommandError::WrongArity("MSET".into()));
                 }
@@ -268,24 +318,27 @@ impl CounterState {
                 }
                 Ok(Value::ok())
             }
-            "INCR" | "DECR" => {
-                let delta = if name == "INCR" { 1 } else { -1 };
-                let expiry = increment_expiry(&cmd[2..], now, &name)?;
-                self.add(now, &cmd[1], delta, expiry)
+            Kind::Incr => {
+                let expiry = increment_expiry(&cmd[2..], now, "incr")?;
+                self.add(now, &cmd[1], 1, expiry)
             }
-            "INCRBY" | "DECRBY" => {
+            Kind::Decr => {
+                let expiry = increment_expiry(&cmd[2..], now, "decr")?;
+                self.add(now, &cmd[1], -1, expiry)
+            }
+            Kind::IncrBy | Kind::DecrBy => {
                 let n = parse_i64(cmd.get(2).ok_or(CommandError::Syntax)?)?;
-                let delta = if name == "INCRBY" {
-                    n
+                let (delta, who) = if kind == Kind::IncrBy {
+                    (n, "incrby")
                 } else {
-                    n.checked_neg().ok_or(CommandError::Overflow)?
+                    (n.checked_neg().ok_or(CommandError::Overflow)?, "decrby")
                 };
-                let expiry = increment_expiry(&cmd[3..], now, &name)?;
+                let expiry = increment_expiry(&cmd[3..], now, who)?;
                 self.add(now, &cmd[1], delta, expiry)
             }
-            "INCRBYFLOAT" => self.add_float(now, &cmd[1], parse_float_delta(&cmd[2])?),
-            "APPEND" => self.append(now, &cmd[1], &cmd[2], limits),
-            "DEL" => {
+            Kind::IncrByFloat => self.add_float(now, &cmd[1], parse_float_delta(&cmd[2])?),
+            Kind::Append => self.append(now, &cmd[1], &cmd[2], limits),
+            Kind::Del => {
                 let removed = cmd[1..]
                     .iter()
                     .filter(|k| {
@@ -296,25 +349,29 @@ impl CounterState {
                     .count();
                 Ok(Value::Integer(removed as i64))
             }
-            "EXPIRE" | "PEXPIRE" | "EXPIREAT" | "PEXPIREAT" => {
-                let unit = if name.starts_with('P') { 1 } else { 1000 };
-                let base = if name.ends_with("AT") { 0 } else { now as i128 };
-                let ms = span(&cmd[2], unit, &name.to_lowercase())?;
+            Kind::Expire | Kind::PExpire | Kind::ExpireAt | Kind::PExpireAt => {
+                let (unit, base, who) = match kind {
+                    Kind::Expire => (1000, now as i128, "expire"),
+                    Kind::PExpire => (1, now as i128, "pexpire"),
+                    Kind::ExpireAt => (1000, 0, "expireat"),
+                    _ => (1, 0, "pexpireat"),
+                };
+                let ms = span(&cmd[2], unit, who)?;
                 Ok(self.set_deadline(now, &cmd[1], base + ms))
             }
-            "PERSIST" => Ok(Value::Integer(match self.live(&cmd[1], now) {
+            Kind::Persist => Ok(Value::Integer(match self.live(&cmd[1], now) {
                 Some(e) if e.expires_at_ms.is_some() => {
                     e.expires_at_ms = None;
                     1
                 }
                 _ => 0,
             })),
-            "FLUSHALL" | "FLUSHDB" => {
+            Kind::FlushAll | Kind::FlushDb => {
                 self.map.clear();
                 self.bytes = 0;
                 Ok(Value::ok())
             }
-            "PURGE" => {
+            Kind::Purge => {
                 let expired: Vec<Bytes> = self
                     .map
                     .iter()
@@ -326,7 +383,7 @@ impl CounterState {
                 }
                 Ok(Value::Integer(expired.len() as i64))
             }
-            other => Err(CommandError::UnknownCommand(other.to_lowercase())),
+            _ => Err(unknown(cmd)),
         }
     }
 
@@ -450,10 +507,10 @@ impl CounterState {
 
 /// The deadline of `INCR key [EX s | PX ms | EXAT s | PXAT ms]`, from the arguments after the
 /// key (or after the increment).
-fn increment_expiry(rest: &[Bytes], now: u64, name: &str) -> Result<Option<u64>, CommandError> {
+fn increment_expiry(rest: &[Bytes], now: u64, who: &str) -> Result<Option<u64>, CommandError> {
     match rest {
         [] => Ok(None),
-        [opt, arg] => expiry_option(opt, arg, now, &name.to_lowercase()).map(Some),
+        [opt, arg] => expiry_option(opt, arg, now, who).map(Some),
         _ => Err(CommandError::Syntax),
     }
 }
@@ -647,8 +704,8 @@ mod tests {
         let mut s = CounterState::new();
         run(&mut s, 0, &["SET", "k", "5", "PXAT", "2000"]);
         let (len, bytes) = (s.len(), s.bytes());
-        assert_eq!(s.read(5000, &cmd(&["GET", "k"])), Value::Null);
-        assert_eq!(s.read(5000, &cmd(&["TTL", "k"])), int(-2));
+        assert_eq!(s.read(5000, Kind::Get, &cmd(&["GET", "k"])), Value::Null);
+        assert_eq!(s.read(5000, Kind::Ttl, &cmd(&["TTL", "k"])), int(-2));
         assert_eq!((s.len(), s.bytes()), (len, bytes));
         assert_eq!(run(&mut s, 1500, &["INCR", "k"]), int(6));
     }
@@ -713,9 +770,26 @@ mod tests {
     }
 
     #[test]
-    fn the_command_lists_are_consistent() {
-        assert!(accepts("INCR") && accepts("PERSIST") && !accepts("HSET"));
-        assert!(is_read(&cmd(&["get", "k"])) && !is_read(&cmd(&["INCR", "k"])));
-        assert!(is_shrinking(&cmd(&["DEL", "k"])) && !is_shrinking(&cmd(&["SET", "k", "v"])));
+    fn commands_are_classified_in_any_case() {
+        assert_eq!(Kind::of(b"incrbyfloat"), Some(Kind::IncrByFloat));
+        assert_eq!(Kind::of(b"PersisT"), Some(Kind::Persist));
+        assert_eq!(Kind::of(b"HSET"), None);
+        assert_eq!(Kind::of(b"INCRBYFLOATX"), None);
+        assert_eq!(Kind::of(b""), None);
+        assert!(Kind::Get.is_read() && !Kind::Incr.is_read());
+        assert!(Kind::Del.is_shrinking() && !Kind::Set.is_shrinking());
+    }
+
+    #[test]
+    fn an_unknown_command_names_itself_in_lower_case() {
+        let mut s = CounterState::new();
+        assert_eq!(
+            run(&mut s, 1, &["HSet", "k"]),
+            CommandError::UnknownCommand("hset".into()).to_value()
+        );
+        assert_eq!(
+            s.read(1, Kind::Set, &cmd(&["Set", "k", "v"])),
+            CommandError::UnknownCommand("set".into()).to_value()
+        );
     }
 }

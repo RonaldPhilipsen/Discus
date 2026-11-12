@@ -18,7 +18,7 @@ use tracing::Instrument;
 use super::group::{Group, Role};
 use super::raft::network::RaftLink;
 use super::raft::{Op, Peer, Replica};
-use super::state::{self, CounterState};
+use super::state::{CounterState, Kind};
 use super::{Counters, Refusal, Settings, View};
 
 /// How long a membership change may take.
@@ -64,19 +64,26 @@ impl RaftRole {
     /// Run one command on the leader: a read after ReadIndex, a write through the log.
     pub async fn execute(
         &self,
+        kind: Kind,
         cmd: &Command,
         now_ms: u64,
         timeout: Duration,
     ) -> Result<Value, Refusal> {
         let span = crate::telemetry::raft_span();
-        self.run(cmd, now_ms, timeout).instrument(span).await
+        self.run(kind, cmd, now_ms, timeout).instrument(span).await
     }
 
-    async fn run(&self, cmd: &Command, now_ms: u64, timeout: Duration) -> Result<Value, Refusal> {
+    async fn run(
+        &self,
+        kind: Kind,
+        cmd: &Command,
+        now_ms: u64,
+        timeout: Duration,
+    ) -> Result<Value, Refusal> {
         let raft = &self.replica.raft;
-        if state::is_read(cmd) {
+        if kind.is_read() {
             return match tokio::time::timeout(timeout, self.replica.ensure_linearizable()).await {
-                Ok(Ok(_)) => Ok(self.replica.sm.lock().state.get().read(now_ms, cmd)),
+                Ok(Ok(_)) => Ok(self.replica.sm.lock().state.get().read(now_ms, kind, cmd)),
                 _ => Err(Refusal::NotLeader),
             };
         }
