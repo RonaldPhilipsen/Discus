@@ -92,8 +92,6 @@ label_enum! {
         Timeout => "timeout",
         Reset => "reset",
         Handshake => "handshake",
-        Verify => "verify",
-        Dropped => "dropped",
     }
 }
 
@@ -187,17 +185,23 @@ impl Attribute {
     }
 
     pub fn value(&self) -> &str {
-        match self {
+        self.static_value().unwrap_or_else(NodeLabel::as_str)
+    }
+
+    /// The value as a static string, or the label of a node or peer attribute. The metrics
+    /// handle shares that label instead of copying it.
+    pub(crate) fn static_value(&self) -> Result<&'static str, &NodeLabel> {
+        Ok(match self {
             Attribute::Command(c) => c.as_str(),
             Attribute::Status(s) => s.as_str(),
-            Attribute::Node(n) | Attribute::Peer(n) => n.as_str(),
+            Attribute::Node(n) | Attribute::Peer(n) => return Err(n),
             Attribute::State(s) => s.as_str(),
             Attribute::Role(r) => r.as_str(),
             Attribute::Mode(m) => m.as_str(),
             Attribute::Channel(c) => c.as_str(),
             Attribute::Reason(r) => r.as_str(),
             Attribute::Topology(t) => t.as_str(),
-        }
+        })
     }
 }
 
