@@ -115,6 +115,10 @@ pub struct Faults {
     pub drop_held: std::sync::atomic::AtomicBool,
     /// The replication senders keep their queued keys while this is set.
     pub hold_replication: std::sync::atomic::AtomicBool,
+    /// The refill after a hint replay waits before each page while this is set.
+    pub hold_refill: std::sync::atomic::AtomicBool,
+    /// A refill waited on `hold_refill`.
+    pub refill_held: std::sync::atomic::AtomicBool,
     /// Bulk acknowledgements carry this epoch in place of the current one, as from a node that
     /// lags or runs ahead.
     pub ack_epoch: parking_lot::Mutex<Option<discus_placement::EpochId>>,

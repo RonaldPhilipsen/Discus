@@ -688,6 +688,14 @@ impl Replicator {
                 };
                 if self.probe(&node, &q).await && self.replay(&node, q.peer).await {
                     q.set_up();
+                    // Writes became hints until the queue came up, also while the replay ran,
+                    // and nothing else replays them.
+                    if !self.replay(&node, q.peer).await {
+                        for k in q.failed() {
+                            self.hint(&q, k);
+                        }
+                    }
+                    self.bump_progress();
                 }
                 continue;
             }
@@ -747,22 +755,41 @@ impl Replicator {
             .is_ok()
     }
 
-    /// Replay the hints of `peer` in HLC order, one acknowledged batch at a time (spec section
-    /// 9). The first batch names the refill buckets of lost hints, and the peer discards its
-    /// copies there. Then [`Self::refill`] sends this node's entries of those buckets again.
-    /// Only a peer that the epoch lists as `NORMAL` gets a replay. Returns false when a batch
-    /// failed. The buckets stay lost until their refill ends, so the next replay discards and
-    /// refills them again.
+    /// Replay the hints of `peer` (spec section 9). The refill buckets of lost hints come
+    /// first: one batch tells the peer to discard its copies there, and [`Self::refill`] sends
+    /// this node's entries of those buckets again. Then the hints go in HLC order, one
+    /// acknowledged batch at a time. A hint is never newer than the entry that the refill sent,
+    /// so this order is safe. Only a peer that the epoch lists as `NORMAL` gets a replay.
+    /// Returns false when a batch failed or the epoch changed. The buckets stay lost until their
+    /// refill ends, so the next replay discards and refills them again.
     async fn replay(&self, node: &Arc<Node>, peer: NodeId) -> bool {
-        if !node.epochs().current().is_normal(peer) {
+        let epoch = node.epochs().current().clone();
+        if !epoch.is_normal(peer) {
             return false;
         }
         let lost = self.hints.lock().lost(peer);
-        let mut discard = lost.buckets.clone();
+        if !lost.buckets.is_empty() {
+            let mut batch = Batch::new(epoch.id());
+            batch.discard = lost.buckets.clone();
+            match self.send(node, peer, Message::HintReplay(batch)).await {
+                // The peer picks the keys to discard by its own epoch, so the refill below
+                // sends the same keys only when both epochs are one.
+                Ok(Message::BatchAck(a)) if a.epoch == epoch.id() => {}
+                Ok(_) => return false,
+                Err(e) => {
+                    tracing::debug!(%peer, error = %e, "a hint replay batch failed");
+                    return false;
+                }
+            }
+            if !self.refill(node, peer, &lost.buckets, &epoch).await {
+                return false;
+            }
+            self.hints.lock().clear_lost(peer, &lost);
+        }
         loop {
             let entries = self.hints.lock().batch(peer, REPLAY_BATCH);
-            if entries.is_empty() && discard.is_empty() {
-                break;
+            if entries.is_empty() {
+                return true;
             }
             let sent: Vec<(Bytes, Version)> = entries
                 .iter()
@@ -770,7 +797,6 @@ impl Replicator {
                 .collect();
             let mut batch = Batch::new(node.epoch_id());
             batch.entries = entries;
-            batch.discard = std::mem::take(&mut discard);
             match self.send(node, peer, Message::HintReplay(batch)).await {
                 Ok(_) => {
                     self.hints.lock().confirm(peer, &sent);
@@ -785,39 +811,52 @@ impl Replicator {
                 }
             }
         }
-        if lost.buckets.is_empty() {
-            return true;
-        }
-        if !self.refill(node, peer, &lost.buckets).await {
-            return false;
-        }
-        self.hints.lock().clear_lost(peer, &lost);
-        true
     }
 
-    /// Send `peer` the entries of `buckets` that this node is the primary of and `peer` owns,
-    /// after `peer` discarded its copies there. A read refills a discarded key only when it
-    /// misses on `peer`, and with primary reads none does. Tombstones go too, so a delete that
-    /// the lost hints carried stays a delete.
-    async fn refill(&self, node: &Arc<Node>, peer: NodeId, buckets: &[u8]) -> bool {
+    /// Send `peer` the entries of `buckets` that this node is the primary of and `peer` owns in
+    /// `epoch`, after `peer` discarded its copies there. A read refills a discarded key only when
+    /// it misses on `peer`, and with primary reads none does. Tombstones go too, so a delete that
+    /// the lost hints carried stays a delete. Returns false when a batch failed or the epoch is
+    /// no longer `epoch`, because then the keys that `peer` discarded can differ from the keys
+    /// sent.
+    async fn refill(
+        &self,
+        node: &Arc<Node>,
+        peer: NodeId,
+        buckets: &[u8],
+        epoch: &Arc<Epoch>,
+    ) -> bool {
         let mut wanted = [false; 256];
         for b in buckets {
             wanted[usize::from(*b)] = true;
         }
-        let rf = self.settings.rf;
+        let page = RefillPage {
+            wanted,
+            epoch: epoch.clone(),
+            me: self.id,
+            peer,
+            rf: self.settings.rf,
+            keys: self.settings.batch_keys,
+        };
         let mut cursor = 0;
         loop {
-            let epoch = node.epochs().current().clone();
-            let (next, entries) = self.store.scan_entries(cursor, REPLAY_BATCH, |k, _| {
-                if !wanted[usize::from(refill_bucket(k))] {
-                    return false;
-                }
-                let owners = epoch.owners(k, rf);
-                owners.first() == Some(&self.id) && owners.contains(&peer)
-            });
-            drop(epoch);
+            #[cfg(feature = "testing")]
+            while node.faults.hold_refill.load(Ordering::Relaxed) {
+                node.faults.refill_held.store(true, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            if node.epochs().current().id() != epoch.id() {
+                return false;
+            }
+            // The walk reads whole shards, so it runs off the async workers.
+            let (store, p) = (self.store.clone(), page.clone());
+            let Ok((next, entries)) =
+                tokio::task::spawn_blocking(move || p.read(&store, cursor)).await
+            else {
+                return false;
+            };
             if !entries.is_empty() {
-                let mut batch = Batch::new(node.epoch_id());
+                let mut batch = Batch::new(epoch.id());
                 batch.entries = entries;
                 if let Err(e) = self.send(node, peer, Message::HintReplay(batch)).await {
                     tracing::debug!(%peer, error = %e, "a refill batch failed");
@@ -825,7 +864,7 @@ impl Replicator {
                 }
             }
             if next == 0 {
-                return true;
+                return node.epochs().current().id() == epoch.id();
             }
             cursor = next;
         }
@@ -993,6 +1032,44 @@ impl Replicator {
             }
         }
         applied
+    }
+}
+
+/// What one refill sends: the entries of the wanted buckets whose primary is `me` and that
+/// `peer` owns in `epoch`.
+#[derive(Clone)]
+struct RefillPage {
+    wanted: [bool; 256],
+    epoch: Arc<Epoch>,
+    me: NodeId,
+    peer: NodeId,
+    rf: usize,
+    keys: usize,
+}
+
+impl RefillPage {
+    /// The next batch from `cursor`: about `keys` matching entries, or about [`BATCH_BYTES`].
+    /// Returns the cursor to go on from, 0 at the end.
+    fn read(&self, store: &Store, mut cursor: u64) -> (u64, Vec<(Bytes, Entry)>) {
+        let mut out = Vec::new();
+        let mut bytes = 0;
+        loop {
+            let (next, entries) = store.scan_entries(cursor, self.keys, |k, _| {
+                if !self.wanted[usize::from(refill_bucket(k))] {
+                    return false;
+                }
+                let owners = self.epoch.owners(k, self.rf);
+                owners.first() == Some(&self.me) && owners.contains(&self.peer)
+            });
+            for (k, e) in entries {
+                bytes += discus_store::estimate_size(&k, &e);
+                out.push((k, e));
+            }
+            cursor = next;
+            if cursor == 0 || out.len() >= self.keys || bytes >= BATCH_BYTES {
+                return (cursor, out);
+            }
+        }
     }
 }
 
