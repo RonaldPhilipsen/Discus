@@ -7,9 +7,8 @@ use discus_placement::{slot, Epoch};
 use discus_resp::{Command, Protocol, Value};
 use discus_telemetry::attrs::TopologyCommand;
 
-use super::access::Access;
 use super::error::CommandError;
-use super::table::{check, lookup, names, CommandSpec};
+use super::table::{check, lookup, names, Access, CommandSpec};
 use super::util::{glob_match, parse_i64, upper};
 use crate::build;
 use crate::cluster::route::key_args;

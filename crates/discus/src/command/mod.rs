@@ -1,6 +1,5 @@
 //! Command parsing, dispatch, and handlers.
 
-pub mod access;
 pub mod coll;
 pub mod connection;
 pub mod error;

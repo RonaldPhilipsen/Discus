@@ -31,7 +31,7 @@ pub use policy::{Factor, Policy, Scopes};
 pub use session::{CertGrant, ConnAuth, TokenGrant};
 pub use stream::ClientStream;
 
-use crate::command::access::Access;
+use crate::command::table::Access;
 use crate::command::{CommandError, CommandSpec};
 use crate::node::ConnState;
 use crate::Config;

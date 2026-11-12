@@ -5,11 +5,23 @@ use std::sync::OnceLock;
 
 use discus_resp::{Command, Value};
 
-use super::access::Access;
 use super::error::CommandError;
 use crate::cluster::route::Route;
 use crate::node::{ConnState, Node};
 use crate::security::ConnAuth;
+
+/// What a command needs from the scopes of a connection (spec §14.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// Runs before authentication: `QUIT`, `AUTH`, and `HELLO`.
+    Public,
+    /// No data access. Authentication is enough.
+    Connection,
+    /// Reads data or node state. Needs `discus.read` or `discus.write`.
+    Read,
+    /// Changes data. Needs `discus.write`.
+    Write,
+}
 
 pub type Handler = fn(&Node, &mut ConnState, &Command) -> Result<Value, CommandError>;
 
@@ -176,4 +188,17 @@ pub fn check(
         return Err(CommandError::WrongArity(spec.name.into()));
     }
     Ok(spec)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_reads_and_set_writes() {
+        let access = |name: &[u8]| lookup(name).unwrap().access;
+        assert_eq!(access(b"GET"), Access::Read);
+        assert_eq!(access(b"SET"), Access::Write);
+        assert_eq!(access(b"PING"), Access::Connection);
+    }
 }
