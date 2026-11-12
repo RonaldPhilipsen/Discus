@@ -126,6 +126,57 @@ async fn a_lost_hint_makes_the_target_discard_the_key() {
     }
 }
 
+/// The primary sends a replica every entry of the buckets that it told the replica to discard.
+/// No read misses on the replica, as with primary reads and cluster clients, so without this the
+/// replica would keep only one copy of those keys until they are written again.
+#[tokio::test]
+async fn a_discarded_bucket_refills_without_reads() {
+    let args = [
+        "--replication-factor",
+        "3",
+        "--replication-queue-keys",
+        "8",
+        "--replication-batch-keys",
+        "4",
+        "--hint-max-entries",
+        "4",
+    ];
+    let c = start_cluster(3, &args).await;
+    let (p, r) = (&c.nodes[0], &c.nodes[1]);
+    let keys: Vec<String> = (0..200)
+        .map(|i| c.key_on(0, &format!("refill{i}")))
+        .collect();
+    let mut client = p.redis().await;
+    let same =
+        |k: &String| r.node.store.version(k.as_bytes()) == p.node.store.version(k.as_bytes());
+    for k in &keys {
+        let _: () = client.set(k, "old").await.unwrap();
+    }
+    assert!(wait_until(Duration::from_secs(10), || keys.iter().all(same)).await);
+    p.node
+        .faults
+        .hold_replication
+        .store(true, Ordering::Relaxed);
+    for k in &keys {
+        let _: () = client.set(k, "new").await.unwrap();
+    }
+    // The queue holds 8 keys and the hints 4, so most of the overflow was lost.
+    assert_eq!(hints(p, r), 4);
+    p.node
+        .faults
+        .hold_replication
+        .store(false, Ordering::Relaxed);
+    assert!(
+        wait_until(Duration::from_secs(20), || hints(p, r) == 0
+            && keys.iter().all(same))
+        .await,
+        "{} of {} keys differ on the replica, {} of them missing",
+        keys.iter().filter(|k| !same(k)).count(),
+        keys.len(),
+        keys.iter().filter(|k| value_of(r, k).is_none()).count()
+    );
+}
+
 async fn tombstone_overflow() -> (common::cluster::Cluster, String) {
     let c = start_cluster(
         1,
