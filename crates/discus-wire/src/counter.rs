@@ -256,10 +256,13 @@ pub type SnapshotEntries = Vec<(Bytes, Bytes, u64)>;
 
 /// Encode a counter state as a snapshot: the clock and every `(key, value, deadline)`, with
 /// deadline 0 for no expiry.
-pub fn encode_counter_snapshot(clock_ms: u64, entries: &[(Bytes, Bytes, u64)]) -> Vec<u8> {
+pub fn encode_counter_snapshot<'a>(
+    clock_ms: u64,
+    entries: impl IntoIterator<Item = (&'a [u8], &'a [u8], u64)>,
+) -> Vec<u8> {
     let mut fbb = FlatBufferBuilder::new();
     let items: Vec<_> = entries
-        .iter()
+        .into_iter()
         .map(|(k, v, t)| {
             let key = fbb.create_vector(k);
             let value = fbb.create_vector(v);
@@ -268,7 +271,7 @@ pub fn encode_counter_snapshot(clock_ms: u64, entries: &[(Bytes, Bytes, u64)]) -
                 &fb::CounterEntryArgs {
                     key: Some(key),
                     value: Some(value),
-                    expires_at_ms: *t,
+                    expires_at_ms: t,
                 },
             )
         })

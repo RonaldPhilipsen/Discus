@@ -182,7 +182,6 @@ pub struct Counters {
     groups: Vec<Arc<Group>>,
     hints: Mutex<(Option<Instant>, Vec<GroupHint>)>,
     published: Mutex<Vec<u8>>,
-    me: Weak<Counters>,
     /// Since when this node sees three `NORMAL` members without a break.
     dwell_since: Mutex<Option<Instant>>,
     /// The last membership change that this node started, in any group.
@@ -203,8 +202,7 @@ impl Counters {
         let groups = (0..settings.groups)
             .map(|g| Arc::new(Group::new(g, leases.as_ref().map(|f| f(g)))))
             .collect();
-        Arc::new_cyclic(|me| Counters {
-            me: me.clone(),
+        Arc::new(Counters {
             dwell_since: Mutex::new(None),
             last_change: Mutex::new(None),
             settled: AtomicBool::new(false),
@@ -220,14 +218,18 @@ impl Counters {
     }
 
     /// A new replica of group `g` for `regime`, on the transport of this node.
-    pub(super) async fn start_replica(&self, g: u16, regime: Regime) -> Result<Replica, String> {
+    pub(super) async fn start_replica(
+        self: &Arc<Self>,
+        g: u16,
+        regime: Regime,
+    ) -> Result<Replica, String> {
         Replica::start(
             &self.settings.raft,
             self.settings.limits,
             g,
             regime,
             raft::new_replica_id(),
-            Arc::new(raft_group::Link(self.me.clone())),
+            Arc::new(raft_group::Link(Arc::downgrade(self))),
             self.budget.clone(),
         )
         .await
@@ -492,7 +494,7 @@ impl Counters {
             .iter()
             .filter(|r| matches!(r, Role::Raft(r) if r.leads() && r.replica.voters().len() == 1))
             .count();
-        metrics.counter_memory(self.bytes());
+        metrics.counter_memory(self.budget.used());
         metrics.raft_single_voter_groups(single as u64);
     }
 
@@ -560,11 +562,6 @@ impl Counters {
 
     pub fn group(&self, g: u16) -> &Arc<Group> {
         &self.groups[usize::from(g) % self.groups.len()]
-    }
-
-    /// Counter bytes that this node holds over every group and role.
-    pub fn bytes(&self) -> u64 {
-        self.budget.used()
     }
 
     pub fn view(&self) -> Option<View> {

@@ -2,6 +2,7 @@
 //! the target voters, quorum-loss recovery, and the down switch.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -29,8 +30,8 @@ const ORPHAN_AFTER: Duration = Duration::from_secs(5);
 
 /// The Raft role of a node in one group.
 pub struct RaftRole {
-    pub replica: Arc<Replica>,
-    last_stamp: Mutex<u64>,
+    pub replica: Replica,
+    last_stamp: AtomicU64,
     /// Since when this replica leads. A new leader has heard from nobody yet, so it measures the
     /// silence of a voter from here, never from the start of the replica.
     leading_since: Mutex<Option<Instant>>,
@@ -42,8 +43,8 @@ pub struct RaftRole {
 impl RaftRole {
     pub fn new(replica: Replica) -> Arc<RaftRole> {
         Arc::new(RaftRole {
-            replica: Arc::new(replica),
-            last_stamp: Mutex::new(0),
+            replica,
+            last_stamp: AtomicU64::new(0),
             leading_since: Mutex::new(None),
             dropped_since: Mutex::new(None),
         })
@@ -53,10 +54,11 @@ impl RaftRole {
         self.replica.regime
     }
 
+    /// The stamp of the next write. Stamps never run backwards within one replica.
     fn stamp(&self, now_ms: u64) -> u64 {
-        let mut last = self.last_stamp.lock();
-        *last = now_ms.max(*last);
-        *last
+        self.last_stamp
+            .fetch_max(now_ms, Ordering::Relaxed)
+            .max(now_ms)
     }
 
     /// Run one command on the leader: a read after ReadIndex, a write through the log.
@@ -389,13 +391,8 @@ impl Group {
         if !takes {
             return;
         }
-        let lease_until = if self.lease.is_some() {
-            match self.acquire(counters).await {
-                Some(Ok(until)) => Some(until),
-                _ => return,
-            }
-        } else {
-            None
+        let Some(lease_until) = self.lease_for_leader(counters).await else {
+            return;
         };
         if r.leads() {
             // The read index waits until this leader applied every entry that a quorum
@@ -637,10 +634,6 @@ impl Group {
         if !self.set_role_if(seen, Role::Raft(role.clone())) {
             role.replica.shutdown().await;
             return refuse;
-        }
-        {
-            let mut inner = self.inner();
-            inner.max_generation = inner.max_generation.max(c.regime.generation);
         }
         RaftConfig { replica: id, ..*c }
     }

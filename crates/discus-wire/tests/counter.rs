@@ -185,7 +185,7 @@ fn a_snapshot_round_trips() {
             )
         })
         .collect();
-    let bytes = encode_counter_snapshot(77, &entries);
+    let bytes = encode_counter_snapshot(77, entries.iter().map(|(k, v, t)| (&k[..], &v[..], *t)));
     assert_eq!(decode_counter_snapshot(&bytes).unwrap(), (77, entries));
     assert!(decode_counter_snapshot(b"garbage").is_err());
 }

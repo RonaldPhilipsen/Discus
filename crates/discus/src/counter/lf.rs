@@ -20,9 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use super::budget::{Budget, Tracked};
-use super::raft::convert::parse_command;
-use super::raft::store::{decode_state, encode_state};
-use super::state::{self, CounterState, Limits};
+use super::state::{self, parse_command, CounterState, Limits};
 use super::{Counters, Refusal};
 
 /// Ops in one `COUNTER_SYNC`.
@@ -221,7 +219,7 @@ impl LfLeader {
                     regime: self.regime,
                     seq: core.seq,
                     ops: Vec::new(),
-                    snapshot: Some(Bytes::from(encode_state(core.state.get()))),
+                    snapshot: Some(Bytes::from(core.state.get().encode())),
                 }
             } else {
                 let core = self.core.lock();
@@ -315,7 +313,7 @@ impl Follower {
         let mut core = self.core.lock();
         let mut need_snapshot = false;
         if let Some(snapshot) = &s.snapshot {
-            match decode_state(snapshot) {
+            match CounterState::decode(snapshot) {
                 Some(state) => {
                     core.state.replace(state);
                     core.seq = s.seq;
