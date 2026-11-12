@@ -32,7 +32,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{Config, Node};
 use hints::{HintLimits, HintStore};
-use queue::{PeerQueue, Pushed};
+use queue::PeerQueue;
 
 /// The most bytes of entries in one replication batch.
 const BATCH_BYTES: u64 = 4 << 20;
@@ -172,25 +172,15 @@ impl Replicator {
             return;
         };
         let me = self.clone();
-        let mut events = membership.subscribe();
-        tokio::spawn(async move {
-            use crate::membership::Event;
-            use tokio::sync::broadcast::error::RecvError;
-            loop {
-                let event = tokio::select! {
-                    _ = stop.cancelled() => return,
-                    e = events.recv() => e,
-                };
-                match event {
-                    Ok(Event::Core(discus_membership::Event::Rejoining { .. })) => {
-                        me.rejoining(me.absence());
-                    }
-                    Ok(Event::Core(discus_membership::Event::ClusterLost { .. })) => me.flush(),
-                    Ok(_) | Err(RecvError::Lagged(_)) => {}
-                    Err(RecvError::Closed) => return,
-                }
+        let events = membership.subscribe();
+        tokio::spawn(discus_store::on_events(events, stop, move |event| {
+            use discus_membership::Event;
+            match event {
+                Event::Rejoining { .. } => me.rejoining(me.absence()),
+                Event::ClusterLost { .. } => me.flush(),
+                _ => {}
             }
-        });
+        }));
     }
 
     fn tick(&self) {
@@ -369,13 +359,9 @@ impl Replicator {
                 return;
             };
             let to = node.epochs().current().clone();
-            let limits = handoff::Limits {
-                rate_bytes: self.settings.handoff_rate,
-                rf: self.settings.rf,
-            };
             let watermark = node.hlc.current();
-            if handoff::scan(&node, &changes, to.clone(), limits).await {
-                let dropped = handoff::drop_lost(&node, &to, watermark, limits).await;
+            if handoff::scan(&node, &changes, to.clone(), &self.settings).await {
+                let dropped = handoff::drop_lost(&node, &to, watermark, &self.settings).await;
                 tracing::info!(dropped, "dropped the keys that moved to other owners");
             }
             self.scans.fetch_add(1, Ordering::Relaxed);
@@ -462,6 +448,30 @@ impl Replicator {
         self.sync_charge();
     }
 
+    /// Record a hint for the peer of `q` for each of `keys`, under one hold of the hint lock.
+    fn hint_all(&self, q: &PeerQueue, keys: Vec<Bytes>) {
+        let entries: Vec<(Bytes, Entry)> = keys
+            .into_iter()
+            .filter_map(|k| self.store.entry(&k).map(|e| (k, e)))
+            .collect();
+        if entries.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let mut evicted = Vec::new();
+        {
+            let mut hints = self.hints.lock();
+            for (k, e) in entries {
+                evicted.extend(hints.record(q.peer, k, e, now));
+                if let Some(label) = &q.label {
+                    discus_telemetry::global().hint_recorded(label);
+                }
+            }
+        }
+        self.count_evicted(&evicted);
+        self.sync_charge();
+    }
+
     /// Hints held for `target`.
     pub fn hints(&self, target: NodeId) -> usize {
         self.hints.lock().count(target)
@@ -488,19 +498,15 @@ impl Replicator {
                     missing.push(owner);
                     continue;
                 };
-                match q.push(key) {
-                    Pushed::Queued => {}
-                    Pushed::Overflow(old) => hints.push((q.clone(), old)),
-                    Pushed::Down => hints.push((q.clone(), key.clone())),
+                if let Some(k) = q.push(key) {
+                    hints.push((q.clone(), k));
                 }
             }
         }
         for owner in missing {
             let q = self.queue(owner);
-            match q.push(key) {
-                Pushed::Queued => {}
-                Pushed::Overflow(old) => hints.push((q, old)),
-                Pushed::Down => hints.push((q, key.clone())),
+            if let Some(k) = q.push(key) {
+                hints.push((q, k));
             }
         }
         for (q, k) in hints {
@@ -712,14 +718,15 @@ impl Replicator {
                 let Some(node) = self.node.upgrade() else {
                     return;
                 };
-                if self.probe(&node, &q).await && self.replay(&node, q.peer).await {
+                // An empty batch tells whether the peer takes replication again.
+                let probe = Message::Replicate(Batch::new(node.epoch_id()));
+                if self.send(&node, q.peer, probe).await.is_ok() && self.replay(&node, q.peer).await
+                {
                     q.set_up();
                     // Writes became hints until the queue came up, also while the replay ran,
                     // and nothing else replays them.
                     if !self.replay(&node, q.peer).await {
-                        for k in q.failed() {
-                            self.hint(&q, k);
-                        }
+                        self.hint_all(&q, q.failed());
                     }
                     self.bump_progress();
                 }
@@ -755,9 +762,7 @@ impl Replicator {
                         discus_telemetry::global().replication_lag(label, started.elapsed());
                     }
                     if q.take_drained() && !self.replay(&node, q.peer).await {
-                        for k in q.failed() {
-                            self.hint(&q, k);
-                        }
+                        self.hint_all(&q, q.failed());
                         self.bump_progress();
                     }
                 }
@@ -767,21 +772,11 @@ impl Replicator {
                 }
                 Err(e) => {
                     tracing::debug!(peer = %q.peer, error = %e, "a replication batch failed");
-                    for k in q.failed() {
-                        self.hint(&q, k);
-                    }
+                    self.hint_all(&q, q.failed());
                     self.bump_progress();
                 }
             }
         }
-    }
-
-    /// An empty batch tells whether the peer takes replication again.
-    async fn probe(&self, node: &Arc<Node>, q: &PeerQueue) -> bool {
-        let batch = Batch::new(node.epoch_id());
-        self.send(node, q.peer, Message::Replicate(batch))
-            .await
-            .is_ok()
     }
 
     /// Replay the hints of `peer` (spec section 9). The refill buckets of lost hints come
@@ -870,10 +865,7 @@ impl Replicator {
         let mut cursor = 0;
         loop {
             #[cfg(feature = "testing")]
-            while node.faults.hold_refill.load(Ordering::Relaxed) {
-                node.faults.refill_held.store(true, Ordering::Relaxed);
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            crate::node::Faults::wait(&node.faults.hold_refill, &node.faults.refill_held).await;
             if node.epochs().current().id() != epoch.id() {
                 return false;
             }

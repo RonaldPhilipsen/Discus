@@ -646,14 +646,6 @@ impl Swim {
                 old: old.id(),
                 new: current.id(),
             });
-            let gained = gained_owners(&old, &current, self.cfg.replication_factor);
-            if !gained.is_empty() {
-                self.events.push(Event::OwnershipGained {
-                    old: old.id(),
-                    new: current.id(),
-                    gained,
-                });
-            }
             let me = self.me.id;
             let normal = |e: &Epoch| e.is_normal(me);
             // The rejoin rule needs the node to have been placed. A joiner that adopts an epoch

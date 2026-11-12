@@ -17,6 +17,7 @@ use bytes::Bytes;
 use discus_placement::{range_of, slot, Epoch, EpochId, NodeId, Version, NTP64, RANGES};
 use discus_wire::{Batch, Message};
 
+use super::Settings;
 use crate::node::EpochPin;
 use crate::Node;
 
@@ -109,6 +110,7 @@ fn covers(to: EpochId, new: EpochId) -> bool {
 }
 
 /// What a scan sends to one target.
+#[derive(Default)]
 struct Target {
     batch: Vec<(Bytes, discus_store::Entry)>,
     offers: Vec<(Bytes, Version)>,
@@ -119,31 +121,19 @@ struct Target {
 }
 
 impl Target {
-    fn new() -> Target {
-        Target {
-            batch: Vec::new(),
-            offers: Vec::new(),
-            bytes: 0,
-            wanted: Vec::new(),
-            abandoned: false,
-        }
-    }
-
     fn full(&self) -> bool {
         self.batch.len() + self.offers.len() >= STEP || self.bytes >= BATCH_BYTES
     }
 }
 
-/// The settings of a scan.
-#[derive(Debug, Clone, Copy)]
-pub struct Limits {
-    pub rate_bytes: u64,
-    pub rf: usize,
-}
-
 /// Run one scan for every change in `changes`, from the oldest old epoch to `to`. Returns when
 /// every target got its `done` batch or was abandoned, and whether every target got it.
-pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits: Limits) -> bool {
+pub async fn scan(
+    node: &Arc<Node>,
+    changes: &[Outgoing],
+    to: Arc<Epoch>,
+    settings: &Settings,
+) -> bool {
     let Some(replicator) = node.replicator().cloned() else {
         return false;
     };
@@ -155,29 +145,20 @@ pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits
         .iter()
         .flat_map(|c| c.gained.iter().copied())
         .filter(|g| *g != me && to.member(*g).is_some())
-        .map(|g| (g, Target::new()))
+        .map(|g| (g, Target::default()))
         .collect();
     if targets.is_empty() {
         return true;
     }
     // Entries written after this point replicate to their current owners on their own.
     let watermark = node.hlc.current();
-    let rf = limits.rf;
+    let rf = settings.rf;
     let changed = from.changed_ranges(&to, rf);
     tracing::info!(from = %from.id(), to = %to.id(), targets = targets.len(), "handoff scan");
     let mut cursor = 0;
     loop {
         #[cfg(feature = "testing")]
-        while node
-            .faults
-            .hold_scan
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            node.faults
-                .scan_held
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        crate::node::Faults::wait(&node.faults.hold_scan, &node.faults.scan_held).await;
         let (next, entries) = node
             .store
             .scan_entries(cursor, STEP, |_, e| e.version.time() <= watermark);
@@ -214,7 +195,7 @@ pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits
         }
         for (g, t) in targets.iter_mut() {
             if t.full() && !t.abandoned {
-                flush(node, &replicator, *g, t, None, limits).await;
+                flush(node, &replicator, *g, t, None, settings).await;
             }
         }
         if next == 0 {
@@ -225,10 +206,10 @@ pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits
     let range = (from.id(), to.id());
     for (g, t) in targets.iter_mut() {
         while !t.abandoned && (!t.wanted.is_empty() || t.full()) {
-            flush(node, &replicator, *g, t, None, limits).await;
+            flush(node, &replicator, *g, t, None, settings).await;
         }
         if !t.abandoned {
-            flush(node, &replicator, *g, t, Some(range), limits).await;
+            flush(node, &replicator, *g, t, Some(range), settings).await;
         }
     }
     targets.values().all(|t| !t.abandoned)
@@ -252,12 +233,17 @@ pub async fn scan(node: &Arc<Node>, changes: &[Outgoing], to: Arc<Epoch>, limits
 /// forward a write here first. Every key stays once this node adopts another epoch during the
 /// pass, or once a peer sent a batch from an epoch newer than the current one: such a batch can
 /// carry entries of ranges that this node gains in that epoch.
-pub async fn drop_lost(node: &Arc<Node>, to: &Epoch, watermark: NTP64, limits: Limits) -> usize {
+pub async fn drop_lost(
+    node: &Arc<Node>,
+    to: &Epoch,
+    watermark: NTP64,
+    settings: &Settings,
+) -> usize {
     let Some(replicator) = node.replicator().cloned() else {
         return 0;
     };
     let adoptions = replicator.adoptions.load(Ordering::SeqCst);
-    let (me, rf) = (node.id, limits.rf);
+    let (me, rf) = (node.id, settings.rf);
     let current = node.epochs().current().clone();
     if !current.is_normal(me) {
         return 0;
@@ -277,10 +263,7 @@ pub async fn drop_lost(node: &Arc<Node>, to: &Epoch, watermark: NTP64, limits: L
     let mut cursor = 0;
     loop {
         #[cfg(feature = "testing")]
-        while node.faults.hold_drop.load(Ordering::Relaxed) {
-            node.faults.drop_held.store(true, Ordering::Relaxed);
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        crate::node::Faults::wait(&node.faults.hold_drop, &node.faults.drop_held).await;
         if moved_on() {
             stopped(node, "this node moved on to another epoch");
             return dropped;
@@ -420,7 +403,7 @@ async fn flush(
     target: NodeId,
     t: &mut Target,
     done: Option<(EpochId, EpochId)>,
-    limits: Limits,
+    settings: &Settings,
 ) {
     let mut batch = Batch::new(node.epoch_id());
     batch.entries = std::mem::take(&mut t.batch);
@@ -435,7 +418,7 @@ async fn flush(
     match send(node, replicator, target, &batch).await {
         Some(ack) => {
             t.wanted = ack.want;
-            pace(bytes, limits.rate_bytes).await;
+            pace(bytes, settings.handoff_rate).await;
         }
         None => {
             tracing::warn!(%target, "abandoned a handoff target after its retries");

@@ -37,16 +37,6 @@ struct QueueState {
     closed: bool,
 }
 
-/// What happened to a key that `push` was given.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Pushed {
-    Queued,
-    /// The queue was full, so its oldest key dropped out.
-    Overflow(Bytes),
-    /// The peer is down: the key goes to a hint instead.
-    Down,
-}
-
 impl PeerQueue {
     pub fn new(peer: NodeId, cap: usize) -> PeerQueue {
         PeerQueue {
@@ -64,25 +54,23 @@ impl PeerQueue {
         }
     }
 
-    /// Queue `key`. A key already queued keeps one place.
-    pub fn push(&self, key: &Bytes) -> Pushed {
+    /// Queue `key`. A key already queued keeps one place. Returns the key to hint instead: `key`
+    /// itself while the peer is down, or the oldest key when the queue overflowed.
+    pub fn push(&self, key: &Bytes) -> Option<Bytes> {
         let mut s = self.state.lock();
         if s.down {
-            return Pushed::Down;
+            return Some(key.clone());
         }
         // A key already queued moves to the back. Only a new key is cloned.
         if s.keys.to_back(key).is_some() {
-            return Pushed::Queued;
+            return None;
         }
         s.keys.insert(key.clone(), ());
         let out = if s.keys.len() > self.cap {
             s.lagging = true;
-            match s.keys.pop_front() {
-                Some((old, ())) => Pushed::Overflow(old),
-                None => Pushed::Queued,
-            }
+            s.keys.pop_front().map(|(old, ())| old)
         } else {
-            Pushed::Queued
+            None
         };
         drop(s);
         self.notify.notify_one();
@@ -200,8 +188,8 @@ mod tests {
     #[test]
     fn a_key_waits_once() {
         let q = PeerQueue::new(NodeId::from_u128(1), 8);
-        assert_eq!(q.push(&k("a")), Pushed::Queued);
-        assert_eq!(q.push(&k("a")), Pushed::Queued);
+        assert_eq!(q.push(&k("a")), None);
+        assert_eq!(q.push(&k("a")), None);
         assert_eq!(q.len(), 1);
         assert_eq!(q.take(10), vec![k("a")]);
         assert!(q.holds(b"a"));
@@ -213,9 +201,9 @@ mod tests {
     fn overflow_drops_the_oldest_and_marks_lagging() {
         let q = PeerQueue::new(NodeId::from_u128(1), 4);
         for i in 0..4 {
-            assert_eq!(q.push(&k(&i.to_string())), Pushed::Queued);
+            assert_eq!(q.push(&k(&i.to_string())), None);
         }
-        assert_eq!(q.push(&k("x")), Pushed::Overflow(k("0")));
+        assert_eq!(q.push(&k("x")), Some(k("0")));
         assert!(!q.take_drained());
         q.take(4);
         assert!(q.take_drained());
@@ -231,9 +219,9 @@ mod tests {
         let mut back = q.failed();
         back.sort();
         assert_eq!(back, vec![k("a"), k("b")]);
-        assert_eq!(q.push(&k("c")), Pushed::Down);
+        assert_eq!(q.push(&k("c")), Some(k("c")));
         q.set_up();
-        assert_eq!(q.push(&k("c")), Pushed::Queued);
+        assert_eq!(q.push(&k("c")), None);
     }
 
     #[test]

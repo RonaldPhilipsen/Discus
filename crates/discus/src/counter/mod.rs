@@ -449,26 +449,15 @@ impl Counters {
             return;
         };
         let me = self.clone();
-        let mut events = membership.subscribe();
-        tokio::spawn(async move {
-            use crate::membership::Event;
-            use tokio::sync::broadcast::error::RecvError;
-            loop {
-                let Some(event) = stop.run_until_cancelled(events.recv()).await else {
-                    return;
-                };
-                match event {
-                    // A rejoining node and a node of a lost cluster discard their counters
-                    // (spec section 6.3).
-                    Ok(Event::Core(
-                        discus_membership::Event::Rejoining { .. }
-                        | discus_membership::Event::ClusterLost { .. },
-                    )) => me.discard(),
-                    Ok(_) | Err(RecvError::Lagged(_)) => {}
-                    Err(RecvError::Closed) => return,
-                }
+        let events = membership.subscribe();
+        tokio::spawn(discus_store::on_events(events, stop, move |event| {
+            use discus_membership::Event;
+            // A rejoining node and a node of a lost cluster discard their counters (spec
+            // section 6.3).
+            if matches!(event, Event::Rejoining { .. } | Event::ClusterLost { .. }) {
+                me.discard();
             }
-        });
+        }));
     }
 
     /// Drop every counter role and state of this node. A later role starts with new replica

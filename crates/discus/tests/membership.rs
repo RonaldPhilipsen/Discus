@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::gossip::{refs, socket, wait_agreed, wait_until, Net, Opts};
-use discus::membership::Event;
 use discus_membership::{LeaseProvider, NoneLease};
 use discus_placement::mock::MockClock;
 use discus_placement::{Clock, ClusterId, EpochId, NodeId};
@@ -214,28 +213,6 @@ async fn two_clusters_merge_into_one() {
     wait_agreed(&[&lone, &b, &c], Duration::from_secs(20)).await;
     assert_eq!(lone.node.cluster_id(), b.node.cluster_id());
     assert!(!lone.node.store.read(b"lost", |e| e.is_some()));
-}
-
-#[tokio::test]
-async fn ownership_gained_reaches_subscribers() {
-    let net = Net::new();
-    let rf = ["--replication-factor", "3"];
-    let nodes = net.start_agreed(3, &rf).await;
-    let mut events = nodes[0].node.membership().unwrap().subscribe();
-    let joiner = net.start(&[nodes[0].cluster_addr], &rf).await;
-    let gained = tokio::time::timeout(FORM, async {
-        loop {
-            if let Ok(Event::OwnershipGained(g)) = events.recv().await {
-                if g.gained.contains(&joiner.id) {
-                    return g;
-                }
-            }
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(gained.pin.id(), gained.old);
-    assert!(nodes[0].node.epochs().get(gained.old).is_some());
 }
 
 #[tokio::test]

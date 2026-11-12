@@ -137,10 +137,7 @@ async fn a_rejoined_node_discards_its_counters() {
             let f = flag.clone();
             tokio::spawn(async move {
                 while let Ok(e) = events.recv().await {
-                    if matches!(
-                        e,
-                        discus::membership::Event::Core(discus_membership::Event::Rejoining { .. })
-                    ) {
+                    if matches!(e, discus_membership::Event::Rejoining { .. }) {
                         f.store(true, Ordering::Relaxed);
                     }
                 }

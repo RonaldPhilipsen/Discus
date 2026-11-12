@@ -1,6 +1,6 @@
 use discus_placement::ManualClock;
 use discus_store::Version;
-use discus_store::{Entry, Store, StoreConfig, Value, HASH_SEED};
+use discus_store::{Entry, Store, StoreConfig, Value};
 use std::sync::Arc;
 
 #[test]
@@ -9,7 +9,6 @@ fn sweep_removes_a_share_of_expired_entries_without_touching_live_ones() {
     let cfg = StoreConfig {
         shards: 4,
         max_memory: 1 << 30,
-        seed: HASH_SEED,
         ..StoreConfig::default()
     };
     let s = Store::new(cfg, clock.clone());
@@ -35,7 +34,6 @@ fn repeated_sweeps_eventually_cover_every_expired_entry() {
     let cfg = StoreConfig {
         shards: 2,
         max_memory: 1 << 30,
-        seed: HASH_SEED,
         ..StoreConfig::default()
     };
     let s = Store::new(cfg, clock.clone());
