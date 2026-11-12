@@ -1,18 +1,24 @@
-use discus_telemetry::context::{outbound, set_parent, TraceContext, TraceParent};
+use discus_telemetry::context::{outbound, set_parent, TraceContext};
 
 const TP: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
-#[test]
-fn traceparent_roundtrips() {
-    let tp = TraceParent::parse(TP).unwrap();
-    assert!(tp.is_sampled());
-    assert_eq!(tp.to_string(), TP);
-    let unsampled = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00";
-    assert!(!TraceParent::parse(unsampled).unwrap().is_sampled());
+fn cx(traceparent: &str, tracestate: &str) -> TraceContext {
+    TraceContext::new(Some(traceparent.into()), Some(tracestate.into()))
 }
 
 #[test]
-fn malformed_traceparent_is_rejected() {
+fn a_valid_context_keeps_both_values() {
+    let unsampled = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00";
+    for tp in [TP, unsampled] {
+        let c = cx(tp, "congo=t61rcWkgMzE");
+        assert!(!c.is_empty(), "{tp}");
+        assert_eq!(c.traceparent.as_deref(), Some(tp));
+        assert_eq!(c.tracestate.as_deref(), Some("congo=t61rcWkgMzE"));
+    }
+}
+
+#[test]
+fn malformed_traceparent_drops_the_whole_context() {
     for bad in [
         "",
         "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7",
@@ -20,35 +26,33 @@ fn malformed_traceparent_is_rejected() {
         "00-00000000000000000000000000000000-00f067aa0ba902b7-01",
         "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01",
         "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01",
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0G",
         "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra",
         "00_4bf92f3577b34da6a3ce929d0e0e4736_00f067aa0ba902b7_01",
     ] {
-        assert!(TraceParent::parse(bad).is_none(), "{bad}");
-        let cx = TraceContext::from_pairs([("traceparent", bad), ("tracestate", "a=1")]);
-        assert!(cx.is_empty(), "{bad}");
+        assert_eq!(cx(bad, "a=1"), TraceContext::default(), "{bad}");
     }
 }
 
 #[test]
-fn carrier_roundtrips_through_pairs() {
-    let cx = TraceContext::from_pairs([("traceparent", TP), ("tracestate", "congo=t61rcWkgMzE")]);
-    assert!(!cx.is_empty());
-    let pairs = cx.to_pairs();
-    let back = TraceContext::from_pairs(pairs.iter().map(|(k, v)| (*k, v.as_str())));
-    assert_eq!(back, cx);
+fn tracestate_without_traceparent_is_dropped() {
+    let c = TraceContext::new(None, Some("a=1".into()));
+    assert!(c.is_empty());
+    assert_eq!(c, TraceContext::default());
 }
 
 #[test]
-fn unknown_pairs_are_ignored() {
-    let cx = TraceContext::from_pairs([("traceparent", TP), ("baggage", "x=1")]);
-    assert_eq!(cx.traceparent, TP);
-    assert_eq!(cx.tracestate, "");
+fn an_empty_tracestate_counts_as_none() {
+    let c = cx(TP, "");
+    assert_eq!(c.traceparent.as_deref(), Some(TP));
+    assert_eq!(c.tracestate, None);
+    assert_eq!(TraceContext::new(Some(TP.into()), None), c);
 }
 
 #[cfg(not(feature = "otel"))]
 #[test]
 fn without_otel_the_context_passes_through_unchanged() {
-    let inbound = TraceContext::from_pairs([("traceparent", TP), ("tracestate", "k=v")]);
+    let inbound = cx(TP, "k=v");
     let span = tracing::info_span!("forward");
     set_parent(&span, &inbound);
     let _e = span.enter();
@@ -67,24 +71,25 @@ fn with_otel_the_outbound_context_continues_the_inbound_trace() {
         .build();
     let subscriber = tracing_subscriber::registry()
         .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
-    let inbound = TraceContext::from_pairs([("traceparent", TP), ("tracestate", "k=v")]);
+    let inbound = cx(TP, "k=v");
     let out = tracing::subscriber::with_default(subscriber, || {
         let span = tracing::info_span!("forward");
         set_parent(&span, &inbound);
         let _e = span.enter();
         outbound(&inbound)
     });
-    let sent = TraceParent::parse(TP).unwrap();
-    let got = TraceParent::parse(&out.traceparent).unwrap();
-    assert_eq!(got.trace_id, sent.trace_id);
-    assert_ne!(got.parent_id, sent.parent_id);
-    assert!(got.is_sampled());
-    assert_eq!(out.tracestate, "k=v");
+    let got = out.traceparent.as_deref().unwrap();
+    assert!(!TraceContext::new(Some(got.into()), None).is_empty());
+    // Same trace ID, a new parent ID, and still sampled.
+    assert_eq!(got[3..35], TP[3..35]);
+    assert_ne!(got[36..52], TP[36..52]);
+    assert!(got.ends_with("-01"));
+    assert_eq!(out.tracestate.as_deref(), Some("k=v"));
 }
 
 #[cfg(feature = "otel")]
 #[test]
 fn with_otel_and_no_active_span_the_inbound_context_is_kept() {
-    let inbound = TraceContext::from_pairs([("traceparent", TP)]);
+    let inbound = TraceContext::new(Some(TP.into()), None);
     assert_eq!(outbound(&inbound), inbound);
 }

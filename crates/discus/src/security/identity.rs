@@ -26,6 +26,12 @@ pub fn cert_identity(der: &[u8]) -> Option<String> {
     cn.as_str().ok().map(str::to_string)
 }
 
+/// The identity of the verified client certificate of a TLS connection, if the client sent one
+/// that names one.
+pub fn peer_identity(conn: &rustls::ServerConnection) -> Option<String> {
+    cert_identity(conn.peer_certificates()?.first()?)
+}
+
 /// Match `value` against `pattern`. A trailing `*` matches any suffix. Otherwise the match is
 /// exact.
 pub fn pattern_matches(pattern: &str, value: &str) -> bool {

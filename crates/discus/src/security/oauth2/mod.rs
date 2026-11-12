@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use jwks::KeySet;
 
-use super::file::IssuerFile;
+use super::file::{IssuerFile, KubernetesFile};
 use super::identity::pattern_matches;
 use super::policy::Scopes;
 
@@ -165,31 +165,19 @@ pub struct TrustedIssuer {
     /// The `iss` value. It starts as `rules.issuer`. An issuer that learns its name takes it from
     /// discovery.
     name: RwLock<String>,
-    learn_name: bool,
     keys: RwLock<Option<(Arc<KeySet>, Instant)>>,
-    /// Keys older than this are stale. `None` never goes stale.
-    pub max_stale: Option<Duration>,
+    /// Keys older than this are stale.
+    max_stale: Duration,
 }
 
 impl TrustedIssuer {
-    pub fn new(rules: IssuerRules) -> TrustedIssuer {
+    pub fn new(rules: IssuerRules, max_stale: Duration) -> TrustedIssuer {
         TrustedIssuer {
             name: RwLock::new(rules.issuer.clone()),
-            learn_name: false,
             rules,
             keys: RwLock::new(None),
-            max_stale: None,
+            max_stale,
         }
-    }
-
-    /// An issuer whose `iss` value comes from its discovery document.
-    pub fn learning_name(mut self) -> TrustedIssuer {
-        self.learn_name = true;
-        self
-    }
-
-    pub fn learns_name(&self) -> bool {
-        self.learn_name
     }
 
     pub fn name(&self) -> String {
@@ -224,7 +212,7 @@ impl TrustedIssuer {
     pub fn keys(&self) -> Result<Arc<KeySet>, Reject> {
         let guard = self.keys.read().map_err(|_| Reject::Stale)?;
         let (keys, at) = guard.as_ref().ok_or(Reject::Stale)?;
-        if self.max_stale.is_some_and(|max| at.elapsed() > max) {
+        if at.elapsed() > self.max_stale {
             return Err(Reject::Stale);
         }
         Ok(keys.clone())
@@ -274,13 +262,14 @@ impl Validator {
         self.skew
     }
 
-    /// The trusted issuer that a token names in `iss`, without checking anything else.
-    pub fn issuer_of(&self, token: &[u8]) -> Option<&Arc<TrustedIssuer>> {
+    /// The index of the trusted issuer that a token names in `iss`, without checking anything
+    /// else.
+    pub fn issuer_of(&self, token: &[u8]) -> Option<usize> {
         let claims: IssOnly = jsonwebtoken::dangerous::insecure_decode(token).ok()?.claims;
         let iss = claims.iss?;
         self.issuers
             .iter()
-            .find(|i| !iss.is_empty() && i.name() == iss)
+            .position(|i| !iss.is_empty() && i.name() == iss)
     }
 
     /// Check a token fully: header, issuer, key, signature, registered claims, and scopes.
@@ -289,7 +278,7 @@ impl Validator {
             return Err(Reject::Malformed);
         }
         let header = jsonwebtoken::decode_header(token).map_err(|_| Reject::Malformed)?;
-        let issuer = self.issuer_of(token).ok_or(Reject::UnknownIssuer)?;
+        let issuer = &self.issuers[self.issuer_of(token).ok_or(Reject::UnknownIssuer)?];
         let rules = &issuer.rules;
         if !rules.algorithms.contains(&header.alg) {
             return Err(Reject::Algorithm);
@@ -335,6 +324,7 @@ impl Validator {
 
 /// Every trusted issuer, their loaders, and the JWKS generation.
 pub struct OAuth2 {
+    /// Its issuers are those of `sources`, in the same order.
     validator: Validator,
     sources: Vec<Arc<issuer::Source>>,
     generation: Arc<AtomicU64>,
@@ -348,9 +338,10 @@ pub fn is_jwt(token: &[u8]) -> bool {
 }
 
 impl OAuth2 {
-    /// Build the issuers of the `[[issuer]]` sections.
+    /// Build the issuers of the `[[issuer]]` sections and of the `[kubernetes]` section.
     pub fn from_file(
         files: &[IssuerFile],
+        kubernetes: Option<&KubernetesFile>,
         skew_secs: u64,
         insecure: bool,
     ) -> Result<OAuth2, String> {
@@ -388,8 +379,6 @@ impl OAuth2 {
                     scopes: Scopes::parse_names(&sub.scopes).map_err(ctx)?,
                 });
             }
-            let mut trusted = TrustedIssuer::new(rules);
-            trusted.max_stale = Some(Duration::from_secs(f.jwks_max_stale_secs));
             let discovery_url = f.discovery_url.clone().unwrap_or_else(|| {
                 format!(
                     "{}/.well-known/openid-configuration",
@@ -401,13 +390,13 @@ impl OAuth2 {
                 fixed_jwks_url: None,
                 bearer_file: None,
                 ca_file: f.ca_file.clone(),
-                refresh: Duration::from_secs(f.jwks_refresh_secs.max(1)),
-                min_refetch: Duration::from_secs(f.jwks_min_refetch_secs),
+                refresh_secs: f.jwks_refresh_secs,
+                min_refetch_secs: f.jwks_min_refetch_secs,
+                max_stale_secs: f.jwks_max_stale_secs,
+                learn_name: false,
                 insecure,
             };
-            let source =
-                issuer::Source::new(Arc::new(trusted), config, generation.clone()).map_err(ctx)?;
-            let source = Arc::new(source);
+            let source = issuer::Source::new(rules, config, generation.clone()).map_err(ctx)?;
             #[cfg(feature = "oauth2-introspection")]
             if f.client_id.is_some() {
                 introspector =
@@ -415,6 +404,12 @@ impl OAuth2 {
             }
             sources.push(source);
         }
+        #[cfg(feature = "k8s")]
+        if let Some(k) = kubernetes {
+            sources.push(k8s::source(k, generation.clone(), insecure)?);
+        }
+        #[cfg(not(feature = "k8s"))]
+        let _ = kubernetes;
         let issuers = sources.iter().map(|s| s.trusted.clone()).collect();
         Ok(OAuth2 {
             validator: Validator::new(issuers, skew_secs),
@@ -423,17 +418,6 @@ impl OAuth2 {
             #[cfg(feature = "oauth2-introspection")]
             introspector,
         })
-    }
-
-    /// Add more loaders, for example the Kubernetes issuer.
-    pub fn extend(&mut self, more: Vec<Arc<issuer::Source>>) {
-        self.sources.extend(more);
-        let issuers = self.sources.iter().map(|s| s.trusted.clone()).collect();
-        self.validator = Validator::new(issuers, self.validator.skew as u64);
-    }
-
-    pub fn generation_handle(&self) -> Arc<AtomicU64> {
-        self.generation.clone()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -473,7 +457,7 @@ impl OAuth2 {
             }
             return;
         }
-        let Some(trusted) = self.validator.issuer_of(token) else {
+        let Some(source) = self.validator.issuer_of(token).map(|i| &self.sources[i]) else {
             return;
         };
         let Ok(header) = jsonwebtoken::decode_header(token) else {
@@ -482,18 +466,11 @@ impl OAuth2 {
         let Some(kid) = header.kid else {
             return;
         };
-        let known = trusted.keys().is_ok_and(|k| k.has_kid(&kid));
-        if known {
+        if source.trusted.keys().is_ok_and(|k| k.has_kid(&kid)) {
             return;
         }
-        if let Some(source) = self
-            .sources
-            .iter()
-            .find(|s| Arc::ptr_eq(&s.trusted, trusted))
-        {
-            let _ = tokio::time::timeout(Duration::from_secs(5), source.refresh_for_unknown_kid())
-                .await;
-        }
+        let _ =
+            tokio::time::timeout(Duration::from_secs(5), source.refresh_for_unknown_kid()).await;
     }
 
     /// Check a token. A JWT verifies locally. An opaque token needs a cached introspection
@@ -566,7 +543,7 @@ mod tests {
 
     fn issuer(rules: IssuerRules, keys: &[&TestKey]) -> Arc<TrustedIssuer> {
         let set: Vec<_> = keys.iter().map(|k| k.jwk.clone()).collect();
-        let i = Arc::new(TrustedIssuer::new(rules));
+        let i = Arc::new(TrustedIssuer::new(rules, Duration::MAX));
         i.set_keys(KeySet::parse(json!({ "keys": set }).to_string().as_bytes()));
         i
     }
