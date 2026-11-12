@@ -19,6 +19,7 @@
 //! stays bounded.
 
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::BytesMut;
@@ -28,7 +29,7 @@ use futures::future::BoxFuture;
 use futures::stream::{FuturesOrdered, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
 use tracing::Instrument;
 
 use super::order::{KeyOrder, Keys, WaitFor};
@@ -63,13 +64,13 @@ impl Slot {
 async fn flush<S: AsyncWrite + Unpin>(
     stream: &mut S,
     out: &mut BytesMut,
-    hard_stop: &CancellationToken,
+    stop: Pin<&mut WaitForCancellationFuture<'_>>,
 ) -> bool {
     if out.is_empty() {
         return true;
     }
     let sent = tokio::select! {
-        _ = hard_stop.cancelled() => false,
+        _ = stop => false,
         written = stream.write_all(out) => written.is_ok(),
     };
     out.clear();
@@ -224,6 +225,10 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     local_addr: Option<SocketAddr>,
 ) {
     let _guard = node.track_connection();
+    // One future for the whole connection. A new `cancelled()` at each wait registers with the
+    // token and leaves it again, a large share of the CPU of a GET.
+    let stop = hard_stop.cancelled();
+    tokio::pin!(stop);
     let cfg = &node.config;
     // The parser limit is looser than the value limit so a moderately oversize value gets a clean
     // `value too large` error. A hugely oversize one still closes the connection.
@@ -286,20 +291,20 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
                     break;
                 }
             }
-            if p.out.len() >= FLUSH_BYTES && !flush(&mut stream, &mut p.out, &hard_stop).await {
+            if p.out.len() >= FLUSH_BYTES && !flush(&mut stream, &mut p.out, stop.as_mut()).await {
                 return;
             }
         }
         if p.finished {
-            flush(&mut stream, &mut p.out, &hard_stop).await;
+            flush(&mut stream, &mut p.out, stop.as_mut()).await;
             return;
         }
         if p.pending.is_empty() {
-            if !flush(&mut stream, &mut p.out, &hard_stop).await || p.closing {
+            if !flush(&mut stream, &mut p.out, stop.as_mut()).await || p.closing {
                 return;
             }
             tokio::select! {
-                _ = hard_stop.cancelled() => return,
+                _ = &mut stop => return,
                 read = stream.read_buf(parser.buffer()) => match read {
                     Ok(0) | Err(_) => return,
                     Ok(_) => {}
@@ -309,7 +314,7 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         }
         let can_read = starved && !p.closing && p.pending.len() < max_pipeline;
         tokio::select! {
-            _ = hard_stop.cancelled() => return,
+            _ = &mut stop => return,
             Some(slot) = p.pending.next() => {
                 p.encode(slot);
                 // Drain every reply that is already done before deciding to flush.
@@ -317,7 +322,7 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
                     p.encode(slot);
                 }
                 if (p.pending.is_empty() || p.out.len() >= FLUSH_BYTES || p.finished)
-                    && !flush(&mut stream, &mut p.out, &hard_stop).await
+                    && !flush(&mut stream, &mut p.out, stop.as_mut()).await
                 {
                     return;
                 }
