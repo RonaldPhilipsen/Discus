@@ -227,6 +227,28 @@ impl Dispatch {
             Dispatch::Pending(f) => f.await,
         }
     }
+
+    /// Run `f` on the reply once it is ready. `ctx` is cloned only when the reply is pending.
+    pub fn then<T: Send + Sync + 'static>(
+        self,
+        ctx: &Arc<T>,
+        f: impl FnOnce(&T, &mut Reply) + Send + 'static,
+    ) -> Dispatch {
+        match self {
+            Dispatch::Ready(mut reply) => {
+                f(ctx, &mut reply);
+                Dispatch::Ready(reply)
+            }
+            Dispatch::Pending(fut) => {
+                let ctx = ctx.clone();
+                Dispatch::Pending(Box::pin(async move {
+                    let mut reply = fut.await;
+                    f(&ctx, &mut reply);
+                    reply
+                }))
+            }
+        }
+    }
 }
 
 /// Check a command on the entry node: lookup, arity, authentication, and authorization.
@@ -493,17 +515,14 @@ fn single(
             .required(SetKey::of(&job.cmd[1]), std::time::Instant::now),
         _ => None,
     };
-    let readonly = redirect::applies(job.redirect, &hop).then_some(job.readonly);
     // Only a write, or a read that must see an earlier write, changes the write set.
     let key = (tracked && (write || need.is_some())).then(|| SetKey::of(&job.cmd[1]));
-    let dispatch = single_planned(
-        node, job.spec, job.cmd, owners, hop, write, job.rr, need, readonly, route,
-    );
+    let dispatch = single_planned(node, job, owners, hop, write, need, route);
     let (Some(writes), Some(key)) = (writes, key) else {
         return dispatch;
     };
     // The write set changes before the key order releases the next command on this key.
-    let note = move |writes: &Writes, reply: &Reply| {
+    dispatch.then(writes, move |writes, reply| {
         let mut w = writes.lock();
         match (write, reply.applied) {
             (true, Some(v)) if !matches!(reply.value, Value::Error(_)) => {
@@ -512,36 +531,26 @@ fn single(
             (false, _) if need.is_some() => w.observed(key, reply.observed, reply.settled),
             _ => {}
         }
-    };
-    match dispatch {
-        Dispatch::Ready(reply) => {
-            note(writes, &reply);
-            Dispatch::Ready(reply)
-        }
-        Dispatch::Pending(f) => {
-            let writes = writes.clone();
-            Dispatch::Pending(Box::pin(async move {
-                let reply = f.await;
-                note(&writes, &reply);
-                reply
-            }))
-        }
-    }
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn single_planned(
     node: &Arc<Node>,
-    spec: &'static CommandSpec,
-    cmd: Command,
+    job: Job,
     owners: Owners,
     mut hop: Hop,
     write: bool,
-    rr: u64,
     need: Option<Version>,
-    redirect: Option<bool>,
     route: Span,
 ) -> Dispatch {
+    let Job {
+        cmd,
+        spec,
+        rr,
+        redirect,
+        readonly,
+    } = job;
+    let redirect = redirect::applies(redirect, &hop).then_some(readonly);
     let key: &[u8] = &cmd[1];
     let plan = route.in_scope(|| {
         let forward = || {
@@ -568,20 +577,8 @@ fn single_planned(
         Plan::Moved(moved) => return Dispatch::Ready(Reply::error(moved)),
         Plan::Local if need.is_some() || hop.track => {
             let owned = cmd[1].clone();
-            return match local_acked(node, spec, cmd) {
-                Dispatch::Ready(mut reply) => {
-                    track_here(node, &owned, &mut reply);
-                    Dispatch::Ready(reply)
-                }
-                Dispatch::Pending(f) => {
-                    let node = node.clone();
-                    Dispatch::Pending(Box::pin(async move {
-                        let mut reply = f.await;
-                        track_here(&node, &owned, &mut reply);
-                        reply
-                    }))
-                }
-            };
+            return local_acked(node, spec, cmd)
+                .then(node, move |node, reply| track_here(node, &owned, reply));
         }
         Plan::Local => return serve_here(node, spec, cmd, write, &owners),
         Plan::Forward(targets) => targets,

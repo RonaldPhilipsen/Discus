@@ -14,10 +14,11 @@ use discus_placement::{
 };
 use discus_resp::{Protocol, Value};
 use discus_store::{Slot, Store, StoreConfig, SystemClock, HASH_SEED};
+use discus_telemetry::attrs::TopologyCommand;
 use discus_transport::TransportError;
 use parking_lot::{RwLock, RwLockReadGuard};
 
-use crate::cluster::topology::{self, TopologyKind};
+use crate::cluster::topology;
 use crate::cluster::writeset::{WriteSet, WriteSetBudget, WriteSetLimits};
 use crate::cluster::ClusterLink;
 use crate::command::CommandError;
@@ -331,11 +332,11 @@ impl Node {
     /// `CLUSTER INFO`, which then reports `cluster_state:fail` and is not cached.
     pub fn topology(
         &self,
-        kind: TopologyKind,
+        kind: TopologyCommand,
         protocol: Protocol,
     ) -> Result<Arc<Value>, CommandError> {
         let normal = self.is_normal();
-        if !normal && kind != TopologyKind::Info {
+        if !normal && kind != TopologyCommand::Info {
             return Err(CommandError::ClusterTryAgain);
         }
         let epoch = self.epochs().current().clone();
