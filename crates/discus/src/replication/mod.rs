@@ -748,20 +748,21 @@ impl Replicator {
     }
 
     /// Replay the hints of `peer` in HLC order, one acknowledged batch at a time (spec section
-    /// 9). The first batch names the refill buckets of lost hints. Only a peer that the epoch
-    /// lists as `NORMAL` gets a replay. Returns false when a batch failed.
+    /// 9). The first batch names the refill buckets of lost hints, and the peer discards its
+    /// copies there. Then [`Self::refill`] sends this node's entries of those buckets again.
+    /// Only a peer that the epoch lists as `NORMAL` gets a replay. Returns false when a batch
+    /// failed. The buckets stay lost until their refill ends, so the next replay discards and
+    /// refills them again.
     async fn replay(&self, node: &Arc<Node>, peer: NodeId) -> bool {
         if !node.epochs().current().is_normal(peer) {
             return false;
         }
-        let mut first = true;
+        let lost = self.hints.lock().lost(peer);
+        let mut discard = lost.buckets.clone();
         loop {
-            let (entries, lost) = {
-                let h = self.hints.lock();
-                (h.batch(peer, REPLAY_BATCH), h.lost(peer))
-            };
-            if entries.is_empty() && (lost.buckets.is_empty() || !first) {
-                return true;
+            let entries = self.hints.lock().batch(peer, REPLAY_BATCH);
+            if entries.is_empty() && discard.is_empty() {
+                break;
             }
             let sent: Vec<(Bytes, Version)> = entries
                 .iter()
@@ -769,29 +770,64 @@ impl Replicator {
                 .collect();
             let mut batch = Batch::new(node.epoch_id());
             batch.entries = entries;
-            if first {
-                batch.discard = lost.buckets.clone();
-            }
+            batch.discard = std::mem::take(&mut discard);
             match self.send(node, peer, Message::HintReplay(batch)).await {
                 Ok(_) => {
-                    {
-                        let mut h = self.hints.lock();
-                        h.confirm(peer, &sent);
-                        if first {
-                            h.clear_lost(peer, &lost);
-                        }
-                    }
+                    self.hints.lock().confirm(peer, &sent);
                     self.sync_charge();
                     if let Some(label) = crate::telemetry::node_label(peer) {
                         discus_telemetry::global().hint_replayed(&label, sent.len() as u64);
                     }
-                    first = false;
                 }
                 Err(e) => {
                     tracing::debug!(%peer, error = %e, "a hint replay batch failed");
                     return false;
                 }
             }
+        }
+        if lost.buckets.is_empty() {
+            return true;
+        }
+        if !self.refill(node, peer, &lost.buckets).await {
+            return false;
+        }
+        self.hints.lock().clear_lost(peer, &lost);
+        true
+    }
+
+    /// Send `peer` the entries of `buckets` that this node is the primary of and `peer` owns,
+    /// after `peer` discarded its copies there. A read refills a discarded key only when it
+    /// misses on `peer`, and with primary reads none does. Tombstones go too, so a delete that
+    /// the lost hints carried stays a delete.
+    async fn refill(&self, node: &Arc<Node>, peer: NodeId, buckets: &[u8]) -> bool {
+        let mut wanted = [false; 256];
+        for b in buckets {
+            wanted[usize::from(*b)] = true;
+        }
+        let rf = self.settings.rf;
+        let mut cursor = 0;
+        loop {
+            let epoch = node.epochs().current().clone();
+            let (next, entries) = self.store.scan_entries(cursor, REPLAY_BATCH, |k, _| {
+                if !wanted[usize::from(refill_bucket(k))] {
+                    return false;
+                }
+                let owners = epoch.owners(k, rf);
+                owners.first() == Some(&self.id) && owners.contains(&peer)
+            });
+            drop(epoch);
+            if !entries.is_empty() {
+                let mut batch = Batch::new(node.epoch_id());
+                batch.entries = entries;
+                if let Err(e) = self.send(node, peer, Message::HintReplay(batch)).await {
+                    tracing::debug!(%peer, error = %e, "a refill batch failed");
+                    return false;
+                }
+            }
+            if next == 0 {
+                return true;
+            }
+            cursor = next;
         }
     }
 

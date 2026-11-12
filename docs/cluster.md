@@ -682,8 +682,9 @@ Hints have these bounds:
 - An age of the tombstone TTL.
 
 A bound evicts the oldest hints. An evicted hint is lost. The first replay then names the part of
-the key space of each lost hint. The secondary drops its copies of those keys, and they refill
-from the primary as misses.
+the key space of each lost hint. The secondary drops its copies of those keys. After the hints, the
+primary sends its entries of those parts again, so the secondary has every copy back without a
+read. If the replay fails before the end, the next replay drops and sends those parts again.
 
 The primary drops the hints of a secondary that becomes `DEAD` or no longer owns the key, and
 queues those keys for their current owners. Hints live only in the memory of the primary.

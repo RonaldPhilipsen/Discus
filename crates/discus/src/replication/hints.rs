@@ -3,7 +3,8 @@
 //! Hints live per target and key, so they coalesce to the latest entry of a key. Every bound
 //! evicts the oldest hint first: the entry cap and the byte cap of a target, the global cap, the
 //! maximum age, and memory pressure. An evicted hint is lost, so its refill bucket is marked for
-//! the target, and the first replay batch tells the target to discard those buckets.
+//! the target, and the first replay batch tells the target to discard those buckets. The replay
+//! then sends the primary's entries of those buckets again.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{Duration, Instant};
