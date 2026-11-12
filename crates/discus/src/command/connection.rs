@@ -465,7 +465,7 @@ mod tests {
                 Route::Single { .. } => (1, 1, 1),
                 Route::MultiRead { .. } | Route::MultiWrite { pairs: false } => (1, -1, 1),
                 Route::MultiWrite { pairs: true } => (1, -1, 2),
-        Route::Rename => (1, 2, 1),
+                Route::Rename => (1, 2, 1),
                 _ => (0, 0, 0),
             };
             assert_eq!(positions(&command_entry(spec)), want, "{name}");

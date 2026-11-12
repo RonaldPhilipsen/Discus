@@ -1,7 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
-//! Authelia in a container, with its session store on a three-node cluster. Spec: "Testing" in
-//! docs/superpowers/specs/2026-11-09-authelia-session-store-design.md.
+//! Authelia in a container, with its session store on a three-node cluster (spec section 19.1).
 
 mod common;
 
