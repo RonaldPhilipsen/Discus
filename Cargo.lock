@@ -998,6 +998,7 @@ dependencies = [
  "discus-transport",
  "discus-wire",
  "fastrand",
+ "foldhash",
  "futures",
  "hashlink",
  "ipnet",

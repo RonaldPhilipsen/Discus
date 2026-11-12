@@ -66,8 +66,12 @@ impl CommandSpec {
     }
 }
 
-fn registry() -> &'static HashMap<&'static str, &'static CommandSpec> {
-    static REGISTRY: OnceLock<HashMap<&'static str, &'static CommandSpec>> = OnceLock::new();
+/// Keyed by the upper-case name bytes, so a lookup needs no UTF-8 check. The names are fixed, so
+/// the map needs no defense against crafted keys and uses a fast hash.
+type Registry = HashMap<&'static [u8], &'static CommandSpec, foldhash::fast::FixedState>;
+
+fn registry() -> &'static Registry {
+    static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(|| {
         [
             super::connection::COMMANDS,
@@ -79,14 +83,14 @@ fn registry() -> &'static HashMap<&'static str, &'static CommandSpec> {
         ]
         .into_iter()
         .flatten()
-        .map(|spec| (spec.name, spec))
+        .map(|spec| (spec.name.as_bytes(), spec))
         .collect()
     })
 }
 
 /// The names of every supported command, sorted.
 pub fn names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = registry().keys().copied().collect();
+    let mut names: Vec<&'static str> = registry().values().map(|spec| spec.name).collect();
     names.sort_unstable();
     names
 }
@@ -100,7 +104,7 @@ pub fn lookup(name: &[u8]) -> Option<&'static CommandSpec> {
     let upper = buf.get_mut(..name.len())?;
     upper.copy_from_slice(name);
     upper.make_ascii_uppercase();
-    registry().get(std::str::from_utf8(upper).ok()?).copied()
+    registry().get(&*upper).copied()
 }
 
 /// Names that Discus recognizes and rejects on purpose.
