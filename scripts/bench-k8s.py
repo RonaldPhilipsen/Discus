@@ -273,8 +273,9 @@ def deploy_cluster(name, engine, replicas, n):
     return {"targets": [(ips[0], 6379)], "cluster": True, "ips": ips}
 
 
-def deploy_discus(name, n, tag, tmp, cluster_mode=False):
-    """With cluster_mode, memtier runs as a Redis Cluster client against the redirect listener."""
+def deploy_discus(name, n, tag, tmp, cluster_mode=False, pyroscope_url=None):
+    """With cluster_mode, memtier runs as a Redis Cluster client against the redirect listener.
+    With pyroscope_url, the nodes push CPU profiles. The image needs the pyroscope feature."""
     release = "discus"
     run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
          "-days", "2", "-subj", "/CN=bench CA", "-keyout", f"{tmp}/ca.key", "-out", f"{tmp}/ca.crt"])
@@ -294,7 +295,9 @@ def deploy_discus(name, n, tag, tmp, cluster_mode=False):
          "--set", "resources.requests.memory=2Gi", "--set", "resources.limits.memory=2Gi",
          "--set-string", f"nodeSelector.kubernetes\\.io/hostname={NODE}",
          "--set", "podDisruptionBudget.enabled=false",
-         "--set", f"clusterClients.enabled={'true' if cluster_mode else 'false'}"], timeout=400)
+         "--set", f"clusterClients.enabled={'true' if cluster_mode else 'false'}",
+         *(["--set-string", f"pyroscope.url={pyroscope_url}"] if pyroscope_url else [])],
+        timeout=400)
     out = json.loads(kc("get", "pods", "-l", "app.kubernetes.io/name=discus", "-o", "json"))
     ips = [p["status"]["podIP"] for p in out["items"] if p["metadata"].get("deletionTimestamp") is None]
 
@@ -454,7 +457,8 @@ def run_system(name, args, tmp, out):
     elif kind in ("cluster0", "cluster1", "cluster2"):
         info = deploy_cluster(short, engine, int(kind[-1]), n)
     else:
-        info = deploy_discus(short, n, rest[0] if rest else DISCUS_TAG, tmp, kind == "discus-cluster")
+        info = deploy_discus(short, n, rest[0] if rest else DISCUS_TAG, tmp, kind == "discus-cluster",
+                             args.pyroscope_url)
     prefill(info)
     verify(name, kind, info, "after-prefill", out)
     for rep in range(args.reps):
@@ -479,11 +483,14 @@ def run_system(name, args, tmp, out):
                 samples = []
                 th = top_sample(args.duration * 0.6, samples)
                 before = cfs()
+                # The time window selects this run in Pyroscope.
+                start_ms = time.time_ns() // 1_000_000
                 parts = one(info, targets, ratio, pipe, args.duration, t, c)
+                end_ms = time.time_ns() // 1_000_000
                 throttle = cfs_delta(before, cfs())
                 th.join()
                 rec = {"system": name, "workload": w, "variant": variant, "rep": rep, "threads": t,
-                       "clients": c,
+                       "clients": c, "start_ms": start_ms, "end_ms": end_ms,
                        "duration": args.duration, "top": samples[0] if samples else "",
                        "cfs": throttle, **summarize(parts)}
                 with open(out, "a") as f:
@@ -505,6 +512,10 @@ def main():
                     help="memtier threads in all. With several targets, each target gets an equal part.")
     ap.add_argument("--connections", type=int, default=96,
                     help="client connections per node. Every setup gets this number times its node count.")
+    ap.add_argument("--pyroscope-url",
+                    help="Discus nodes push CPU profiles here, for example "
+                         "http://pyroscope.observability.svc.cluster.local:4040. "
+                         "The image must be built with --build-arg FEATURES=pyroscope.")
     args = ap.parse_args()
     ensure_tools()
     with tempfile.TemporaryDirectory() as tmp:

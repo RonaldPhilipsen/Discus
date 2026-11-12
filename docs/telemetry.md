@@ -246,3 +246,64 @@ Each place in the code that writes log lines can write at most `--log-rate-limit
 The default is 100. The node drops the lines over the limit and counts them in
 `discus.logs.suppressed`. A noisy place in the code does not stop other places from logging. Set
 `--log-rate-limit 0` to turn the limit off.
+
+## CPU profiles
+
+Discus can push CPU profiles to a Pyroscope server. The profiler runs inside the node. It samples
+the stacks of all threads and uploads a pprof profile every 10 seconds.
+
+Profiling needs the `pyroscope` build feature. The default build and the published images do not
+have it, because the sampling costs CPU. To build an image with it, run this command in the
+repository root:
+
+```sh
+docker build --build-arg FEATURES=pyroscope -t discus:pyroscope .
+```
+
+Start the node with `--pyroscope-url`:
+
+```sh
+discus --pyroscope-url http://pyroscope.observability:4040
+```
+
+If the binary lacks the `pyroscope` feature, `--pyroscope-url` stops the start. The node prints this
+message and exits with code 2:
+
+```text
+discus: profiling is enabled (--pyroscope-url) but this binary was built without the "pyroscope" feature
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--pyroscope-url` | none | The Pyroscope server. Profiling is off without it. |
+| `--pyroscope-service-name` | `discus` | The `service_name` label of the profiles. |
+| `--pyroscope-sample-rate` | `100` | CPU samples per second, from 1 to 1000. |
+
+Each profile has the label `node_id`. In Kubernetes, it also has the labels `namespace`, `pod` and
+`node` from the variables of the Helm chart.
+
+The profiler writes samples to a temporary file in `$TMPDIR`, or in `/tmp` when `$TMPDIR` is not
+set. The release image has no `/tmp`, and the chart makes the root file system read-only. If the
+profiler cannot create the file, the node prints `cannot start the profiler` and exits with code 2.
+
+The profiler also needs system CA certificates, also for an `http://` URL, because its HTTP client
+loads them at start. The release image has none. An image built with `FEATURES=pyroscope` gets the
+CA bundle of the Debian build image. If the node finds no certificates, it prints
+`cannot start the profiler` and exits with code 2.
+
+To turn on profiling with the chart, set `pyroscope.url` and use an image with the feature. The
+chart then passes `--pyroscope-url` and mounts an `emptyDir` volume at `/tmp`. The value
+`pyroscope.tmpSizeLimit` sets its size limit, which is `64Mi` by default.
+
+```sh
+helm upgrade <release> oci://ghcr.io/ronaldphilipsen/charts/discus \
+  --reuse-values \
+  --version <version> \
+  --set image.repository=<registry>/discus \
+  --set image.tag=pyroscope \
+  --set pyroscope.url=http://pyroscope.observability:4040
+```
+
+The benchmark script `scripts/bench-k8s.py` has the option `--pyroscope-url`, which sets
+`pyroscope.url`. Each result line has `start_ms` and `end_ms`. Use them to select the time range of
+one run in Pyroscope.

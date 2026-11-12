@@ -364,6 +364,9 @@ pub struct Config {
     /// Telemetry flags (spec §15.4).
     #[command(flatten)]
     pub telemetry: crate::telemetry::TelemetryArgs,
+    /// Profiling flags.
+    #[command(flatten)]
+    pub profiling: crate::profiling::ProfilingArgs,
 }
 
 impl Config {
