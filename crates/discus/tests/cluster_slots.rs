@@ -737,7 +737,7 @@ fn key_owned(on: &GossipNode, primary: NodeId, secondary: NodeId, prefix: &str) 
     let epoch = on.node.epochs().current().clone();
     (0..)
         .map(|i| format!("{prefix}{i}"))
-        .find(|k| epoch.owners(k.as_bytes(), 2) == [primary, secondary])
+        .find(|k| epoch.owners(k.as_bytes(), 2)[..] == [primary, secondary])
         .unwrap()
 }
 

@@ -69,7 +69,7 @@ fn bootstrap_epoch_is_generation_one_from_self() {
     assert_eq!(e.cluster_id(), CLUSTER);
     assert_eq!(e.members(), &[member(9)]);
     assert_eq!(e.primary(b"k"), Some(NodeId::from_u128(9)));
-    assert_eq!(e.owners(b"k", 3), vec![NodeId::from_u128(9)]);
+    assert_eq!(e.owners(b"k", 3)[..], [NodeId::from_u128(9)]);
 }
 
 #[test]

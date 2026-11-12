@@ -35,8 +35,12 @@ fn runs(epoch: &Epoch, rf: usize) -> Vec<Run> {
         let start = range * SLOTS_PER_RANGE;
         let end = start + SLOTS_PER_RANGE - 1;
         match out.last_mut() {
-            Some(last) if last.end + 1 == start && last.owners == owners => last.end = end,
-            _ => out.push(Run { start, end, owners }),
+            Some(last) if last.end + 1 == start && last.owners[..] == owners[..] => last.end = end,
+            _ => out.push(Run {
+                start,
+                end,
+                owners: owners.to_vec(),
+            }),
         }
     }
     out

@@ -37,7 +37,7 @@ pub enum EpochError {
     Unknown(EpochId),
 }
 
-/// The owners of a key in one epoch, primary first, from [`Epoch::owner_set`]. Up to four
+/// The owners of a key in one epoch, primary first, from [`Epoch::owners`]. Up to four
 /// owners are kept inline, so a lookup neither allocates nor touches a reference count.
 pub type Owners = SmallVec<[NodeId; 4]>;
 
@@ -141,7 +141,7 @@ impl Epoch {
     }
 
     /// The owner set of `key` in this epoch. The first owner is the primary.
-    pub fn owners(&self, key: &[u8], rf: usize) -> Vec<NodeId> {
+    pub fn owners(&self, key: &[u8], rf: usize) -> Owners {
         self.range_owners(range_of(slot(key)), rf)
     }
 
@@ -151,17 +151,17 @@ impl Epoch {
     }
 
     /// The owners of `slot`, primary first. Every slot of a range has the owners of that range.
-    pub fn slot_owners(&self, slot: u16, rf: usize) -> Vec<NodeId> {
+    pub fn slot_owners(&self, slot: u16, rf: usize) -> Owners {
         self.range_owners(range_of(slot), rf)
     }
 
     /// The owners of `range`, primary first. The owner list for a smaller `rf` is a prefix of the
     /// longer one, so the cached table answers every `rf` it covers. A larger `rf` is computed
     /// directly.
-    pub fn range_owners(&self, range: u16, rf: usize) -> Vec<NodeId> {
+    pub fn range_owners(&self, range: u16, rf: usize) -> Owners {
         match self.table_owners(range, rf) {
-            Some(ids) => ids.to_vec(),
-            None => hrw::owners(&range.to_be_bytes(), &self.members, rf),
+            Some(ids) => Owners::from_slice(ids),
+            None => hrw::owners(&range.to_be_bytes(), &self.members, rf).into(),
         }
     }
 
@@ -173,15 +173,6 @@ impl Epoch {
             let ids = table.owner_ids(range);
             &ids[..ids.len().min(rf)]
         })
-    }
-
-    /// [`Epoch::owners`] without a heap allocation for a small replication factor.
-    pub fn owner_set(&self, key: &[u8], rf: usize) -> Owners {
-        let range = range_of(slot(key));
-        match self.table_owners(range, rf) {
-            Some(ids) => Owners::from_slice(ids),
-            None => hrw::owners(&range.to_be_bytes(), &self.members, rf).into(),
-        }
     }
 
     /// The ranges whose ordered owner list differs between the two epochs.
