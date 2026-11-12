@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use discus_placement::{
     hlc, Adopt, Clock, ClusterId, Epoch, EpochError, EpochHistory, EpochId, Hlc, Member,
@@ -60,6 +61,9 @@ pub struct Node {
     /// The clock that stamps every write.
     pub hlc: Hlc,
     epochs: Arc<RwLock<EpochHistory>>,
+    /// The current epoch of `epochs`, for reads on the command path without the lock. It changes
+    /// only under the write lock, after the work that a reader must see with the new epoch.
+    current: ArcSwap<Epoch>,
     pub started_at: Instant,
     pub store: Arc<Store>,
     pub security: Arc<Security>,
@@ -245,6 +249,7 @@ impl Node {
             config,
             id,
             hlc: Hlc::new(id, hlc_clock),
+            current: ArcSwap::new(epochs.current().clone()),
             epochs: Arc::new(RwLock::new(epochs)),
             started_at: Instant::now(),
             store,
@@ -421,6 +426,7 @@ impl Node {
         *epochs = EpochHistory::new(epoch);
         tracing::info!(epoch = %id, cluster = %epochs.cluster_id(), "took a new cluster history");
         crate::telemetry::record_epoch(discus_telemetry::global(), epochs.current());
+        self.current.store(epochs.current().clone());
         drop(epochs);
         if let Some(link) = self.link() {
             link.reset();
@@ -525,7 +531,7 @@ impl Node {
         to: NodeId,
     ) -> Result<(&ClusterLink, SocketAddr, Arc<Epoch>), String> {
         let link = self.link().ok_or("this node has no transport")?;
-        let epoch = self.epochs().current().clone();
+        let epoch = self.current_epoch();
         let addr = epoch
             .member(to)
             .map(|m| m.rpc_addr)
@@ -582,6 +588,7 @@ impl Node {
         }
         // Adoptions run on the control lane and on the data runtime, so the send happens under
         // the lock to keep the work in adoption order.
+        self.current.store(new.clone());
         let unsent = match self.epoch_work.get() {
             Some(tx) => tx.send((old, new)).err().map(|e| e.0),
             None => Some((old, new)),
@@ -649,7 +656,7 @@ impl Node {
     }
 
     pub fn epoch_id(&self) -> EpochId {
-        self.epochs.read().current().id()
+        self.current.load().id()
     }
 
     /// The owner set of `key` in the previous epoch, if the history holds one.
@@ -703,10 +710,14 @@ impl Node {
 
     /// The owner set of `key` in the current epoch with the configured replication factor.
     pub fn owners(&self, key: &[u8]) -> Owners {
-        self.epochs
-            .read()
-            .current()
+        self.current
+            .load()
             .owner_set(key, self.config.replication_factor)
+    }
+
+    /// The current epoch, without the lock of the history.
+    pub fn current_epoch(&self) -> Arc<Epoch> {
+        self.current.load_full()
     }
 
     /// A fresh HLC version for one write command. A clock pinned at its drift bound refuses, and
