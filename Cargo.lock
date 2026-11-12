@@ -991,6 +991,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.3",
  "proptest",
+ "smallvec",
  "thiserror 2.0.21",
  "uhlc",
  "xxhash-rust",

@@ -130,3 +130,25 @@ fn a_write_that_changes_nothing_keeps_the_version() {
     assert!(applied.is_some());
     assert_eq!(Some(version(&node, "k")), applied);
 }
+
+#[test]
+fn a_replicated_batch_drops_only_the_entries_too_far_ahead() {
+    let node = Arc::new(node::<4>());
+    let replicator = discus::replication::Replicator::new(&node);
+    let entry = |at_ms: u64| discus_store::Entry {
+        version: Version::new(ms(at_ms), discus_placement::NodeId::random()),
+        ..discus_store::Entry::new(discus_store::Value::Str(Bytes::from_static(b"v")), None)
+    };
+    let entries = vec![
+        (Bytes::from_static(b"near"), entry(START + 10)),
+        (Bytes::from_static(b"far"), entry(START + 5_000)),
+        (Bytes::from_static(b"old"), entry(START - 10)),
+    ];
+    assert_eq!(replicator.apply_entries(&node, entries), 2);
+    assert!(node.store.entry(b"near").is_some());
+    assert!(node.store.entry(b"old").is_some());
+    assert!(node.store.entry(b"far").is_none());
+    run(&node, &["SET", "k", "v"]);
+    let stamped = version(&node, "k").time();
+    assert!(stamped > ms(START + 10) && stamped < ms(START + 1_000));
+}

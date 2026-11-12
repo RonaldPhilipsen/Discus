@@ -39,7 +39,7 @@ fn node_bootstraps_epoch_one_from_itself() {
 fn a_single_node_owns_every_key() {
     let n = node(&[]);
     for i in 0..100 {
-        assert_eq!(n.owners(format!("key:{i}").as_bytes()), vec![n.id]);
+        assert_eq!(n.owners(format!("key:{i}").as_bytes())[..], [n.id]);
     }
 }
 

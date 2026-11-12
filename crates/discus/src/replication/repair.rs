@@ -23,14 +23,18 @@ pub fn sources(node: &Node, key: &[u8], write: bool, owners: &[NodeId]) -> Vec<N
     let Some(replicator) = node.replicator() else {
         return Vec::new();
     };
+    // Only a replica read asks the other owners. Every other command asks only the handoff
+    // sources, so without an incomplete handoff the answer is empty and the store lookup is
+    // skipped.
+    let replica_read = !write && owners.first() != Some(&node.id) && owners.contains(&node.id);
+    if !replica_read && !replicator.handoff_pending() {
+        return Vec::new();
+    }
     if node.store.version(key).is_some() {
         return Vec::new();
     }
     let mut out = replicator.fallback_sources(node, key, owners);
-    if write {
-        return out;
-    }
-    if owners.first() != Some(&node.id) && owners.contains(&node.id) {
+    if replica_read {
         for &o in owners {
             if o != node.id && !out.contains(&o) {
                 out.push(o);

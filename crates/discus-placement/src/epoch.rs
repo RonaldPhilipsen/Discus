@@ -3,6 +3,8 @@
 use std::fmt;
 use std::sync::OnceLock;
 
+use smallvec::SmallVec;
+
 use crate::table::{RangeSet, SlotTable};
 use crate::{hrw, range_of, slot, ClusterId, Member, MemberState, NodeId, RANGES};
 
@@ -34,6 +36,10 @@ pub enum EpochError {
     #[error("epoch {0} is not in the history")]
     Unknown(EpochId),
 }
+
+/// The owners of a key in one epoch, primary first, from [`Epoch::owner_set`]. Up to four
+/// owners are kept inline, so a lookup neither allocates nor touches a reference count.
+pub type Owners = SmallVec<[NodeId; 4]>;
 
 /// One epoch: its identity, its cluster, and its member list sorted by node ID.
 #[derive(Debug)]
@@ -153,11 +159,28 @@ impl Epoch {
     /// longer one, so the cached table answers every `rf` it covers. A larger `rf` is computed
     /// directly.
     pub fn range_owners(&self, range: u16, rf: usize) -> Vec<NodeId> {
+        match self.table_owners(range, rf) {
+            Some(ids) => ids.to_vec(),
+            None => hrw::owners(&range.to_be_bytes(), &self.members, rf),
+        }
+    }
+
+    /// The owners of `range` borrowed from the slot table, or `None` when the table does not
+    /// cover `rf`.
+    fn table_owners(&self, range: u16, rf: usize) -> Option<&[NodeId]> {
         let table = self.table(rf);
-        if rf <= table.rf() || table.lists_all_normal() {
-            table.owners(range).take(rf).map(|m| m.id).collect()
-        } else {
-            hrw::owners(&range.to_be_bytes(), &self.members, rf)
+        (rf <= table.rf() || table.lists_all_normal()).then(|| {
+            let ids = table.owner_ids(range);
+            &ids[..ids.len().min(rf)]
+        })
+    }
+
+    /// [`Epoch::owners`] without a heap allocation for a small replication factor.
+    pub fn owner_set(&self, key: &[u8], rf: usize) -> Owners {
+        let range = range_of(slot(key));
+        match self.table_owners(range, rf) {
+            Some(ids) => Owners::from_slice(ids),
+            None => hrw::owners(&range.to_be_bytes(), &self.members, rf).into(),
         }
     }
 

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use discus_placement::{ClusterId, EpochId, NodeId, Version};
+use discus_placement::{ClusterId, EpochId, NodeId, Owners, Version};
 use discus_resp::{Command, Value};
 use discus_transport::Transport;
 use discus_wire::TraceContext;
@@ -27,7 +27,8 @@ use crate::command::{self, CommandError, CommandSpec};
 use crate::node::{ConnState, Node};
 use crate::telemetry;
 use crate::Config;
-use route::{keys_of, Keys, Route};
+use route::Route;
+use writeset::SetKey;
 
 /// A forward may hop at most this many times (spec section 7.2).
 pub const MAX_HOPS: u8 = 2;
@@ -184,8 +185,6 @@ pub struct Job {
     pub spec: &'static CommandSpec,
     /// The per-connection round-robin position for reads.
     pub rr: u64,
-    /// The write set of the client connection. Forwarded jobs have none.
-    pub writes: Option<Writes>,
     /// From a redirect connection, so hop 0 may return `-MOVED`.
     pub redirect: bool,
     /// The connection sent `READONLY`.
@@ -201,14 +200,9 @@ impl Job {
             cmd,
             spec,
             rr: 0,
-            writes: None,
             redirect: false,
             readonly: false,
         }
-    }
-
-    pub fn keys(&self) -> Keys {
-        keys_of(self.spec.route, &self.cmd)
     }
 }
 
@@ -258,7 +252,6 @@ pub fn prepare(
         cmd,
         spec,
         rr: conn.next_rr(),
-        writes: conn.writes.clone(),
         redirect: conn.redirect,
         readonly: conn.readonly,
     })
@@ -325,12 +318,12 @@ pub fn serve_here(
     write: bool,
     owners: &[NodeId],
 ) -> Dispatch {
-    let key = cmd[1].clone();
-    let sources = crate::replication::repair::sources(node, &key, write, owners);
+    let sources = crate::replication::repair::sources(node, &cmd[1], write, owners);
     if sources.is_empty() {
         return local_acked(node, spec, cmd);
     }
     let node = node.clone();
+    let key = cmd[1].clone();
     Dispatch::Pending(Box::pin(async move {
         crate::replication::repair::fetch(&node, &key, sources).await;
         local_acked(&node, spec, cmd).finish().await
@@ -339,13 +332,21 @@ pub fn serve_here(
 
 /// Run a data command from the entry node. `route` is the `route` span: the owner choice runs
 /// in it, and it ends before the command runs or forwards.
-pub fn run(node: &Arc<Node>, job: Job, route: Span) -> Dispatch {
-    run_hop(node, job, Hop::default(), route)
+pub fn run(node: &Arc<Node>, job: Job, writes: Option<&Writes>, route: Span) -> Dispatch {
+    // With one owner per key, a read reaches that owner whatever the write set requires.
+    let writes = writes.filter(|_| node.config.replication_factor > 1);
+    run_hop(node, job, Hop::default(), writes, route)
 }
 
 /// Run a data command at any hop. A command that needs no other node runs inline. A command on
 /// counter keys goes to its group leader first, so it never takes the replicated path.
-pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
+pub fn run_hop(
+    node: &Arc<Node>,
+    job: Job,
+    hop: Hop,
+    writes: Option<&Writes>,
+    route: Span,
+) -> Dispatch {
     if let Some(dispatch) = crate::counter::route::intercept(node, &job, &hop) {
         drop(route);
         return dispatch;
@@ -359,8 +360,10 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
         return Dispatch::Ready(local(node, job.spec, &job.cmd));
     }
     match job.spec.route {
-        Route::Single { write } => single(node, job, hop, write, route),
-        Route::MultiRead { .. } | Route::MultiWrite { .. } => multi::multi(node, job, hop, route),
+        Route::Single { write } => single(node, job, hop, write, writes, route),
+        Route::MultiRead { .. } | Route::MultiWrite { .. } => {
+            multi::multi(node, job, hop, writes, route)
+        }
         // Only the entry node fans out. A forwarded copy runs locally. These routes need no
         // owner, so the route span ends at once.
         Route::Fanout if redirect::applies(job.redirect, &hop) && job.spec.name == "DBSIZE" => {
@@ -378,7 +381,7 @@ pub fn run_hop(node: &Arc<Node>, job: Job, hop: Hop, route: Span) -> Dispatch {
         }
         Route::Rename => {
             drop(route);
-            rename::run(node, job, hop)
+            rename::run(node, job, hop, writes)
         }
         Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => {
             drop(route);
@@ -471,44 +474,58 @@ enum Plan {
     Moved(CommandError),
 }
 
-fn single(node: &Arc<Node>, mut job: Job, hop: Hop, write: bool, route: Span) -> Dispatch {
-    let key = job.cmd[1].clone();
-    let writes = job
-        .writes
-        .take()
-        .filter(|_| !node.is_primary_read_key(&key));
-    let need = match (&writes, write) {
-        (Some(w), false) => w.lock().required(&key, std::time::Instant::now()),
+fn single(
+    node: &Arc<Node>,
+    job: Job,
+    hop: Hop,
+    write: bool,
+    writes: Option<&Writes>,
+    route: Span,
+) -> Dispatch {
+    let owners = route.in_scope(|| node.owners(&job.cmd[1]));
+    // A primary-read key keeps no write-set entry: every read of it goes to the primary.
+    let tracked = writes.is_some() && !node.is_primary_read_key(&job.cmd[1]);
+    // With one owner, every read goes to that owner whatever the write set requires, so the
+    // write set is not asked.
+    let need = match (writes, write) {
+        (Some(w), false) if tracked && owners.len() > 1 => w
+            .lock()
+            .required(SetKey::of(&job.cmd[1]), std::time::Instant::now),
         _ => None,
     };
     let readonly = redirect::applies(job.redirect, &hop).then_some(job.readonly);
+    // Only a write, or a read that must see an earlier write, changes the write set.
+    let key = (tracked && (write || need.is_some())).then(|| SetKey::of(&job.cmd[1]));
     let dispatch = single_planned(
-        node, job.spec, job.cmd, hop, write, job.rr, need, readonly, route,
+        node, job.spec, job.cmd, owners, hop, write, job.rr, need, readonly, route,
     );
-    let Some(writes) = writes else {
+    let (Some(writes), Some(key)) = (writes, key) else {
         return dispatch;
     };
     // The write set changes before the key order releases the next command on this key.
-    let note = move |reply: &Reply| {
+    let note = move |writes: &Writes, reply: &Reply| {
         let mut w = writes.lock();
         match (write, reply.applied) {
             (true, Some(v)) if !matches!(reply.value, Value::Error(_)) => {
-                w.record(&key, v, std::time::Instant::now())
+                w.record(key, v, std::time::Instant::now())
             }
-            (false, _) if need.is_some() => w.observed(&key, reply.observed, reply.settled),
+            (false, _) if need.is_some() => w.observed(key, reply.observed, reply.settled),
             _ => {}
         }
     };
     match dispatch {
         Dispatch::Ready(reply) => {
-            note(&reply);
+            note(writes, &reply);
             Dispatch::Ready(reply)
         }
-        Dispatch::Pending(f) => Dispatch::Pending(Box::pin(async move {
-            let reply = f.await;
-            note(&reply);
-            reply
-        })),
+        Dispatch::Pending(f) => {
+            let writes = writes.clone();
+            Dispatch::Pending(Box::pin(async move {
+                let reply = f.await;
+                note(&writes, &reply);
+                reply
+            }))
+        }
     }
 }
 
@@ -517,6 +534,7 @@ fn single_planned(
     node: &Arc<Node>,
     spec: &'static CommandSpec,
     cmd: Command,
+    owners: Owners,
     mut hop: Hop,
     write: bool,
     rr: u64,
@@ -524,43 +542,42 @@ fn single_planned(
     redirect: Option<bool>,
     route: Span,
 ) -> Dispatch {
-    let key = cmd[1].clone();
-    let (plan, owners) = route.in_scope(|| {
-        let owners = node.owners(&key);
+    let key: &[u8] = &cmd[1];
+    let plan = route.in_scope(|| {
         let forward = || {
-            let targets = candidates(node, &key, &owners, write, rr, need);
+            let targets = candidates(node, key, &owners, write, rr, need);
             match targets.first() {
                 None => Plan::Retry,
                 Some(first) if *first == node.id => Plan::Local,
                 Some(_) => Plan::Forward(allowed(node, &hop, targets)),
             }
         };
-        let plan = match redirect.map(|ro| redirect::target(node, &key, &owners, write, need, ro)) {
+        match redirect.map(|ro| redirect::target(node, key, &owners, write, need, ro)) {
             None => forward(),
             Some(None) => Plan::Retry,
             Some(Some(t)) if t == node.id => Plan::Local,
-            Some(Some(t)) => match redirect::moved(node, &key, t) {
+            Some(Some(t)) => match redirect::moved(node, key, t) {
                 Some(moved) => Plan::Moved(moved),
                 None => forward(),
             },
-        };
-        (plan, owners)
+        }
     });
     drop(route);
     let targets = match plan {
         Plan::Retry => return Dispatch::Ready(Reply::try_again()),
         Plan::Moved(moved) => return Dispatch::Ready(Reply::error(moved)),
         Plan::Local if need.is_some() || hop.track => {
+            let owned = cmd[1].clone();
             return match local_acked(node, spec, cmd) {
                 Dispatch::Ready(mut reply) => {
-                    track_here(node, &key, &mut reply);
+                    track_here(node, &owned, &mut reply);
                     Dispatch::Ready(reply)
                 }
                 Dispatch::Pending(f) => {
                     let node = node.clone();
                     Dispatch::Pending(Box::pin(async move {
                         let mut reply = f.await;
-                        track_here(&node, &key, &mut reply);
+                        track_here(&node, &owned, &mut reply);
                         reply
                     }))
                 }
@@ -570,7 +587,8 @@ fn single_planned(
         Plan::Forward(targets) => targets,
     };
     if targets.is_empty() {
-        return spent(node, spec, cmd, &[&key], write);
+        let owned = cmd[1].clone();
+        return spent(node, spec, cmd, &[&owned], write);
     }
     hop.track |= need.is_some();
     let node = node.clone();

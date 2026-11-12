@@ -16,7 +16,7 @@ use futures::future::join_all;
 
 use super::{state, Counters, Refusal};
 use crate::cluster::multi::{split, Merge};
-use crate::cluster::route::{keys_of, Keys};
+use crate::cluster::route::key_args;
 use crate::cluster::{forward, Dispatch, Hop, Job, Reply, MAX_HOPS};
 use crate::command::util::{check_key, check_mset, check_value};
 use crate::command::{CommandError, CommandSpec};
@@ -45,15 +45,16 @@ fn is_error(v: &Value, text: &str) -> bool {
 
 /// Take a command with counter keys. `None` for any other command.
 pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
-    let counters = node.counters()?.clone();
-    let Keys::Some(keys) = keys_of(job.spec.route, &job.cmd) else {
-        return None;
-    };
-    let strong = keys.iter().filter(|k| node.is_counter_key(k)).count();
+    let counters = node.counters()?;
+    let (mut keys, mut strong) = (0, 0);
+    for key in key_args(job.spec.route, &job.cmd)? {
+        keys += 1;
+        strong += usize::from(node.is_counter_key(key));
+    }
     if strong == 0 {
         return None;
     }
-    if strong != keys.len() {
+    if strong != keys {
         return Some(Dispatch::Ready(error(MIXED)));
     }
     if !state::accepts(job.spec.name) {
@@ -62,7 +63,8 @@ pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
     if let Err(e) = check_sizes(node, job.spec.name, &job.cmd) {
         return Some(Dispatch::Ready(Reply::error(e)));
     }
-    let (node, cmd, hop, route) = (node.clone(), job.cmd.clone(), hop.clone(), job.spec.route);
+    let (node, counters, cmd, hop) = (node.clone(), counters.clone(), job.cmd.clone(), hop.clone());
+    let route = job.spec.route;
     Some(Dispatch::Pending(Box::pin(async move {
         match Merge::of(route) {
             Some((merge, width)) => fan_out(&node, &counters, cmd, hop, merge, width).await,

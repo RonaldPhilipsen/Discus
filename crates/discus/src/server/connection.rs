@@ -31,7 +31,7 @@ use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::order::{KeyOrder, WaitFor};
+use super::order::{KeyOrder, Keys, WaitFor};
 use crate::cluster::{self, Dispatch, Prepared};
 use crate::node::{ConnState, Node};
 use crate::security::ConnAuth;
@@ -147,14 +147,15 @@ impl Pipeline {
         let protocol = self.conn.protocol;
         // With nothing in flight, the command waits for nothing. It registers its keys only when
         // it does not finish at once, so the single-node path skips the key order.
+        let keys = Keys::of(job.spec.route, &job.cmd);
         let (wait, done, keys) = if self.pending.is_empty() {
-            (WaitFor::default(), None, Some(job.keys()))
+            (WaitFor::default(), None, Some(keys))
         } else {
-            let (wait, done) = self.order.admit(&job.keys());
+            let (wait, done) = self.order.admit(&keys);
             (wait, Some(done), None)
         };
         if wait.is_ready() {
-            match cluster::run(&self.node, job, route) {
+            match cluster::run(&self.node, job, self.conn.writes.as_ref(), route) {
                 Dispatch::Ready(reply) => {
                     drop(done);
                     trace.finish(&reply.value);
@@ -177,10 +178,13 @@ impl Pipeline {
         }
         drop(route);
         let node = self.node.clone();
+        let writes = self.conn.writes.clone();
         self.pending.push_back(Box::pin(
             async move {
                 wait.wait().await;
-                let reply = cluster::run(&node, job, trace.route_span()).finish().await;
+                let reply = cluster::run(&node, job, writes.as_ref(), trace.route_span())
+                    .finish()
+                    .await;
                 drop(done);
                 trace.finish(&reply.value);
                 Slot::reply(protocol, reply.value)

@@ -11,6 +11,7 @@ workspace = true
 crc = "3"
 fastrand = "2"
 getrandom = "0.4"
+smallvec = "1"
 uhlc = { version = "0.9", default-features = false }
 thiserror = "2"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

@@ -296,7 +296,7 @@ async fn run_spent(node: &ClusterNode, parts: &[&str]) -> Value {
         hops: MAX_HOPS,
         ..Hop::default()
     };
-    run_hop(&node.node, job, hop, tracing::Span::none())
+    run_hop(&node.node, job, hop, None, tracing::Span::none())
         .finish()
         .await
         .value

@@ -30,7 +30,6 @@ impl Steps {
             cmd,
             spec,
             rr: self.rr,
-            writes: self.writes.clone(),
             // The take and the put are internal steps, so they forward and never return `-MOVED`.
             redirect: false,
             readonly: false,
@@ -39,9 +38,15 @@ impl Steps {
             trace: self.hop.trace.clone(),
             ..Hop::default()
         };
-        run_hop(&self.node, job, hop, telemetry::route_span())
-            .finish()
-            .await
+        run_hop(
+            &self.node,
+            job,
+            hop,
+            self.writes.as_ref(),
+            telemetry::route_span(),
+        )
+        .finish()
+        .await
     }
 }
 
@@ -81,7 +86,7 @@ async fn move_entry(steps: &Steps, from: Bytes, to: Bytes) -> Reply {
 }
 
 /// Run a `RENAME` from the entry node.
-pub fn run(node: &Arc<Node>, job: Job, hop: Hop) -> Dispatch {
+pub fn run(node: &Arc<Node>, job: Job, hop: Hop, writes: Option<&Writes>) -> Dispatch {
     let (from, to) = (job.cmd[1].clone(), job.cmd[2].clone());
     // The take removes the source, so a destination that the put must refuse is refused now.
     if let Err(e) = check_key(node, &to) {
@@ -90,7 +95,7 @@ pub fn run(node: &Arc<Node>, job: Job, hop: Hop) -> Dispatch {
     let steps = Steps {
         node: node.clone(),
         rr: job.rr,
-        writes: job.writes,
+        writes: writes.cloned(),
         hop,
     };
     Dispatch::Pending(Box::pin(async move {

@@ -8,6 +8,7 @@ use discus_wire::ForwardMode;
 use futures::future::join_all;
 
 use super::route::{keys_of, Keys, Route};
+use super::writeset::SetKey;
 use super::{
     allowed, candidates, forward, hold, local, local_acked, spent, Dispatch, Failure, Hop, Job,
     Reply,
@@ -147,12 +148,17 @@ impl Merge {
 
 /// Plan and run a multi-key command. With every key local, the original command runs inline.
 /// The grouping by owner runs in the `route` span.
-pub fn multi(node: &Arc<Node>, job: Job, hop: Hop, route: tracing::Span) -> Dispatch {
+pub fn multi(
+    node: &Arc<Node>,
+    job: Job,
+    hop: Hop,
+    writes: Option<&super::Writes>,
+    route: tracing::Span,
+) -> Dispatch {
     let Job {
         cmd,
         spec,
         rr,
-        writes,
         redirect,
         readonly,
     } = job;
@@ -167,8 +173,8 @@ pub fn multi(node: &Arc<Node>, job: Job, hop: Hop, route: tracing::Span) -> Disp
         }
     }
     let now = Instant::now();
-    let need = |key: &[u8]| match &writes {
-        Some(w) if !write => w.lock().required(key, now),
+    let need = |key: &[u8]| match writes {
+        Some(w) if !write => w.lock().required(SetKey::of(key), || now),
         _ => None,
     };
     if super::redirect::applies(redirect, &hop) {
@@ -191,8 +197,9 @@ pub fn multi(node: &Arc<Node>, job: Job, hop: Hop, route: tracing::Span) -> Disp
     let Some(groups) = groups else {
         return Dispatch::Ready(Reply::try_again());
     };
-    // Each written key enters the write set with the stamp of its own part.
+    // Each written key enters the write set with the stamp of its own part. Only a write notes.
     let owner = node.clone();
+    let writes = writes.filter(|_| write).cloned();
     let note = move |keys: &[Bytes], reply: &Reply| {
         if let (Some(w), Some(v)) = (&writes, reply.applied) {
             if write && !matches!(reply.value, Value::Error(_)) {
@@ -202,7 +209,7 @@ pub fn multi(node: &Arc<Node>, job: Job, hop: Hop, route: tracing::Span) -> Disp
                     .step_by(width)
                     .filter(|k| !owner.is_primary_read_key(k))
                 {
-                    w.record(k, v, Instant::now());
+                    w.record(SetKey::of(k), v, Instant::now());
                 }
             }
         }

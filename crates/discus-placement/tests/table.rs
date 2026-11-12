@@ -57,6 +57,20 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(32))]
 
     #[test]
+    fn owner_set_matches_owners(
+        members in members_strategy(),
+        table_rf in 1usize..5,
+        rf in 1usize..5,
+        keys in proptest::collection::vec(any::<Vec<u8>>(), 1..16),
+    ) {
+        let e = epoch(members);
+        e.table(table_rf);
+        for key in &keys {
+            prop_assert_eq!(&e.owner_set(key, rf)[..], &e.owners(key, rf)[..]);
+        }
+    }
+
+    #[test]
     fn table_matches_hrw_per_range(members in members_strategy(), rf in 1usize..5) {
         let e = epoch(members);
         let table = e.table(rf);

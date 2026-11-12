@@ -9,7 +9,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use discus_placement::{
     hlc, Adopt, Clock, ClusterId, Epoch, EpochError, EpochHistory, EpochId, Hlc, Member,
-    MemberState, NodeId, Version, Weight, NTP64,
+    MemberState, NodeId, Owners, Version, Weight, NTP64,
 };
 use discus_resp::{Protocol, Value};
 use discus_store::{Slot, Store, StoreConfig, SystemClock, HASH_SEED};
@@ -702,11 +702,11 @@ impl Node {
     }
 
     /// The owner set of `key` in the current epoch with the configured replication factor.
-    pub fn owners(&self, key: &[u8]) -> Vec<NodeId> {
+    pub fn owners(&self, key: &[u8]) -> Owners {
         self.epochs
             .read()
             .current()
-            .owners(key, self.config.replication_factor)
+            .owner_set(key, self.config.replication_factor)
     }
 
     /// A fresh HLC version for one write command. A clock pinned at its drift bound refuses, and

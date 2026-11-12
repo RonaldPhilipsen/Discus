@@ -109,7 +109,7 @@ pub async fn held(
             return Reply::try_again();
         }
         let job = Job::plain(cmd.clone(), spec);
-        let reply = run_hop(node, job, retry.clone(), tracing::Span::none())
+        let reply = run_hop(node, job, retry.clone(), None, tracing::Span::none())
             .finish()
             .await;
         match reply.failed {

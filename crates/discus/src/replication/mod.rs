@@ -42,6 +42,11 @@ const REPLAY_BATCH: usize = 256;
 const PROBE_AFTER: Duration = Duration::from_secs(2);
 /// How often the replicator reports its gauges and ages out hints.
 const TICK: Duration = Duration::from_secs(1);
+/// Scheduler turns the sender waits after a wake before it takes the queue. The first write of a
+/// burst wakes the sender, and tokio would run it right after that client task, so each batch
+/// would carry one key. Each yield lets the other ready tasks run first, so their writes join the
+/// batch. A timer would wait at least 1 ms.
+const SEND_YIELDS: usize = 2;
 
 /// The replication settings from the flags.
 #[derive(Debug, Clone, Copy)]
@@ -468,7 +473,7 @@ impl Replicator {
     }
 
     /// Queue `key` for every owner in `owners` but this node.
-    fn queue_for(&self, owners: Vec<NodeId>, key: &Bytes) {
+    fn queue_for(&self, owners: impl IntoIterator<Item = NodeId>, key: &Bytes) {
         for owner in owners {
             if owner == self.id {
                 continue;
@@ -711,6 +716,9 @@ impl Replicator {
                 tokio::select! {
                     _ = self.stop.cancelled() => return,
                     _ = q.notify.notified() => {}
+                }
+                for _ in 0..SEND_YIELDS {
+                    tokio::task::yield_now().await;
                 }
                 continue;
             }
@@ -1021,9 +1029,14 @@ impl Replicator {
         if node.faults.refuse_apply.load(Ordering::Relaxed) {
             return 0;
         }
+        // A batch whose newest version is within the drift bound observes the clock once: every
+        // older version is within the bound too, and the clock ends at the same maximum. Only a
+        // batch with a version too far ahead checks each entry, to drop just those.
+        let newest = entries.iter().map(|(_, e)| e.version).max();
+        let checked = newest.is_some_and(|v| node.hlc.observe(v).is_ok());
         let mut applied = 0;
         for (k, e) in entries {
-            if node.hlc.observe(e.version).is_err() {
+            if !checked && node.hlc.observe(e.version).is_err() {
                 tracing::warn!("dropped a replicated entry too far ahead of the local clock");
                 continue;
             }
