@@ -245,6 +245,46 @@ fn the_sweep_removes_expired_tombstones() {
 }
 
 #[test]
+fn a_write_over_a_live_entry_keeps_the_accounting() {
+    let (s, clock) = store(1 << 20, 1 << 20);
+    let (fresh, _) = store(1 << 20, 1 << 20);
+    let set = |s: &Store, n: usize, stamp: Version| {
+        s.write_changed(b"k", stamp, |slot| {
+            slot.set(Some(Entry::new(Value::Str(vec![b'x'; n].into()), None)));
+        })
+    };
+    set(&s, 4096, v(1));
+    assert!(set(&s, 10, v(2)).1);
+    set(&fresh, 10, v(2));
+    assert_eq!(s.used_memory(), fresh.used_memory());
+    assert_eq!(s.entry(b"k").unwrap().version, v(2));
+
+    // A write that only reads changes nothing and keeps the version.
+    let (len, changed) = s.write_changed(b"k", v(3), |slot| slot.as_ref().map(|_| 1));
+    assert_eq!((len, changed), (Some(1), false));
+    assert_eq!(s.entry(b"k").unwrap().version, v(2));
+    assert_eq!(s.used_memory(), fresh.used_memory());
+
+    assert!(del(&s, "k", v(4)));
+    del(&fresh, "k", v(4));
+    assert_eq!((s.len(), s.tombstones()), (0, 1));
+    assert_eq!(s.used_memory(), fresh.used_memory());
+    assert_eq!(s.tombstone_bytes(), fresh.tombstone_bytes());
+    clock.advance(TTL);
+    s.sweep_expired(1);
+    assert_eq!((s.tombstones(), s.used_memory()), (0, 0));
+}
+
+#[test]
+fn an_internal_delete_of_a_live_entry_leaves_no_tombstone() {
+    let (s, _) = store(1 << 20, 1 << 20);
+    put(&s, "k", v(1));
+    assert!(del(&s, "k", Version::zero()));
+    assert!(s.entry(b"k").is_none());
+    assert_eq!((s.len(), s.tombstones(), s.used_memory()), (0, 0, 0));
+}
+
+#[test]
 fn an_internal_remove_leaves_no_tombstone() {
     let (s, _) = store(1 << 20, 1 << 20);
     put(&s, "k", v(1));
