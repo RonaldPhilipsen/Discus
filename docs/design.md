@@ -473,7 +473,7 @@ flowchart LR
     mult["multiplier m"]
     scale["probe and suspicion timeouts times m"]
     fwd["forward timeout or reset"]
-    gatem at or above 1.5?
+    gate{"m at or above 1.5?"}
     drop["drop the evidence and count it"]
     phi["add the evidence to phi for the peer"]
     probe --> atomic --> tick --> health --> mult
@@ -628,16 +628,16 @@ The diagram shows the redirect rule as a decision.
 ```mermaid
 flowchart TD
     cmd["command on a redirect connection"]
-    authauthorized?
+    auth{"authorized?"}
     noperm["reply -NOPERM"]
-    cntcounter key?
+    cnt{"counter key?"}
     leader["forward to the group leader"]
-    oneall keys in one slot?
+    one{"all keys in one slot?"}
     plan["serve or fan out, as on the forward listener"]
     target["find the target: primary, or this node for a READONLY read"]
-    selftarget is this node?
+    self{"target is this node?"}
     serve["serve locally"]
-    checktarget T is NORMAL with a client address, up, and at the same or a newer epoch?
+    check{"target T is NORMAL with a client address, up, and at the same or a newer epoch?"}
     moved["reply -MOVED slot T"]
     forward["forward to T, holds apply"]
     cmd --> auth
@@ -772,10 +772,10 @@ flowchart TD
     write["primary applies the write and assigns an HLC"]
     ack["acknowledge to the entry node, W = 1"]
     queue["queue for the secondary, latest entry per key"]
-    sentdelivered?
+    sent{"delivered?"}
     apply["secondary applies the entry if its HLC is newer"]
     hint["record a hint: target, key, entry, epoch"]
-    readytarget NORMAL and reconnected, or queue below the low-water mark?
+    ready{"target NORMAL and reconnected, or queue below the low-water mark?"}
     replay["HINT_REPLAY batches in HLC order"]
     drop["drop the hint"]
     refill["mark the refill bucket needs_refill"]
