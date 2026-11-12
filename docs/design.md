@@ -1340,20 +1340,6 @@ and `INFO` list the enabled features.
 No assertion depends on the speed of the machine. Unit and simulator tests use virtual time. A
 test that waits for a state polls it with a deadline of several seconds.
 
-Each crate tests its own rules in its `tests/` directory. These layers exist:
-
-- Unit and property tests (proptest) for parsing, placement, slots, the slot table, HLC, the store,
-  and local health. Placement tests compare slots with `CLUSTER KEYSLOT` of Valkey and check
-  minimal movement and balance.
-- The deterministic membership simulator (`discus-membership/src/sim.rs`) for partitions,
-  isolation, kills, and lag.
-- Cluster tests in `crates/discus/tests` that run several nodes in one process. They cover
-  failover, handoff, hints, counters, cluster clients, security, drain, and probes. Counter tests
-  check linearizability: the final value equals the number of successful increments.
-- `scripts/compat.sh`, the `redis-cli` compatibility matrix, and `mise run authelia-e2e` (needs
-  Docker).
-- Benchmarks and chaos runs on Kubernetes.
-
 Acceptance: a node loss causes no read errors, only misses. Writes can see a brief retryable error
 during detection. A join causes no errors, and the handoff keeps the hit-rate dip below a cold
 start. Any connection can land on any node. Under a 1 CPU limit per pod at saturation, no healthy
