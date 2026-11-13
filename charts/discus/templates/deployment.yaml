@@ -120,7 +120,7 @@ spec:
             {{- if not (has .clientAuth (list "optional" "required")) }}
             {{- fail "clientTls.clientAuth must be optional or required" }}
             {{- end }}
-            - --tls-client-ca=/client-tls/ca.crt
+            - --tls-client-ca={{ if .clientCaSecretName }}/client-ca{{ else }}/client-tls{{ end }}/ca.crt
             - --tls-client-auth={{ .clientAuth }}
             {{- end }}
             {{- end }}
@@ -176,6 +176,11 @@ spec:
             - name: client-tls
               mountPath: /client-tls
               readOnly: true
+            {{- if and .Values.clientTls.verifyClients .Values.clientTls.clientCaSecretName }}
+            - name: client-ca
+              mountPath: /client-ca
+              readOnly: true
+            {{- end }}
             {{- if .Values.authConfig.secretName }}
             - name: auth-config
               mountPath: /auth
@@ -197,6 +202,11 @@ spec:
         - name: client-tls
           secret:
             secretName: {{ .Values.clientTls.secretName | default .Values.cluster.tls.secretName }}
+        {{- if and .Values.clientTls.verifyClients .Values.clientTls.clientCaSecretName }}
+        - name: client-ca
+          secret:
+            secretName: {{ .Values.clientTls.clientCaSecretName }}
+        {{- end }}
         {{- with .Values.authConfig.secretName }}
         - name: auth-config
           secret:

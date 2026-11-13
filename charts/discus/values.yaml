@@ -58,6 +58,9 @@ clientTls:
   secretName: ""
   # Verifies client certificates against the key ca.crt of the Secret.
   verifyClients: false
+  # A Secret with the key ca.crt that replaces the client CA, for example a private CA for client
+  # certificates next to a public server certificate. The default is the Secret above.
+  clientCaSecretName: ""
   # With verifyClients: optional or required.
   clientAuth: optional
 
