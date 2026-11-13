@@ -172,9 +172,9 @@ pub fn cmd(args: &[&str]) -> Vec<u8> {
     discus_wire::encode_command(&common::cmd(args)).to_vec()
 }
 
-/// [`exchange`] on a new plaintext connection to `node`.
+/// [`exchange`] on a new TLS connection to `node`, which uses the client TLS of a test node.
 pub async fn send(node: &Node, wire: &[u8]) -> String {
-    let mut s = TcpStream::connect(node.addr).await.unwrap();
+    let mut s = common::client_tls::connect(node.addr).await;
     exchange(&mut s, wire).await
 }
 
@@ -209,8 +209,8 @@ pub async fn start(args: &[&str]) -> Node {
     try_start(args).await.unwrap()
 }
 
-/// A plaintext node, with the development flag, that trusts the OAuth2 issuers of `file`. It
-/// waits until the node is ready.
+/// A node that trusts the OAuth2 issuers of `file`, with the development flag for issuers over
+/// http. It waits until the node is ready.
 pub async fn start_oauth2(file: &str, args: &[&str]) -> Node {
     let mut argv = vec![
         "--auth-policy",

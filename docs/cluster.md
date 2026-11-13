@@ -267,13 +267,15 @@ publishes the chart with the same version as the image.
 
 Before you install the chart, create a Secret with the keys `ca.crt`, `tls.crt`, and `tls.key`.
 Use a CA that serves only this release, because every certificate from the CA is a member of the
-cluster. Then install the chart:
+cluster. Also create a Secret with a shared token in the key `token`, or set up another
+authentication policy (see below). Then install the chart:
 
 ```bash
 helm install <release> oci://ghcr.io/ronaldphilipsen/charts/discus \
   --version <version> \
   --namespace <namespace> \
-  --set cluster.tls.secretName=<secret>
+  --set cluster.tls.secretName=<secret> \
+  --set sharedToken.secretName=<token-secret>
 ```
 
 The chart does not require a URI SAN by default. To require a SPIFFE identity, set
@@ -285,6 +287,26 @@ of the release. By default, it is the full name of the release, for example `dis
 You can install more than one release in a namespace. The chart gives each release its own lease
 names, so each release is a separate cluster. Use a different CA for each release, or require a
 URI SAN that is different for each release.
+
+Every client connection uses TLS. The client listener and the redirect listener use the
+certificate of `cluster.tls.secretName` unless you set another one. Clients must therefore trust
+the cluster CA, or you set a Secret with a certificate from another CA. These values set TLS and
+authentication for clients:
+
+| Value | Effect |
+| --- | --- |
+| `clientTls.secretName` | A Secret with the keys `tls.crt` and `tls.key`. The default is `cluster.tls.secretName`. |
+| `clientTls.verifyClients=true` | The node asks for client certificates and verifies them against the key `ca.crt` of the Secret. |
+| `clientTls.clientAuth` | `optional` or `required`. The default is `optional`. |
+| `authPolicy` | The flag `--auth-policy`, for example `all:mtls`. |
+| `authConfig.secretName` | A Secret with the key `auth.toml`, for the flag `--auth-config`. |
+| `sharedToken.secretName` | A Secret with the shared token in the key `sharedToken.key` (default `token`). |
+
+Set at least one of `authPolicy`, `sharedToken.secretName`, and `authConfig.secretName`, or the
+chart stops with an error. Without `authPolicy`, the node uses `all:tls,shared_token` with a
+shared token, and `all:tls,oauth2` otherwise. The second policy needs trusted issuers in the
+`auth.toml` file. For client certificates without tokens, set `authPolicy=all:mtls`. See
+[Security](security.md) for the policies.
 
 To run without the redirect listener, set `clusterClients.enabled=false`. The chart then passes no
 redirect flags and opens no redirect port.
@@ -455,7 +477,8 @@ nodes do not collide on port 7380.
 
 ```bash
 TLS="--cluster-ca ca.pem --cluster-cert node.pem --cluster-key node-key.pem"
-GOSSIP="--lease-provider none $TLS"
+CLIENT_TLS="--tls-cert node.pem --tls-key node-key.pem --auth-policy none"
+GOSSIP="--lease-provider none $TLS $CLIENT_TLS"
 
 discus --listen 127.0.0.1:6380 --admin-listen 127.0.0.1:9101 --cluster-listen 127.0.0.1:7381 \
   --rpc-listen 127.0.0.1:7391 \
@@ -468,8 +491,8 @@ discus --listen 127.0.0.1:6382 --admin-listen 127.0.0.1:9103 --cluster-listen 12
   --rpc-listen 127.0.0.1:7393 \
   $GOSSIP --peer 127.0.0.1:7381 --peer 127.0.0.1:7382 &
 
-redis-cli -p 6380 SET greeting hello
-redis-cli -p 6382 GET greeting
+redis-cli --tls --cacert ca.pem -p 6380 SET greeting hello
+redis-cli --tls --cacert ca.pem -p 6382 GET greeting
 ```
 
 `INFO discus` on each node shows `discus_membership`, `discus_member_state`,
@@ -487,7 +510,8 @@ setups.
 ## Make a test CA
 
 Use a real PKI such as cert-manager in production. For a local test, `openssl` makes a CA and one
-node certificate:
+node certificate. The certificate serves both the cluster and the clients on this host, so it also
+names `localhost` and `127.0.0.1`:
 
 ```bash
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 \
@@ -495,7 +519,7 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 \
 openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
   -subj "/CN=discus node" -keyout node-key.pem -out node.csr
 printf '%s\n' \
-  "subjectAltName=URI:spiffe://cluster.local/ns/default/sa/discus" \
+  "subjectAltName=URI:spiffe://cluster.local/ns/default/sa/discus,DNS:localhost,IP:127.0.0.1" \
   "extendedKeyUsage=serverAuth,clientAuth" > node.ext
 openssl x509 -req -in node.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -days 30 \
   -extfile node.ext -out node.pem
@@ -986,8 +1010,8 @@ session:
 Sessions live in memory only. A full restart of the cluster signs out every user.
 
 The task `mise run authelia-e2e` runs Authelia in a container against three nodes. It needs
-Docker. It covers sign-in, a second factor, a session on later requests, and sign-out. It runs
-without TLS and without a token.
+Docker. It covers sign-in, a second factor, a session on later requests, and sign-out. It runs over
+TLS without a token.
 
 ## Limits of this release
 

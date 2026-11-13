@@ -10,7 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[tokio::test]
 async fn an_unfinished_request_over_the_byte_cap_is_rejected() {
     let addr = common::start_node(&["--max-request-bytes", "100000"]).await;
-    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut s = common::client_tls::connect(addr).await;
     s.write_all(b"*10\r\n").await.unwrap();
     let chunk = vec![b'x'; 50_000];
     let mut closed = false;
@@ -78,11 +78,11 @@ async fn drain_finishes_when_a_client_never_reads() {
         .await
         .unwrap();
     let (addr, shutdown) = (node.addr, node.shutdown.clone());
-    let client = redis::Client::open(format!("redis://{addr}")).unwrap();
+    let client = common::client_tls::redis_client(&format!("rediss://{addr}"));
     let mut c = client.get_multiplexed_async_connection().await.unwrap();
     let _: () = c.set("big", "x".repeat(1_000_000)).await.unwrap();
 
-    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut s = common::client_tls::connect(addr).await;
     let mut wire = Vec::new();
     for _ in 0..300 {
         wire.extend_from_slice(b"*2\r\n$3\r\nGET\r\n$3\r\nbig\r\n");

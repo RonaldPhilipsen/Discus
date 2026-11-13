@@ -1,4 +1,4 @@
-//! A client connection, plain or TLS.
+//! TLS client connections.
 
 use std::io;
 use std::net::SocketAddr;
@@ -78,5 +78,5 @@ impl axum::serve::Listener for TlsListener {
     }
 }
 
-/// A client connection: plain TCP or TLS.
-pub type ClientStream = tokio_util::either::Either<TcpStream, Box<TlsStream<TcpStream>>>;
+/// A client connection. Every client uses TLS.
+pub type ClientStream = Box<TlsStream<TcpStream>>;

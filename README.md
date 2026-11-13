@@ -85,7 +85,9 @@ follow the same path. A strong `INCR` mixed with an asynchronous `SET` would bre
 ## Decisions
 
 - **Deployment:** Kubernetes, single zone initially.
-- **Security:** mTLS enforced with cert-manager-issued certificates, including node-to-node traffic.
+- **Security:** every client connection uses TLS, and client certificates (mTLS) are a choice.
+  Node-to-node traffic always uses mTLS with cert-manager-issued certificates. See
+  [Security](docs/security.md).
 - **Restarts:** cold restarts are acceptable; the cache starts empty.
 - **Latency targets:** local hit p99 ≤ 1 ms, remote hit p99 ≤ 2 ms, and p99 ≤ 5 ms during a
   membership change.

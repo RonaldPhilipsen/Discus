@@ -11,7 +11,7 @@ async fn probes_reflect_the_phase() {
     assert_eq!(common::status(node.admin, "/readyz").await, 200);
 
     // An open client connection keeps the drain pending, so the admin port stays up.
-    let mut client = tokio::net::TcpStream::connect(node.addr).await.unwrap();
+    let mut client = common::client_tls::connect(node.addr).await;
     client.write_all(b"*1\r\n$4\r\nPING\r\n").await.unwrap();
     let mut pong = [0u8; 7];
     client.read_exact(&mut pong).await.unwrap();

@@ -1128,9 +1128,9 @@ line. To move to it, install a new cluster. The cache starts empty.
   SAN, for example `spiffe://cluster.local/ns/<namespace>/sa/discus`. The certificate proves
   membership, not the `NodeId`. Every member has the same authority, so one certificate per
   Deployment is enough. Certificates come from cert-manager or another PKI.
-- The client listeners have three TLS modes. `off` is plaintext, for development only. `node`
-  terminates TLS and optional mTLS on the node. `lb` lets the L4 load balancer terminate TLS and
-  forward the client identity through PROXY protocol or a trusted header, over mTLS. A forwarded
+- Every client uses TLS. The client listeners have two TLS modes, and there is no plaintext mode.
+  `node` terminates TLS and optional mTLS on the node. `lb` lets the L4 load balancer terminate TLS
+  and forward the client identity through PROXY protocol or a trusted header, over mTLS. A forwarded
   identity from an unauthenticated source is never trusted.
 - The redirect listener uses `--tls-mode`, `--tls-cert`, `--tls-key`, `--tls-client-ca`, and
   `--tls-client-auth`, like `--listen`. A TLS cluster client checks the certificate against the

@@ -2,10 +2,12 @@
 
 use std::sync::Arc;
 
+mod common;
+
 use bytes::Bytes;
 use discus::command::{check, execute_local, lookup};
 use discus::security::Security;
-use discus::{Config, Node};
+use discus::Node;
 use discus_placement::mock::MockClock;
 use discus_resp::Value;
 use discus_store::{Version, NTP64};
@@ -16,7 +18,7 @@ const START: u64 = 1_700_000_000_000;
 fn node<const SLOT: usize>() -> Node {
     let clock = MockClock::<SLOT>;
     clock.set(START);
-    let config = Config::parse_from(["discus"]).unwrap();
+    let config = common::config(&["discus"]);
     let security = Arc::new(Security::from_config(&config).unwrap());
     Node::with_clocks(config, security, Arc::new(clock), clock.hlc_clock())
 }

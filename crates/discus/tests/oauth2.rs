@@ -82,7 +82,7 @@ async fn expiry_mid_connection_gives_noauth_then_reauth_works() {
     let mut c = idp.claims("discus.read");
     c["exp"] = json!(unix_now() + 2);
     let short = idp.sign("k1", &c);
-    let mut s = tokio::net::TcpStream::connect(node.addr).await.unwrap();
+    let mut s = security_support::common::client_tls::connect(node.addr).await;
     assert_eq!(exchange(&mut s, &cmd(&["AUTH", &short])).await, "+OK\r\n");
     assert_eq!(exchange(&mut s, &cmd(&["GET", "k"])).await, "$-1\r\n");
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -116,7 +116,7 @@ async fn a_removed_key_revokes_open_connections_after_a_refresh() {
     let idp = MockIdp::start(&ca).await;
     idp.add_key("k2", jsonwebtoken::Algorithm::ES256);
     let node = node(&ca, &[&idp], "jwks_refresh_secs = 1", &[]).await;
-    let mut s = tokio::net::TcpStream::connect(node.addr).await.unwrap();
+    let mut s = security_support::common::client_tls::connect(node.addr).await;
     assert_eq!(
         exchange(&mut s, &cmd(&["AUTH", &idp.token("discus.read")])).await,
         "+OK\r\n"
@@ -215,18 +215,6 @@ async fn all_mtls_oauth2_needs_both_factors() {
     wire.extend(cmd(&["PING"]));
     let r = exchange(&mut anon, &wire).await;
     assert!(r.starts_with("+OK\r\n-NOAUTH"), "{r:?}");
-}
-
-#[tokio::test]
-async fn oauth2_over_plaintext_is_refused_without_the_dev_flag() {
-    let ca = TestCa::new();
-    let idp = MockIdp::start(&ca).await;
-    let file = write_file(&ca, "auth.toml", &idp.toml(&ca, ""));
-    let e = try_start(&["--auth-policy", "any:oauth2", "--auth-config", &file])
-        .await
-        .err()
-        .unwrap();
-    assert!(e.contains("--dev-insecure-oauth2"), "{e}");
 }
 
 #[tokio::test]

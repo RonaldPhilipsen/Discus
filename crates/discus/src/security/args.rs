@@ -4,11 +4,10 @@ use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
 
-/// The client listener TLS mode (spec §14.1).
+/// The client listener TLS mode (spec §14.1). Every client uses TLS: the node or the load
+/// balancer terminates it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum TlsMode {
-    /// Plaintext. Development only.
-    Off,
     /// The node terminates TLS and optional client mTLS.
     Node,
     /// The load balancer terminates TLS and forwards the client identity with PROXY protocol,
@@ -19,7 +18,6 @@ pub enum TlsMode {
 impl TlsMode {
     pub fn name(self) -> &'static str {
         match self {
-            TlsMode::Off => "off",
             TlsMode::Node => "node",
             TlsMode::Lb => "lb",
         }
@@ -49,8 +47,8 @@ fn parse_tlv(s: &str) -> Result<u8, String> {
 /// Client TLS and authentication settings.
 #[derive(Debug, Clone, Args)]
 pub struct SecurityArgs {
-    /// Client listener TLS mode: off, node, or lb.
-    #[arg(long, value_enum, default_value = "off")]
+    /// Client listener TLS mode: node or lb.
+    #[arg(long, value_enum, default_value = "node")]
     pub tls_mode: TlsMode,
     /// PEM certificate chain of the client listener.
     #[arg(long)]
@@ -77,7 +75,7 @@ pub struct SecurityArgs {
     /// TOML file with trusted issuers, certificate rules, and admin identities.
     #[arg(long)]
     pub auth_config: Option<PathBuf>,
-    /// Allow OAuth 2.0 over plaintext and http issuers. Development only.
+    /// Allow http issuers and admin bearer tokens over a plaintext admin port. Development only.
     #[arg(long)]
     pub dev_insecure_oauth2: bool,
     /// Clock skew allowed on token times, in seconds.

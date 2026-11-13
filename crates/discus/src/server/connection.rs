@@ -269,6 +269,22 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     redirect: bool,
     local_addr: Option<SocketAddr>,
 ) {
+    serve_until_closed(&mut stream, auth, node, redirect, local_addr).await;
+    // A TLS client sees a clean end only after close_notify. A client that never reads cannot
+    // hold the task past the limit.
+    let _ = tokio::time::timeout(CLOSE_TIMEOUT, stream.shutdown()).await;
+}
+
+/// How long the node tries to close a connection cleanly.
+const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn serve_until_closed<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: &mut S,
+    auth: ConnAuth,
+    node: Arc<Node>,
+    redirect: bool,
+    local_addr: Option<SocketAddr>,
+) {
     let _guard = node.track_connection();
     let cfg = &node.config;
     let max_pipeline = cfg.max_pipeline.max(1);

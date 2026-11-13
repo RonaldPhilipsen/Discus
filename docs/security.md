@@ -4,17 +4,17 @@ This page tells operators how to secure the client side of a Discus node. It cov
 client listener, client authentication, scopes, OAuth 2.0 tokens, Kubernetes service account
 tokens, and the admin port.
 
-Node-to-node traffic uses QUIC with mTLS. See [Running a cluster](cluster.md) for its
-certificates. The section [Commands from other nodes](#commands-from-other-nodes) tells how the two
-sides meet.
+Every client connection uses TLS. A node without `--tls-cert` and `--tls-key` refuses to start.
+Mutual TLS (mTLS), where the client also presents a certificate, is a choice. Node-to-node traffic
+always uses QUIC with mTLS. See [Running a cluster](cluster.md) for its certificates. The section
+[Commands from other nodes](#commands-from-other-nodes) tells how the two sides meet.
 
 ## Quick start
 
-A production node uses TLS and OAuth 2.0 tokens. This is the default policy when TLS is on:
+A production node uses TLS and OAuth 2.0 tokens. This is the default policy:
 
 ```bash
 discus \
-  --tls-mode node \
   --tls-cert /etc/discus/tls.crt \
   --tls-key /etc/discus/tls.key \
   --auth-config /etc/discus/auth.toml
@@ -40,12 +40,11 @@ The flag `--tls-mode` sets the TLS mode of the client listener.
 
 | Mode | Meaning |
 | --- | --- |
-| `off` | Plaintext. Use it for development only. This is the default. |
-| `node` | The node terminates TLS. It can also verify client certificates (mTLS). |
+| `node` | The node terminates TLS. It can also verify client certificates (mTLS). This is the default. |
 | `lb` | The load balancer terminates TLS. It forwards the client identity to the node. |
 
-Each TLS mode needs `--tls-cert` and `--tls-key`. Both are PEM files. The certificate file can hold
-a chain.
+There is no plaintext mode. Each TLS mode needs `--tls-cert` and `--tls-key`. Both are PEM files.
+The certificate file can hold a chain.
 
 ### Mode `node`
 
@@ -80,8 +79,8 @@ The node accepts PROXY protocol v1 and v2. It reads these values from the header
 - The client identity. The node takes it from a custom TLV when `--lb-identity-tlv` names one,
   for example `0xE0`. Otherwise the node takes the CN from the `PP2_TYPE_SSL` TLV, but only when
   the load balancer says that it verified the client certificate.
-- Whether the client used TLS. The `tls` factor holds unless the `PP2_TYPE_SSL` TLV says that the
-  client did not use TLS. Configure the load balancer to accept TLS clients only.
+- Whether the client used TLS. If the `PP2_TYPE_SSL` TLV says that the client did not use TLS, the
+  node closes the connection. Configure the load balancer to accept TLS clients only.
 
 Example with HAProxy:
 
@@ -139,13 +138,11 @@ Without `--auth-policy`, the node picks a default:
 
 | Setting | Default policy |
 | --- | --- |
-| TLS on | `all:tls,oauth2` |
-| TLS off, `--shared-token` set | `any:shared_token` |
-| TLS off, no shared token | `none` |
+| `--shared-token` set | `all:tls,shared_token` |
+| No shared token | `all:tls,oauth2` |
 
-If you set `--shared-token` with TLS on, you must also set a policy that uses `shared_token`, for
-example `all:tls,shared_token`. A shared token that the policy does not use stops the node at
-startup.
+A shared token that the policy does not use stops the node at startup. The policy `none` lets
+every TLS client in without credentials. Use it for development only.
 
 Examples:
 
@@ -310,10 +307,10 @@ The node checks the full token at `AUTH` and after a key refresh. For each other
 checks only the `exp` and `nbf` values that it saved. When the token expires, the next command
 returns `-NOAUTH`. The client can send `AUTH` with a new token on the same connection.
 
-### TLS requirement
+### Issuer addresses
 
-OAuth 2.0 needs TLS. With `--tls-mode off`, the node refuses to start with an `oauth2` policy.
-For development, set `--dev-insecure-oauth2`. This flag also allows `http` issuer addresses.
+The node fetches keys from an issuer over HTTPS. For development, `--dev-insecure-oauth2` also
+allows `http` issuer addresses.
 
 The node never logs a token. The debug log shows the `sub` and `jti` claims only.
 
@@ -465,17 +462,17 @@ identity provider without `ca_file`.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--tls-mode` | `off` | The client listener TLS mode: `off`, `node`, or `lb`. |
-| `--tls-cert` | none | The PEM certificate chain of the client listener and the admin port. |
-| `--tls-key` | none | The PEM private key that matches `--tls-cert`. |
+| `--tls-mode` | `node` | The client listener TLS mode: `node` or `lb`. |
+| `--tls-cert` | required | The PEM certificate chain of the client listener and the admin port. |
+| `--tls-key` | required | The PEM private key that matches `--tls-cert`. |
 | `--tls-client-ca` | none | The CA for client certificates, or for the load balancer in `lb` mode. |
 | `--tls-client-auth` | `optional` | `required` refuses clients without a certificate in `node` mode. |
 | `--lb-trusted-source` | none | A network that the load balancer connects from. Repeat it for more. |
 | `--lb-identity-tlv` | none | A PROXY v2 TLV type from `0xE0` to `0xEF` that holds the client identity. |
 | `--auth-policy` | see above | The client authentication policy. |
 | `--auth-config` | none | The TOML file with issuers, rules, and admin identities. |
-| `--shared-token` | none | The shared token for the `shared_token` factor. |
-| `--dev-insecure-oauth2` | off | Allows OAuth 2.0 over plaintext and `http` issuers. Development only. |
+| `--shared-token` | none | The shared token for the `shared_token` factor. The node also reads it from `DISCUS_SHARED_TOKEN`. |
+| `--dev-insecure-oauth2` | off | Allows `http` issuers, and admin bearer tokens on a plaintext admin port. Development only. |
 | `--auth-clock-skew-secs` | 60 | The clock skew allowed on token times. |
 | `--auth-max-failures-per-connection` | 5 | Failed attempts that close a connection. |
 | `--auth-max-failures-per-source` | 20 | Failed attempts per source address in one window. |

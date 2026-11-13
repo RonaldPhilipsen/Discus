@@ -19,7 +19,7 @@ fn node(config: discus::Config) -> Node {
 fn args(extra: &[&str]) -> discus::Config {
     let mut argv = vec!["discus", "--listen", "127.0.0.1:0"];
     argv.extend_from_slice(extra);
-    discus::Config::parse_from(argv).expect("valid test arguments")
+    common::config(&argv)
 }
 
 #[test]
@@ -200,7 +200,13 @@ mod otel {
         let h = TraceHarness::new(0.0);
         let m = h.telemetry.metrics();
         let node = node(args(&["--shared-token", "t"]));
-        let mut conn = ConnState::new(1, ConnAuth::default());
+        let mut conn = ConnState::new(
+            1,
+            ConnAuth {
+                tls: true,
+                ..ConnAuth::default()
+            },
+        );
         for c in [
             &["AUTH", "wrong"][..],
             &["AUTH", "t"],
@@ -340,7 +346,10 @@ mod otel {
     }
 
     /// Send one command and read the first chunk of the reply. The replies here are small.
-    async fn ask(stream: &mut tokio::net::TcpStream, parts: &[&str]) -> String {
+    async fn ask<S>(stream: &mut S, parts: &[&str]) -> String
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut wire = format!("*{}\r\n", parts.len()).into_bytes();
         for p in parts {
@@ -360,7 +369,6 @@ mod otel {
         use common::cluster::start_redirect_cluster;
         use common::gossip::wait_until;
         use discus_telemetry::testing::MetricHarness;
-        use tokio::net::TcpStream;
 
         let h = MetricHarness::new();
         assert!(discus_telemetry::install_global(h.metrics.clone()));
@@ -374,7 +382,7 @@ mod otel {
         })
         .await;
         let (a, b) = (&c.nodes[0], &c.nodes[1]);
-        let mut forward = TcpStream::connect(a.addr).await.unwrap();
+        let mut forward = common::client_tls::connect(a.addr).await;
         for (j, to) in c.nodes.iter().enumerate().skip(1) {
             let key = c.key_on(j, "warm");
             assert_eq!(ask(&mut forward, &["SET", &key, "w"]).await, "+OK\r\n");
@@ -382,7 +390,7 @@ mod otel {
             assert!(wait_until(Duration::from_secs(10), || link.peer_epoch(to.id).is_some()).await);
         }
         let key = c.key_on(1, "moved");
-        let mut redirect = TcpStream::connect(ports[0]).await.unwrap();
+        let mut redirect = common::client_tls::connect(ports[0]).await;
         let reply = ask(&mut redirect, &["SET", &key, "v"]).await;
         assert!(reply.starts_with("-MOVED"), "{reply:?}");
         let tag = c.key_on(1, "tag");

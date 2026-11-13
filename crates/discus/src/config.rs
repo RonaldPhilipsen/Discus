@@ -132,8 +132,9 @@ pub struct Config {
     /// Placement weight of this node. Finite and greater than zero.
     #[arg(long, default_value_t = 1.0, value_parser = parse_weight)]
     pub weight: f64,
-    /// Shared token that clients must send with AUTH.
-    #[arg(long)]
+    /// Shared token that clients must send with AUTH. The environment variable keeps the token
+    /// out of the process arguments.
+    #[arg(long, env = "DISCUS_SHARED_TOKEN", hide_env_values = true)]
     pub shared_token: Option<String>,
 
     /// This node's ID, 32 hex digits. Random by default. Required with static membership.

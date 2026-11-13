@@ -5,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[tokio::test]
 async fn replies_arrive_in_order_for_a_pipeline() {
     let addr = common::start_node(&[]).await;
-    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut s = common::client_tls::connect(addr).await;
     let mut wire = Vec::new();
     for i in 0..1000 {
         wire.extend_from_slice(format!("*2\r\n$4\r\nECHO\r\n$4\r\n{i:04}\r\n").as_bytes());
@@ -23,8 +23,8 @@ async fn replies_arrive_in_order_for_a_pipeline() {
 #[tokio::test]
 async fn pipeline_limit_applies_backpressure_and_keeps_order() {
     let addr = common::start_node(&["--max-pipeline", "100"]).await;
-    let s = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let (mut rd, mut wr) = s.into_split();
+    let s = common::client_tls::connect(addr).await;
+    let (mut rd, mut wr) = tokio::io::split(s);
     let writer = tokio::spawn(async move {
         let one = b"*1\r\n$4\r\nPING\r\n";
         let mut wire = Vec::new();
@@ -43,7 +43,7 @@ async fn pipeline_limit_applies_backpressure_and_keeps_order() {
 #[tokio::test]
 async fn unknown_and_unsupported_commands_return_clear_errors() {
     let addr = common::start_node(&[]).await;
-    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut s = common::client_tls::connect(addr).await;
     s.write_all(b"*1\r\n$5\r\nNOPE!\r\n*1\r\n$5\r\nMULTI\r\n")
         .await
         .unwrap();
@@ -61,7 +61,7 @@ async fn unknown_and_unsupported_commands_return_clear_errors() {
 #[tokio::test]
 async fn quit_after_a_pipeline_flushes_every_reply() {
     let addr = common::start_node(&[]).await;
-    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut s = common::client_tls::connect(addr).await;
     s.write_all(b"*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n1\r\n*2\r\n$3\r\nGET\r\n$1\r\na\r\n*1\r\n$4\r\nQUIT\r\n")
         .await
         .unwrap();
@@ -73,7 +73,7 @@ async fn quit_after_a_pipeline_flushes_every_reply() {
 #[tokio::test]
 async fn hello_3_in_a_pipeline_switches_later_replies() {
     let addr = common::start_node(&[]).await;
-    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut s = common::client_tls::connect(addr).await;
     s.write_all(b"*2\r\n$5\r\nHELLO\r\n$1\r\n3\r\n*2\r\n$3\r\nGET\r\n$7\r\nmissing\r\n")
         .await
         .unwrap();

@@ -82,7 +82,8 @@ fn secret() -> String {
 
 fn write_files(dir: &Path, port: u16, redis: SocketAddr, digest: &str) {
     let config = format!(
-        r"server:
+        r"certificates_directory: '/config/certs'
+server:
   address: 'tcp://127.0.0.1:{port}/'
 log:
   level: 'debug'
@@ -103,6 +104,9 @@ session:
     host: '{host}'
     port: {redis_port}
     database_index: 0
+    tls:
+      server_name: '{host}'
+      minimum_version: 'TLS1.2'
 storage:
   encryption_key: '{storage}'
   local:
@@ -118,6 +122,9 @@ notifier:
         redis_port = redis.port(),
     );
     std::fs::write(dir.join("configuration.yml"), config).unwrap();
+    // Every client uses TLS. Authelia trusts the CA of the test node certificates.
+    std::fs::create_dir_all(dir.join("certs")).unwrap();
+    std::fs::copy(common::client_tls::ca_file(), dir.join("certs/ca.pem")).unwrap();
     let users = format!(
         "users:\n  {USER}:\n    disabled: false\n    displayname: 'Alice'\n    password: '{digest}'\n    email: 'alice@example.com'\n    groups: []\n"
     );
