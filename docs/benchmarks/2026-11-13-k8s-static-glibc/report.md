@@ -21,8 +21,7 @@ The runs follow the [benchmark methodology](../methodology.md), with 3 nodes onl
   runs. On musl, the profiling-cost report measured 17% to 23%.
 - With profiling on, the p99 of glibc stayed within 0.2 ms of the p99 without profiling.
 - The CPU time per operation did not show a clear difference between musl and glibc. The runs
-  vary more than the 9% to 11% gap of the
-  [local test](../2026-11-13-local-glibc-static/report.md).
+  vary more than the gap of 9% to 11% that a local test with one node on one core showed.
 - All runs kept 1,000,000 keys on each node, and no GET missed.
 
 ## Setups
@@ -34,8 +33,8 @@ The runs follow the [benchmark methodology](../methodology.md), with 3 nodes onl
 | glibc, profiling on | `static-glibc-1b486a1-pyroscope` | As glibc, with the `pyroscope` feature, profiles pushed to Pyroscope |
 
 All three images come from commit 1b486a1, which is the tag v1.2.3. The `glibc` image has the
-same Cargo features as the release image. The file `Dockerfile.k8s-glibc` builds both glibc
-images. It is the release `Dockerfile` with the glibc target and the static flag.
+same Cargo features as the release image. The repository `Dockerfile` of this change builds the
+same images. Add `--build-arg FEATURES=pyroscope` for the profiling image.
 
 The test ran 3 rounds. Each round runs musl, then glibc, then glibc with profiling on. Each setup
 runs in cluster mode and in forward mode. Each run of a workload takes 30 seconds.
@@ -126,8 +125,8 @@ Pyroscope profiling costs almost nothing. On musl, it costs about 20% of the thr
 ## Limits of this benchmark
 
 - The runs cover 3 nodes with 1 core only.
-- No workload made a pod reach its core. The local test showed the CPU gain of glibc. A
-  CPU-bound workload can show more of that gain in the throughput.
+- No workload made a pod reach its core. A CPU-bound workload can show more of the CPU gain of
+  glibc in the throughput.
 - The node CPU has AVX-512. The test does not show the result on a CPU without AVX-512.
 - The test did not measure the upload of profiles. All 18 glibc pods with profiling on sent
   profiles to Pyroscope, and the function names in them resolve. The pods found the Pyroscope
@@ -137,7 +136,6 @@ Pyroscope profiling costs almost nothing. On musl, it costs about 20% of the thr
 
 - `results-musl.jsonl`, `results-glibc.jsonl`, `results-glibc-profiling-on.jsonl`: one line for
   each run, with the memtier results and the cgroup CPU counters of each pod.
-- `Dockerfile.k8s-glibc`: the build of the glibc images.
 
 These commands ran one round. The script profiles by default, so the first two commands turn
 profiling off.
