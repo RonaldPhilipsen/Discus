@@ -138,12 +138,10 @@ run also has these limits:
 
 ## Files in this directory
 
-- `results.jsonl` has one JSON line per Discus 0.5.0-rc0 run. `run-2.log` is the log of the
-  script for these runs.
+- `results.jsonl` has one JSON line per Discus 0.5.0-rc0 run.
 - `results-tls.jsonl` has the Valkey runs with TLS. It also has runs of Discus 0.4.9 with TLS,
   in which cluster mode on 3 and 6 nodes hung. `results-plain.jsonl` has runs of Discus 0.4.9
-  without TLS. `run-1.log` is the log of the script for both files. This report uses only the
-  Valkey runs from this session.
+  without TLS. This report uses only the Valkey runs from this session.
 
 To run the Discus setups again, run this command from the repository root:
 
