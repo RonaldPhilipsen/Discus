@@ -124,6 +124,10 @@ impl LfLeader {
         self.core.lock().state.get().clone()
     }
 
+    pub fn holds_expired(&self, now_ms: u64) -> bool {
+        self.core.lock().state.get().expired_keys(now_ms)
+    }
+
     pub fn follower(&self) -> Option<NodeId> {
         *self.follower.lock()
     }

@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use common::counters::{
-    all_hold, group_of, incr_until, leader_of, role, start, status, Leases, FAST, GROUPS,
+    all_hold, group_of, incr_until, leader_of, purge_reaches_every_replica, role, start, status,
+    Leases, FAST, GROUPS,
 };
 use common::gossip::{refs, socket, wait_agreed, wait_until, GossipNode, Net, Opts};
 use discus::counter::state::Kind;
@@ -274,4 +275,11 @@ async fn expiry_is_identical_under_clock_skew() {
         );
     }
     ticking.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_purge_removes_expired_keys_from_leader_and_follower() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (nodes, _gates) = two(&net, &leases, &[]).await;
+    purge_reaches_every_replica(&refs(&nodes)).await;
 }

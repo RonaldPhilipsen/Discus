@@ -45,6 +45,9 @@ pub const TICK: Duration = Duration::from_millis(100);
 /// How often the tier reports its gauges.
 const METRICS_EVERY: Duration = Duration::from_secs(1);
 
+/// How often a leader looks for expired keys to purge.
+const PURGE_EVERY: Duration = Duration::from_secs(10);
+
 /// How long a `RAFT_LEADER` question waits for each answer.
 const ASK_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -445,6 +448,15 @@ impl Counters {
                 me.record_metrics();
             }
         });
+        let me = self.clone();
+        let s = stop.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(PURGE_EVERY);
+            every.tick().await;
+            while s.run_until_cancelled(every.tick()).await.is_some() {
+                me.purge().await;
+            }
+        });
         let Some(membership) = self.node().and_then(|n| n.membership().cloned()) else {
             return;
         };
@@ -594,6 +606,22 @@ impl Counters {
             }
             Role::Raft(r) if r.leads() => r.execute(kind, cmd, now_ms, self.settings.timeout).await,
             Role::Idle | Role::Follower(_) | Role::Raft(_) => Err(Refusal::NotLeader),
+        }
+    }
+
+    /// Propose a `PURGE` in every group that this node leads and that holds expired keys.
+    /// Expired keys use the counter reserve until a write touches them, so without a purge they
+    /// can fill it.
+    pub async fn purge(&self) {
+        let purge: Command = vec![bytes::Bytes::from_static(state::PURGE)];
+        for (g, group) in self.groups.iter().enumerate() {
+            if !group.role().leads_expired(self.now_ms()) {
+                continue;
+            }
+            let g = g as u16;
+            if let Err(refusal) = self.execute(g, Kind::Purge, &purge).await {
+                tracing::debug!(group = g, ?refusal, "the purge did not apply");
+            }
         }
     }
 

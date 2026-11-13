@@ -328,3 +328,33 @@ pub async fn raft_cluster(
     }
     nodes
 }
+
+/// Write a counter key with a short TTL, let it expire, purge on its leader, and check that no
+/// node of `nodes` still holds it.
+pub async fn purge_reaches_every_replica(nodes: &[&GossipNode]) {
+    let key = "cnt:purge";
+    let mut c = nodes[0].redis().await;
+    let _: i64 = redis::cmd("INCR")
+        .arg(key)
+        .arg("PX")
+        .arg(200)
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    assert!(
+        all_hold(nodes, key, "1", Duration::from_secs(5)).await,
+        "the key did not reach every replica\n{}",
+        dump(nodes)
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let leader = leader_of(nodes, group_of(nodes[0], key)).unwrap();
+    leader.node.counters().unwrap().purge().await;
+    assert!(
+        wait_until(Duration::from_secs(5), || nodes
+            .iter()
+            .all(|n| held(n, key).is_none()))
+        .await,
+        "a replica still holds the expired key\n{}",
+        dump(nodes)
+    );
+}

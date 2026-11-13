@@ -912,7 +912,8 @@ Counter state is never evicted. It has its own share, `--counter-memory-percent`
 counter key costs its key, its value, and 64 bytes on every node that holds the group. When the
 counter bytes of the leader reach the share, a write that can grow the state returns
 `-OOM command not allowed when the counter reserve is full`. `DEL`, `GETDEL`, `PERSIST`, the expiry
-commands, and `FLUSHALL` still work.
+commands, and `FLUSHALL` still work. An expired counter key uses the share until it is removed.
+Every 10 s, the leader of each group with expired keys removes them from every replica.
 
 ## Multi-key and keyspace commands
 
