@@ -7,7 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 async fn in_flight_connection_gets_its_reply_during_drain() {
     let mut node = common::try_start_full(&[]).await.unwrap();
     let (addr, shutdown) = (node.addr, node.shutdown.clone());
-    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut s = common::client_tls::connect(addr).await;
     // Make sure the server accepted the connection before the drain starts.
     s.write_all(b"*1\r\n$4\r\nPING\r\n").await.unwrap();
     let mut buf = [0u8; 7];
@@ -32,7 +32,7 @@ async fn drain_gives_up_after_the_timeout_and_closes_idle_connections() {
         .await
         .unwrap();
     let (addr, shutdown) = (node.addr, node.shutdown.clone());
-    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut s = common::client_tls::connect(addr).await;
     s.write_all(b"*1\r\n$4\r\nPING\r\n").await.unwrap();
     let mut buf = [0u8; 7];
     s.read_exact(&mut buf).await.unwrap();
@@ -58,7 +58,7 @@ async fn drain_timeout_closes_a_connection_that_never_reads() {
         .await
         .unwrap();
     let (addr, shutdown) = (node.addr, node.shutdown.clone());
-    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut s = common::client_tls::connect(addr).await;
     let value = vec![b'x'; 100_000];
     let mut set = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$100000\r\n".to_vec();
     set.extend_from_slice(&value);

@@ -112,7 +112,7 @@ fn script(prefix: &str, ops: &[Op]) -> (Vec<u8>, Vec<u8>) {
 }
 
 async fn exchange(addr: std::net::SocketAddr, req: &[u8], want_len: usize) -> Vec<u8> {
-    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut s = common::client_tls::connect(addr).await;
     s.write_all(req).await.unwrap();
     let mut got = vec![0u8; want_len];
     s.read_exact(&mut got).await.unwrap();

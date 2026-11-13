@@ -18,9 +18,11 @@ pub mod tls;
 
 use std::io;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use tokio::net::TcpStream;
 
 use ctutils::CtEq;
@@ -55,10 +57,31 @@ fn fail<T>(msg: impl Into<String>) -> Result<T, SecurityError> {
 /// How long a client has to finish the connection setup, the TLS handshake included.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The files of the client listener certificate. A reload reads them again.
+struct ClientTlsFiles {
+    cert: PathBuf,
+    key: PathBuf,
+    client_ca: Option<PathBuf>,
+    require_client: bool,
+}
+
+impl ClientTlsFiles {
+    fn listener(&self) -> io::Result<rustls::ServerConfig> {
+        let ca = self.client_ca.as_deref();
+        tls::server_config(&self.cert, &self.key, ca, self.require_client)
+    }
+
+    /// The admin port asks for a client certificate but never requires one.
+    fn admin(&self) -> io::Result<rustls::ServerConfig> {
+        tls::server_config(&self.cert, &self.key, self.client_ca.as_deref(), false)
+    }
+}
+
 /// The security state of a node.
 pub struct Security {
     mode: TlsMode,
-    server_tls: Option<Arc<rustls::ServerConfig>>,
+    tls_files: ClientTlsFiles,
+    server_tls: ArcSwap<rustls::ServerConfig>,
     lb_sources: Vec<ipnet::IpNet>,
     lb_identity_tlv: Option<u8>,
     cert_rules: Vec<(String, Scopes)>,
@@ -66,7 +89,7 @@ pub struct Security {
     shared_token: Option<String>,
     max_conn_failures: u32,
     limiter: FailureLimiter,
-    admin_tls: Option<Arc<rustls::ServerConfig>>,
+    admin_tls: Option<Arc<ArcSwap<rustls::ServerConfig>>>,
     admin_identities: Vec<String>,
     dev_insecure: bool,
     #[cfg(feature = "oauth2")]
@@ -82,28 +105,20 @@ impl Security {
             Some(path) => AuthFile::load(path)?,
             None => AuthFile::default(),
         };
-        let tls_on = args.tls_mode != TlsMode::Off;
         let policy = match &args.auth_policy {
             Some(p) => Policy::parse(p)?,
-            None if tls_on => Policy::All(vec![Factor::Tls, Factor::Oauth2]),
-            None if config.shared_token.is_some() => Policy::Any(vec![Factor::SharedToken]),
+            None if config.shared_token.is_some() => {
+                Policy::All(vec![Factor::Tls, Factor::SharedToken])
+            }
+            // Every client uses TLS, so `none` means TLS without credentials.
             None => Policy::None,
         };
 
-        if tls_on && (args.tls_cert.is_none() || args.tls_key.is_none()) {
-            return fail(format!(
-                "--tls-mode {} needs --tls-cert and --tls-key",
-                args.tls_mode.name()
-            ));
-        }
-        for f in [Factor::Tls, Factor::Mtls] {
-            if policy.uses(f) && !tls_on {
-                return fail(format!(
-                    "the policy uses {}, so set --tls-mode to node or lb",
-                    f.name()
-                ));
-            }
-        }
+        let (Some(tls_cert), Some(tls_key)) = (&args.tls_cert, &args.tls_key) else {
+            return fail(
+                "every client uses TLS, so set --tls-cert and --tls-key for the client listener",
+            );
+        };
         if policy.uses(Factor::Mtls) && args.tls_client_ca.is_none() {
             return fail("the policy uses mtls, so set --tls-client-ca");
         }
@@ -117,7 +132,7 @@ impl Security {
             _ => {}
         }
         #[cfg(feature = "oauth2")]
-        let oauth = Self::oauth2(args, &policy, &file, tls_on)?;
+        let oauth = Self::oauth2(args, &policy, &file)?;
         #[cfg(not(feature = "oauth2"))]
         Self::no_oauth2(&policy, &file)?;
         let lb = args.tls_mode == TlsMode::Lb;
@@ -138,14 +153,15 @@ impl Security {
                 .map_err(|e| format!("--auth-config client_cert {:?}: {e}", rule.identity))?;
             cert_rules.push((rule.identity.clone(), scopes));
         }
+        let tls_files = ClientTlsFiles {
+            cert: tls_cert.clone(),
+            key: tls_key.clone(),
+            client_ca: args.tls_client_ca.clone(),
+            require_client: required,
+        };
         let admin_tls = if args.admin_tls {
-            let (Some(cert), Some(key)) = (&args.tls_cert, &args.tls_key) else {
-                return fail("--admin-tls needs --tls-cert and --tls-key");
-            };
-            Some(Arc::new(
-                tls::server_config(cert, key, args.tls_client_ca.as_deref(), false)
-                    .map_err(|e| e.to_string())?,
-            ))
+            let config = tls_files.admin().map_err(|e| e.to_string())?;
+            Some(Arc::new(ArcSwap::from_pointee(config)))
         } else {
             None
         };
@@ -154,16 +170,11 @@ impl Security {
         {
             return fail("[admin] cert_identities needs --admin-tls and --tls-client-ca");
         }
-        let server_tls = match (&args.tls_cert, &args.tls_key) {
-            (Some(cert), Some(key)) if tls_on => Some(Arc::new(
-                tls::server_config(cert, key, args.tls_client_ca.as_deref(), required)
-                    .map_err(|e| e.to_string())?,
-            )),
-            _ => None,
-        };
+        let server_tls = ArcSwap::from_pointee(tls_files.listener().map_err(|e| e.to_string())?);
 
         Ok(Security {
             mode: args.tls_mode,
+            tls_files,
             server_tls,
             lb_sources: args.lb_trusted_source.clone(),
             lb_identity_tlv: args.lb_identity_tlv,
@@ -207,7 +218,6 @@ impl Security {
         args: &SecurityArgs,
         policy: &Policy,
         file: &AuthFile,
-        tls_on: bool,
     ) -> Result<Option<oauth2::OAuth2>, SecurityError> {
         #[cfg(not(feature = "k8s"))]
         if file.kubernetes.is_some() {
@@ -224,12 +234,6 @@ impl Security {
                 ));
             }
             return Ok(None);
-        }
-        if !tls_on && !args.dev_insecure_oauth2 {
-            return fail(
-                "the policy uses oauth2, which needs TLS: set --tls-mode, or set \
-                 --dev-insecure-oauth2 for development",
-            );
         }
         let oauth = oauth2::OAuth2::from_file(
             &file.issuer,
@@ -262,9 +266,34 @@ impl Security {
         drop(stop);
     }
 
-    /// The TLS config of the admin port, with `--admin-tls`.
-    pub fn admin_tls(&self) -> Option<Arc<rustls::ServerConfig>> {
+    /// The TLS config of the admin port, with `--admin-tls`. A reload replaces its content.
+    pub fn admin_tls(&self) -> Option<Arc<ArcSwap<rustls::ServerConfig>>> {
         self.admin_tls.clone()
+    }
+
+    /// The files that [`Security::reload_client_tls`] reads.
+    pub fn client_tls_files(args: &SecurityArgs) -> Vec<PathBuf> {
+        [&args.tls_cert, &args.tls_key, &args.tls_client_ca]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    /// Read the certificate, the key, and the client CA again, and use them for every new
+    /// connection on the client, redirect, and admin listeners. On an error, the listeners keep
+    /// their current certificates.
+    pub fn reload_client_tls(&self) -> io::Result<()> {
+        let listener = self.tls_files.listener()?;
+        let admin = match &self.admin_tls {
+            Some(_) => Some(self.tls_files.admin()?),
+            None => None,
+        };
+        self.server_tls.store(Arc::new(listener));
+        if let (Some(slot), Some(admin)) = (&self.admin_tls, admin) {
+            slot.store(Arc::new(admin));
+        }
+        Ok(())
     }
 
     /// Whether an admin request may pass: an admin certificate, or a bearer token with
@@ -360,9 +389,9 @@ impl Security {
         CertGrant { identity, scopes }
     }
 
-    /// Run the transport setup of a new client connection: nothing in `off` mode, the TLS
-    /// handshake in `node` mode, and the PROXY header plus the load balancer handshake in `lb`
-    /// mode. Returns the stream and what the node knows about the client.
+    /// Run the transport setup of a new client connection: the TLS handshake in `node` mode, and
+    /// the PROXY header plus the load balancer handshake in `lb` mode. Returns the stream and what
+    /// the node knows about the client.
     pub async fn accept(
         &self,
         tcp: TcpStream,
@@ -379,9 +408,7 @@ impl Security {
         peer: SocketAddr,
     ) -> io::Result<(ClientStream, ConnAuth)> {
         let mut auth = ConnAuth::new(Some(peer.ip()));
-        let Some(config) = &self.server_tls else {
-            return Ok((ClientStream::Left(tcp), auth));
-        };
+        auth.tls = true;
         let forwarded = if self.mode == TlsMode::Lb {
             if !self.lb_sources.iter().any(|n| n.contains(&peer.ip())) {
                 return Err(io::Error::new(
@@ -393,21 +420,25 @@ impl Security {
         } else {
             None
         };
-        let acceptor = tokio_rustls::TlsAcceptor::from(config.clone());
+        let acceptor = tokio_rustls::TlsAcceptor::from(self.server_tls.load_full());
         let tls = acceptor.accept(tcp).await?;
         if let Some(header) = forwarded {
             // The handshake verified the load balancer certificate, so the header is trusted.
             if let Some(source) = header.source {
                 auth.peer = Some(source.ip());
             }
-            auth.tls = header.client_tls != Some(false);
+            if header.client_tls == Some(false) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "lb mode: the client did not use TLS to the load balancer",
+                ));
+            }
             if let Some(identity) = header.identity {
                 tracing::debug!(%identity, "forwarded client identity");
                 auth.cert = Some(self.cert_grant(identity));
             }
-            return Ok((ClientStream::Right(Box::new(tls)), auth));
+            return Ok((Box::new(tls), auth));
         }
-        auth.tls = true;
         let conn = tls.get_ref().1;
         if conn.peer_certificates().is_some_and(|c| !c.is_empty()) {
             // A verified certificate without a SAN or CN still meets mtls.
@@ -415,7 +446,7 @@ impl Security {
             tracing::debug!(%identity, "client certificate verified");
             auth.cert = Some(self.cert_grant(identity));
         }
-        Ok((ClientStream::Right(Box::new(tls)), auth))
+        Ok((Box::new(tls), auth))
     }
 
     /// True when the connection meets the policy.
@@ -583,7 +614,17 @@ mod tests {
     }
 
     fn security(args: &[&str]) -> Security {
-        let mut argv = vec!["discus"];
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (cert_path, key_path) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+        std::fs::write(&cert_path, cert.pem()).unwrap();
+        std::fs::write(&key_path, key.serialize_pem()).unwrap();
+        let (cert_path, key_path) = (cert_path.to_str().unwrap(), key_path.to_str().unwrap());
+        let mut argv = vec!["discus", "--tls-cert", cert_path, "--tls-key", key_path];
         argv.extend_from_slice(args);
         Security::from_config(&Config::parse_from(argv).unwrap()).unwrap()
     }
@@ -591,7 +632,13 @@ mod tests {
     #[test]
     fn a_read_only_connection_cannot_write() {
         let s = security(&["--shared-token", "x"]);
-        let mut conn = ConnState::new(1, ConnAuth::default());
+        let mut conn = ConnState::new(
+            1,
+            ConnAuth {
+                tls: true,
+                ..ConnAuth::default()
+            },
+        );
         assert_eq!(
             s.authorize(&mut conn, spec(b"GET")),
             Err(CommandError::NoAuth)

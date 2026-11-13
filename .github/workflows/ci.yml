@@ -58,6 +58,11 @@ jobs:
       - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5
       - run: helm lint charts/discus --strict --set cluster.tls.secretName=discus-tls
       - run: helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+      - run: >-
+          helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --set clientTls.verifyClients=true,clientTls.clientAuth=required
+          --set clientTls.clientCaSecretName=discus-client-ca
+          --set 'authPolicy=all:mtls\,oauth2' --set authConfig.secretName=discus-auth
 
   # redis-cli against a fresh node, for every supported and unsupported command.
   compat:

@@ -107,6 +107,7 @@ async fn bind_transport(
 
 mod connection;
 mod order;
+mod tls_reload;
 
 /// Export the metrics of `transport`. Its events feed the peer error and QUIC failure metrics.
 /// The events task runs on the runtime of the caller.
@@ -116,6 +117,64 @@ fn observe(transport: &Transport, channel: TransportChannel, stop: CancellationT
     let transport = transport.clone();
     tokio::spawn(async move {
         crate::telemetry::observe_peer_events(metrics, &transport, channel, stop).await;
+    });
+}
+
+/// The cluster certificate files, in the order of the reload.
+fn cluster_tls_files(config: &Config) -> Vec<std::path::PathBuf> {
+    [
+        &config.cluster_ca,
+        &config.cluster_cert,
+        &config.cluster_key,
+    ]
+    .into_iter()
+    .flatten()
+    .cloned()
+    .collect()
+}
+
+/// Reload the client and cluster certificates after their files change.
+fn watch_certificates(
+    node: &Arc<Node>,
+    transports: Vec<Transport>,
+    (client_seen, cluster_seen): (tls_reload::Snapshot, tls_reload::Snapshot),
+    stop: CancellationToken,
+) {
+    let config = &node.config;
+    if config.tls_reload_secs == 0 {
+        return;
+    }
+    let period = Duration::from_secs(config.tls_reload_secs);
+    let security = node.security.clone();
+    let files = Security::client_tls_files(&config.security);
+    tls_reload::watch(
+        "client",
+        files,
+        client_seen,
+        period,
+        stop.clone(),
+        move || security.reload_client_tls(),
+    );
+    let (Some(ca), Some(cert), Some(key)) = (
+        config.cluster_ca.clone(),
+        config.cluster_cert.clone(),
+        config.cluster_key.clone(),
+    ) else {
+        return;
+    };
+    if transports.is_empty() {
+        return;
+    }
+    let san = config.cluster_san.clone();
+    let files = cluster_tls_files(config);
+    tls_reload::watch("cluster", files, cluster_seen, period, stop, move || {
+        let tls = TlsMaterial::from_files(&ca, &cert, &key, &san).map_err(io::Error::other)?;
+        // Check every endpoint before any of them changes, so they never disagree.
+        tls.check().map_err(io::Error::other)?;
+        for t in &transports {
+            t.reload_tls(&tls)?;
+        }
+        Ok(())
     });
 }
 
@@ -134,6 +193,10 @@ pub struct Server {
     admin: std::net::TcpListener,
     node: Arc<Node>,
     lane: ControlLane,
+    /// The QUIC endpoints, for a reload of the cluster certificates.
+    transports: Vec<Transport>,
+    /// The client and cluster certificate files before the node loaded them.
+    tls_seen: (tls_reload::Snapshot, tls_reload::Snapshot),
 }
 
 impl Server {
@@ -147,6 +210,10 @@ impl Server {
         let socket = opts.cluster_socket;
         let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidInput, msg);
         config.validate().map_err(invalid)?;
+        let tls_seen = (
+            tls_reload::snapshot(&Security::client_tls_files(&config.security)),
+            tls_reload::snapshot(&cluster_tls_files(&config)),
+        );
         let tls = if config.cluster_enabled() {
             let (Some(ca), Some(cert), Some(key)) = (
                 &config.cluster_ca,
@@ -202,6 +269,7 @@ impl Server {
         node.set_counters(crate::counter::Counters::new(&node, leases));
         node.set_data_handle(tokio::runtime::Handle::current());
         let lane = ControlLane::start()?;
+        let mut transports = Vec::new();
         if let Some(tls) = tls {
             let cfg = &node.config;
             let mut tc = TransportConfig::new(cfg.cluster_listen, tls, node.id, node.cluster_id());
@@ -228,6 +296,7 @@ impl Server {
                         .spawn(bind_transport(gossip_tc, socket, service))
                         .await
                         .map_err(io::Error::other)??;
+                    transports.push(gossip.clone());
                     let advertise = discovery::advertise(cfg).await;
                     let rpc_advertise = discovery::rpc_advertise(cfg, advertise, rpc.local_addr());
                     let membership = Membership::new(
@@ -243,6 +312,7 @@ impl Server {
                 }
                 None => bind_transport(tc, socket, service).await?,
             };
+            transports.push(rpc.clone());
             node.set_link(ClusterLink::new(rpc, &node.config));
             node.set_replicator(crate::replication::Replicator::new(&node));
         }
@@ -252,6 +322,8 @@ impl Server {
             admin,
             node,
             lane,
+            transports,
+            tls_seen,
         })
     }
 
@@ -297,8 +369,11 @@ impl Server {
             admin,
             node,
             lane,
+            transports,
+            tls_seen,
         } = self;
         let stop_background = CancellationToken::new();
+        watch_certificates(&node, transports, tls_seen, stop_background.clone());
         {
             let node = node.clone();
             discus_store::every(

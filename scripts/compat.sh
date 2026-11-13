@@ -3,8 +3,9 @@
 #
 # usage: scripts/compat.sh [host:port]
 #
-# With no argument the script builds the node, starts it on COMPAT_PORT (default 16379), runs the
-# checks, and stops the node. With an argument it checks that node and leaves it running.
+# With no argument the script builds the node, starts it on COMPAT_PORT (default 16379) with a
+# test certificate, runs the checks, and stops the node. With an argument it checks that node and
+# leaves it running. Every client uses TLS, so then set COMPAT_CA to the CA file of that node.
 # The node of the script also has a redirect listener on COMPAT_REDIRECT_PORT (default 16380) for
 # the cluster client check. For a node that you name, set COMPAT_REDIRECT=host:port to run it.
 # FLUSHDB and FLUSHALL run only when COMPAT_ALLOW_FLUSH=1, because they delete data.
@@ -12,23 +13,32 @@ set -u
 cd "$(dirname "$0")/.."
 
 node_pid=""
-cleanup() { [ -n "$node_pid" ] && kill "$node_pid" 2>/dev/null; }
+certs=""
+cleanup() {
+  [ -n "$node_pid" ] && kill "$node_pid" 2>/dev/null
+  [ -n "$certs" ] && rm -rf "$certs"
+}
 trap cleanup EXIT
 
 if [ $# -ge 1 ]; then
   target=$1
+  ca=${COMPAT_CA:?set COMPAT_CA to the CA file of the node}
 else
   port=${COMPAT_PORT:-16379}
   redirect_port=${COMPAT_REDIRECT_PORT:-16380}
+  certs=$(mktemp -d)
+  scripts/dev-cert.sh "$certs"
+  ca="$certs/ca.pem"
   cargo build -q -p discus || exit 1
   "${CARGO_TARGET_DIR:-target}/debug/discus" --listen "127.0.0.1:$port" --redirect-listen "127.0.0.1:$redirect_port" \
-    --admin-listen "127.0.0.1:$((port + 1000))" >/dev/null 2>&1 &
+    --admin-listen "127.0.0.1:$((port + 1000))" --tls-cert "$certs/cert.pem" \
+    --tls-key "$certs/key.pem" --auth-policy none >/dev/null 2>&1 &
   node_pid=$!
   target="127.0.0.1:$port"
   export COMPAT_ALLOW_FLUSH=1
   COMPAT_REDIRECT="127.0.0.1:$redirect_port"
   for _ in $(seq 1 50); do
-    redis-cli -h 127.0.0.1 -p "$port" PING >/dev/null 2>&1 && break
+    redis-cli --tls --cacert "$ca" -h 127.0.0.1 -p "$port" PING >/dev/null 2>&1 && break
     sleep 0.1
   done
 fi
@@ -37,7 +47,7 @@ port=${target##*:}
 p="compat:$$"
 fail=0
 
-cli() { timeout 5 redis-cli -h "$host" -p "$port" "$@" 2>&1; }
+cli() { timeout 5 redis-cli --tls --cacert "$ca" -h "$host" -p "$port" "$@" 2>&1; }
 
 # ok NAME EXTENDED-REGEX ARGS...: the reply must match the regex.
 ok() {
@@ -208,7 +218,7 @@ ok "COMMAND INFO" '^get$' COMMAND INFO get
 if [ -n "${COMPAT_REDIRECT:-}" ]; then
   rhost=${COMPAT_REDIRECT%:*}
   rport=${COMPAT_REDIRECT##*:}
-  rcli() { timeout 5 redis-cli -c -h "$rhost" -p "$rport" "$@" 2>&1; }
+  rcli() { timeout 5 redis-cli --tls --cacert "$ca" -c -h "$rhost" -p "$rport" "$@" 2>&1; }
   rcli SET "$p:cc" cluster-client >/dev/null
   out=$(rcli GET "$p:cc")
   if [ "$out" = cluster-client ]; then

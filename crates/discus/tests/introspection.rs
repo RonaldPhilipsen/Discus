@@ -58,7 +58,7 @@ async fn the_cache_saves_calls_but_never_outlives_the_token() {
     let idp = MockIdp::start(&ca).await;
     idp.add_opaque("opaque-1", active(&idp, unix_now() + 2));
     let node = node(&ca, &idp, "secret", &["--auth-clock-skew-secs", "0"]).await;
-    let mut s = tokio::net::TcpStream::connect(node.addr).await.unwrap();
+    let mut s = security_support::common::client_tls::connect(node.addr).await;
     assert_eq!(
         exchange(&mut s, &cmd(&["AUTH", "opaque-1"])).await,
         "+OK\r\n"

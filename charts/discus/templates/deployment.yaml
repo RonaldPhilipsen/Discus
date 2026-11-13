@@ -112,6 +112,24 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
+            - --tls-mode=node
+            - --tls-cert=/client-tls/tls.crt
+            - --tls-key=/client-tls/tls.key
+            {{- with .Values.clientTls }}
+            {{- if .verifyClients }}
+            {{- if not (has .clientAuth (list "optional" "required")) }}
+            {{- fail "clientTls.clientAuth must be optional or required" }}
+            {{- end }}
+            - --tls-client-ca={{ if .clientCaSecretName }}/client-ca{{ else }}/client-tls{{ end }}/ca.crt
+            - --tls-client-auth={{ .clientAuth }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.authPolicy }}
+            - --auth-policy={{ . }}
+            {{- end }}
+            {{- if .Values.authConfig.secretName }}
+            - --auth-config=/auth/auth.toml
+            {{- end }}
             {{- with .Values.pyroscope.url }}
             - --pyroscope-url={{ . }}
             {{- end }}
@@ -155,6 +173,19 @@ spec:
             - name: tls
               mountPath: /tls
               readOnly: true
+            - name: client-tls
+              mountPath: /client-tls
+              readOnly: true
+            {{- if and .Values.clientTls.verifyClients .Values.clientTls.clientCaSecretName }}
+            - name: client-ca
+              mountPath: /client-ca
+              readOnly: true
+            {{- end }}
+            {{- if .Values.authConfig.secretName }}
+            - name: auth-config
+              mountPath: /auth
+              readOnly: true
+            {{- end }}
             {{- if and .Values.otel.enabled .Values.otel.tls.secretName }}
             - name: otel-tls
               mountPath: /otel-tls
@@ -168,6 +199,19 @@ spec:
         - name: tls
           secret:
             secretName: {{ required "cluster.tls.secretName is required" .Values.cluster.tls.secretName }}
+        - name: client-tls
+          secret:
+            secretName: {{ .Values.clientTls.secretName | default .Values.cluster.tls.secretName }}
+        {{- if and .Values.clientTls.verifyClients .Values.clientTls.clientCaSecretName }}
+        - name: client-ca
+          secret:
+            secretName: {{ .Values.clientTls.clientCaSecretName }}
+        {{- end }}
+        {{- with .Values.authConfig.secretName }}
+        - name: auth-config
+          secret:
+            secretName: {{ . }}
+        {{- end }}
         {{- if and .Values.otel.enabled .Values.otel.tls.secretName }}
         - name: otel-tls
           secret:

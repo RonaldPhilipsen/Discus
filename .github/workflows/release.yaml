@@ -4,7 +4,14 @@ on:
   push:
     branches:
       - main
+  # A pull request with the label `release-candidate` publishes a release candidate.
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+# Opening a pull request with a label starts two runs. Only the last one publishes.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions: {}
 
@@ -19,6 +26,7 @@ jobs:
       contents: read
     outputs:
       release: ${{ steps.semversie.outputs.release }}
+      prerelease: ${{ steps.semversie.outputs.prerelease }}
       tag: ${{ steps.semversie.outputs.tag }}
       version: ${{ steps.semversie.outputs.version }}
       release-notes: ${{ steps.semversie.outputs.release-notes }}
@@ -31,11 +39,23 @@ jobs:
         uses: RonaldPhilipsen/semVersie@61a735e7d9e3d6e258d3288d09c1289a5a23ca69 # v2.3.5
 
   build:
-    name: Build image
-    if: github.event_name == 'pull_request'
+    name: Build image (${{ matrix.variant.name }})
+    needs: version
+    # A release candidate builds the same images in the job `image`.
+    if: github.event_name == 'pull_request' && needs.version.outputs.release != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      matrix:
+        variant: &variants
+          - name: release
+            features: ""
+            suffix: ""
+          # The same build with the Pyroscope profiler, for benchmarks.
+          - name: pyroscope
+            features: pyroscope
+            suffix: -pyroscope
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
@@ -43,18 +63,26 @@ jobs:
         with:
           context: .
           push: false
-          cache-from: type=gha
+          build-args: |
+            FEATURES=${{ matrix.variant.features }}
+          cache-from: type=gha,scope=${{ matrix.variant.name }}
 
   image:
-    name: Build and push image
+    name: Build and push image (${{ matrix.variant.name }})
     needs: version
-    if: github.event_name == 'push' && needs.version.outputs.release == 'true'
+    if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    strategy:
+      matrix:
+        variant: *variants
     steps:
+      # A release candidate is the head of the pull request, not the merge commit of GitHub.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       # The commit time, so a rebuild of the same commit gets the same label.
       - name: Read the commit time
@@ -69,13 +97,14 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ env.IMAGE }}:${{ needs.version.outputs.version }}
+          tags: ${{ env.IMAGE }}:${{ needs.version.outputs.version }}${{ matrix.variant.suffix }}
           build-args: |
+            FEATURES=${{ matrix.variant.features }}
             VERSION=${{ needs.version.outputs.version }}
-            REVISION=${{ github.sha }}
+            REVISION=${{ github.event.pull_request.head.sha || github.sha }}
             CREATED=${{ steps.created.outputs.created }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.variant.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant.name }}
 
   chart:
     name: Package and push Helm chart
@@ -86,6 +115,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5
       - name: Log in to the registry
         env:
@@ -105,6 +136,9 @@ jobs:
   release:
     name: Create GitHub release
     needs: [version, image, chart]
+    # A release candidate gets no Git tag. semVersie reads the newest tag as the last release, so
+    # after a tag v0.5.0-rc0 it would compute 0.6.0 for the release of the same pull request.
+    if: needs.version.outputs.prerelease != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -673,7 +673,7 @@ mod tests {
         let hs = encode(
             &h,
             &claims("discus.read"),
-            &EncodingKey::from_secret(b"secret"),
+            &EncodingKey::from_secret(b"secret").unwrap(),
         )
         .unwrap();
         assert_eq!(

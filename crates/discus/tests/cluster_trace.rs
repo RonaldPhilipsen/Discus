@@ -7,8 +7,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod common;
+
 use discus::server::BindOptions;
-use discus::{Config, Server};
+use discus::Server;
 use discus_placement::{ClusterId, EpochId, NodeId};
 use discus_resp::Value;
 use discus_transport::testing::{TestCa, TEST_SAN};
@@ -135,7 +137,7 @@ async fn setup() -> Setup {
         "--shutdown-timeout-secs".into(),
         "1".into(),
     ];
-    let config = Config::parse_from(argv).unwrap();
+    let config = common::config(&argv);
     let opts = BindOptions {
         cluster_socket: Some(socket),
         ..BindOptions::default()

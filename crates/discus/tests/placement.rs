@@ -9,7 +9,7 @@ use discus_placement::{ClusterId, EpochId, MemberState};
 fn node(args: &[&str]) -> Node {
     let mut argv = vec!["discus"];
     argv.extend_from_slice(args);
-    let config = Config::parse_from(argv).unwrap();
+    let config = common::config(&argv);
     let security = Security::from_config(&config).unwrap();
     Node::new(config, std::sync::Arc::new(security))
 }
@@ -75,7 +75,7 @@ fn bad_placement_settings_are_refused() {
 #[tokio::test]
 async fn info_reports_identity_and_epoch() {
     let addr = common::start_node(&[]).await;
-    let client = redis::Client::open(format!("redis://{addr}")).unwrap();
+    let client = common::client_tls::redis_client(&format!("rediss://{addr}"));
     let mut con = client.get_multiplexed_async_connection().await.unwrap();
     let info: String = redis::cmd("INFO")
         .arg("discus")
@@ -223,11 +223,11 @@ fn cluster_args(extra: &[&str]) -> Vec<String> {
 
 #[tokio::test]
 async fn peers_without_certificates_are_refused() {
-    let config = Config::parse_from(cluster_args(&[])).unwrap();
+    let config = common::config(&cluster_args(&[]));
     let err = discus::Server::bind(config).await.err().unwrap();
     assert!(err.to_string().contains("--cluster-ca"), "{err}");
 
-    let config = Config::parse_from(cluster_args(&[
+    let config = common::config(&cluster_args(&[
         "--cluster-ca",
         "/nonexistent/ca.pem",
         "--cluster-cert",
@@ -238,8 +238,7 @@ async fn peers_without_certificates_are_refused() {
         "2",
         "--membership",
         "static",
-    ]))
-    .unwrap();
+    ]));
     let err = discus::Server::bind(config).await.err().unwrap();
     assert!(err.to_string().contains("--weight"), "{err}");
 }

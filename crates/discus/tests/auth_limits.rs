@@ -9,7 +9,7 @@ const RIGHT: &[u8] = b"*2\r\n$4\r\nAUTH\r\n$6\r\ns3cret\r\n";
 #[tokio::test]
 async fn five_failures_close_the_connection() {
     let addr = common::start_node(&["--shared-token", "s3cret"]).await;
-    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut s = common::client_tls::connect(addr).await;
     s.write_all(&WRONG.repeat(6)).await.unwrap();
     let mut all = Vec::new();
     tokio::time::timeout(std::time::Duration::from_secs(5), s.read_to_end(&mut all))
@@ -44,7 +44,7 @@ async fn a_failed_auth_keeps_an_earlier_success() {
     let mut wire = RIGHT.to_vec();
     wire.extend_from_slice(WRONG);
     wire.extend_from_slice(b"*1\r\n$4\r\nPING\r\n");
-    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut s = common::client_tls::connect(addr).await;
     s.write_all(&wire).await.unwrap();
     let mut buf = Vec::new();
     while !String::from_utf8_lossy(&buf).contains("PONG") {

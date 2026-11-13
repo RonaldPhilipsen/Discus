@@ -226,6 +226,10 @@ pub struct Config {
     /// PEM file with this node's private key.
     #[arg(long)]
     pub cluster_key: Option<PathBuf>,
+    /// Seconds between checks of the certificate files, of the client listener and of the
+    /// cluster. After a change, new connections use the new certificates. 0 turns it off.
+    #[arg(long, default_value_t = 10)]
+    pub tls_reload_secs: u64,
     /// The URI SAN that every peer certificate must carry. Empty: any certificate from the CA.
     #[arg(long, default_value = "spiffe://cluster.local/ns/default/sa/discus")]
     pub cluster_san: String,

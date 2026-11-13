@@ -4,7 +4,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[tokio::test]
 async fn info_reports_the_build_features() {
     let addr = common::start_node(&[]).await;
-    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut s = common::client_tls::connect(addr).await;
     s.write_all(b"*2\r\n$4\r\nINFO\r\n$6\r\ndiscus\r\n")
         .await
         .unwrap();

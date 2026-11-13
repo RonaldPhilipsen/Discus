@@ -273,3 +273,17 @@ async fn a_first_stream_without_hello_fails() {
     let closed = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await;
     assert!(closed.is_ok(), "the connection stays open");
 }
+
+#[tokio::test]
+async fn a_tls_reload_applies_to_new_handshakes() {
+    let (old, new) = (TestCa::new(), TestCa::new());
+    let cluster = ClusterId::mint();
+    let (a_id, b_id) = (NodeId::random(), NodeId::random());
+    let (a, _) = start(config(&old, a_id, cluster)).await;
+    let (b, _) = start(config(&old, b_id, cluster)).await;
+    b.reload_tls(&new.material(TEST_SAN)).unwrap();
+    // b now presents a certificate from the new CA and trusts only the new CA.
+    expect_handshake_failure(&a, b_id, b.local_addr()).await;
+    a.reload_tls(&new.material(TEST_SAN)).unwrap();
+    assert_eq!(a.peer(b_id, b.local_addr()).await.unwrap().node_id, b_id);
+}

@@ -62,7 +62,7 @@ impl GossipNode {
     /// A connection whose replies time out after 30 s, so a lost reply fails the test instead of
     /// hanging it.
     pub async fn redis(&self) -> redis::aio::MultiplexedConnection {
-        let client = redis::Client::open(format!("redis://{}", self.addr)).unwrap();
+        let client = super::client_tls::redis_client(&format!("rediss://{}", self.addr));
         let config =
             redis::AsyncConnectionConfig::new().set_response_timeout(Some(Duration::from_secs(30)));
         client
@@ -251,6 +251,8 @@ pub fn argv(
         }
     }
     argv.extend(extra.iter().cloned());
+    let tls = super::client_tls::server_args(&argv);
+    argv.extend(tls);
     argv
 }
 

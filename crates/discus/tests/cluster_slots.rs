@@ -10,10 +10,12 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use discus_placement::{slot, ClusterId, Epoch, NodeId};
+use security_support::common::client_tls;
 use security_support::common::cluster::{free_port, start_redirect_cluster, Cluster};
 use security_support::common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio_rustls::client::TlsStream;
 
 /// Three static nodes with `--replication-factor 3`. Each has a redirect listener on a reserved
 /// port and advertises it, since a static peer learns client addresses only from the list.
@@ -91,14 +93,14 @@ fn reply_len(buf: &[u8]) -> Option<usize> {
 
 /// A raw RESP connection that reads whole replies.
 struct Raw {
-    stream: TcpStream,
+    stream: TlsStream<TcpStream>,
     buf: Vec<u8>,
 }
 
 impl Raw {
     async fn connect(addr: SocketAddr) -> Raw {
         Raw {
-            stream: TcpStream::connect(addr).await.unwrap(),
+            stream: client_tls::connect(addr).await,
             buf: Vec::new(),
         }
     }
@@ -384,14 +386,13 @@ async fn scan_over_primaries_lists_each_key_once() {
 /// A redis-rs connection to `addr`, in RESP3 when `resp3`.
 async fn conn(addr: SocketAddr, resp3: bool) -> redis::aio::MultiplexedConnection {
     let url = if resp3 {
-        format!("redis://{addr}/?protocol=resp3")
+        format!("rediss://{addr}/?protocol=resp3")
     } else {
-        format!("redis://{addr}")
+        format!("rediss://{addr}")
     };
     let config =
         redis::AsyncConnectionConfig::new().set_response_timeout(Some(Duration::from_secs(30)));
-    redis::Client::open(url)
-        .unwrap()
+    client_tls::redis_client(&url)
         .get_multiplexed_async_connection_with_config(&config)
         .await
         .unwrap()
@@ -518,8 +519,9 @@ async fn resp3_topology_parses() {
         }
     }
 
-    let urls: Vec<String> = ports.iter().map(|p| format!("redis://{p}")).collect();
+    let urls: Vec<String> = ports.iter().map(|p| format!("rediss://{p}")).collect();
     let client = redis::cluster::ClusterClientBuilder::new(urls)
+        .certs(client_tls::redis_certs())
         .use_protocol(redis::ProtocolVersion::RESP3)
         .response_timeout(Duration::from_secs(30))
         .build()
@@ -620,8 +622,9 @@ async fn cluster_client_routes_directly() {
     let (c, ports) = start(|_| vec![]).await;
     let before = forwards(&c);
     let moved = redirects(&c);
-    let urls: Vec<String> = ports.iter().map(|p| format!("redis://{p}")).collect();
+    let urls: Vec<String> = ports.iter().map(|p| format!("rediss://{p}")).collect();
     let client = redis::cluster::ClusterClientBuilder::new(urls)
+        .certs(client_tls::redis_certs())
         .response_timeout(Duration::from_secs(30))
         .build()
         .unwrap();
@@ -676,7 +679,8 @@ async fn single_node_answers_one_range() {
         vec![(0, 16383, vec![("127.0.0.1".to_string(), port.port(), id)])]
     );
 
-    let client = redis::cluster::ClusterClientBuilder::new(vec![format!("redis://{port}")])
+    let client = redis::cluster::ClusterClientBuilder::new(vec![format!("rediss://{port}")])
+        .certs(client_tls::redis_certs())
         .response_timeout(Duration::from_secs(30))
         .build()
         .unwrap();
@@ -825,12 +829,10 @@ async fn cluster_client(
     urls: Vec<String>,
     tls: Option<redis::TlsCertificates>,
 ) -> redis::cluster_async::ClusterConnection {
-    let mut builder =
-        redis::cluster::ClusterClientBuilder::new(urls).response_timeout(Duration::from_secs(30));
-    if let Some(certs) = tls {
-        builder = builder.tls(redis::TlsMode::Secure).certs(certs);
-    }
-    builder
+    let certs = tls.unwrap_or_else(client_tls::redis_certs);
+    redis::cluster::ClusterClientBuilder::new(urls)
+        .response_timeout(Duration::from_secs(30))
+        .certs(certs)
         .build()
         .unwrap()
         .get_async_connection()
@@ -841,7 +843,7 @@ async fn cluster_client(
 fn cluster_urls(nodes: &[GossipNode]) -> Vec<String> {
     nodes
         .iter()
-        .map(|n| format!("redis://{}", redirect_of(n)))
+        .map(|n| format!("rediss://{}", redirect_of(n)))
         .collect()
 }
 

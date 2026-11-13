@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+mod common;
+
 use discus::node::Node;
 use discus::security::Security;
 use discus_placement::{Epoch, EpochId};
@@ -24,7 +26,7 @@ fn gauge(h: &TraceHarness) -> f64 {
 fn the_epoch_gauge_follows_the_adopted_epoch() {
     let h = TraceHarness::new(0.0);
     assert!(discus_telemetry::install_global(h.telemetry.metrics()));
-    let config = discus::Config::parse_from(["discus", "--listen", "127.0.0.1:0"]).unwrap();
+    let config = common::config(&["discus", "--listen", "127.0.0.1:0"]);
     let security = Security::from_config(&config).unwrap();
     let node = Node::new(config, Arc::new(security));
     assert_eq!(gauge(&h), 1.0);

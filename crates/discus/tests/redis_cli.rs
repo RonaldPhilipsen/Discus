@@ -26,6 +26,7 @@ async fn compat_script_passes_against_a_fresh_node() {
         .arg("scripts/compat.sh")
         .arg(node.addr.to_string())
         .env("COMPAT_ALLOW_FLUSH", "1")
+        .env("COMPAT_CA", common::client_tls::ca_file())
         .env("COMPAT_REDIRECT", redirect.to_string())
         .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
         .output()

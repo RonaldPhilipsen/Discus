@@ -1,6 +1,16 @@
 //! Configuration checks that make the node refuse to start (spec §14.2, §15.5).
 
+mod common;
+
+/// The start error of a node with the client TLS of a test node and `args`.
 async fn bind_error(args: &[&str]) -> String {
+    let tls = common::client_tls::server_args(args);
+    let mut all: Vec<&str> = args.to_vec();
+    all.extend(tls.iter().map(String::as_str));
+    bind_error_without_tls(&all).await
+}
+
+async fn bind_error_without_tls(args: &[&str]) -> String {
     let mut argv = vec![
         "discus",
         "--listen",
@@ -52,21 +62,16 @@ async fn a_shared_token_policy_needs_the_token() {
 }
 
 #[tokio::test]
-async fn a_tls_policy_needs_a_tls_mode() {
-    let e = bind_error(&[
-        "--auth-policy",
-        "all:tls,shared_token",
-        "--shared-token",
-        "x",
-    ])
-    .await;
-    assert!(e.contains("--tls-mode"), "{e}");
+async fn a_node_without_a_client_certificate_refuses_to_start() {
+    let e = bind_error_without_tls(&["--auth-policy", "none"]).await;
+    assert!(e.contains("--tls-cert"), "{e}");
+    let e = bind_error_without_tls(&["--tls-mode", "lb", "--auth-policy", "none"]).await;
+    assert!(e.contains("--tls-cert"), "{e}");
 }
 
-#[tokio::test]
-async fn a_tls_mode_needs_a_certificate_and_a_key() {
-    let e = bind_error(&["--tls-mode", "node", "--auth-policy", "none"]).await;
-    assert!(e.contains("--tls-cert"), "{e}");
+#[test]
+fn there_is_no_plaintext_tls_mode() {
+    assert!(discus::Config::parse_from(["discus", "--tls-mode", "off"]).is_err());
 }
 
 #[cfg(all(feature = "oauth2", not(feature = "oauth2-introspection")))]

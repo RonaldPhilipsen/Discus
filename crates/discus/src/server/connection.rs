@@ -65,7 +65,10 @@ async fn flush<S: AsyncWrite + Unpin>(stream: &mut S, out: &mut BytesMut) -> boo
     if out.is_empty() {
         return true;
     }
-    let sent = stream.write_all(out).await.is_ok();
+    // A TLS stream can return from `write_all` with the last records still in its buffer when
+    // the socket is full. Only `flush` sends them, so without it a client can wait forever for
+    // the end of a large reply.
+    let sent = stream.write_all(out).await.is_ok() && stream.flush().await.is_ok();
     out.clear();
     sent
 }
@@ -266,6 +269,22 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     redirect: bool,
     local_addr: Option<SocketAddr>,
 ) {
+    serve_until_closed(&mut stream, auth, node, redirect, local_addr).await;
+    // A TLS client sees a clean end only after close_notify. A client that never reads cannot
+    // hold the task past the limit.
+    let _ = tokio::time::timeout(CLOSE_TIMEOUT, stream.shutdown()).await;
+}
+
+/// How long the node tries to close a connection cleanly.
+const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn serve_until_closed<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: &mut S,
+    auth: ConnAuth,
+    node: Arc<Node>,
+    redirect: bool,
+    local_addr: Option<SocketAddr>,
+) {
     let _guard = node.track_connection();
     let cfg = &node.config;
     let max_pipeline = cfg.max_pipeline.max(1);
@@ -362,5 +381,49 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
                 Ok(_) => {}
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    /// A writer that, like a TLS stream with a full socket, keeps written bytes until a flush.
+    #[derive(Default)]
+    struct HoldsUntilFlush {
+        held: Vec<u8>,
+        sent: Vec<u8>,
+    }
+
+    impl AsyncWrite for HoldsUntilFlush {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.held.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            let held = std::mem::take(&mut self.held);
+            self.sent.extend_from_slice(&held);
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            self.poll_flush(cx)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_flush_sends_every_reply_byte() {
+        let mut stream = HoldsUntilFlush::default();
+        let mut out = BytesMut::from(&b"+OK\r\n"[..]);
+        assert!(flush(&mut stream, &mut out).await);
+        assert_eq!(stream.sent, b"+OK\r\n");
+        assert!(stream.held.is_empty());
     }
 }

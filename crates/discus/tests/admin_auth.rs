@@ -74,6 +74,8 @@ fn admin_tls_args<'a>(ca: &'a TestCa, server: &'a CertFiles, file: &'a str) -> V
         ca.ca_str(),
         "--auth-config",
         file,
+        "--auth-policy",
+        "none",
     ]
 }
 
@@ -98,7 +100,7 @@ async fn an_admin_certificate_opens_the_admin_port() {
     let ops = ca.client_cert("spiffe://test/ops/alice");
     let (code, body) = tls_get(&node, &ca, Some(&ops), "/admin/security").await;
     assert_eq!(code, 200, "{body}");
-    assert!(body.contains("\"tls_mode\":\"off\""), "{body}");
+    assert!(body.contains("\"tls_mode\":\"node\""), "{body}");
     assert!(body.contains("\"ready\":true"), "{body}");
     // The probes answer over TLS without a certificate.
     assert_eq!(tls_get(&node, &ca, None, "/healthz").await.0, 200);
@@ -117,7 +119,7 @@ async fn the_drain_route_needs_admin_credentials() {
     );
     assert_eq!(tls_get(&node, &ca, None, "/readyz").await.0, 200);
     // An open client connection keeps the drain pending, so the admin port stays up.
-    let _client = tokio::net::TcpStream::connect(node.addr).await.unwrap();
+    let _client = tls_connect(node.addr, &ca, None).await.unwrap();
     let ops = ca.client_cert("spiffe://test/ops/alice");
     let mut s = tls_connect(node.admin, &ca, Some(&ops)).await.unwrap();
     assert_eq!(

@@ -51,6 +51,27 @@ cluster:
     # The default is spiffe://cluster.local/ns/<namespace>/sa/<service account>.
     value: ""
 
+# TLS on the client listener and the redirect listener. Every client uses TLS. Node-to-node
+# traffic uses mTLS with cluster.tls.
+clientTls:
+  # A Secret with the keys tls.crt and tls.key. The default is cluster.tls.secretName.
+  secretName: ""
+  # Verifies client certificates against the key ca.crt of the Secret.
+  verifyClients: false
+  # A Secret with the key ca.crt that replaces the client CA, for example a private CA for client
+  # certificates next to a public server certificate. The default is the Secret above.
+  clientCaSecretName: ""
+  # With verifyClients: optional or required.
+  clientAuth: optional
+
+# The flag --auth-policy, for example all:mtls or all:tls,oauth2. An empty value uses the node
+# default none: every client uses TLS and needs no credentials.
+authPolicy: ""
+authConfig:
+  # A Secret with the key auth.toml, for the flag --auth-config. The file lists the trusted
+  # issuers and the client certificate rules. See docs/security.md.
+  secretName: ""
+
 # The termination grace period of the pod is this value plus 15 seconds.
 shutdownTimeoutSeconds: 30
 
