@@ -252,9 +252,10 @@ The default is 100. The node drops the lines over the limit and counts them in
 Discus can push CPU profiles to a Pyroscope server. The profiler runs inside the node. It samples
 the stacks of all threads and uploads a pprof profile every 10 seconds.
 
-Profiling needs the `pyroscope` build feature. The default build and the published images do not
-have it, because the sampling costs CPU. To build an image with it, run this command in the
-repository root:
+Profiling needs the `pyroscope` build feature. The default build and the release images do not
+have it, because the sampling costs CPU. Each release also publishes an image with the feature,
+with the suffix `-pyroscope`, for example `ghcr.io/ronaldphilipsen/discus:1.2.5-pyroscope`. To
+build an image with the feature yourself, run this command in the repository root:
 
 ```sh
 docker build --build-arg FEATURES=pyroscope -t discus:pyroscope .
@@ -302,7 +303,7 @@ helm upgrade <release> oci://ghcr.io/ronaldphilipsen/charts/discus \
   --reuse-values \
   --version <version> \
   --set image.repository=<registry>/discus \
-  --set image.tag=pyroscope \
+  --set image.tag=<version>-pyroscope \
   --set pyroscope.url=http://pyroscope.observability:4040
 ```
 

@@ -25,6 +25,19 @@ mise run test
 ## Releases
 
 When a pull request with a version-raising title merges into `main`, the
-release workflow runs. It calculates the version, builds the Docker image,
-pushes it to `ghcr.io/ronaldphilipsen/discus` with the version as tag, and
+release workflow runs. It calculates the version and builds two Docker images.
+It pushes them to `ghcr.io/ronaldphilipsen/discus` with the version as tag, and
+with the version and the suffix `-pyroscope`. The second image contains the
+CPU profiler for benchmarks. The workflow then pushes the Helm chart and
 creates a GitHub release.
+
+### Release candidates
+
+A release candidate is a test release of an open pull request. To publish one,
+add the label `release-candidate` to the pull request. The release workflow
+then pushes the two images and the chart with a version such as `2.0.0-rc0`.
+Each new push to the pull request publishes the same version again.
+
+A release candidate gets no Git tag and no GitHub release. semVersie reads the
+newest tag as the last release. After a tag `v2.0.0-rc0`, it would calculate
+`3.0.0` for the release of the same pull request.
