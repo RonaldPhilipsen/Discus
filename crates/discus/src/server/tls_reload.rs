@@ -12,6 +12,14 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+/// The content of every file, or `None` when one cannot be read. The server takes it before it
+/// loads the files, so a change between the load and the first check still counts as a change.
+pub type Snapshot = Option<Vec<Vec<u8>>>;
+
+pub fn snapshot(files: &[PathBuf]) -> Snapshot {
+    files.iter().map(|f| std::fs::read(f).ok()).collect()
+}
+
 /// The content of every file, or the first read error.
 async fn read_all(files: &[PathBuf]) -> io::Result<Vec<Vec<u8>>> {
     let mut out = Vec::with_capacity(files.len());
@@ -26,13 +34,12 @@ async fn read_all(files: &[PathBuf]) -> io::Result<Vec<Vec<u8>>> {
 pub fn watch(
     what: &'static str,
     files: Vec<PathBuf>,
+    mut seen: Snapshot,
     period: Duration,
     stop: CancellationToken,
     reload: impl Fn() -> io::Result<()> + Send + 'static,
 ) {
     tokio::spawn(async move {
-        // The node loaded these files at startup, so the first read is the baseline.
-        let mut seen = read_all(&files).await.ok();
         let mut ticker = tokio::time::interval(period);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         ticker.tick().await;

@@ -120,18 +120,41 @@ fn observe(transport: &Transport, channel: TransportChannel, stop: CancellationT
     });
 }
 
+/// The cluster certificate files, in the order of the reload.
+fn cluster_tls_files(config: &Config) -> Vec<std::path::PathBuf> {
+    [
+        &config.cluster_ca,
+        &config.cluster_cert,
+        &config.cluster_key,
+    ]
+    .into_iter()
+    .flatten()
+    .cloned()
+    .collect()
+}
+
 /// Reload the client and cluster certificates after their files change.
-fn watch_certificates(node: &Arc<Node>, transports: Vec<Transport>, stop: CancellationToken) {
+fn watch_certificates(
+    node: &Arc<Node>,
+    transports: Vec<Transport>,
+    (client_seen, cluster_seen): (tls_reload::Snapshot, tls_reload::Snapshot),
+    stop: CancellationToken,
+) {
     let config = &node.config;
     if config.tls_reload_secs == 0 {
         return;
     }
     let period = Duration::from_secs(config.tls_reload_secs);
     let security = node.security.clone();
-    let files = security.client_tls_files();
-    tls_reload::watch("client", files, period, stop.clone(), move || {
-        security.reload_client_tls()
-    });
+    let files = Security::client_tls_files(&config.security);
+    tls_reload::watch(
+        "client",
+        files,
+        client_seen,
+        period,
+        stop.clone(),
+        move || security.reload_client_tls(),
+    );
     let (Some(ca), Some(cert), Some(key)) = (
         config.cluster_ca.clone(),
         config.cluster_cert.clone(),
@@ -143,8 +166,8 @@ fn watch_certificates(node: &Arc<Node>, transports: Vec<Transport>, stop: Cancel
         return;
     }
     let san = config.cluster_san.clone();
-    let files = vec![ca.clone(), cert.clone(), key.clone()];
-    tls_reload::watch("cluster", files, period, stop, move || {
+    let files = cluster_tls_files(config);
+    tls_reload::watch("cluster", files, cluster_seen, period, stop, move || {
         let tls = TlsMaterial::from_files(&ca, &cert, &key, &san).map_err(io::Error::other)?;
         // Check every endpoint before any of them changes, so they never disagree.
         tls.check().map_err(io::Error::other)?;
@@ -172,6 +195,8 @@ pub struct Server {
     lane: ControlLane,
     /// The QUIC endpoints, for a reload of the cluster certificates.
     transports: Vec<Transport>,
+    /// The client and cluster certificate files before the node loaded them.
+    tls_seen: (tls_reload::Snapshot, tls_reload::Snapshot),
 }
 
 impl Server {
@@ -185,6 +210,10 @@ impl Server {
         let socket = opts.cluster_socket;
         let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidInput, msg);
         config.validate().map_err(invalid)?;
+        let tls_seen = (
+            tls_reload::snapshot(&Security::client_tls_files(&config.security)),
+            tls_reload::snapshot(&cluster_tls_files(&config)),
+        );
         let tls = if config.cluster_enabled() {
             let (Some(ca), Some(cert), Some(key)) = (
                 &config.cluster_ca,
@@ -294,6 +323,7 @@ impl Server {
             node,
             lane,
             transports,
+            tls_seen,
         })
     }
 
@@ -340,9 +370,10 @@ impl Server {
             node,
             lane,
             transports,
+            tls_seen,
         } = self;
         let stop_background = CancellationToken::new();
-        watch_certificates(&node, transports, stop_background.clone());
+        watch_certificates(&node, transports, tls_seen, stop_background.clone());
         {
             let node = node.clone();
             discus_store::every(

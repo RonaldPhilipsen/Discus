@@ -272,9 +272,8 @@ impl Security {
     }
 
     /// The files that [`Security::reload_client_tls`] reads.
-    pub fn client_tls_files(&self) -> Vec<PathBuf> {
-        let f = &self.tls_files;
-        [Some(&f.cert), Some(&f.key), f.client_ca.as_ref()]
+    pub fn client_tls_files(args: &SecurityArgs) -> Vec<PathBuf> {
+        [&args.tls_cert, &args.tls_key, &args.tls_client_ca]
             .into_iter()
             .flatten()
             .cloned()
