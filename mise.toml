@@ -60,10 +60,6 @@ run = "cargo bench -p discus-resp -p discus-store"
 description = "Compare one node with Redis and Valkey under redis-benchmark"
 run = "bash scripts/bench-compare.sh"
 
-[tasks.bench-flamegraph]
-description = "Record CPU flamegraphs of one node under redis-benchmark"
-run = "bash scripts/bench-flamegraph.sh"
-
 [tasks.build-matrix]
 description = "Check every build feature combination and the rejected ones"
 run = "bash scripts/build-matrix.sh"
