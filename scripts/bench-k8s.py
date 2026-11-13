@@ -24,6 +24,12 @@ KEYS = 1_000_000
 CPUS = os.environ.get("BENCH_CPUS", "1")
 IO_THREADS = os.environ.get("BENCH_VALKEY_IO_THREADS")
 VALUE = 256
+# Every client connection uses mTLS, because Discus has no plaintext mode. Valkey and Redis also
+# encrypt replication and the cluster bus, like Discus between nodes. All pods mount this Secret
+# on /tls.
+TLS_SECRET = "bench-tls"
+# The clients skip the server name check: the certificate has no SAN for the pod IPs.
+TLS_CLI = "--tls --cert /tls/tls.crt --key /tls/tls.key --cacert /tls/ca.crt --insecure"
 
 WORKLOADS = {
     "get": ("0:1", 1),
@@ -79,8 +85,12 @@ SYSTEMS = {
     "discus-cluster-3-glibc": ("discus-cluster", "discus", 3, "static-glibc-1b486a1"),
     "discus-3-glibc-pyro": ("discus", "discus", 3, "static-glibc-1b486a1-pyroscope"),
     "discus-cluster-3-glibc-pyro": ("discus-cluster", "discus", 3, "static-glibc-1b486a1-pyroscope"),
-    "discus-3-1.2.4-pyro": ("discus", "discus", 3, "1.2.4-pyroscope"),
-    "discus-cluster-3-1.2.4-pyro": ("discus-cluster", "discus", 3, "1.2.4-pyroscope"),
+    "discus-1-0.5.0-rc0-pyro": ("discus", "discus", 1, "0.5.0-rc0-pyroscope"),
+    "discus-3-0.5.0-rc0-pyro": ("discus", "discus", 3, "0.5.0-rc0-pyroscope"),
+    "discus-6-0.5.0-rc0-pyro": ("discus", "discus", 6, "0.5.0-rc0-pyroscope"),
+    "discus-cluster-1-0.5.0-rc0-pyro": ("discus-cluster", "discus", 1, "0.5.0-rc0-pyroscope"),
+    "discus-cluster-3-0.5.0-rc0-pyro": ("discus-cluster", "discus", 3, "0.5.0-rc0-pyroscope"),
+    "discus-cluster-6-0.5.0-rc0-pyro": ("discus-cluster", "discus", 6, "0.5.0-rc0-pyroscope"),
     "redis-sentinel-6": ("sentinel", "redis", 6),
     "valkey-sentinel-6": ("sentinel", "valkey", 6),
     "redis-cluster-noreplica-6": ("cluster0", "redis", 6),
@@ -137,32 +147,60 @@ def until(fn, what, limit=240):
     raise RuntimeError(f"timeout waiting for {what}: {last}")
 
 
+def tls_volume():
+    return ({"volumes": [{"name": "tls", "secret": {"secretName": TLS_SECRET}}]},
+            {"volumeMounts": [{"name": "tls", "mountPath": "/tls", "readOnly": True}]})
+
+
 def tool_pod(name, image, cpu, mem):
+    vol, mount = tls_volume()
     return {
         "apiVersion": "v1", "kind": "Pod", "metadata": {"name": name, "labels": {"bench": "tool"}},
         "spec": {
             "nodeSelector": {"kubernetes.io/hostname": NODE},
             "terminationGracePeriodSeconds": 1,
+            **vol,
             "containers": [{
                 "name": "c", "image": image, "command": ["sleep", "infinity"],
                 "resources": {"requests": {"cpu": cpu, "memory": mem}, "limits": {"cpu": cpu, "memory": mem}},
+                **mount,
             }],
         },
     }
 
 
-def ensure_tools():
+def make_certs(tmp):
+    """One CA and one certificate for every node and client. The certificate is valid for server and
+    client use, so Discus nodes, Valkey replicas, and memtier all present it."""
+    run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+         "-days", "2", "-subj", "/CN=bench CA", "-keyout", f"{tmp}/ca.key", "-out", f"{tmp}/ca.crt"])
+    run(["openssl", "req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+         "-subj", "/CN=bench", "-keyout", f"{tmp}/tls.key", "-out", f"{tmp}/n.csr"])
+    pathlib.Path(f"{tmp}/ext").write_text("extendedKeyUsage=serverAuth,clientAuth\n")
+    run(["openssl", "x509", "-req", "-in", f"{tmp}/n.csr", "-CA", f"{tmp}/ca.crt", "-CAkey", f"{tmp}/ca.key",
+         "-CAcreateserial", "-days", "2", "-extfile", f"{tmp}/ext", "-out", f"{tmp}/tls.crt"])
+    kc("delete", "secret", TLS_SECRET, "--ignore-not-found")
+    kc("create", "secret", "generic", TLS_SECRET, f"--from-file=ca.crt={tmp}/ca.crt",
+       f"--from-file=tls.crt={tmp}/tls.crt", f"--from-file=tls.key={tmp}/tls.key")
+
+
+def ensure_tools(tmp):
     run(["kubectl", "--context", CTX, "create", "ns", NS], check=False)
+    make_certs(tmp)
+    # A pod spec cannot change, and the tool pods must mount the new Secret.
+    kc("delete", "pod", "client", "toolbox", "--ignore-not-found", "--wait=true", timeout=200)
     apply(tool_pod("client", MEMTIER, "8", "4Gi"))
     apply(tool_pod("toolbox", IMAGES["redis"], "200m", "128Mi"))
     kc("wait", "--for=condition=Ready", "pod/client", "pod/toolbox", "--timeout=300s")
 
 
 def cli(ip, *a, port=6379, check=True):
-    return kc("exec", "toolbox", "--", "redis-cli", "--raw", "-h", ip, "-p", str(port), *a, check=check, timeout=60)
+    return kc("exec", "toolbox", "--", "redis-cli", *TLS_CLI.split(), "--raw", "-h", ip, "-p", str(port), *a,
+              check=check, timeout=60)
 
 
 def server_sts(name, engine, n, script):
+    vol, mount = tls_volume()
     return [
         {"apiVersion": "v1", "kind": "Service",
          "metadata": {"name": name, "labels": {"bench": "server"}},
@@ -176,21 +214,33 @@ def server_sts(name, engine, n, script):
              "template": {"metadata": {"labels": {"app": name, "bench": "server"}}, "spec": {
                  "nodeSelector": {"kubernetes.io/hostname": NODE},
                  "terminationGracePeriodSeconds": 1,
+                 **vol,
                  "containers": [{
                      "name": "s", "image": IMAGES[engine], "command": ["sh", "-c", script],
                      "env": [{"name": "POD_IP", "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}}}],
                      "resources": {"requests": {"cpu": CPUS, "memory": "2Gi"},
                                    "limits": {"cpu": CPUS, "memory": "2Gi"}},
+                     **mount,
                  }],
              }},
          }},
     ]
 
 
-def common(mem):
-    return (f"--bind 0.0.0.0 --protected-mode no --save '' --appendonly no "
+TLS_SERVER = ("--tls-cert-file /tls/tls.crt --tls-key-file /tls/tls.key --tls-ca-cert-file /tls/ca.crt "
+              "--tls-auth-clients yes --tls-replication yes --tls-cluster yes")
+
+
+def common(mem, port=6379):
+    """The plaintext port is off, so no client, replica, or cluster link can skip TLS."""
+    ports = f"--port 0 --tls-port {port} {TLS_SERVER}"
+    return (f"--bind 0.0.0.0 --protected-mode no --save '' --appendonly no {ports} "
             f"--maxmemory {mem} --maxmemory-policy allkeys-lru"
             + (f" --io-threads {IO_THREADS}" if IO_THREADS else ""))
+
+
+def engine_cli(engine):
+    return f"{engine}-cli {TLS_CLI}"
 
 
 def pods(name):
@@ -216,14 +266,16 @@ def deploy_standalone(name, engine):
 
 def deploy_sentinel(name, engine, n):
     host0 = f"{name}-0.{name}.{NS}.svc.cluster.local"
+    sentinel_ports = ("port 0\ntls-port 26379\ntls-cert-file /tls/tls.crt\ntls-key-file /tls/tls.key\n"
+                      "tls-ca-cert-file /tls/ca.crt\ntls-auth-clients yes\ntls-replication yes")
     s = f"""
 ORD=${{HOSTNAME##*-}}
 ROLE=""
 [ "$ORD" != 0 ] && ROLE="--replicaof {host0} 6379"
 {engine}-server {common('1536mb')} --replica-announce-ip $POD_IP $ROLE &
-until {engine}-cli -h {host0} ping | grep -q PONG; do sleep 1; done
+until {engine_cli(engine)} -h {host0} ping | grep -q PONG; do sleep 1; done
 cat > /tmp/s.conf <<EOF
-port 26379
+{sentinel_ports}
 bind 0.0.0.0
 protected-mode no
 sentinel resolve-hostnames yes
@@ -258,19 +310,19 @@ def deploy_cluster(name, engine, replicas, n):
     """Each pod runs one primary on 6379 and `replicas` replica processes on 6380 and up. Replica k
     of the primary on pod i runs on pod i + k + 1, so the copies of a slot are on different pods."""
     mem = {0: "1536mb", 1: "700mb", 2: "500mb"}[replicas]
-    srv = (f"{engine}-server {common(mem)} --cluster-enabled yes --cluster-node-timeout 5000 "
-           f"--cluster-announce-ip $POD_IP")
+    srv = lambda port: (f"{engine}-server {common(mem, port)} --cluster-enabled yes "
+                        f"--cluster-node-timeout 5000 --cluster-announce-ip $POD_IP")
     if replicas:
-        s = " & ".join(f"{srv} --port {6379 + k} --cluster-config-file /tmp/n{k}.conf"
+        s = " & ".join(f"{srv(6379 + k)} --cluster-config-file /tmp/n{k}.conf"
                        for k in range(replicas + 1)) + " & wait"
     else:
-        s = f"exec {srv} --port 6379 --cluster-config-file /tmp/n0.conf"
+        s = f"exec {srv(6379)} --cluster-config-file /tmp/n0.conf"
     for o in server_sts(name, engine, n, s):
         apply(o)
     ps = wait_pods(name, n)
     ips = [ip for _, ip in ps]
     pod0 = ps[0][0]
-    ex = lambda *a: kc("exec", pod0, "--", f"{engine}-cli", *a, timeout=120)
+    ex = lambda *a: kc("exec", pod0, "--", *engine_cli(engine).split(), *a, timeout=120)
     until(lambda: all(cli(ip, "PING").strip() == "PONG" for ip in ips), "cluster nodes up")
     ex("--cluster", "create", *[f"{ip}:6379" for ip in ips], "--cluster-yes")
     until(lambda: "cluster_state:ok" in cli(ips[0], "CLUSTER", "INFO"), "cluster ok")
@@ -293,27 +345,21 @@ def deploy_cluster(name, engine, replicas, n):
     return {"targets": [(ips[0], 6379)], "cluster": True, "ips": ips}
 
 
-def deploy_discus(name, n, tag, tmp, cluster_mode=False, pyroscope_url=None):
+def deploy_discus(name, n, tag, cluster_mode=False, pyroscope_url=None):
     """With cluster_mode, memtier runs as a Redis Cluster client against the redirect listener.
     With pyroscope_url, the nodes push CPU profiles. The image needs the pyroscope feature."""
     release = "discus"
-    run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
-         "-days", "2", "-subj", "/CN=bench CA", "-keyout", f"{tmp}/ca.key", "-out", f"{tmp}/ca.crt"])
-    run(["openssl", "req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
-         "-subj", "/CN=bench", "-keyout", f"{tmp}/tls.key", "-out", f"{tmp}/n.csr"])
-    pathlib.Path(f"{tmp}/ext").write_text("extendedKeyUsage=serverAuth,clientAuth\n")
-    run(["openssl", "x509", "-req", "-in", f"{tmp}/n.csr", "-CA", f"{tmp}/ca.crt", "-CAkey", f"{tmp}/ca.key",
-         "-CAcreateserial", "-days", "2", "-extfile", f"{tmp}/ext", "-out", f"{tmp}/tls.crt"])
-    kc("delete", "secret", "discus-tls", "--ignore-not-found")
-    kc("create", "secret", "generic", "discus-tls", f"--from-file=ca.crt={tmp}/ca.crt",
-       f"--from-file=tls.crt={tmp}/tls.crt", f"--from-file=tls.key={tmp}/tls.key")
-    # DISCUS_CHART installs a local chart, for an image tag that has no published chart.
+    # The client listener uses the cluster certificate. all:mtls matches tls-auth-clients on Valkey.
+    tls_args = "clientTls.verifyClients=true,clientTls.clientAuth=required,authPolicy=all:mtls"
+    # DISCUS_CHART installs a local chart, for an image tag that has no published chart. A profiling
+    # image uses the chart of its release.
     chart = os.environ.get("DISCUS_CHART")
-    chart_args = [chart] if chart else [CHART, "--version", tag]
+    chart_args = [chart] if chart else [CHART, "--version", tag.removesuffix("-pyroscope")]
     run(["helm", "--kube-context", CTX, "-n", NS, "upgrade", "--install", release, *chart_args,
          "--wait", "--timeout", "5m",
          "--set", f"replicaCount={n}", "--set", f"image.tag={tag}",
-         "--set", "cluster.tls.secretName=discus-tls",
+         "--set", f"cluster.tls.secretName={TLS_SECRET}",
+         "--set", tls_args,
          "--set", f"resources.requests.cpu={CPUS}", "--set", f"resources.limits.cpu={CPUS}",
          "--set", "resources.requests.memory=2Gi", "--set", "resources.limits.memory=2Gi",
          "--set-string", f"nodeSelector.kubernetes\\.io/hostname={NODE}",
@@ -362,6 +408,8 @@ def memtier(target, cluster, extra):
          "--distinct-client-seed"]
     if cluster:
         a.append("--cluster-mode")
+    a += ["--tls", "--cert", "/tls/tls.crt", "--key", "/tls/tls.key", "--cacert", "/tls/ca.crt",
+          "--tls-skip-verify"]
     return a + extra
 
 
@@ -474,7 +522,7 @@ def top_sample(delay, into):
     return th
 
 
-def run_system(name, args, tmp, out):
+def run_system(name, args, out):
     kind, engine, n, *rest = SYSTEMS[name]
     log(f"=== {name}: deploy")
     teardown()
@@ -486,7 +534,7 @@ def run_system(name, args, tmp, out):
     elif kind in ("cluster0", "cluster1", "cluster2"):
         info = deploy_cluster(short, engine, int(kind[-1]), n)
     else:
-        info = deploy_discus(short, n, rest[0] if rest else DISCUS_TAG, tmp, kind == "discus-cluster",
+        info = deploy_discus(short, n, rest[0] if rest else DISCUS_TAG, kind == "discus-cluster",
                              args.pyroscope_url)
     prefill(info)
     verify(name, kind, info, "after-prefill", out)
@@ -518,7 +566,7 @@ def run_system(name, args, tmp, out):
                 end_ms = time.time_ns() // 1_000_000
                 throttle = cfs_delta(before, cfs())
                 th.join()
-                rec = {"system": name, "workload": w, "variant": variant, "rep": rep, "threads": t,
+                rec = {"system": name, "tls": True, "workload": w, "variant": variant, "rep": rep, "threads": t,
                        "clients": c, "start_ms": start_ms, "end_ms": end_ms,
                        "duration": args.duration, "top": samples[0] if samples else "",
                        "cfs": throttle, **summarize(parts)}
@@ -545,11 +593,11 @@ def main():
                     help="Discus nodes push CPU profiles here. The image must be built with "
                          "--build-arg FEATURES=pyroscope. An empty value turns profiling off.")
     args = ap.parse_args()
-    ensure_tools()
     with tempfile.TemporaryDirectory() as tmp:
+        ensure_tools(tmp)
         for name in args.systems.split(","):
             try:
-                run_system(name, args, tmp, args.out)
+                run_system(name, args, args.out)
             except Exception as e:
                 log(f"FAILED {name}: {e}")
                 with open(args.out, "a") as f:
