@@ -1,11 +1,13 @@
 //! The sharded in-memory map.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
+use hashbrown::hash_map::EntryRef;
+use hashbrown::HashMap;
 use parking_lot::RwLock;
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
@@ -50,6 +52,8 @@ impl Default for StoreConfig {
 
 #[derive(Default)]
 pub(crate) struct ShardInner {
+    /// The default hasher of hashbrown is foldhash with a random seed, so clients cannot choose
+    /// keys that collide.
     pub(crate) map: HashMap<Bytes, Entry>,
     /// The tombstones of the shard by deadline, so the oldest one is found without a walk.
     pub(crate) tombs: BTreeSet<(u64, Bytes)>,
@@ -209,6 +213,54 @@ impl Store {
         let mut added_tomb = false;
         let (result, changed) = {
             let mut guard = shard.inner.write();
+            let ShardInner { map, tombs } = &mut *guard;
+            // A live entry changes in its bucket, so the common overwrite hashes and probes once.
+            if let EntryRef::Occupied(o) = map.entry_ref(key) {
+                if !o.get().tombstone && !o.get().is_expired(now) {
+                    let mut out = None;
+                    o.replace_entry_with(|k, e| {
+                        let before = estimate_size(k, &e);
+                        let mut slot = Slot {
+                            entry: Some(e),
+                            touched: false,
+                        };
+                        let result = f(&mut slot);
+                        let changed = slot.touched;
+                        let next = match slot.entry {
+                            Some(mut e) => {
+                                e.last_access_ms = now;
+                                if changed {
+                                    e.version = stamp;
+                                    e.tombstone = false;
+                                }
+                                self.adjust_used(before, estimate_size(k, &e));
+                                Some(e)
+                            }
+                            None => {
+                                self.adjust_used(before, 0);
+                                self.len.fetch_sub(1, Ordering::Relaxed);
+                                (stamp != Version::zero()).then(|| {
+                                    let t = self.tombstone(stamp, now);
+                                    let size = estimate_size(k, &t);
+                                    self.adjust_used(0, size);
+                                    self.tomb_count.fetch_add(1, Ordering::Relaxed);
+                                    self.tomb_bytes.fetch_add(size, Ordering::Relaxed);
+                                    tombs.insert((t.expires_at_ms.unwrap_or(0), k.clone()));
+                                    added_tomb = true;
+                                    t
+                                })
+                            }
+                        };
+                        out = Some((result, changed));
+                        next
+                    });
+                    drop(guard);
+                    if added_tomb {
+                        self.enforce_reserve();
+                    }
+                    return out.expect("the closure of replace_entry_with ran");
+                }
+            }
             let (key_bytes, entry, old_tomb) = match self.take(&mut guard, key) {
                 Some((k, e)) if e.tombstone && !e.is_expired(now) => (Some(k), None, Some(e)),
                 Some((k, e)) if e.tombstone || e.is_expired(now) => (Some(k), None, None),
