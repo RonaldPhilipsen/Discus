@@ -17,6 +17,8 @@ DISCUS_TAG = "0.2.2"
 CHART = "oci://ghcr.io/ronaldphilipsen/charts/discus"
 IMAGES = {"redis": "docker.io/library/redis:8", "valkey": "docker.io/valkey/valkey:9"}
 MEMTIER = "docker.io/redislabs/memtier_benchmark:2.2.1"
+# Every run profiles the Discus nodes, so the Discus image needs the pyroscope feature.
+PYROSCOPE_URL = "http://pyroscope.observability.svc.cluster.local:4040"
 KEYS = 1_000_000
 # The CPU of each server pod, and the io-threads of each Valkey or Redis process.
 CPUS = os.environ.get("BENCH_CPUS", "1")
@@ -71,6 +73,12 @@ SYSTEMS = {
     "discus-6-hot-path-pyro": ("discus", "discus", 6, "hot-path-3bc4fea-pyroscope"),
     "discus-cluster-1-hot-path-pyro": ("discus-cluster", "discus", 1, "hot-path-3bc4fea-pyroscope"),
     "discus-cluster-6-hot-path-pyro": ("discus-cluster", "discus", 6, "hot-path-3bc4fea-pyroscope"),
+    "discus-3-1.2.3": ("discus", "discus", 3, "1.2.3"),
+    "discus-cluster-3-1.2.3": ("discus-cluster", "discus", 3, "1.2.3"),
+    "discus-3-glibc": ("discus", "discus", 3, "static-glibc-1b486a1"),
+    "discus-cluster-3-glibc": ("discus-cluster", "discus", 3, "static-glibc-1b486a1"),
+    "discus-3-glibc-pyro": ("discus", "discus", 3, "static-glibc-1b486a1-pyroscope"),
+    "discus-cluster-3-glibc-pyro": ("discus-cluster", "discus", 3, "static-glibc-1b486a1-pyroscope"),
     "redis-sentinel-6": ("sentinel", "redis", 6),
     "valkey-sentinel-6": ("sentinel", "valkey", 6),
     "redis-cluster-noreplica-6": ("cluster0", "redis", 6),
@@ -531,10 +539,9 @@ def main():
                     help="memtier threads in all. With several targets, each target gets an equal part.")
     ap.add_argument("--connections", type=int, default=96,
                     help="client connections per node. Every setup gets this number times its node count.")
-    ap.add_argument("--pyroscope-url",
-                    help="Discus nodes push CPU profiles here, for example "
-                         "http://pyroscope.observability.svc.cluster.local:4040. "
-                         "The image must be built with --build-arg FEATURES=pyroscope.")
+    ap.add_argument("--pyroscope-url", default=PYROSCOPE_URL,
+                    help="Discus nodes push CPU profiles here. The image must be built with "
+                         "--build-arg FEATURES=pyroscope. An empty value turns profiling off.")
     args = ap.parse_args()
     ensure_tools()
     with tempfile.TemporaryDirectory() as tmp:

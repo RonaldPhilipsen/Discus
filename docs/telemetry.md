@@ -279,8 +279,10 @@ discus: profiling is enabled (--pyroscope-url) but this binary was built without
 | `--pyroscope-service-name` | `discus` | The `service_name` label of the profiles. |
 | `--pyroscope-sample-rate` | `100` | CPU samples per second, from 1 to 1000. |
 
-Each profile has the label `node_id`. In Kubernetes, it also has the labels `namespace`, `pod` and
-`node` from the variables of the Helm chart.
+Each profile has the labels `node_id` and `service_version`. The value of `service_version` is
+the build ID, which the `VERSION` build argument of the image sets. Without it, the value is
+`dev`. In Kubernetes, each profile also has the labels `namespace`, `pod` and `node` from the
+variables of the Helm chart.
 
 The profiler writes samples to a temporary file in `$TMPDIR`, or in `/tmp` when `$TMPDIR` is not
 set. The release image has no `/tmp`, and the chart makes the root file system read-only. If the

@@ -66,6 +66,28 @@ The `top` field holds one `kubectl top` sample from the middle of the run. Do no
 compare setups. The samples can be far from the real use: in one Valkey Cluster run at
 403,000 GET/s, three of the six pods showed 1m to 5m CPU.
 
+## Profiling
+
+From 2026-11-13, every Discus run has CPU profiling on. The Discus nodes push profiles to the
+Pyroscope server of the cluster. The script does this by default. Each result line has
+`start_ms` and `end_ms`. Use them to select the time range of one run in Pyroscope.
+
+The release images do not contain the `pyroscope` feature. For each image that you test, build
+and push a second image with the feature, with the same tag and the suffix `-pyroscope`. Run
+this command in the repository root:
+
+```sh
+docker build --build-arg FEATURES=pyroscope --build-arg VERSION=<tag> \
+  -t ghcr.io/ronaldphilipsen/discus:<tag>-pyroscope .
+```
+
+The `VERSION` argument sets the `service_version` label of the profiles. Use it to select or
+compare the builds in Pyroscope.
+
+On the static glibc image, profiling costs at most 2% of the throughput. See the
+[static glibc report](2026-11-13-k8s-static-glibc/report.md). To turn profiling off, pass
+`--pyroscope-url ""`.
+
 ## Client limits
 
 The client pod has a limit of 8 CPU, and its counters are in the `cfs` field too. If the client

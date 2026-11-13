@@ -56,6 +56,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      # The commit time, so a rebuild of the same commit gets the same label.
+      - name: Read the commit time
+        id: created
+        run: echo "created=$(git log -1 --format=%cI)" >> "$GITHUB_OUTPUT"
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         with:
           registry: ghcr.io
@@ -66,6 +70,10 @@ jobs:
           context: .
           push: true
           tags: ${{ env.IMAGE }}:${{ needs.version.outputs.version }}
+          build-args: |
+            VERSION=${{ needs.version.outputs.version }}
+            REVISION=${{ github.sha }}
+            CREATED=${{ steps.created.outputs.created }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
