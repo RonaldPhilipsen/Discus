@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 
 use bytes::Bytes;
+use foldhash::fast::RandomState;
 use hashlink::LinkedHashMap;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
@@ -26,9 +27,10 @@ pub struct PeerQueue {
 struct QueueState {
     /// Oldest key first. A removed key leaves its node on the free list of the map, so a queue
     /// that keeps its size allocates nothing for a new key.
-    keys: LinkedHashMap<Bytes, ()>,
+    /// Both maps hash with a random seed, so clients cannot choose keys that collide.
+    keys: LinkedHashMap<Bytes, (), RandomState>,
     /// Keys of the batch on the wire, until the peer acknowledges it.
-    inflight: HashSet<Bytes>,
+    inflight: HashSet<Bytes, RandomState>,
     /// The last batch failed. Writes go to hints until a probe succeeds.
     down: bool,
     /// The queue overflowed since the last drain below the low-water mark.
@@ -53,8 +55,8 @@ impl PeerQueue {
             peer,
             label: crate::telemetry::node_label(peer),
             state: Mutex::new(QueueState {
-                keys: LinkedHashMap::new(),
-                inflight: HashSet::new(),
+                keys: LinkedHashMap::default(),
+                inflight: HashSet::default(),
                 down: false,
                 lagging: false,
                 closed: false,
