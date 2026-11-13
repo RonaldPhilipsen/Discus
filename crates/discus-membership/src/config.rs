@@ -65,8 +65,6 @@ pub struct SwimConfig {
     pub health_max_multiplier: f64,
     /// At or above this multiplier, data-path evidence is dropped.
     pub health_evidence_cutoff: f64,
-    /// The replication factor, for the ownership-gained event.
-    pub replication_factor: usize,
     /// The seed of the random source. Production uses a random seed.
     pub seed: u64,
 }
@@ -101,7 +99,6 @@ impl Default for SwimConfig {
             health_unit_ms: 10,
             health_max_multiplier: 9.0,
             health_evidence_cutoff: 1.5,
-            replication_factor: discus_placement::DEFAULT_RF,
             seed: fastrand::u64(..),
         }
     }

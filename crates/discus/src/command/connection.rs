@@ -5,14 +5,14 @@ use std::fmt::Write;
 use bytes::Bytes;
 use discus_placement::{slot, Epoch};
 use discus_resp::{Command, Protocol, Value};
+use discus_telemetry::attrs::TopologyCommand;
 
-use super::access::Access;
 use super::error::CommandError;
-use super::table::{check, lookup, names, CommandSpec};
+use super::table::{check, lookup, names, Access, CommandSpec};
 use super::util::{glob_match, parse_i64, upper};
 use crate::build;
-use crate::cluster::route::{keys_of, Keys, Route};
-use crate::cluster::topology::{self, TopologyKind};
+use crate::cluster::route::key_args;
+use crate::cluster::topology;
 use crate::node::{ConnState, Node};
 
 /// The Redis version that Discus reports. Clients gate features on it.
@@ -169,13 +169,7 @@ fn command_entry(spec: &CommandSpec) -> Value {
     } else {
         "readonly"
     };
-    let (first, last, step) = match spec.route {
-        Route::Single { .. } => (1, 1, 1),
-        Route::MultiRead { .. } | Route::MultiWrite { pairs: false } => (1, -1, 1),
-        Route::MultiWrite { pairs: true } => (1, -1, 2),
-        Route::Rename => (1, 2, 1),
-        Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => (0, 0, 0),
-    };
+    let (first, last, step) = spec.route.key_spec();
     Value::Array(vec![
         Value::bulk(spec.name.to_lowercase().into_bytes()),
         Value::Integer(i64::from(spec.arity)),
@@ -197,9 +191,9 @@ fn getkeys(args: &[Bytes]) -> Reply {
             "ERR Invalid command specified or wrong number of arguments".into(),
         ));
     };
-    match keys_of(spec.route, &inner) {
-        Keys::Some(keys) => Ok(Value::Array(keys.into_iter().map(Value::Bulk).collect())),
-        Keys::None | Keys::Barrier => Err(CommandError::Custom(
+    match key_args(spec.route, &inner) {
+        Some(keys) => Ok(Value::Array(keys.cloned().map(Value::Bulk).collect())),
+        None => Err(CommandError::Custom(
             "ERR The command has no key arguments".into(),
         )),
     }
@@ -377,10 +371,10 @@ fn cluster(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
         return Err(CommandError::WrongArity("CLUSTER".into()));
     };
     let kind = match sub.as_str() {
-        "SLOTS" => Some(TopologyKind::Slots),
-        "SHARDS" => Some(TopologyKind::Shards),
-        "NODES" => Some(TopologyKind::Nodes),
-        "INFO" => Some(TopologyKind::Info),
+        "SLOTS" => Some(TopologyCommand::Slots),
+        "SHARDS" => Some(TopologyCommand::Shards),
+        "NODES" => Some(TopologyCommand::Nodes),
+        "INFO" => Some(TopologyCommand::Info),
         _ => None,
     };
     let arity = match sub.as_str() {
@@ -392,7 +386,7 @@ fn cluster(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
         return Err(CommandError::WrongArity(format!("CLUSTER|{sub}")));
     }
     if let Some(kind) = kind {
-        discus_telemetry::global().topology_request(kind.into());
+        discus_telemetry::global().topology_request(kind);
         return match standalone_topology(node, conn, kind) {
             Some(reply) => reply,
             None => node
@@ -415,7 +409,7 @@ fn cluster(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
 /// A single node without a cluster and without an advertised address names the local address
 /// of the connection that asks (spec "CLUSTER and connection commands"). That reply depends on
 /// the connection, so it is not cached. `None` when the node advertises an address.
-fn standalone_topology(node: &Node, conn: &ConnState, kind: TopologyKind) -> Option<Reply> {
+fn standalone_topology(node: &Node, conn: &ConnState, kind: TopologyCommand) -> Option<Reply> {
     let local = conn.local_addr?;
     let epoch = node.epochs().current().clone();
     let [me] = epoch.members() else {
@@ -461,17 +455,16 @@ mod tests {
     fn every_entry_has_its_key_positions() {
         for name in names() {
             let spec = lookup(name.as_bytes()).unwrap();
-            let want = match spec.route {
-                Route::Single { .. } => (1, 1, 1),
-                Route::MultiRead { .. } | Route::MultiWrite { pairs: false } => (1, -1, 1),
-                Route::MultiWrite { pairs: true } => (1, -1, 2),
-                Route::Rename => (1, 2, 1),
-                _ => (0, 0, 0),
-            };
-            assert_eq!(positions(&command_entry(spec)), want, "{name}");
+            assert_eq!(
+                positions(&command_entry(spec)),
+                spec.route.key_spec(),
+                "{name}"
+            );
         }
         let of = |name: &str| positions(&command_entry(lookup(name.as_bytes()).unwrap()));
         assert_eq!(of("MSET"), (1, -1, 2));
+        assert_eq!(of("MGET"), (1, -1, 1));
+        assert_eq!(of("RENAME"), (1, 2, 1));
         assert_eq!(of("GET"), (1, 1, 1));
         assert_eq!(of("PING"), (0, 0, 0));
     }

@@ -70,8 +70,20 @@ impl TestCa {
 
     /// Material with a certificate for `san` that also expects `san` from peers.
     pub fn material(&self, san: &str) -> TlsMaterial {
-        let (cert, key) = self.issue(san);
-        TlsMaterial::from_pem(self.pem.as_bytes(), cert.as_bytes(), key.as_bytes(), san).unwrap()
+        self.material_for(san, san)
+    }
+
+    /// Material with a certificate for `cert_san` that expects `expected_san` from peers. An
+    /// empty `expected_san` accepts any certificate from this CA.
+    pub fn material_for(&self, cert_san: &str, expected_san: &str) -> TlsMaterial {
+        let (cert, key) = self.issue(cert_san);
+        TlsMaterial::from_pem(
+            self.pem.as_bytes(),
+            cert.as_bytes(),
+            key.as_bytes(),
+            expected_san,
+        )
+        .unwrap()
     }
 }
 

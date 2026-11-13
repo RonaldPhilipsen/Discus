@@ -41,12 +41,6 @@ pub enum Event {
     },
     /// The node adopted a newer epoch.
     EpochAdopted { old: EpochId, new: EpochId },
-    /// The new epoch gives owner slots to these members.
-    OwnershipGained {
-        old: EpochId,
-        new: EpochId,
-        gained: Vec<NodeId>,
-    },
     /// The node was dropped from the epoch and joins again with a new incarnation.
     Rejoining { incarnation: u64 },
     /// The node lost a merge. It discards its store and joins the winner.

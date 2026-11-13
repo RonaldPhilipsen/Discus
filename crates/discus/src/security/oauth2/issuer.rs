@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
-use super::{KeySet, TrustedIssuer};
+use super::{IssuerRules, KeySet, TrustedIssuer};
 use crate::security::tls;
 
 /// The timeout of one HTTP request to an identity provider.
@@ -27,12 +27,12 @@ pub struct Source {
     refresh: Duration,
     min_refetch: Duration,
     insecure: bool,
+    /// Take the `iss` value from discovery instead of checking it against the configured one.
+    learn_name: bool,
     jwks_uri: Mutex<Option<String>>,
     /// The last refresh that an unknown `kid` caused.
     last_kid_refresh: tokio::sync::Mutex<Option<Instant>>,
     generation: Arc<AtomicU64>,
-    /// The `issuer` from discovery, for an issuer that learns its name from the document.
-    pub discovered_issuer: Mutex<Option<String>>,
     /// The `introspection_endpoint` from discovery.
     pub introspection_endpoint: Mutex<Option<String>>,
 }
@@ -42,8 +42,11 @@ pub struct SourceConfig {
     pub fixed_jwks_url: Option<String>,
     pub bearer_file: Option<PathBuf>,
     pub ca_file: Option<PathBuf>,
-    pub refresh: Duration,
-    pub min_refetch: Duration,
+    pub refresh_secs: u64,
+    pub min_refetch_secs: u64,
+    /// Keys older than this are stale.
+    pub max_stale_secs: u64,
+    pub learn_name: bool,
     pub insecure: bool,
 }
 
@@ -61,11 +64,13 @@ pub fn check_url(url: &str, insecure: bool) -> Result<(), String> {
 }
 
 impl Source {
+    /// The loader of the issuer that `rules` describe. Every source of one `OAuth2` shares
+    /// `generation`.
     pub fn new(
-        trusted: Arc<TrustedIssuer>,
+        rules: IssuerRules,
         config: SourceConfig,
         generation: Arc<AtomicU64>,
-    ) -> Result<Source, String> {
+    ) -> Result<Arc<Source>, String> {
         check_url(&config.discovery_url, config.insecure)?;
         if let Some(url) = &config.fixed_jwks_url {
             check_url(url, config.insecure)?;
@@ -76,21 +81,22 @@ impl Source {
             .timeout(FETCH_TIMEOUT)
             .build()
             .map_err(|e| e.to_string())?;
-        Ok(Source {
-            trusted,
+        let max_stale = Duration::from_secs(config.max_stale_secs);
+        Ok(Arc::new(Source {
+            trusted: Arc::new(TrustedIssuer::new(rules, max_stale)),
             discovery_url: config.discovery_url,
             fixed_jwks_url: config.fixed_jwks_url,
             bearer_file: config.bearer_file,
             client,
-            refresh: config.refresh,
-            min_refetch: config.min_refetch,
+            refresh: Duration::from_secs(config.refresh_secs.max(1)),
+            min_refetch: Duration::from_secs(config.min_refetch_secs),
             insecure: config.insecure,
+            learn_name: config.learn_name,
             jwks_uri: Mutex::new(None),
             last_kid_refresh: tokio::sync::Mutex::new(None),
             generation,
-            discovered_issuer: Mutex::new(None),
             introspection_endpoint: Mutex::new(None),
-        })
+        }))
     }
 
     /// The HTTP client of this issuer, with its trust roots.
@@ -125,10 +131,7 @@ impl Source {
             .get("issuer")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        if self.trusted.learns_name() {
-            if let Ok(mut d) = self.discovered_issuer.lock() {
-                *d = Some(issuer.to_string());
-            }
+        if self.learn_name {
             self.trusted.set_name(issuer);
         } else if issuer != self.trusted.rules.issuer {
             return Err(format!(

@@ -62,27 +62,9 @@ async fn a_wrong_san_is_rejected() {
     let (a, _) = start(config(&ca, a_id, cluster)).await;
     let mut cb = config(&ca, b_id, cluster);
     // b presents a certificate for another SAN, and expects the test SAN from peers.
-    let (cert, key) = ca.issue("spiffe://other/ns/x/sa/y");
-    cb.tls = discus_transport::TlsMaterial::from_pem(
-        ca.ca_pem().as_bytes(),
-        cert.as_bytes(),
-        key.as_bytes(),
-        TEST_SAN,
-    )
-    .unwrap();
+    cb.tls = ca.material_for("spiffe://other/ns/x/sa/y", TEST_SAN);
     let (b, _) = start(cb).await;
     expect_handshake_failure(&a, b_id, b.local_addr()).await;
-}
-
-fn ca_only_material(ca: &TestCa, san: &str) -> discus_transport::TlsMaterial {
-    let (cert, key) = ca.issue(san);
-    discus_transport::TlsMaterial::from_pem(
-        ca.ca_pem().as_bytes(),
-        cert.as_bytes(),
-        key.as_bytes(),
-        "",
-    )
-    .unwrap()
 }
 
 #[tokio::test]
@@ -91,9 +73,9 @@ async fn an_empty_san_accepts_any_certificate_from_the_ca() {
     let cluster = ClusterId::mint();
     let (a_id, b_id) = (NodeId::random(), NodeId::random());
     let mut ca_config = config(&ca, a_id, cluster);
-    ca_config.tls = ca_only_material(&ca, "spiffe://one/ns/x/sa/y");
+    ca_config.tls = ca.material_for("spiffe://one/ns/x/sa/y", "");
     let mut cb = config(&ca, b_id, cluster);
-    cb.tls = ca_only_material(&ca, "spiffe://two/ns/x/sa/y");
+    cb.tls = ca.material_for("spiffe://two/ns/x/sa/y", "");
     let (a, _) = start(ca_config).await;
     let (b, _) = start(cb).await;
     assert_eq!(a.peer(b_id, b.local_addr()).await.unwrap().node_id, b_id);
@@ -105,9 +87,9 @@ async fn an_empty_san_still_rejects_a_wrong_ca() {
     let cluster = ClusterId::mint();
     let (a_id, b_id) = (NodeId::random(), NodeId::random());
     let mut ca_config = config(&ca, a_id, cluster);
-    ca_config.tls = ca_only_material(&ca, TEST_SAN);
+    ca_config.tls = ca.material_for(TEST_SAN, "");
     let mut cb = config(&other, b_id, cluster);
-    cb.tls = ca_only_material(&other, TEST_SAN);
+    cb.tls = other.material_for(TEST_SAN, "");
     let (a, _) = start(ca_config).await;
     let (b, _) = start(cb).await;
     expect_handshake_failure(&a, b_id, b.local_addr()).await;

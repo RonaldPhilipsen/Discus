@@ -2,10 +2,10 @@
 
 use std::future::Future;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -56,19 +56,6 @@ impl Store {
     }
 }
 
-/// Run the sweep on a timer until `shutdown` is cancelled.
-pub fn spawn_sweeper(
-    store: Arc<Store>,
-    interval: Duration,
-    samples_per_shard: usize,
-    shutdown: CancellationToken,
-) -> JoinHandle<()> {
-    every(interval, shutdown, move || {
-        store.sweep_expired(samples_per_shard);
-        std::future::ready(())
-    })
-}
-
 /// Spawn a task that runs `f` every `period` until `stop` is cancelled. Ticks that a slow `f`
 /// missed are skipped, so `f` never runs back to back to catch up.
 pub fn every<F, Fut>(period: Duration, stop: CancellationToken, mut f: F) -> JoinHandle<()>
@@ -86,4 +73,20 @@ where
             }
         }
     })
+}
+
+/// Give `f` every event of `rx` until `stop` is cancelled or the sender is gone. Events that a
+/// lagging receiver lost are skipped.
+pub async fn on_events<T: Clone>(
+    mut rx: broadcast::Receiver<T>,
+    stop: CancellationToken,
+    mut f: impl FnMut(T),
+) {
+    loop {
+        match stop.run_until_cancelled(rx.recv()).await {
+            None | Some(Err(RecvError::Closed)) => return,
+            Some(Err(RecvError::Lagged(_))) => {}
+            Some(Ok(event)) => f(event),
+        }
+    }
 }

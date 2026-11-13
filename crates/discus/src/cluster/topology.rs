@@ -6,29 +6,10 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use discus_placement::{Epoch, Member, NodeId, RANGES, SLOTS, SLOTS_PER_RANGE};
 use discus_resp::{Protocol, Value};
+use discus_telemetry::attrs::TopologyCommand;
 
 use super::redirect::{endpoint, Endpoint};
 use crate::command::CommandError;
-
-/// The topology replies that a node caches per epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TopologyKind {
-    Slots,
-    Shards,
-    Nodes,
-    Info,
-}
-
-impl From<TopologyKind> for discus_telemetry::attrs::TopologyCommand {
-    fn from(kind: TopologyKind) -> Self {
-        match kind {
-            TopologyKind::Slots => Self::Slots,
-            TopologyKind::Shards => Self::Shards,
-            TopologyKind::Nodes => Self::Nodes,
-            TopologyKind::Info => Self::Info,
-        }
-    }
-}
 
 /// The 40-character Redis form of a node ID: the 32 hex digits followed by `00000000`, so
 /// clients that check the length accept it.
@@ -276,22 +257,22 @@ pub struct Responder {
 
 /// The reply of `kind`.
 pub fn build(
-    kind: TopologyKind,
+    kind: TopologyCommand,
     epoch: &Epoch,
     rf: usize,
     protocol: Protocol,
     by: Responder,
 ) -> Result<Value, CommandError> {
     match kind {
-        TopologyKind::Slots => slots(epoch, rf, protocol),
-        TopologyKind::Shards => shards(epoch, rf, protocol, by.tls),
-        TopologyKind::Nodes => {
+        TopologyCommand::Slots => slots(epoch, rf, protocol),
+        TopologyCommand::Shards => shards(epoch, rf, protocol, by.tls),
+        TopologyCommand::Nodes => {
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as u64);
             nodes(epoch, rf, by.me, now_ms).map(bulk)
         }
-        TopologyKind::Info => Ok(bulk(info(epoch, rf, by.normal))),
+        TopologyCommand::Info => Ok(bulk(info(epoch, rf, by.normal))),
     }
 }
 

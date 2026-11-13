@@ -19,7 +19,6 @@ pub mod sim;
 
 pub use config::{Millis, SwimConfig};
 pub use detector::Detector;
-pub use health::LocalHealth;
 pub use host::{Event, Host};
 #[cfg(feature = "testing")]
 pub use lease::MemoryLease;
@@ -28,4 +27,3 @@ pub use swim::{
     gained_owners, normal_count, provisional_epoch, suspicion_timeout, Action, Handled, Outcome,
     Phase, Swim,
 };
-pub use view::{retransmit_limit, supersedes};

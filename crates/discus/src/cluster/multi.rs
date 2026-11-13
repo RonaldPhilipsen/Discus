@@ -7,7 +7,7 @@ use discus_resp::{Command, Value};
 use discus_wire::ForwardMode;
 use futures::future::join_all;
 
-use super::route::{keys_of, Keys, Route};
+use super::route::{key_args, Route};
 use super::writeset::SetKey;
 use super::{
     allowed, candidates, forward, hold, local, local_acked, spent, Dispatch, Failure, Hop, Job,
@@ -67,10 +67,10 @@ async fn run_group(
         return Some(local_acked(node, spec, g.cmd.clone()).finish().await);
     }
     if allowed(node, hop, vec![g.target]).is_empty() {
-        let Keys::Some(keys) = keys_of(spec.route, &g.cmd) else {
+        let Some(keys) = key_args(spec.route, &g.cmd) else {
             return Some(Reply::try_again());
         };
-        let keys: Vec<&[u8]> = keys.iter().map(|k| &k[..]).collect();
+        let keys: Vec<&[u8]> = keys.map(|k| &k[..]).collect();
         return Some(
             spent(node, spec, g.cmd.clone(), &keys, write)
                 .finish()
@@ -178,7 +178,11 @@ pub fn multi(
         _ => None,
     };
     if super::redirect::applies(redirect, &hop) {
-        let keys: Vec<&[u8]> = cmd[1..].chunks(width).map(|item| &item[0][..]).collect();
+        let keys: Vec<&[u8]> = key_args(spec.route, &cmd)
+            .into_iter()
+            .flatten()
+            .map(|k| &k[..])
+            .collect();
         let moved =
             route.in_scope(|| super::redirect::multi_moved(node, &keys, write, need, readonly));
         if let Some(moved) = moved {
@@ -198,16 +202,15 @@ pub fn multi(
         return Dispatch::Ready(Reply::try_again());
     };
     // Each written key enters the write set with the stamp of its own part. Only a write notes.
-    let owner = node.clone();
     let writes = writes.filter(|_| write).cloned();
-    let note = move |keys: &[Bytes], reply: &Reply| {
+    let note = move |node: &Node, cmd: &Command, reply: &Reply| {
         if let (Some(w), Some(v)) = (&writes, reply.applied) {
             if write && !matches!(reply.value, Value::Error(_)) {
                 let mut w = w.lock();
-                for k in keys
-                    .iter()
-                    .step_by(width)
-                    .filter(|k| !owner.is_primary_read_key(k))
+                for k in key_args(spec.route, cmd)
+                    .into_iter()
+                    .flatten()
+                    .filter(|k| !node.is_primary_read_key(k))
                 {
                     w.record(SetKey::of(k), v, Instant::now());
                 }
@@ -215,17 +218,8 @@ pub fn multi(
         }
     };
     if groups.iter().all(|g| g.target == node.id) {
-        return match local_acked(node, spec, cmd.clone()) {
-            Dispatch::Ready(reply) => {
-                note(&cmd[1..], &reply);
-                Dispatch::Ready(reply)
-            }
-            Dispatch::Pending(f) => Dispatch::Pending(Box::pin(async move {
-                let reply = f.await;
-                note(&cmd[1..], &reply);
-                reply
-            })),
-        };
+        return local_acked(node, spec, cmd.clone())
+            .then(node, move |node, reply| note(node, &cmd, reply));
     }
     let node = node.clone();
     let total = (cmd.len() - 1) / width;
@@ -238,7 +232,7 @@ pub fn multi(
         .await;
         for (g, part) in groups.iter().zip(&parts) {
             if let Some(r) = part {
-                note(&g.cmd[1..], r);
+                note(&node, &g.cmd, r);
             }
         }
         // A held retry of this command learns whether every failed part was never sent.

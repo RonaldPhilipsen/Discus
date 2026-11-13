@@ -3,7 +3,7 @@
 use std::sync::{Arc, Weak};
 
 use discus_placement::EpochId;
-use discus_resp::{Limits, Parser, Value};
+use discus_resp::{Parser, Value};
 use discus_transport::{Channel, Inbound, Service};
 use discus_wire::{Forward, ForwardMode, ForwardReply, Message, TraceContext};
 use futures::future::BoxFuture;
@@ -106,15 +106,7 @@ fn unsupported(m: &Message) -> Message {
 
 /// Parse the raw command of a forward. The limits match the client parser.
 fn parse(node: &Node, raw: &[u8]) -> Result<discus_resp::Command, Value> {
-    let cfg = &node.config;
-    let limits = Limits {
-        max_bulk_bytes: cfg
-            .max_value_bytes
-            .max(cfg.max_key_bytes)
-            .saturating_add(1 << 20),
-        ..Limits::default()
-    };
-    let mut parser = Parser::new(limits);
+    let mut parser = Parser::new(node.config.parser_limits());
     parser.feed(raw);
     match parser.next() {
         Ok(Some(cmd)) => Ok(cmd),

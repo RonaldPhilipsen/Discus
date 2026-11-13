@@ -64,22 +64,39 @@ pub enum Expiry {
     Persist,
 }
 
-/// Convert `EX`, `PX`, `EXAT`, or `PXAT` and its argument into an absolute deadline.
-pub fn deadline(option: &str, arg: &[u8], now_ms: u64, who: &str) -> Result<u64, CommandError> {
+/// The absolute deadline of the expiry option `opt` (`EX`, `PX`, `EXAT`, or `PXAT`, in any case)
+/// with its argument. Any other option is a syntax error.
+pub fn expiry_option(opt: &[u8], arg: &[u8], now_ms: u64, who: &str) -> Result<u64, CommandError> {
+    let (unit, base) = if opt.eq_ignore_ascii_case(b"EX") {
+        (1000, now_ms)
+    } else if opt.eq_ignore_ascii_case(b"PX") {
+        (1, now_ms)
+    } else if opt.eq_ignore_ascii_case(b"EXAT") {
+        (1000, 0)
+    } else if opt.eq_ignore_ascii_case(b"PXAT") {
+        (1, 0)
+    } else {
+        return Err(CommandError::Syntax);
+    };
     let n = parse_i64(arg)?;
     let invalid = || CommandError::Custom(format!("ERR invalid expire time in '{who}' command"));
     if n <= 0 {
         return Err(invalid());
     }
-    let n = n as u64;
-    let ms = match option {
-        "EX" => n.checked_mul(1000).and_then(|v| v.checked_add(now_ms)),
-        "PX" => n.checked_add(now_ms),
-        "EXAT" => n.checked_mul(1000),
-        "PXAT" => Some(n),
-        _ => None,
-    };
-    ms.ok_or_else(invalid)
+    (n as u64)
+        .checked_mul(unit)
+        .and_then(|v| v.checked_add(base))
+        .ok_or_else(invalid)
+}
+
+/// The expiry change of `GETEX key [EX s | PX ms | EXAT s | PXAT ms | PERSIST]`.
+pub fn getex_expiry(cmd: &Command, now_ms: u64) -> Result<Option<Expiry>, CommandError> {
+    match cmd.len() {
+        2 => Ok(None),
+        3 if cmd[2].eq_ignore_ascii_case(b"PERSIST") => Ok(Some(Expiry::Persist)),
+        4 => expiry_option(&cmd[2], &cmd[3], now_ms, "getex").map(|t| Some(Expiry::At(t))),
+        _ => Err(CommandError::Syntax),
+    }
 }
 
 /// The options of `SET` after the value.
@@ -103,7 +120,12 @@ pub fn set_options(cmd: &Command, now_ms: u64) -> Result<SetOptions, CommandErro
             "KEEPTTL" if o.expiry.is_none() => o.expiry = Some(Expiry::Keep),
             "EX" | "PX" | "EXAT" | "PXAT" if o.expiry.is_none() => {
                 let arg = cmd.get(i + 1).ok_or(CommandError::Syntax)?;
-                o.expiry = Some(Expiry::At(deadline(&opt, arg, now_ms, "set")?));
+                o.expiry = Some(Expiry::At(expiry_option(
+                    opt.as_bytes(),
+                    arg,
+                    now_ms,
+                    "set",
+                )?));
                 i += 1;
             }
             _ => return Err(CommandError::Syntax),
@@ -158,19 +180,7 @@ fn getdel(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 }
 
 fn getex(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    let now = node.store.now_ms();
-    let expiry = match cmd.len() {
-        2 => None,
-        3 if upper(&cmd[2]) == "PERSIST" => Some(Expiry::Persist),
-        4 => {
-            let opt = upper(&cmd[2]);
-            if !matches!(opt.as_str(), "EX" | "PX" | "EXAT" | "PXAT") {
-                return Err(CommandError::Syntax);
-            }
-            Some(Expiry::At(deadline(&opt, &cmd[3], now, "getex")?))
-        }
-        _ => return Err(CommandError::Syntax),
-    };
+    let expiry = getex_expiry(cmd, node.store.now_ms())?;
     let deadline = match expiry {
         Some(Expiry::At(t)) => Some(Some(t)),
         Some(Expiry::Persist) => Some(None),

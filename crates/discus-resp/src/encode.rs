@@ -55,9 +55,7 @@ pub fn encode(value: &Value, protocol: Protocol, out: &mut BytesMut) {
     }
 }
 
+/// Rust prints infinities as `inf` and `-inf`, as Redis does.
 fn format_double(d: f64) -> String {
-    if d.is_infinite() {
-        return if d > 0.0 { "inf".into() } else { "-inf".into() };
-    }
     format!("{d}")
 }

@@ -158,10 +158,7 @@ impl Replica {
             .state(ServerState::Leader, "bootstrap")
             .await
             .map_err(|e| e.to_string())?;
-        let restore = vec![
-            Bytes::from_static(RESTORE),
-            Bytes::from(store::encode_state(initial)),
-        ];
+        let restore = vec![Bytes::from_static(RESTORE), Bytes::from(initial.encode())];
         tokio::time::timeout(
             wait,
             self.raft.client_write(Op {
@@ -241,27 +238,19 @@ impl Replica {
     /// The voters of the current membership, by replica ID and node. During a joint change it is
     /// the union of both sets.
     pub fn voters(&self) -> Vec<(u64, NodeId)> {
-        self.with_membership(|m| {
-            m.voter_ids()
-                .filter_map(|id| m.get_node(&id).map(|p| (id, p.node)))
-                .collect()
-        })
+        self.with_membership(|m| listed(m, m.voter_ids()).collect())
     }
 
     pub fn learners(&self) -> Vec<(u64, NodeId)> {
-        self.with_membership(|m| {
-            m.non_write_voter_ids()
-                .filter_map(|id| m.get_node(&id).map(|p| (id, p.node)))
-                .collect()
-        })
+        self.with_membership(|m| listed(m, m.non_write_voter_ids()).collect())
     }
 
     pub fn voter_nodes(&self) -> Vec<NodeId> {
-        self.voters().into_iter().map(|(_, n)| n).collect()
+        self.with_membership(|m| listed(m, m.voter_ids()).map(|(_, n)| n).collect())
     }
 
     pub fn learner_nodes(&self) -> Vec<NodeId> {
-        self.learners().into_iter().map(|(_, n)| n).collect()
+        self.with_membership(|m| listed(m, m.non_write_voter_ids()).map(|(_, n)| n).collect())
     }
 
     pub fn is_voter(&self) -> bool {
@@ -304,6 +293,14 @@ impl Replica {
     pub async fn shutdown(&self) {
         let _ = self.raft.shutdown().await;
     }
+}
+
+/// The replicas `ids` of membership `m` with their nodes.
+fn listed<'a>(
+    m: &'a Peers,
+    ids: impl Iterator<Item = u64> + 'a,
+) -> impl Iterator<Item = (u64, NodeId)> + 'a {
+    ids.filter_map(|id| m.get_node(&id).map(|p| (id, p.node)))
 }
 
 /// A random replica ID. Zero means "no replica" on the wire, so it is never used.

@@ -27,10 +27,6 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::read("ZCOUNT", 4, zcount),
 ];
 
-fn score_value(s: f64) -> Value {
-    Value::Double(s)
-}
-
 /// A bound such as `1.5`, `(1.5`, `-inf`, or `+inf`.
 fn parse_bound(b: &[u8]) -> Result<Bound<f64>, CommandError> {
     let min_max = || CommandError::Custom("ERR min or max is not a float".into());
@@ -46,35 +42,19 @@ fn parse_bound(b: &[u8]) -> Result<Bound<f64>, CommandError> {
     })
 }
 
-/// Shape ranked members for the reply. RESP3 nests `[member, score]` pairs.
+/// Shape ranked members for the reply. RESP3 nests `[member, score]` pairs. RESP2 encodes a
+/// score as a bulk string.
 fn members_reply(items: Vec<(&Bytes, f64)>, with_scores: bool, protocol: Protocol) -> Value {
-    if !with_scores {
-        return Value::Array(
-            items
-                .into_iter()
-                .map(|(m, _)| Value::Bulk(m.clone()))
-                .collect(),
-        );
-    }
-    if protocol == Protocol::Resp3 {
-        return Value::Array(
-            items
-                .into_iter()
-                .map(|(m, s)| Value::Array(vec![Value::Bulk(m.clone()), score_value(s)]))
-                .collect(),
-        );
-    }
-    Value::Array(
-        items
-            .into_iter()
-            .flat_map(|(m, s)| {
-                [
-                    Value::Bulk(m.clone()),
-                    Value::Bulk(Bytes::from(format!("{s}"))),
-                ]
-            })
+    let items = items.into_iter();
+    Value::Array(match (with_scores, protocol) {
+        (false, _) => items.map(|(m, _)| Value::Bulk(m.clone())).collect(),
+        (true, Protocol::Resp3) => items
+            .map(|(m, s)| Value::Array(vec![Value::Bulk(m.clone()), Value::Double(s)]))
             .collect(),
-    )
+        (true, Protocol::Resp2) => items
+            .flat_map(|(m, s)| [Value::Bulk(m.clone()), Value::Double(s)])
+            .collect(),
+    })
 }
 
 fn zadd(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
@@ -130,7 +110,7 @@ fn zadd(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 fn zscore(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     view(node, &cmd[1], |z: Option<&ZSet>| {
         z.and_then(|z| z.score(&cmd[2]))
-            .map_or(Value::Null, score_value)
+            .map_or(Value::Null, Value::Double)
     })
 }
 
@@ -139,7 +119,10 @@ fn zmscore(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         Value::Array(
             cmd[2..]
                 .iter()
-                .map(|m| z.and_then(|z| z.score(m)).map_or(Value::Null, score_value))
+                .map(|m| {
+                    z.and_then(|z| z.score(m))
+                        .map_or(Value::Null, Value::Double)
+                })
                 .collect(),
         )
     })
@@ -226,7 +209,7 @@ fn zincrby(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
                 ));
             }
             z.insert(cmd[3].clone(), next);
-            Ok(score_value(next))
+            Ok(Value::Double(next))
         },
     )
 }
@@ -236,4 +219,35 @@ fn zcount(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     view(node, &cmd[1], |z: Option<&ZSet>| {
         Value::Integer(z.map_or(0, |z| z.count(min, max)) as i64)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wire(v: &Value, protocol: Protocol) -> Vec<u8> {
+        let mut out = bytes::BytesMut::new();
+        discus_resp::encode(v, protocol, &mut out);
+        out.to_vec()
+    }
+
+    #[test]
+    fn ranked_scores_encode_like_redis() {
+        let (a, b, c) = (
+            Bytes::from_static(b"a"),
+            Bytes::from_static(b"b"),
+            Bytes::from_static(b"c"),
+        );
+        let items = || vec![(&a, 1.5), (&b, f64::INFINITY), (&c, f64::NEG_INFINITY)];
+        let resp2 = members_reply(items(), true, Protocol::Resp2);
+        assert_eq!(
+            wire(&resp2, Protocol::Resp2),
+            b"*6\r\n$1\r\na\r\n$3\r\n1.5\r\n$1\r\nb\r\n$3\r\ninf\r\n$1\r\nc\r\n$4\r\n-inf\r\n"
+        );
+        let resp3 = members_reply(items(), true, Protocol::Resp3);
+        assert_eq!(
+            wire(&resp3, Protocol::Resp3),
+            b"*3\r\n*2\r\n$1\r\na\r\n,1.5\r\n*2\r\n$1\r\nb\r\n,inf\r\n*2\r\n$1\r\nc\r\n,-inf\r\n"
+        );
+    }
 }

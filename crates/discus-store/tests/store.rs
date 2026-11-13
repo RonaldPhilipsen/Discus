@@ -1,13 +1,12 @@
 use discus_placement::ManualClock;
 use discus_store::Version;
-use discus_store::{Entry, Store, StoreConfig, Value, HASH_SEED};
+use discus_store::{Entry, Store, StoreConfig, Value};
 use std::sync::Arc;
 
 fn store(clock: &Arc<ManualClock>) -> Store {
     let cfg = StoreConfig {
         shards: 16,
         max_memory: 1 << 30,
-        seed: HASH_SEED,
         ..StoreConfig::default()
     };
     Store::new(cfg, clock.clone())

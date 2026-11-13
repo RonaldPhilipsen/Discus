@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 
 use bytes::Bytes;
-use discus_placement::{ClusterId, Epoch, EpochId, MemberState, NodeId, Version, Weight};
+use discus_placement::{ClusterId, Epoch, EpochId, Member, MemberState, NodeId, Version, Weight};
 use discus_resp::Value;
 use discus_store::Entry;
 
@@ -399,6 +399,21 @@ pub struct MemberInfo {
     pub leader_hints: Bytes,
 }
 
+impl MemberInfo {
+    /// The epoch entry of this member in `state`.
+    pub fn to_member(&self, state: MemberState) -> Member {
+        Member {
+            id: self.id,
+            addr: self.addr,
+            rpc_addr: self.rpc_addr,
+            client_addr: self.client_addr,
+            client_host: self.client_host.clone(),
+            state,
+            weight: self.weight,
+        }
+    }
+}
+
 /// What the sender believes about a member. The order is the SWIM precedence at one incarnation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Liveness {
@@ -413,6 +428,16 @@ pub struct Rumor {
     pub info: MemberInfo,
     pub liveness: Liveness,
     pub accuser: Option<NodeId>,
+}
+
+impl Rumor {
+    pub fn alive(info: MemberInfo) -> Rumor {
+        Rumor {
+            info,
+            liveness: Liveness::Alive,
+            accuser: None,
+        }
+    }
 }
 
 /// The kind of a gossip body.

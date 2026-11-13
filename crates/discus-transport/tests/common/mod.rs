@@ -6,16 +6,23 @@ use std::time::Duration;
 
 use std::net::SocketAddr;
 
+use bytes::Bytes;
 use discus_placement::{ClusterId, EpochId, NodeId};
+use discus_placement::{MemberState, Weight};
 use discus_transport::testing::{quic_client, TestCa, TEST_SAN};
 use discus_transport::{frame, Inbound, Service, Transport, TransportConfig, ALPN_RPC};
-use discus_wire::{caps, decode_frame, encode_frame, Frame, Hello, Limits, Message, TraceContext};
+use discus_wire::{
+    caps, decode_frame, encode_frame, Capacity, Frame, Gossip, GossipKind, Hello, Limits,
+    MemberInfo, Message, TraceContext,
+};
 use futures::future::BoxFuture;
 
 /// A service that answers `Ping` with `Pong` after an optional delay, and tracks concurrency.
+/// It answers gossip with an ACK, or never when `silent`.
 pub struct TestService {
     pub epoch: EpochId,
     pub delay: Duration,
+    pub silent: bool,
     pub active: AtomicUsize,
     pub peak: AtomicUsize,
     pub seen: parking_lot::Mutex<Vec<u64>>,
@@ -26,14 +33,27 @@ impl TestService {
         TestService::slow(epoch, Duration::ZERO)
     }
 
-    pub fn slow(epoch: EpochId, delay: Duration) -> Arc<TestService> {
+    /// A service that never answers gossip.
+    pub fn silent(epoch: EpochId) -> Arc<TestService> {
         Arc::new(TestService {
+            silent: true,
+            ..TestService::build(epoch, Duration::ZERO)
+        })
+    }
+
+    pub fn slow(epoch: EpochId, delay: Duration) -> Arc<TestService> {
+        Arc::new(TestService::build(epoch, delay))
+    }
+
+    fn build(epoch: EpochId, delay: Duration) -> TestService {
+        TestService {
             epoch,
             delay,
+            silent: false,
             active: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
             seen: parking_lot::Mutex::new(Vec::new()),
-        })
+        }
     }
 }
 
@@ -53,6 +73,11 @@ impl Service for TestService {
             self.active.fetch_sub(1, Ordering::SeqCst);
             match inbound.message {
                 Message::Ping { nonce } => Message::Pong { nonce },
+                Message::Gossip(mut g) if !self.silent => {
+                    g.kind = GossipKind::Ack;
+                    Message::Gossip(g)
+                }
+                Message::Gossip(_) => std::future::pending().await,
                 // Replication stalls, so a test can see that it does not hold up a command.
                 Message::Replicate(b) => {
                     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -71,6 +96,27 @@ impl Service for TestService {
 
 pub fn epoch(generation: u64, origin: NodeId) -> EpochId {
     EpochId { generation, origin }
+}
+
+/// A gossip `PING` from a joining node `from`.
+pub fn gossip_ping(from: NodeId) -> Message {
+    Message::Gossip(Gossip::new(
+        GossipKind::Ping,
+        MemberInfo {
+            id: from,
+            addr: "127.0.0.1:1".parse().unwrap(),
+            rpc_addr: "127.0.0.1:1".parse().unwrap(),
+            client_addr: None,
+            client_host: None,
+            state: MemberState::Joining,
+            incarnation: 0,
+            weight: Weight::default(),
+            epoch: epoch(0, from),
+            capabilities: 0,
+            capacity: Capacity::default(),
+            leader_hints: Bytes::new(),
+        },
+    ))
 }
 
 pub fn config(ca: &TestCa, id: NodeId, cluster: ClusterId) -> TransportConfig {

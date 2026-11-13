@@ -15,7 +15,6 @@ fn store(max_memory: u64, reserve: u64) -> (Store, Arc<ManualClock>) {
         max_memory,
         tombstone_ttl_ms: TTL,
         tombstone_reserve: reserve,
-        ..StoreConfig::default()
     };
     (Store::new(cfg, clock.clone()), clock)
 }

@@ -27,41 +27,37 @@ pub enum Route {
     Broadcast,
 }
 
-/// The keys that a command orders on.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Keys {
-    None,
-    Some(Vec<Bytes>),
-    /// Waits for every earlier command, and every later command waits for it.
-    Barrier,
-}
-
-/// The keys of `cmd` for its route. The arity is already checked.
-pub fn keys_of(route: Route, cmd: &Command) -> Keys {
-    match route {
-        Route::Connection => Keys::None,
-        Route::Local | Route::Fanout | Route::Broadcast => Keys::Barrier,
-        _ => Keys::Some(
-            key_args(route, cmd)
-                .into_iter()
-                .flatten()
-                .cloned()
-                .collect(),
-        ),
+impl Route {
+    /// The key positions in the Redis `COMMAND` form: the first key, the last key (negative
+    /// counts from the end), and the step. `(0, 0, 0)` for a route without keys.
+    pub const fn key_spec(self) -> (i64, i64, i64) {
+        match self {
+            Route::Single { .. } => (1, 1, 1),
+            Route::MultiRead { .. } | Route::MultiWrite { pairs: false } => (1, -1, 1),
+            Route::MultiWrite { pairs: true } => (1, -1, 2),
+            Route::Rename => (1, 2, 1),
+            Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => (0, 0, 0),
+        }
     }
 }
 
 /// The key arguments of `cmd` for its route, borrowed, so a check of the keys copies nothing.
 /// `None` for a route without keys. The arity is already checked.
 pub fn key_args(route: Route, cmd: &Command) -> Option<StepBy<slice::Iter<'_, Bytes>>> {
-    let (end, step) = match route {
-        Route::Single { .. } => (2, 1),
-        Route::MultiRead { .. } | Route::MultiWrite { pairs: false } => (cmd.len(), 1),
-        Route::MultiWrite { pairs: true } => (cmd.len(), 2),
-        Route::Rename => (3, 1),
-        Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => return None,
+    let (first, last, step) = route.key_spec();
+    if step == 0 {
+        return None;
+    }
+    let end = if last < 0 {
+        cmd.len() as i64 + 1 + last
+    } else {
+        last + 1
     };
-    Some(cmd[1..end].iter().step_by(step))
+    Some(
+        cmd[first as usize..end as usize]
+            .iter()
+            .step_by(step as usize),
+    )
 }
 
 #[cfg(test)]
@@ -105,15 +101,5 @@ mod tests {
         ] {
             assert_eq!(args(route, &mget), None);
         }
-    }
-
-    #[test]
-    fn keys_of_owns_the_key_args() {
-        let mset = cmd(&["MSET", "a", "1", "b", "2"]);
-        let route = Route::MultiWrite { pairs: true };
-        let owned = Keys::Some(vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")]);
-        assert_eq!(keys_of(route, &mset), owned);
-        assert_eq!(keys_of(Route::Connection, &mset), Keys::None);
-        assert_eq!(keys_of(Route::Broadcast, &mset), Keys::Barrier);
     }
 }

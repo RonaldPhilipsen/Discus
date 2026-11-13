@@ -33,7 +33,6 @@ pub fn refill_bucket(key: &[u8]) -> u8 {
 pub struct StoreConfig {
     pub shards: usize,
     pub max_memory: u64,
-    pub seed: u64,
     /// How long a delete marker lives.
     pub tombstone_ttl_ms: u64,
     /// Tombstone bytes above this drop the oldest tombstones (spec section 8.1).
@@ -45,7 +44,6 @@ impl Default for StoreConfig {
         StoreConfig {
             shards: 256,
             max_memory: 1 << 30,
-            seed: HASH_SEED,
             tombstone_ttl_ms: DEFAULT_TOMBSTONE_TTL_MS,
             tombstone_reserve: u64::MAX,
         }
@@ -160,12 +158,8 @@ impl Store {
         self.clock.now_ms()
     }
 
-    pub fn config(&self) -> &StoreConfig {
-        &self.config
-    }
-
     pub fn shard_index(&self, key: &[u8]) -> usize {
-        (xxh3_64_with_seed(key, self.config.seed) as usize) % self.shards.len()
+        (xxh3_64_with_seed(key, HASH_SEED) as usize) % self.shards.len()
     }
 
     /// Read an entry. An expired entry or a tombstone reads as absent but is not deleted here.
@@ -535,22 +529,23 @@ impl Store {
         let Some(shard) = self.shards.get(i) else {
             return;
         };
-        let mut guard = shard.inner.write();
-        let keys: Vec<Bytes> = guard.map.keys().cloned().collect();
-        for k in keys {
-            self.take(&mut guard, &k);
-        }
+        self.drop_unless(shard, |_| false);
         shard.needs_refill.store(false, Ordering::Relaxed);
     }
 
     /// Keep only the keys for which `f` is true, tombstones included.
     pub fn retain(&self, f: impl Fn(&[u8]) -> bool) {
         for shard in &self.shards {
-            let mut guard = shard.inner.write();
-            let drop: Vec<Bytes> = guard.map.keys().filter(|k| !f(k)).cloned().collect();
-            for k in drop {
-                self.take(&mut guard, &k);
-            }
+            self.drop_unless(shard, &f);
+        }
+    }
+
+    /// Drop the keys of `shard` for which `keep` is false, under one hold of its lock.
+    fn drop_unless(&self, shard: &Shard, keep: impl Fn(&[u8]) -> bool) {
+        let mut guard = shard.inner.write();
+        let drop: Vec<Bytes> = guard.map.keys().filter(|k| !keep(k)).cloned().collect();
+        for k in drop {
+            self.take(&mut guard, &k);
         }
     }
 

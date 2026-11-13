@@ -2,6 +2,7 @@
 //! (spec "MOVED and forwarding").
 
 use discus_placement::{slot, EpochId, Member, MemberState, NodeId, Version};
+use discus_telemetry::attrs::MisrouteReason;
 
 use super::{candidates, replica_reads, Hop};
 use crate::command::CommandError;
@@ -12,27 +13,6 @@ use crate::node::Node;
 pub struct Endpoint {
     pub host: String,
     pub port: u16,
-}
-
-/// Why the node forwards a command instead of returning `-MOVED`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Misroute {
-    /// The target has not reported the current epoch of this node or a newer one.
-    Epoch,
-    /// The target is not up (spec "Target health").
-    Down,
-    /// The current epoch does not list the target as `NORMAL` with a client address.
-    NoAddress,
-}
-
-impl From<Misroute> for discus_telemetry::attrs::MisrouteReason {
-    fn from(m: Misroute) -> Self {
-        match m {
-            Misroute::Epoch => Self::Epoch,
-            Misroute::Down => Self::Down,
-            Misroute::NoAddress => Self::NoAddress,
-        }
-    }
 }
 
 /// The client endpoint of `member`: the host name when one is set, else the IP.
@@ -55,16 +35,16 @@ pub fn decide(
     alive: bool,
     peer_epoch: Option<EpochId>,
     current: EpochId,
-) -> Result<Endpoint, Misroute> {
+) -> Result<Endpoint, MisrouteReason> {
     let to = member
         .filter(|m| m.state == MemberState::Normal)
         .and_then(endpoint)
-        .ok_or(Misroute::NoAddress)?;
+        .ok_or(MisrouteReason::NoAddress)?;
     if !alive {
-        return Err(Misroute::Down);
+        return Err(MisrouteReason::Down);
     }
     if peer_epoch.is_none_or(|e| e < current) {
-        return Err(Misroute::Epoch);
+        return Err(MisrouteReason::Epoch);
     }
     Ok(to)
 }
@@ -117,7 +97,7 @@ pub(crate) fn moved(node: &Node, key: &[u8], target: NodeId) -> Option<CommandEr
             })
         }
         Err(misroute) => {
-            discus_telemetry::global().misrouted(misroute.into());
+            discus_telemetry::global().misrouted(misroute);
             tracing::trace!(?misroute, %target, "forwarding instead of MOVED");
             None
         }
@@ -197,11 +177,11 @@ mod tests {
                     let m = member(NodeId::random(), addr);
                     let got = decide(Some(&m), alive, peer, current);
                     let want = if addr.is_none() {
-                        Err(Misroute::NoAddress)
+                        Err(MisrouteReason::NoAddress)
                     } else if !alive {
-                        Err(Misroute::Down)
+                        Err(MisrouteReason::Down)
                     } else if matches!(name, "unknown" | "older") {
-                        Err(Misroute::Epoch)
+                        Err(MisrouteReason::Epoch)
                     } else {
                         Ok(Endpoint {
                             host: "10.0.0.2".into(),
@@ -214,13 +194,13 @@ mod tests {
         }
         assert_eq!(
             decide(None, true, Some(current), current),
-            Err(Misroute::NoAddress)
+            Err(MisrouteReason::NoAddress)
         );
         let mut leaving = member(NodeId::random(), Some(client));
         leaving.state = MemberState::Leaving;
         assert_eq!(
             decide(Some(&leaving), true, Some(current), current),
-            Err(Misroute::NoAddress)
+            Err(MisrouteReason::NoAddress)
         );
     }
 

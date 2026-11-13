@@ -40,10 +40,6 @@ impl Budget {
         self.used.load(Ordering::Relaxed)
     }
 
-    pub fn reserve(&self) -> u64 {
-        self.reserve
-    }
-
     pub fn full(&self) -> bool {
         self.used() >= self.reserve
     }

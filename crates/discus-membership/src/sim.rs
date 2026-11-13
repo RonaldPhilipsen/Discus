@@ -321,15 +321,7 @@ impl Sim {
             node.host.reset_cluster(epoch.clone());
             node.swim.set_static_member(cluster, MemberState::Normal);
             for info in infos.iter().filter(|i| i.id != *id) {
-                node.swim.learn(
-                    now,
-                    Rumor {
-                        info: info.clone(),
-                        liveness: Liveness::Alive,
-                        accuser: None,
-                    },
-                    true,
-                );
+                node.swim.learn(now, Rumor::alive(info.clone()), true);
             }
             node.swim.take_events();
         }
@@ -422,10 +414,6 @@ impl Sim {
         self.nodes[&id].host.history.cluster_id()
     }
 
-    pub fn hlc(&self, id: NodeId) -> u64 {
-        self.nodes[&id].host.hlc()
-    }
-
     fn up(&self, id: NodeId) -> bool {
         self.nodes
             .get(&id)
@@ -433,7 +421,7 @@ impl Sim {
     }
 
     /// True when a message from `a` reaches `b` now.
-    pub fn reachable(&self, a: NodeId, b: NodeId) -> bool {
+    fn reachable(&self, a: NodeId, b: NodeId) -> bool {
         if !self.up(a) || !self.up(b) {
             return false;
         }
@@ -453,7 +441,7 @@ impl Sim {
     }
 
     /// Send the actions of `from`.
-    pub fn send(&mut self, from: NodeId, actions: Vec<Action>) {
+    fn send(&mut self, from: NodeId, actions: Vec<Action>) {
         let now = self.now;
         for a in actions {
             let node = self.node_mut(from);

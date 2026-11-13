@@ -7,10 +7,9 @@
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::time::Duration;
 
 use super::issuer::{Source, SourceConfig};
-use super::{parse_algorithms, IssuerRules, SubjectRule, TrustedIssuer};
+use super::{parse_algorithms, IssuerRules, SubjectRule};
 use crate::security::file::KubernetesFile;
 use crate::security::policy::Scopes;
 
@@ -60,24 +59,19 @@ pub fn source(
                 .map_err(|e| format!("[[kubernetes.account]] {:?}: {e}", a.pattern))?,
         });
     }
-    let mut trusted = TrustedIssuer::new(rules);
-    if k.issuer.is_none() {
-        trusted = trusted.learning_name();
-    }
-    trusted.max_stale = Some(Duration::from_secs(k.jwks_max_stale_secs));
     let api = k.api_server.trim_end_matches('/');
     let config = SourceConfig {
         discovery_url: format!("{api}/.well-known/openid-configuration"),
         fixed_jwks_url: Some(format!("{api}/openid/v1/jwks")),
         bearer_file: Some(k.token_file.clone()),
         ca_file: Some(k.ca_file.clone()),
-        refresh: Duration::from_secs(k.jwks_refresh_secs.max(1)),
-        min_refetch: Duration::from_secs(k.jwks_min_refetch_secs),
+        refresh_secs: k.jwks_refresh_secs,
+        min_refetch_secs: k.jwks_min_refetch_secs,
+        max_stale_secs: k.jwks_max_stale_secs,
+        learn_name: k.issuer.is_none(),
         insecure,
     };
-    let source = Source::new(Arc::new(trusted), config, generation)
-        .map_err(|e| format!("[kubernetes]: {e}"))?;
-    Ok(Arc::new(source))
+    Source::new(rules, config, generation).map_err(|e| format!("[kubernetes]: {e}"))
 }
 
 #[cfg(test)]

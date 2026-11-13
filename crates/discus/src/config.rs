@@ -424,7 +424,6 @@ impl Config {
             suspicion_min_ms: self.suspicion_min_ms,
             suspicion_max_ms: self.suspicion_max_ms,
             bootstrap_deadline_ms: self.bootstrap_deadline_ms,
-            replication_factor: self.replication_factor,
             ..discus_membership::SwimConfig::default()
         }
     }
@@ -435,7 +434,17 @@ impl Config {
             return Err("--primary-read-prefix needs a non-empty value".into());
         }
         let certs = self.cert_flags();
-        let set = certs.iter().filter(|(_, s)| *s).count();
+        let missing_certs: Vec<&str> = certs.iter().filter(|(_, s)| !*s).map(|(f, _)| *f).collect();
+        let set = certs.len() - missing_certs.len();
+        let peer_needs = |missing: &[&str]| {
+            if missing.is_empty() {
+                return Ok(());
+            }
+            Err(format!(
+                "--peer needs {}. Node-to-node traffic always uses mTLS",
+                missing.join(", ")
+            ))
+        };
         if !(0..=19).contains(&self.data_nice) {
             return Err("--data-nice must be from 0 to 19".into());
         }
@@ -461,13 +470,7 @@ impl Config {
                         .into(),
                 );
             }
-            let missing: Vec<&str> = certs.iter().filter(|(_, s)| !*s).map(|(f, _)| *f).collect();
-            if !missing.is_empty() {
-                return Err(format!(
-                    "--peer needs {}. Node-to-node traffic always uses mTLS",
-                    missing.join(", ")
-                ));
-            }
+            peer_needs(&missing_certs)?;
         } else if !self.peers.is_empty() {
             let mut missing: Vec<&str> = Vec::new();
             if self.node_id.is_none() {
@@ -476,13 +479,8 @@ impl Config {
             if self.cluster_id.is_none() {
                 missing.push("--cluster-id");
             }
-            missing.extend(certs.iter().filter(|(_, s)| !*s).map(|(f, _)| *f));
-            if !missing.is_empty() {
-                return Err(format!(
-                    "--peer needs {}. Node-to-node traffic always uses mTLS",
-                    missing.join(", ")
-                ));
-            }
+            missing.extend(&missing_certs);
+            peer_needs(&missing)?;
             let suffixed = self
                 .peers
                 .iter()
@@ -530,11 +528,10 @@ impl Config {
                     return Err(format!("--peer {id} is listed twice"));
                 }
             }
-        } else if set != 0 && set != certs.len() {
-            let missing: Vec<&str> = certs.iter().filter(|(_, s)| !*s).map(|(f, _)| *f).collect();
+        } else if set != 0 && !missing_certs.is_empty() {
             return Err(format!(
                 "the cluster certificate flags need {}",
-                missing.join(", ")
+                missing_certs.join(", ")
             ));
         }
         Ok(())
@@ -557,6 +554,19 @@ impl Config {
 
     pub fn hold_budget(&self) -> Duration {
         Duration::from_millis(self.hold_budget_ms)
+    }
+
+    /// The RESP parser limits of a client connection and of a forwarded command. The bulk limit
+    /// is looser than the value limit so a moderately oversize value gets a clean `value too
+    /// large` error. A hugely oversize one still closes the connection.
+    pub fn parser_limits(&self) -> discus_resp::Limits {
+        discus_resp::Limits {
+            max_bulk_bytes: self
+                .max_value_bytes
+                .max(self.max_key_bytes)
+                .saturating_add(1 << 20),
+            ..discus_resp::Limits::default()
+        }
     }
 }
 
