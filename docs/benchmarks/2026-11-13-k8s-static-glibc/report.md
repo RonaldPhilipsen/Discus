@@ -129,7 +129,9 @@ Pyroscope profiling costs almost nothing. On musl, it costs about 20% of the thr
 - No workload made a pod reach its core. The local test showed the CPU gain of glibc. A
   CPU-bound workload can show more of that gain in the throughput.
 - The node CPU has AVX-512. The test does not show the result on a CPU without AVX-512.
-- The profiles in Pyroscope from the glibc build were not inspected.
+- The test did not measure the upload of profiles. All 18 glibc pods with profiling on sent
+  profiles to Pyroscope, and the function names in them resolve. The pods found the Pyroscope
+  server by its service name, through the `search` domains of the Kubernetes `resolv.conf`.
 
 ## Files in this directory
 
