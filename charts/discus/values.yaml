@@ -62,14 +62,8 @@ clientTls:
   clientAuth: optional
 
 # The flag --auth-policy, for example all:mtls or all:tls,oauth2. An empty value uses the node
-# default: all:tls,shared_token with sharedToken, else all:tls,oauth2, which needs authConfig.
-# Set at least one of authPolicy, sharedToken, and authConfig.
+# default none: every client uses TLS and needs no credentials.
 authPolicy: ""
-sharedToken:
-  # A Secret that holds the shared token for the policy factor shared_token. The node reads it
-  # from the environment variable DISCUS_SHARED_TOKEN, so it does not show in the pod args.
-  secretName: ""
-  key: token
 authConfig:
   # A Secret with the key auth.toml, for the flag --auth-config. The file lists the trusted
   # issuers and the client certificate rules. See docs/security.md.

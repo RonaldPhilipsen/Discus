@@ -1144,8 +1144,9 @@ line. To move to it, install a new cluster. The cache starts empty.
 ### 14.2 Client authentication policy
 
 - The policy lists factors (`tls`, `mtls`, `oauth2`, `shared_token`) and combines them with `any`
-  or `all`. The default production policy is `tls + oauth2`. A client with `tls` and no other
-  factor gets `-NOAUTH`.
+  or `all`. Every client uses TLS. The default policy is `none`, so a client needs no other
+  factor. With a policy that names other factors, a client with `tls` and no other factor gets
+  `-NOAUTH`.
 - A shared token grants read-write by default and is meant for simple setups. An mTLS-only client
   gets the scope configured for its certificate identity, read-write by default.
 - Each node authenticates its own client connections. A cluster client opens a connection to each

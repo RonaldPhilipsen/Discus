@@ -67,13 +67,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            {{- with .Values.sharedToken.secretName }}
-            - name: DISCUS_SHARED_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ . }}
-                  key: {{ $.Values.sharedToken.key }}
-            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -118,9 +111,6 @@ spec:
             {{- fail "otel.tls.mutual needs otel.tls.secretName" }}
             {{- end }}
             {{- end }}
-            {{- end }}
-            {{- if not (or .Values.authPolicy .Values.sharedToken.secretName .Values.authConfig.secretName) }}
-            {{- fail "set authPolicy, sharedToken.secretName, or authConfig.secretName, so that clients can authenticate" }}
             {{- end }}
             - --tls-mode=node
             - --tls-cert=/client-tls/tls.crt

@@ -40,7 +40,7 @@ impl Factor {
 /// How the factors of a connection combine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Policy {
-    /// Every client is authenticated, with read-write access. Development only.
+    /// Every TLS client is authenticated, with read-write access. The default without a shared token.
     None,
     /// At least one factor.
     Any(Vec<Factor>),
@@ -89,7 +89,8 @@ impl Policy {
         if tls_alone {
             return Err(
                 "--auth-policy: tls is not an identity, so tls alone cannot authenticate a \
-                 client. Combine it with all:, for example all:tls,oauth2"
+                 client. Every client uses TLS, so use none for TLS without credentials, or \
+                 combine tls with all:, for example all:tls,oauth2"
                     .into(),
             );
         }

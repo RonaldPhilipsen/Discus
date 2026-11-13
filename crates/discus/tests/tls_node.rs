@@ -39,12 +39,14 @@ async fn tls_plus_shared_token_needs_auth_over_tls() {
 }
 
 #[tokio::test]
-async fn the_default_tls_policy_without_an_issuer_refuses_to_start() {
+async fn the_default_policy_needs_tls_and_no_credentials() {
     let ca = TestCa::new();
     let server = ca.server_cert();
-    let args = tls_args(&ca, &server);
-    let e = security_support::try_start(&args).await.err().unwrap();
-    assert!(e.contains("oauth2"), "{e}");
+    let node = start(&tls_args(&ca, &server)).await;
+    let mut s = tls_connect(node.addr, &ca, None).await.unwrap();
+    let mut wire = cmd(&["SET", "k", "v"]);
+    wire.extend(cmd(&["GET", "k"]));
+    assert_eq!(exchange(&mut s, &wire).await, "+OK\r\n$1\r\nv\r\n");
 }
 
 #[tokio::test]

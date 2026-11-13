@@ -35,9 +35,9 @@ creates a GitHub release.
 
 A release candidate is a test release of an open pull request. To publish one,
 add the label `release-candidate` to the pull request. The release workflow
-then pushes the two images and the chart with a version such as `2.0.0-rc0`.
+then pushes the two images and the chart with a version such as `0.5.0-rc0`.
 Each new push to the pull request publishes the same version again.
 
 A release candidate gets no Git tag and no GitHub release. semVersie reads the
-newest tag as the last release. After a tag `v2.0.0-rc0`, it would calculate
-`3.0.0` for the release of the same pull request.
+newest tag as the last release. After a tag `v0.5.0-rc0`, it would calculate
+`0.6.0` for the release of the same pull request.

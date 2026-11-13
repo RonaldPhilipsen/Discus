@@ -267,15 +267,13 @@ publishes the chart with the same version as the image.
 
 Before you install the chart, create a Secret with the keys `ca.crt`, `tls.crt`, and `tls.key`.
 Use a CA that serves only this release, because every certificate from the CA is a member of the
-cluster. Also create a Secret with a shared token in the key `token`, or set up another
-authentication policy (see below). Then install the chart:
+cluster. Then install the chart:
 
 ```bash
 helm install <release> oci://ghcr.io/ronaldphilipsen/charts/discus \
   --version <version> \
   --namespace <namespace> \
-  --set cluster.tls.secretName=<secret> \
-  --set sharedToken.secretName=<token-secret>
+  --set cluster.tls.secretName=<secret>
 ```
 
 The chart does not require a URI SAN by default. To require a SPIFFE identity, set
@@ -300,12 +298,10 @@ authentication for clients:
 | `clientTls.clientAuth` | `optional` or `required`. The default is `optional`. |
 | `authPolicy` | The flag `--auth-policy`, for example `all:mtls`. |
 | `authConfig.secretName` | A Secret with the key `auth.toml`, for the flag `--auth-config`. |
-| `sharedToken.secretName` | A Secret with the shared token in the key `sharedToken.key` (default `token`). |
 
-Set at least one of `authPolicy`, `sharedToken.secretName`, and `authConfig.secretName`, or the
-chart stops with an error. Without `authPolicy`, the node uses `all:tls,shared_token` with a
-shared token, and `all:tls,oauth2` otherwise. The second policy needs trusted issuers in the
-`auth.toml` file. For client certificates without tokens, set `authPolicy=all:mtls`. See
+Without `authPolicy`, the node uses the policy `none`. Each client then uses TLS and needs no
+credentials. For client certificates without tokens, set `authPolicy=all:mtls`. For OAuth 2.0
+tokens, set `authPolicy=all:tls,oauth2` and list the trusted issuers in the `auth.toml` file. See
 [Security](security.md) for the policies.
 
 To run without the redirect listener, set `clusterClients.enabled=false`. The chart then passes no

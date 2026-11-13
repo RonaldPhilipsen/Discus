@@ -11,12 +11,19 @@ always uses QUIC with mTLS. See [Running a cluster](cluster.md) for its certific
 
 ## Quick start
 
-A production node uses TLS and OAuth 2.0 tokens. This is the default policy:
+By default, a node asks only for TLS. Each client connects with TLS and needs no credentials:
+
+```bash
+discus --tls-cert /etc/discus/tls.crt --tls-key /etc/discus/tls.key
+```
+
+To also ask each client for an OAuth 2.0 token, set the policy `all:tls,oauth2`:
 
 ```bash
 discus \
   --tls-cert /etc/discus/tls.crt \
   --tls-key /etc/discus/tls.key \
+  --auth-policy all:tls,oauth2 \
   --auth-config /etc/discus/auth.toml
 ```
 
@@ -129,20 +136,21 @@ The policy has one of these forms:
 
 - `all:<factor>,<factor>`. The client needs every factor.
 - `any:<factor>,<factor>`. The client needs one factor.
-- `none`. Every client is in, with read and write access. Use it for development only.
+- `none`. Every client is in, with read and write access. Every client still uses TLS.
 
 The node refuses to start with a policy that `tls` alone can meet, for example `all:tls` or
-`any:tls,oauth2`.
+`any:tls,oauth2`. For TLS without credentials, use `none`.
 
 Without `--auth-policy`, the node picks a default:
 
 | Setting | Default policy |
 | --- | --- |
 | `--shared-token` set | `all:tls,shared_token` |
-| No shared token | `all:tls,oauth2` |
+| No shared token | `none` |
 
-A shared token that the policy does not use stops the node at startup. The policy `none` lets
-every TLS client in without credentials. Use it for development only.
+A shared token that the policy does not use stops the node at startup. With `none`, every client
+that can reach the port and complete the TLS handshake gets read and write access. To limit
+access, set a policy with `mtls`, `oauth2`, or `shared_token`.
 
 Examples:
 
@@ -471,7 +479,7 @@ identity provider without `ca_file`.
 | `--lb-identity-tlv` | none | A PROXY v2 TLV type from `0xE0` to `0xEF` that holds the client identity. |
 | `--auth-policy` | see above | The client authentication policy. |
 | `--auth-config` | none | The TOML file with issuers, rules, and admin identities. |
-| `--shared-token` | none | The shared token for the `shared_token` factor. The node also reads it from `DISCUS_SHARED_TOKEN`. |
+| `--shared-token` | none | The shared token for the `shared_token` factor. |
 | `--dev-insecure-oauth2` | off | Allows `http` issuers, and admin bearer tokens on a plaintext admin port. Development only. |
 | `--auth-clock-skew-secs` | 60 | The clock skew allowed on token times. |
 | `--auth-max-failures-per-connection` | 5 | Failed attempts that close a connection. |

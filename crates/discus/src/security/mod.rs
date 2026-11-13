@@ -87,7 +87,8 @@ impl Security {
             None if config.shared_token.is_some() => {
                 Policy::All(vec![Factor::Tls, Factor::SharedToken])
             }
-            None => Policy::All(vec![Factor::Tls, Factor::Oauth2]),
+            // Every client uses TLS, so `none` means TLS without credentials.
+            None => Policy::None,
         };
 
         let (Some(tls_cert), Some(tls_key)) = (&args.tls_cert, &args.tls_key) else {

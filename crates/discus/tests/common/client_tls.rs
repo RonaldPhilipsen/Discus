@@ -52,24 +52,17 @@ fn fixture() -> &'static Fixture {
 }
 
 /// The flags that a test node needs for client TLS, unless `args` brings its own certificate.
-/// Without a policy or a shared token in `args`, the node also gets the policy `none`, so tests
-/// that do not test authentication need no credentials.
 pub fn server_args<S: AsRef<str>>(args: &[S]) -> Vec<String> {
-    let has = |flag: &str| args.iter().any(|a| a.as_ref() == flag);
-    if has("--tls-cert") {
+    if args.iter().any(|a| a.as_ref() == "--tls-cert") {
         return Vec::new();
     }
     let f = fixture();
-    let mut out = vec![
+    vec![
         "--tls-cert".to_string(),
         f.cert.clone(),
         "--tls-key".to_string(),
         f.key.clone(),
-    ];
-    if !has("--auth-policy") && !has("--shared-token") {
-        out.extend(["--auth-policy".to_string(), "none".to_string()]);
-    }
-    out
+    ]
 }
 
 /// The PEM file of the CA that signed the test node certificates, for external clients.
