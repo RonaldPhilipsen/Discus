@@ -57,6 +57,15 @@ impl Role {
             Role::Raft(r) => Some(r.replica.state()),
         }
     }
+
+    /// True when this role leads its group and holds a key that expired by `now_ms`.
+    pub(super) fn leads_expired(&self, now_ms: u64) -> bool {
+        match self {
+            Role::Leader(l) => l.serving() && l.holds_expired(now_ms),
+            Role::Raft(r) => r.leads() && r.replica.holds_expired(now_ms),
+            Role::Idle | Role::Follower(_) => false,
+        }
+    }
 }
 
 #[derive(Default)]

@@ -290,6 +290,10 @@ impl Replica {
         self.sm.lock().state.get().clone()
     }
 
+    pub fn holds_expired(&self, now_ms: u64) -> bool {
+        self.sm.lock().state.get().expired_keys(now_ms)
+    }
+
     pub async fn shutdown(&self) {
         let _ = self.raft.shutdown().await;
     }
