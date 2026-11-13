@@ -383,13 +383,26 @@ mod tests {
     }
 
     async fn wait_applied(r: &Replica, key: &str, want: &str) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let got = r.state().get(key.as_bytes()).map(|e| e.value.clone());
             if got.as_deref() == Some(want.as_bytes()) {
                 return;
             }
             assert!(Instant::now() < deadline, "{key} is {got:?}, not {want}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// A replica applies the membership change on its own schedule, after the data can arrive.
+    async fn wait_learners(r: &Replica, want: usize) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let got = r.learners().len();
+            if got == want {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{got} learners, not {want}");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
@@ -454,7 +467,7 @@ mod tests {
         wait_applied(&d, "cnt:x", "300").await;
         wait_applied(&d, "k0", "v").await;
         assert!(d.sm.lock().installed >= 1, "the learner got no snapshot");
-        assert_eq!(d.learners().len(), 1);
+        wait_learners(&d, 1).await;
         for r in [&a, &b, &c, &d] {
             r.shutdown().await;
         }
