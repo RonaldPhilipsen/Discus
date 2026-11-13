@@ -107,6 +107,7 @@ async fn bind_transport(
 
 mod connection;
 mod order;
+mod tls_reload;
 
 /// Export the metrics of `transport`. Its events feed the peer error and QUIC failure metrics.
 /// The events task runs on the runtime of the caller.
@@ -116,6 +117,41 @@ fn observe(transport: &Transport, channel: TransportChannel, stop: CancellationT
     let transport = transport.clone();
     tokio::spawn(async move {
         crate::telemetry::observe_peer_events(metrics, &transport, channel, stop).await;
+    });
+}
+
+/// Reload the client and cluster certificates after their files change.
+fn watch_certificates(node: &Arc<Node>, transports: Vec<Transport>, stop: CancellationToken) {
+    let config = &node.config;
+    if config.tls_reload_secs == 0 {
+        return;
+    }
+    let period = Duration::from_secs(config.tls_reload_secs);
+    let security = node.security.clone();
+    let files = security.client_tls_files();
+    tls_reload::watch("client", files, period, stop.clone(), move || {
+        security.reload_client_tls()
+    });
+    let (Some(ca), Some(cert), Some(key)) = (
+        config.cluster_ca.clone(),
+        config.cluster_cert.clone(),
+        config.cluster_key.clone(),
+    ) else {
+        return;
+    };
+    if transports.is_empty() {
+        return;
+    }
+    let san = config.cluster_san.clone();
+    let files = vec![ca.clone(), cert.clone(), key.clone()];
+    tls_reload::watch("cluster", files, period, stop, move || {
+        let tls = TlsMaterial::from_files(&ca, &cert, &key, &san).map_err(io::Error::other)?;
+        // Check every endpoint before any of them changes, so they never disagree.
+        tls.check().map_err(io::Error::other)?;
+        for t in &transports {
+            t.reload_tls(&tls)?;
+        }
+        Ok(())
     });
 }
 
@@ -134,6 +170,8 @@ pub struct Server {
     admin: std::net::TcpListener,
     node: Arc<Node>,
     lane: ControlLane,
+    /// The QUIC endpoints, for a reload of the cluster certificates.
+    transports: Vec<Transport>,
 }
 
 impl Server {
@@ -202,6 +240,7 @@ impl Server {
         node.set_counters(crate::counter::Counters::new(&node, leases));
         node.set_data_handle(tokio::runtime::Handle::current());
         let lane = ControlLane::start()?;
+        let mut transports = Vec::new();
         if let Some(tls) = tls {
             let cfg = &node.config;
             let mut tc = TransportConfig::new(cfg.cluster_listen, tls, node.id, node.cluster_id());
@@ -228,6 +267,7 @@ impl Server {
                         .spawn(bind_transport(gossip_tc, socket, service))
                         .await
                         .map_err(io::Error::other)??;
+                    transports.push(gossip.clone());
                     let advertise = discovery::advertise(cfg).await;
                     let rpc_advertise = discovery::rpc_advertise(cfg, advertise, rpc.local_addr());
                     let membership = Membership::new(
@@ -243,6 +283,7 @@ impl Server {
                 }
                 None => bind_transport(tc, socket, service).await?,
             };
+            transports.push(rpc.clone());
             node.set_link(ClusterLink::new(rpc, &node.config));
             node.set_replicator(crate::replication::Replicator::new(&node));
         }
@@ -252,6 +293,7 @@ impl Server {
             admin,
             node,
             lane,
+            transports,
         })
     }
 
@@ -297,8 +339,10 @@ impl Server {
             admin,
             node,
             lane,
+            transports,
         } = self;
         let stop_background = CancellationToken::new();
+        watch_certificates(&node, transports, stop_background.clone());
         {
             let node = node.clone();
             discus_store::every(

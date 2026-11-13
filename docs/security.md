@@ -486,6 +486,17 @@ identity provider without `ca_file`.
 | `--auth-max-failures-per-source` | 20 | Failed attempts per source address in one window. |
 | `--auth-failure-window-secs` | 60 | The window of the per-source limit. |
 | `--admin-tls` | off | Serves the admin port over TLS. |
+| `--tls-reload-secs` | 10 | Seconds between checks of the certificate files. `0` turns the reload off. |
 
-The node reads certificates, keys, and the `--auth-config` file once at startup. To change them,
-restart the node.
+### Certificate rotation
+
+The node checks the files of `--tls-cert`, `--tls-key`, and `--tls-client-ca` every
+`--tls-reload-secs` seconds. If their content changes, the node loads the new files. New
+connections on the client, redirect, and admin ports then use them. Open connections keep the
+certificate of their handshake. You do not have to restart the node.
+
+If the new files do not load, the node logs a warning and keeps its current certificates. For
+example, this happens when the key does not match the certificate. In Kubernetes, the files of a
+mounted Secret change after the Secret changes, usually within a minute or two.
+
+The node reads the `--auth-config` file once at startup. To change it, restart the node.

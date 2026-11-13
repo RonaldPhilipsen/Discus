@@ -296,8 +296,12 @@ authentication for clients:
 | `clientTls.secretName` | A Secret with the keys `tls.crt` and `tls.key`. The default is `cluster.tls.secretName`. |
 | `clientTls.verifyClients=true` | The node asks for client certificates and verifies them against the key `ca.crt` of the Secret. |
 | `clientTls.clientAuth` | `optional` or `required`. The default is `optional`. |
+| `clientTls.clientCaSecretName` | A Secret with the key `ca.crt` for client certificates. The default is the Secret of `clientTls.secretName`. Use it with a public server certificate and a private CA for clients. |
 | `authPolicy` | The flag `--auth-policy`, for example `all:mtls`. |
 | `authConfig.secretName` | A Secret with the key `auth.toml`, for the flag `--auth-config`. |
+
+The node reloads its certificates after the Secrets change, so a rotation needs no restart. See
+[Certificate rotation](security.md#certificate-rotation).
 
 Without `authPolicy`, the node uses the policy `none`. Each client then uses TLS and needs no
 credentials. For client certificates without tokens, set `authPolicy=all:mtls`. For OAuth 2.0
@@ -375,6 +379,7 @@ the CPU limit of the container from the cgroup (the Linux resource control group
 | `--cluster-ca` | none | PEM file with the CA certificate. |
 | `--cluster-cert` | none | PEM file with this node's certificate chain. |
 | `--cluster-key` | none | PEM file with this node's private key. |
+| `--tls-reload-secs` | 10 | Seconds between checks of the certificate files. After a change, new connections use the new certificates. `0` turns the reload off. |
 | `--cluster-san` | `spiffe://cluster.local/ns/default/sa/discus` | The URI SAN that every peer must carry. If the value is empty, any certificate from the CA is accepted. |
 | `--forward-read-timeout-ms` | 500 | Time to wait for a forwarded read. |
 | `--forward-write-timeout-ms` | 2000 | Time to wait for a forwarded write. |
@@ -520,6 +525,23 @@ printf '%s\n' \
 openssl x509 -req -in node.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -days 30 \
   -extfile node.ext -out node.pem
 ```
+
+## Rotate certificates
+
+Each node checks its certificate files every `--tls-reload-secs` seconds, 10 by default. After a
+change, new connections use the new files. Open connections keep the certificate of their
+handshake. You do not have to restart the nodes. A node that cannot load the new files logs a
+warning and keeps its current certificates.
+
+A new node certificate from the same CA needs no other step. To change the CA, do these steps:
+
+1. Put the old CA and the new CA together in the CA file of every node, and wait for the reload.
+2. Give every node a certificate from the new CA, and wait for the reload.
+3. Remove the old CA from the CA file of every node.
+
+If a node trusts only the new CA while a peer still uses a certificate from the old CA, the two
+cannot connect. See [Certificate rotation](security.md#certificate-rotation) for the client
+certificates.
 
 ## How a command finds its owner
 

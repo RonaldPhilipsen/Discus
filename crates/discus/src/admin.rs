@@ -66,7 +66,7 @@ pub async fn serve_admin(
     let stop = async move { shutdown.cancelled().await };
     match tls {
         Some(config) => {
-            axum::serve(TlsListener::new(listener, config), app)
+            axum::serve(TlsListener::reloadable(listener, config), app)
                 .with_graceful_shutdown(stop)
                 .await
         }

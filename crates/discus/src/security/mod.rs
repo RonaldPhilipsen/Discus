@@ -18,9 +18,11 @@ pub mod tls;
 
 use std::io;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use tokio::net::TcpStream;
 
 use ctutils::CtEq;
@@ -55,10 +57,31 @@ fn fail<T>(msg: impl Into<String>) -> Result<T, SecurityError> {
 /// How long a client has to finish the connection setup, the TLS handshake included.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The files of the client listener certificate. A reload reads them again.
+struct ClientTlsFiles {
+    cert: PathBuf,
+    key: PathBuf,
+    client_ca: Option<PathBuf>,
+    require_client: bool,
+}
+
+impl ClientTlsFiles {
+    fn listener(&self) -> io::Result<rustls::ServerConfig> {
+        let ca = self.client_ca.as_deref();
+        tls::server_config(&self.cert, &self.key, ca, self.require_client)
+    }
+
+    /// The admin port asks for a client certificate but never requires one.
+    fn admin(&self) -> io::Result<rustls::ServerConfig> {
+        tls::server_config(&self.cert, &self.key, self.client_ca.as_deref(), false)
+    }
+}
+
 /// The security state of a node.
 pub struct Security {
     mode: TlsMode,
-    server_tls: Arc<rustls::ServerConfig>,
+    tls_files: ClientTlsFiles,
+    server_tls: ArcSwap<rustls::ServerConfig>,
     lb_sources: Vec<ipnet::IpNet>,
     lb_identity_tlv: Option<u8>,
     cert_rules: Vec<(String, Scopes)>,
@@ -66,7 +89,7 @@ pub struct Security {
     shared_token: Option<String>,
     max_conn_failures: u32,
     limiter: FailureLimiter,
-    admin_tls: Option<Arc<rustls::ServerConfig>>,
+    admin_tls: Option<Arc<ArcSwap<rustls::ServerConfig>>>,
     admin_identities: Vec<String>,
     dev_insecure: bool,
     #[cfg(feature = "oauth2")]
@@ -130,11 +153,15 @@ impl Security {
                 .map_err(|e| format!("--auth-config client_cert {:?}: {e}", rule.identity))?;
             cert_rules.push((rule.identity.clone(), scopes));
         }
+        let tls_files = ClientTlsFiles {
+            cert: tls_cert.clone(),
+            key: tls_key.clone(),
+            client_ca: args.tls_client_ca.clone(),
+            require_client: required,
+        };
         let admin_tls = if args.admin_tls {
-            Some(Arc::new(
-                tls::server_config(tls_cert, tls_key, args.tls_client_ca.as_deref(), false)
-                    .map_err(|e| e.to_string())?,
-            ))
+            let config = tls_files.admin().map_err(|e| e.to_string())?;
+            Some(Arc::new(ArcSwap::from_pointee(config)))
         } else {
             None
         };
@@ -143,13 +170,11 @@ impl Security {
         {
             return fail("[admin] cert_identities needs --admin-tls and --tls-client-ca");
         }
-        let server_tls = Arc::new(
-            tls::server_config(tls_cert, tls_key, args.tls_client_ca.as_deref(), required)
-                .map_err(|e| e.to_string())?,
-        );
+        let server_tls = ArcSwap::from_pointee(tls_files.listener().map_err(|e| e.to_string())?);
 
         Ok(Security {
             mode: args.tls_mode,
+            tls_files,
             server_tls,
             lb_sources: args.lb_trusted_source.clone(),
             lb_identity_tlv: args.lb_identity_tlv,
@@ -241,9 +266,35 @@ impl Security {
         drop(stop);
     }
 
-    /// The TLS config of the admin port, with `--admin-tls`.
-    pub fn admin_tls(&self) -> Option<Arc<rustls::ServerConfig>> {
+    /// The TLS config of the admin port, with `--admin-tls`. A reload replaces its content.
+    pub fn admin_tls(&self) -> Option<Arc<ArcSwap<rustls::ServerConfig>>> {
         self.admin_tls.clone()
+    }
+
+    /// The files that [`Security::reload_client_tls`] reads.
+    pub fn client_tls_files(&self) -> Vec<PathBuf> {
+        let f = &self.tls_files;
+        [Some(&f.cert), Some(&f.key), f.client_ca.as_ref()]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    /// Read the certificate, the key, and the client CA again, and use them for every new
+    /// connection on the client, redirect, and admin listeners. On an error, the listeners keep
+    /// their current certificates.
+    pub fn reload_client_tls(&self) -> io::Result<()> {
+        let listener = self.tls_files.listener()?;
+        let admin = match &self.admin_tls {
+            Some(_) => Some(self.tls_files.admin()?),
+            None => None,
+        };
+        self.server_tls.store(Arc::new(listener));
+        if let (Some(slot), Some(admin)) = (&self.admin_tls, admin) {
+            slot.store(Arc::new(admin));
+        }
+        Ok(())
     }
 
     /// Whether an admin request may pass: an admin certificate, or a bearer token with
@@ -370,7 +421,7 @@ impl Security {
         } else {
             None
         };
-        let acceptor = tokio_rustls::TlsAcceptor::from(self.server_tls.clone());
+        let acceptor = tokio_rustls::TlsAcceptor::from(self.server_tls.load_full());
         let tls = acceptor.accept(tcp).await?;
         if let Some(header) = forwarded {
             // The handshake verified the load balancer certificate, so the header is trusted.

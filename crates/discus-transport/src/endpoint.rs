@@ -228,10 +228,19 @@ struct Conn {
 
 type Slot = Arc<tokio::sync::Mutex<Option<Conn>>>;
 
+/// The QUIC client configs of the channels that an endpoint dials.
+#[derive(Clone)]
+struct Clients {
+    rpc: Option<quinn::ClientConfig>,
+    gossip: Option<quinn::ClientConfig>,
+}
+
 struct Inner {
     endpoint: quinn::Endpoint,
-    client: Option<quinn::ClientConfig>,
-    gossip_client: Option<quinn::ClientConfig>,
+    /// A TLS reload replaces them. Open connections keep the configs of their handshake.
+    clients: parking_lot::RwLock<Clients>,
+    channels: Channels,
+    quic: Arc<quinn::TransportConfig>,
     node_id: NodeId,
     cluster_id: parking_lot::RwLock<ClusterId>,
     capabilities: u64,
@@ -270,6 +279,37 @@ fn other(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
 }
 
+/// The QUIC server config and the client configs for `tls`.
+fn quic_configs(
+    tls: &TlsMaterial,
+    channels: Channels,
+    quic: &Arc<quinn::TransportConfig>,
+) -> io::Result<(quinn::ServerConfig, Clients)> {
+    tls.check().map_err(other)?;
+    let alpns: Vec<&[u8]> = [Channel::Rpc, Channel::Gossip]
+        .into_iter()
+        .filter(|c| channels.serves(*c))
+        .map(Channel::alpn)
+        .collect();
+    let server_tls = QuicServerConfig::try_from(tls.server_config(&alpns)).map_err(other)?;
+    let mut server = quinn::ServerConfig::with_crypto(Arc::new(server_tls));
+    server.transport_config(quic.clone());
+    let client_for = |channel: Channel| -> io::Result<Option<quinn::ClientConfig>> {
+        if !channels.serves(channel) {
+            return Ok(None);
+        }
+        let tls = QuicClientConfig::try_from(tls.client_config(channel.alpn())).map_err(other)?;
+        let mut client = quinn::ClientConfig::new(Arc::new(tls));
+        client.transport_config(quic.clone());
+        Ok(Some(client))
+    };
+    let clients = Clients {
+        rpc: client_for(Channel::Rpc)?,
+        gossip: client_for(Channel::Gossip)?,
+    };
+    Ok((server, clients))
+}
+
 impl Transport {
     /// Bind the UDP port in `config.listen` and start accepting.
     pub async fn bind(config: TransportConfig, service: Arc<dyn Service>) -> io::Result<Transport> {
@@ -283,28 +323,8 @@ impl Transport {
         socket: std::net::UdpSocket,
         service: Arc<dyn Service>,
     ) -> io::Result<Transport> {
-        let transport = quinn_transport(&config)?;
-        let alpns: Vec<&[u8]> = [Channel::Rpc, Channel::Gossip]
-            .into_iter()
-            .filter(|c| config.channels.serves(*c))
-            .map(Channel::alpn)
-            .collect();
-        let server_tls =
-            QuicServerConfig::try_from(config.tls.server_config(&alpns)).map_err(other)?;
-        let mut server = quinn::ServerConfig::with_crypto(Arc::new(server_tls));
-        server.transport_config(transport.clone());
-        let client_for = |channel: Channel| -> io::Result<Option<quinn::ClientConfig>> {
-            if !config.channels.serves(channel) {
-                return Ok(None);
-            }
-            let tls = QuicClientConfig::try_from(config.tls.client_config(channel.alpn()))
-                .map_err(other)?;
-            let mut client = quinn::ClientConfig::new(Arc::new(tls));
-            client.transport_config(transport.clone());
-            Ok(Some(client))
-        };
-        let client = client_for(Channel::Rpc)?;
-        let gossip_client = client_for(Channel::Gossip)?;
+        let quic = quinn_transport(&config)?;
+        let (server, clients) = quic_configs(&config.tls, config.channels, &quic)?;
         let runtime = quinn::default_runtime().ok_or_else(|| other("no async runtime"))?;
         let endpoint = quinn::Endpoint::new(
             quinn::EndpointConfig::default(),
@@ -315,8 +335,9 @@ impl Transport {
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let inner = Arc::new(Inner {
             endpoint,
-            client,
-            gossip_client,
+            clients: parking_lot::RwLock::new(clients),
+            channels: config.channels,
+            quic,
             node_id: config.node_id,
             cluster_id: parking_lot::RwLock::new(config.cluster_id),
             capabilities: config.capabilities,
@@ -573,11 +594,21 @@ impl Transport {
         Shared::open(&conn.conn, conn.info.max_frame, rejected).await
     }
 
-    fn client(&self, channel: Channel) -> Option<&quinn::ClientConfig> {
+    fn client(&self, channel: Channel) -> Option<quinn::ClientConfig> {
+        let clients = self.0.clients.read();
         match channel {
-            Channel::Rpc => self.0.client.as_ref(),
-            Channel::Gossip => self.0.gossip_client.as_ref(),
+            Channel::Rpc => clients.rpc.clone(),
+            Channel::Gossip => clients.gossip.clone(),
         }
+    }
+
+    /// Use `tls` for every new handshake, in both directions. Open connections keep their
+    /// certificates. On an error, the endpoint keeps its current certificates.
+    pub fn reload_tls(&self, tls: &TlsMaterial) -> io::Result<()> {
+        let (server, clients) = quic_configs(tls, self.0.channels, &self.0.quic)?;
+        self.0.endpoint.set_server_config(Some(server));
+        *self.0.clients.write() = clients;
+        Ok(())
     }
 
     fn pool(&self, lane: Lane) -> &Mutex<HashMap<NodeId, Slot>> {
@@ -651,7 +682,6 @@ impl Transport {
         let connect = |e: &dyn std::fmt::Display| TransportError::Connect(e.to_string());
         let client = self
             .client(channel)
-            .cloned()
             .ok_or_else(|| connect(&"this endpoint does not serve the channel"))?;
         let conn = self
             .0

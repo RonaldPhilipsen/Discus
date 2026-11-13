@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_rustls::server::TlsStream;
@@ -26,11 +27,15 @@ pub struct TlsListener {
 
 impl TlsListener {
     pub fn new(tcp: TcpListener, config: Arc<rustls::ServerConfig>) -> TlsListener {
+        TlsListener::reloadable(tcp, Arc::new(ArcSwap::new(config)))
+    }
+
+    /// A listener that uses the current content of `config` for each new handshake.
+    pub fn reloadable(tcp: TcpListener, config: Arc<ArcSwap<rustls::ServerConfig>>) -> TlsListener {
         let local = tcp
             .local_addr()
             .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
         let (tx, rx) = mpsc::channel(64);
-        let acceptor = tokio_rustls::TlsAcceptor::from(config);
         tokio::spawn(async move {
             loop {
                 let (tcp, addr) = tokio::select! {
@@ -43,7 +48,8 @@ impl TlsListener {
                         }
                     },
                 };
-                let (tx, acceptor) = (tx.clone(), acceptor.clone());
+                let tx = tx.clone();
+                let acceptor = tokio_rustls::TlsAcceptor::from(config.load_full());
                 tokio::spawn(async move {
                     let handshake =
                         tokio::time::timeout(super::HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await;
