@@ -52,6 +52,25 @@ The Discus client does not connect through the ClusterIP Service. The Service pl
 connection on a random pod, so some pods get more connections than others. A real client
 connects through the Service, but the even spread makes the comparison with Cluster exact.
 
+## TLS
+
+Discus nodes always talk to each other over QUIC with mTLS. Valkey sends replication and cluster
+bus traffic in plaintext unless you turn TLS on. Reports before 2026-11-13 ran Valkey without TLS,
+so only Discus paid for encryption on the replication path. Clients used plaintext to both systems.
+
+From 2026-11-13, the script runs every setup with TLS. Discus has no plaintext mode from 0.5.0
+on. The script sets the same encryption on both sides:
+
+| Traffic | Discus | Valkey |
+| --- | --- | --- |
+| Client connections | TLS with a required client certificate, policy `all:mtls` | `--tls-port` with `--tls-auth-clients yes`. The plaintext port is off. |
+| Replication | QUIC with mTLS | `--tls-replication yes` |
+| Cluster bus or Sentinel | QUIC with mTLS | `--tls-cluster yes`. Sentinel listens on its TLS port only. |
+
+memtier connects with the same client certificate to both systems. It skips the server name
+check, because the certificate does not name the pod IPs. The check happens once per connection,
+so it does not change the throughput. All connections stay open for the whole run.
+
 ## CPU measurement
 
 The script reads the cAdvisor metrics of the kubelet before and after each run. The `cfs` field
@@ -108,5 +127,7 @@ These limits apply to every report. A report lists only its own extra limits.
   kernel TCP. Discus runs QUIC in user space, and that work counts against its 1 CPU.
 - Without pipelining, no pod reaches its full CPU. The latency sets the rate, so these runs
   measure latency more than capacity. The pipelined runs come closer to capacity.
+- A report without TLS favors Valkey. Valkey replicates in plaintext, but Discus always encrypts
+  node-to-node traffic. See [TLS](#tls).
 - A report that reuses the Valkey numbers of an earlier day compares two sessions. Load from other
   pods on the host can differ between sessions.
