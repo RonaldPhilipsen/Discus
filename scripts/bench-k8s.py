@@ -79,6 +79,8 @@ SYSTEMS = {
     "discus-cluster-3-glibc": ("discus-cluster", "discus", 3, "static-glibc-1b486a1"),
     "discus-3-glibc-pyro": ("discus", "discus", 3, "static-glibc-1b486a1-pyroscope"),
     "discus-cluster-3-glibc-pyro": ("discus-cluster", "discus", 3, "static-glibc-1b486a1-pyroscope"),
+    "discus-3-1.2.4-pyro": ("discus", "discus", 3, "1.2.4-pyroscope"),
+    "discus-cluster-3-1.2.4-pyro": ("discus-cluster", "discus", 3, "1.2.4-pyroscope"),
     "redis-sentinel-6": ("sentinel", "redis", 6),
     "valkey-sentinel-6": ("sentinel", "valkey", 6),
     "redis-cluster-noreplica-6": ("cluster0", "redis", 6),

@@ -85,8 +85,8 @@ The `VERSION` argument sets the `service_version` label of the profiles. Use it 
 compare the builds in Pyroscope.
 
 On the static glibc image, profiling costs at most 2% of the throughput. See the
-[static glibc report](2026-11-13-k8s-static-glibc/report.md). To turn profiling off, pass
-`--pyroscope-url ""`.
+[static glibc report](https://github.com/RonaldPhilipsen/Discus/blob/e9affe8/docs/benchmarks/2026-11-13-k8s-static-glibc/report.md).
+To turn profiling off, pass `--pyroscope-url ""`.
 
 ## Client limits
 

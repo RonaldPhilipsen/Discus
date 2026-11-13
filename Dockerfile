@@ -5,7 +5,7 @@ COPY crates ./crates
 # Extra Cargo features, for example --build-arg FEATURES=pyroscope.
 ARG FEATURES=""
 # Static glibc instead of musl: on musl, the profiler's unwinder calls scan all of .eh_frame and
-# profiling costs about 20% of the throughput. See docs/benchmarks/2026-11-13-k8s-static-glibc.
+# profiling costs about 20% of the throughput. See docs/benchmarks/2026-11-13-k8s-v1.2.4/profiling-cost.md.
 ENV RUSTFLAGS="-C target-feature=+crt-static"
 # The release version, which the binary reports as its build ID.
 ARG VERSION=dev
