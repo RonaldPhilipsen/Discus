@@ -40,13 +40,20 @@ impl ProfilingArgs {
     }
 }
 
-/// Labels for every profile: the node ID and the Kubernetes attributes, with Pyroscope label
-/// names. Pyroscope does not accept dots in a label name.
+/// Labels for every profile: the node ID, the build ID and the Kubernetes attributes, with
+/// Pyroscope label names. Pyroscope does not accept dots in a label name, so it drops the
+/// `otel.scope.version` label that the agent derives from the build ID.
 fn labels(config: &Config) -> Vec<(String, String)> {
-    let mut labels = vec![(
-        "node_id".to_string(),
-        crate::telemetry::node_id(config.node_id.unwrap_or_default()),
-    )];
+    let mut labels = vec![
+        (
+            "node_id".to_string(),
+            crate::telemetry::node_id(config.node_id.unwrap_or_default()),
+        ),
+        (
+            "service_version".to_string(),
+            crate::build::BUILD_ID.to_string(),
+        ),
+    ];
     for (attr, value) in discus_telemetry::pipeline::k8s_from_env() {
         let name = match attr {
             "k8s.namespace.name" => "namespace",
@@ -182,5 +189,15 @@ mod tests {
         let labels = labels(&config);
         assert_eq!(labels[0].0, "node_id");
         assert!(labels.iter().all(|(k, _)| !k.contains('.')));
+    }
+
+    #[test]
+    fn labels_carry_the_build_id() {
+        let config = Config::parse_from(["discus"]).expect("default config");
+        let labels = labels(&config);
+        assert!(labels.contains(&(
+            "service_version".to_string(),
+            crate::build::BUILD_ID.to_string()
+        )));
     }
 }

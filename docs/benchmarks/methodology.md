@@ -77,8 +77,12 @@ and push a second image with the feature, with the same tag and the suffix `-pyr
 this command in the repository root:
 
 ```sh
-docker build --build-arg FEATURES=pyroscope -t ghcr.io/ronaldphilipsen/discus:<tag>-pyroscope .
+docker build --build-arg FEATURES=pyroscope --build-arg VERSION=<tag> \
+  -t ghcr.io/ronaldphilipsen/discus:<tag>-pyroscope .
 ```
+
+The `VERSION` argument sets the `service_version` label of the profiles. Use it to select or
+compare the builds in Pyroscope.
 
 On the static glibc image, profiling costs at most 2% of the throughput. See the
 [static glibc report](2026-11-13-k8s-static-glibc/report.md). To turn profiling off, pass
