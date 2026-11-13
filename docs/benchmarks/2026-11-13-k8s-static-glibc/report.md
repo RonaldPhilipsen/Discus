@@ -135,7 +135,6 @@ Pyroscope profiling costs almost nothing. On musl, it costs about 20% of the thr
 
 - `results-musl.jsonl`, `results-glibc.jsonl`, `results-glibc-profiling-on.jsonl`: one line for
   each run, with the memtier results and the cgroup CPU counters of each pod.
-- `run.log`: the log of the benchmark script.
 - `Dockerfile.k8s-glibc`: the build of the glibc images.
 
 These commands ran one round. The script profiles by default, so the first two commands turn
