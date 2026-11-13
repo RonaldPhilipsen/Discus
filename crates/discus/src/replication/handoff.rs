@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use discus_placement::{range_of, slot, Epoch, EpochId, NodeId, Version, NTP64, RANGES};
+use discus_placement::{range_of, slot, Epoch, EpochId, NodeId, Owners, Version, NTP64, RANGES};
 use discus_wire::{Batch, Message};
 
 use super::Settings;
@@ -271,7 +271,7 @@ pub async fn drop_lost(
         let (next, entries) = node.store.scan_entries(cursor, STEP, |k, e| {
             lost[usize::from(range_of(slot(k)))] && e.version.time() <= watermark
         });
-        let offered: Vec<(Bytes, Version, Vec<NodeId>)> = entries
+        let offered: Vec<(Bytes, Version, Owners)> = entries
             .into_iter()
             .map(|(k, e)| (k.clone(), e.version, current.owners(&k, rf)))
             .filter(|(_, _, owners)| {

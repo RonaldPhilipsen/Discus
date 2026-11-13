@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use super::budget::{Budget, Tracked};
-use super::state::{self, parse_command, CounterState, Limits};
+use super::state::{parse_command, CounterState, Kind, Limits};
 use super::{Counters, Refusal};
 
 /// Ops in one `COUNTER_SYNC`.
@@ -124,6 +124,10 @@ impl LfLeader {
         self.core.lock().state.get().clone()
     }
 
+    pub fn holds_expired(&self, now_ms: u64) -> bool {
+        self.core.lock().state.get().expired_keys(now_ms)
+    }
+
     pub fn follower(&self) -> Option<NodeId> {
         *self.follower.lock()
     }
@@ -142,6 +146,7 @@ impl LfLeader {
     /// and with a follower it waits up to `wait` for the ack (spec section 10.1).
     pub async fn execute(
         &self,
+        kind: Kind,
         cmd: &Command,
         now_ms: u64,
         limits: &Limits,
@@ -150,8 +155,8 @@ impl LfLeader {
         if !self.serving() {
             return Err(Refusal::NotLeader);
         }
-        if state::is_read(cmd) {
-            return Ok(self.core.lock().state.get().read(now_ms, cmd));
+        if kind.is_read() {
+            return Ok(self.core.lock().state.get().read(now_ms, kind, cmd));
         }
         let follower = self.follower().is_some();
         let raw = follower.then(|| encode_command(cmd));

@@ -653,7 +653,7 @@ impl Node {
     }
 
     /// The owner set of `key` in the previous epoch, if the history holds one.
-    pub fn previous_owners(&self, key: &[u8]) -> Option<Vec<NodeId>> {
+    pub fn previous_owners(&self, key: &[u8]) -> Option<Owners> {
         self.epochs
             .read()
             .previous()
@@ -703,7 +703,7 @@ impl Node {
 
     /// The owner set of `key` in the current epoch with the configured replication factor.
     pub fn owners(&self, key: &[u8]) -> Owners {
-        self.with_current(|e| e.owner_set(key, self.config.replication_factor))
+        self.with_current(|e| e.owners(key, self.config.replication_factor))
     }
 
     /// Run `f` on the current epoch. `f` must not call back into this function.

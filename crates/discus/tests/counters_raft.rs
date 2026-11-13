@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use common::counters::{
     all_hold, all_raft, dump, flags, group_of, incr_once, incr_or_show, incr_until, is_refused,
-    is_try_again, join_to, key_in, leader_of, raft_cluster, role, start, status, targeted, targets,
-    voters_of, Leases, GROUPS, RAFT, SLOW_DEATH,
+    is_try_again, join_to, key_in, leader_of, purge_reaches_every_replica, raft_cluster, role,
+    start, status, targeted, targets, voters_of, Leases, GROUPS, RAFT, SLOW_DEATH,
 };
 use common::gossip::{heal, partition, refs, wait_agreed, wait_until, GossipNode, Net};
 use discus::counter::group_key;
@@ -461,4 +461,11 @@ async fn a_draining_raft_leader_keeps_every_increment() {
         ok <= value && value <= ok + ambiguous,
         "the counter is {value}, with {ok} successes and {ambiguous} ambiguous increments"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_purge_removes_expired_keys_from_every_voter() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let nodes = raft_cluster(&net, &leases, 3, &[]).await;
+    purge_reaches_every_replica(&refs(&nodes)).await;
 }

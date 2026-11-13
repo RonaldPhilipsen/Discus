@@ -8,9 +8,11 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use common::counters::{
-    all_hold, group_of, incr_until, leader_of, role, start, status, Leases, FAST, GROUPS,
+    all_hold, group_of, incr_until, leader_of, purge_reaches_every_replica, role, start, status,
+    Leases, FAST, GROUPS,
 };
 use common::gossip::{refs, socket, wait_agreed, wait_until, GossipNode, Net, Opts};
+use discus::counter::state::Kind;
 use discus::counter::Refusal;
 use discus_placement::mock::MockClock;
 use discus_placement::{Clock, SystemClock};
@@ -132,12 +134,15 @@ async fn a_leader_stops_at_the_lease_margin() {
     let early = stop.saturating_duration_since(Instant::now());
     if early > Duration::from_millis(100) {
         assert!(
-            counters.execute(g, &cmd).await.is_ok(),
+            counters.execute(g, Kind::Incr, &cmd).await.is_ok(),
             "stopped before the margin"
         );
     }
     tokio::time::sleep_until((stop + Duration::from_millis(50)).into()).await;
-    assert_eq!(counters.execute(g, &cmd).await, Err(Refusal::NotLeader));
+    assert_eq!(
+        counters.execute(g, Kind::Incr, &cmd).await,
+        Err(Refusal::NotLeader)
+    );
     assert!(
         wait_until(Duration::from_secs(8), || role(follower, g) == "leader").await,
         "the follower never took over"
@@ -270,4 +275,11 @@ async fn expiry_is_identical_under_clock_skew() {
         );
     }
     ticking.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_purge_removes_expired_keys_from_leader_and_follower() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (nodes, _gates) = two(&net, &leases, &[]).await;
+    purge_reaches_every_replica(&refs(&nodes)).await;
 }

@@ -57,7 +57,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(32))]
 
     #[test]
-    fn owner_set_matches_owners(
+    fn owners_match_hrw_whatever_the_table_rf(
         members in members_strategy(),
         table_rf in 1usize..5,
         rf in 1usize..5,
@@ -66,7 +66,8 @@ proptest! {
         let e = epoch(members);
         e.table(table_rf);
         for key in &keys {
-            prop_assert_eq!(&e.owner_set(key, rf)[..], &e.owners(key, rf)[..]);
+            let direct = hrw::owners(&range_of(slot(key)).to_be_bytes(), e.members(), rf);
+            prop_assert_eq!(&e.owners(key, rf)[..], &direct[..]);
         }
     }
 
@@ -185,8 +186,8 @@ fn a_different_rf_bypasses_the_cached_table() {
     assert_eq!(e.table(3).rf(), 3);
     for r in [0, 1, 700, RANGES - 1] {
         assert_eq!(
-            e.range_owners(r, 2),
-            hrw::owners(&r.to_be_bytes(), e.members(), 2)
+            e.range_owners(r, 2)[..],
+            hrw::owners(&r.to_be_bytes(), e.members(), 2)[..]
         );
     }
 }
@@ -221,9 +222,9 @@ fn smaller_rf_reads_the_cached_table_prefix() {
         let r = range_of(slot(key));
         let direct = |rf| hrw::owners(&r.to_be_bytes(), e.members(), rf);
         assert_eq!(e.primary(key), direct(1).first().copied());
-        assert_eq!(e.owners(key, 2), direct(2));
-        assert_eq!(e.owners(key, 3), direct(3));
-        assert_eq!(e.owners(key, 4), direct(4));
+        assert_eq!(e.owners(key, 2)[..], direct(2)[..]);
+        assert_eq!(e.owners(key, 3)[..], direct(3)[..]);
+        assert_eq!(e.owners(key, 4)[..], direct(4)[..]);
     }
     assert_eq!(e.table(1).rf(), 3);
 }
@@ -243,8 +244,8 @@ fn a_table_listing_every_member_answers_a_larger_rf() {
     assert!(e.table(3).lists_all_normal());
     let r = range_of(slot(b"k"));
     assert_eq!(
-        e.range_owners(r, 5),
-        hrw::owners(&r.to_be_bytes(), e.members(), 5)
+        e.range_owners(r, 5)[..],
+        hrw::owners(&r.to_be_bytes(), e.members(), 5)[..]
     );
 }
 
