@@ -65,7 +65,7 @@ jobs:
       - run: >-
           helm template discus charts/discus --set cluster.tls.secretName=discus-tls
           --set clientTls.verifyClients=true,clientTls.clientAuth=required
-          --set authPolicy=all:mtls\,shared_token,authConfig.secretName=discus-auth
+          --set 'authPolicy=all:mtls\,shared_token' --set authConfig.secretName=discus-auth
           --set sharedToken.secretName=discus-token
 
   # redis-cli against a fresh node, for every supported and unsupported command.
