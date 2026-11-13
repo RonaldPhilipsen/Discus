@@ -456,12 +456,12 @@ lacks, the node refuses to start and names the missing feature.
 | Introspection | `oauth2-introspection` |
 | `[kubernetes]` | `k8s` and `oauth2` |
 
-The TLS backend feature (`tls-aws-lc`, `tls-ring`, or `tls-openssl`) supplies the cryptography
-for the client listener, the admin port, HTTPS to identity providers, the OTLP exporter, and the
-node-to-node QUIC transport. The build has one provider for all of them. QUIC uses only its
-TLS 1.3 cipher suites. Token signatures use
-`aws-lc-rs` with `tls-aws-lc`. With `tls-ring` or `tls-openssl`, token signatures use the RustCrypto
-crates, because the JWT library has no `ring` or OpenSSL backend.
+The TLS backend feature (`tls-aws-lc`, `tls-ring`, or `tls-openssl`) supplies the cryptography for
+all TLS in the node. This includes the client listener, the admin port, HTTPS to identity providers,
+the OTLP exporter, and the node-to-node QUIC transport. The build has one provider for all of them.
+QUIC uses only its TLS 1.3 cipher suites. Token signatures use `aws-lc-rs` with `tls-aws-lc`. With
+`tls-ring` or `tls-openssl`, token signatures use the RustCrypto crates, because the JWT library has
+no `ring` or OpenSSL backend.
 
 The trust root feature (`roots-system` or `roots-webpki`) supplies the roots for HTTPS to an
 identity provider without `ca_file`.

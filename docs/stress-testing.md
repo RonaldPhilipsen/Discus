@@ -9,7 +9,7 @@ test restarts and kills pods while clients write.
 You need these items:
 
 - A machine with `kubectl` access to the test cluster. Run every command on this machine.
-- A cluster with at least three schedulable nodes, if you want to test the loss of a node. With
+- A cluster with at least three schedulable nodes. You need them to test the loss of a node. With
   fewer nodes, two pods share a node, and the test does not cover the loss of a whole node.
 - A Discus image that the cluster can pull.
 
@@ -92,7 +92,7 @@ Run a script in a client pod that does these tasks until a stop file exists:
   refusal with `has no leader`, and any other reply.
 - It reads random recorded keys, and it records each hit, miss, and wrong value.
 
-Add a pause of about 20 ms to each loop if the script starts a new `redis-cli` for each command.
+If the script starts a new `redis-cli` for each command, add a pause of about 20 ms to each loop.
 Without the pause, the client runs out of local ports and reports `Address not available`. These
 errors come from the client, so do not count them against Discus.
 
@@ -131,7 +131,7 @@ accepting connections before Kubernetes removes it from the Service.
 
 ## Clean up
 
-Delete the namespace when the test ends:
+When the test ends, delete the namespace:
 
 ```sh
 kubectl delete namespace discus-rc

@@ -36,7 +36,7 @@ jobs:
           fetch-depth: 0
       - name: Calculate version
         id: semversie
-        uses: RonaldPhilipsen/semVersie@61a735e7d9e3d6e258d3288d09c1289a5a23ca69 # v2.3.5
+        uses: RonaldPhilipsen/semVersie@d9fb879058f41166c1b18f7974eaed5620dd596b # v2.3.6
 
   build:
     name: Build image (${{ matrix.variant.name }})
@@ -136,17 +136,21 @@ jobs:
   release:
     name: Create GitHub release
     needs: [version, image, chart]
-    # A release candidate gets no Git tag. semVersie reads the newest tag as the last release, so
-    # after a tag v0.5.0-rc0 it would compute 0.6.0 for the release of the same pull request.
-    if: needs.version.outputs.prerelease != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # A release candidate tags the head of its pull request. semVersie counts these tags for the
+      # next rc number, and skips them when it looks for the last release.
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.version.outputs.tag }}
           NOTES: ${{ needs.version.outputs.release-notes }}
-        run: gh release create "$TAG" --title "$TAG" --notes "$NOTES"
+          TARGET: ${{ github.event.pull_request.head.sha || github.sha }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          flags=()
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          gh release create "$TAG" --title "$TAG" --notes "$NOTES" --target "$TARGET" "${flags[@]}"
