@@ -698,6 +698,7 @@ fn copy_flag(to: &mut Config, from: &Config, flag: &str) {
             to.security.auth_failure_window_secs = from.security.auth_failure_window_secs
         }
         "tls_reload_secs" => to.tls_reload_secs = from.tls_reload_secs,
+        "databases" => to.databases = from.databases,
         _ => unreachable!("KEYS names {flag}, which copy_flag does not copy"),
     }
 }
@@ -1135,7 +1136,7 @@ mod tests {
 
     #[test]
     fn every_key_reaches_its_flag() {
-        let text = "version = 1\n\
+        let text = "version = 1\ndatabases = 20\n\
             [budget]\nforward-read-ms = 11\nforward-write-ms = 12\nhold-ms = 13\n\
             replication-ms = 14\n\
             [reads]\nfrom-replicas = false\n\
@@ -1154,6 +1155,7 @@ mod tests {
         assert_eq!(config.security.auth_max_failures_per_source, 17);
         assert_eq!(config.security.auth_failure_window_secs, 18);
         assert_eq!(config.tls_reload_secs, 19);
+        assert_eq!(config.databases, 20);
         assert_eq!(config.file_set.len(), crate::settings::KEYS.len());
     }
 

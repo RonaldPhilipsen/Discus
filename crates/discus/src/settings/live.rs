@@ -20,6 +20,7 @@ pub struct Reloadable {
     pub auth_max_failures_per_source: u32,
     pub auth_failure_window: Duration,
     pub tls_reload: Duration,
+    pub databases: u32,
 }
 
 impl Reloadable {
@@ -35,6 +36,7 @@ impl Reloadable {
             auth_max_failures_per_source: c.security.auth_max_failures_per_source,
             auth_failure_window: Duration::from_secs(c.security.auth_failure_window_secs),
             tls_reload: Duration::from_secs(c.tls_reload_secs),
+            databases: c.databases,
         }
     }
 
@@ -75,6 +77,7 @@ impl Reloadable {
                 self.auth_failure_window != other.auth_failure_window,
             ),
             ("tls.reload-secs", self.tls_reload != other.tls_reload),
+            ("databases", self.databases != other.databases),
         ];
         checks
             .into_iter()
