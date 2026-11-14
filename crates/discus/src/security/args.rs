@@ -83,15 +83,12 @@ pub struct SecurityArgs {
     #[arg(long, default_value_t = 60)]
     pub auth_clock_skew_secs: u64,
     /// Failed authentication attempts that close a connection.
-    /// Also `[auth] max-failures-per-connection` in the --config file.
     #[arg(long, default_value_t = 5)]
     pub auth_max_failures_per_connection: u32,
     /// Failed authentication attempts per source address in one window.
-    /// Also `[auth] max-failures-per-source` in the --config file.
     #[arg(long, default_value_t = 20)]
     pub auth_max_failures_per_source: u32,
     /// The failed-attempt window per source address, in seconds.
-    /// Also `[auth] failure-window-secs` in the --config file.
     #[arg(long, default_value_t = 60)]
     pub auth_failure_window_secs: u64,
     /// Serve the admin port over TLS with the client listener certificate and CA.
