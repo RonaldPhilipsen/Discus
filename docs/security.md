@@ -363,7 +363,7 @@ that use the same token share one request.
 - If the identity provider gives no answer, the connection also loses its access. The node
   cannot know that the token is still valid, so it fails closed. An outage of the identity
   provider thus ends the access of every connection with an opaque token within 300 seconds.
-  The client can send `AUTH` again when the identity provider is back.
+  When the identity provider is back, the client can send `AUTH` again.
 
 The node also keeps a refused answer, for 30 seconds. During that time it refuses the same token
 without a request to the identity provider. Thus a token that becomes active later can stay
