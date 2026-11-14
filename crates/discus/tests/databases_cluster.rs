@@ -4,7 +4,8 @@ mod common;
 
 use std::time::Duration;
 
-use common::gossip::{wait_until, GossipNode, Net};
+use common::counters::{all_hold, held_in, incr_once, raft_cluster, Leases};
+use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
 use common::run_in;
 use discus_resp::Value;
 use discus_wire::{encode_command, Forward, ForwardMode, Message, TraceContext};
@@ -580,5 +581,253 @@ async fn copy_reads_the_source_on_the_primary() {
             .faults
             .hold_replication
             .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A connection to `n` that selects database `db` in its URL, so it selects again after a
+/// reconnect.
+async fn client(n: &GossipNode, db: u32) -> redis::aio::MultiplexedConnection {
+    let client = common::client_tls::redis_client(&format!("rediss://{}/{db}", n.addr));
+    let config =
+        redis::AsyncConnectionConfig::new().set_response_timeout(Some(Duration::from_secs(30)));
+    client
+        .get_multiplexed_async_connection_with_config(&config)
+        .await
+        .unwrap()
+}
+
+/// Send `GET key` until it answers `want`, and fail after 10 s.
+async fn get_until(conn: &mut redis::aio::MultiplexedConnection, key: &str, want: &str) {
+    let deadline = tokio::time::Instant::now() + TEN;
+    loop {
+        let got: redis::RedisResult<Option<String>> =
+            redis::cmd("GET").arg(key).query_async(conn).await;
+        if matches!(&got, Ok(Some(v)) if v == want) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "GET {key} answered {got:?}, not {want}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn the_same_key_in_three_databases_reads_from_every_node() {
+    let net = Net::new();
+    let nodes = net.start_agreed(3, &["--databases", "3"]).await;
+    for db in 0..3u32 {
+        let mut c = client(&nodes[0], db).await;
+        assert_eq!(
+            query(&mut c, &["SET", "k", &format!("v{db}")]).await,
+            redis::Value::Okay
+        );
+    }
+    for node in &nodes {
+        for db in 0..3u32 {
+            let mut c = client(node, db).await;
+            get_until(&mut c, "k", &format!("v{db}")).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_key_in_database_two_survives_the_loss_of_its_primary() {
+    let net = Net::new();
+    let nodes = net
+        .start_agreed(3, &["--databases", "3", "--replication-factor", "2"])
+        .await;
+    let key = key_on(&nodes, 1, "die");
+    assert_eq!(
+        run_in(&nodes[0].node, 2, &["SET", &key, "v"]).await,
+        Value::ok()
+    );
+    let owners = nodes[0].node.owners(key.as_bytes());
+    assert_eq!(owners.len(), 2);
+    assert!(
+        wait_until(TEN, || nodes
+            .iter()
+            .filter(|n| owners.contains(&n.id))
+            .all(|n| holds(n, 2, &key)))
+        .await,
+        "the write did not reach both owners"
+    );
+    nodes[1].kill();
+    let survivors = [&nodes[0], &nodes[2]];
+    wait_agreed(&survivors, TEN).await;
+    for n in survivors {
+        let mut c = client(n, 2).await;
+        get_until(&mut c, &key, "v").await;
+    }
+}
+
+#[tokio::test]
+async fn a_handoff_moves_keys_of_every_database() {
+    let net = Net::new();
+    let flags = ["--databases", "3"];
+    let nodes = net.start_agreed(3, &flags).await;
+    fill(&nodes[0].node, 0, "zero", 200).await;
+    fill(&nodes[0].node, 2, "two", 200).await;
+    let seeds: Vec<_> = nodes.iter().map(|n| n.cluster_addr).collect();
+    let d = net.start(&seeds, &flags).await;
+    let mut all = refs(&nodes);
+    all.push(&d);
+    wait_agreed(&all, TEN).await;
+    let owned = |prefix: &str| -> Vec<String> {
+        (0..200)
+            .map(|i| format!("{prefix}{i}"))
+            .filter(|k| d.node.owners(k.as_bytes()).contains(&d.id))
+            .collect()
+    };
+    let (zero, two) = (owned("zero"), owned("two"));
+    assert!(
+        !zero.is_empty() && !two.is_empty(),
+        "the new node owns no key"
+    );
+    let moved = wait_until(TEN, || {
+        zero.iter().all(|k| holds(&d, 0, k)) && two.iter().all(|k| holds(&d, 2, k))
+    })
+    .await;
+    assert!(moved, "the new node did not receive every key it owns");
+    let idle = wait_until(TEN, || {
+        all.iter()
+            .all(|n| n.node.replicator().is_none_or(|r| !r.scanning()))
+    })
+    .await;
+    assert!(idle, "a handoff did not finish");
+    assert!(
+        two.iter().all(|k| !holds(&d, 0, k)),
+        "a key of database 2 is in database 0"
+    );
+    assert!(
+        zero.iter().all(|k| !holds(&d, 2, k)),
+        "a key of database 0 is in database 2"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn counter_keys_in_two_databases() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let nodes = raft_cluster(&net, &leases, 3, &["--databases", "3"]).await;
+    let mut zero = client(&nodes[0], 0).await;
+    let mut one = client(&nodes[0], 1).await;
+    assert_eq!(incr_once(&mut zero, "cnt:a").await, 1);
+    assert_eq!(incr_once(&mut zero, "cnt:a").await, 2);
+    assert_eq!(incr_once(&mut one, "cnt:a").await, 1);
+    for (db, want) in [(0, "2"), (1, "1")] {
+        let held = wait_until(Duration::from_secs(10), || {
+            nodes
+                .iter()
+                .all(|n| held_in(n, db, "cnt:a").as_deref() == Some(want))
+        })
+        .await;
+        assert!(held, "a node does not hold {want} in database {db}");
+        for n in &nodes {
+            let mut c = client(n, db).await;
+            get_until(&mut c, "cnt:a", want).await;
+        }
+    }
+    assert!(all_hold(&refs(&nodes), "cnt:a", "2", TEN).await);
+}
+
+async fn cluster_client(
+    nodes: &[GossipNode],
+    db: Option<i64>,
+) -> redis::cluster_async::ClusterConnection {
+    let urls: Vec<String> = nodes
+        .iter()
+        .map(|n| format!("rediss://{}", n.node.client_addr().unwrap()))
+        .collect();
+    let mut builder = redis::cluster::ClusterClientBuilder::new(urls)
+        .certs(common::client_tls::redis_certs())
+        .response_timeout(Duration::from_secs(30));
+    if let Some(db) = db {
+        builder = builder.database_id(db);
+    }
+    builder
+        .build()
+        .unwrap()
+        .get_async_connection()
+        .await
+        .unwrap()
+}
+
+const REDIRECT: [&str; 4] = ["--databases", "3", "--redirect-listen", "127.0.0.1:0"];
+
+#[tokio::test]
+async fn select_on_the_redirect_listener() {
+    let net = Net::new();
+    let nodes = net.start_agreed(3, &REDIRECT).await;
+    let mut two = cluster_client(&nodes, Some(2)).await;
+    let mut plain = cluster_client(&nodes, None).await;
+    let keys: Vec<String> = (0..20).map(|i| format!("k{i}")).collect();
+    for k in &keys {
+        let _: () = redis::AsyncCommands::set(&mut two, k, "two").await.unwrap();
+    }
+    for k in &keys {
+        let got: Option<String> = redis::AsyncCommands::get(&mut two, k).await.unwrap();
+        assert_eq!(got.as_deref(), Some("two"));
+        let other: Option<String> = redis::AsyncCommands::get(&mut plain, k).await.unwrap();
+        assert_eq!(other, None, "database 0 shows {k}");
+    }
+    for k in &keys {
+        assert!(nodes.iter().any(|n| holds(n, 2, k)));
+        assert!(nodes.iter().all(|n| !holds(n, 0, k)));
+    }
+}
+
+#[tokio::test]
+async fn a_client_without_select_uses_database_zero_on_both_listeners() {
+    let net = Net::new();
+    let nodes = net.start_agreed(3, &REDIRECT).await;
+
+    let mut direct = nodes[0].redis().await;
+    assert_eq!(
+        query(&mut direct, &["SET", "k", "client-port"]).await,
+        redis::Value::Okay
+    );
+    let mut other = client(&nodes[1], 0).await;
+    get_until(&mut other, "k", "client-port").await;
+
+    let mut plain = cluster_client(&nodes, None).await;
+    let _: () = redis::AsyncCommands::set(&mut plain, "r", "redirect")
+        .await
+        .unwrap();
+    let mut selected = cluster_client(&nodes, Some(0)).await;
+    let got: Option<String> = redis::AsyncCommands::get(&mut selected, "r").await.unwrap();
+    assert_eq!(got.as_deref(), Some("redirect"));
+    let mut via_port = client(&nodes[2], 0).await;
+    get_until(&mut via_port, "r", "redirect").await;
+    assert!(nodes.iter().any(|n| holds(n, 0, "r")));
+    assert!(nodes.iter().all(|n| !holds(n, 1, "r") && !holds(n, 2, "r")));
+}
+
+#[tokio::test]
+async fn renovate_operator_databases() {
+    let net = Net::new();
+    let nodes = net.start_agreed(3, &["--databases", "3"]).await;
+    let mut clients = Vec::new();
+    for db in 0..3u32 {
+        clients.push(client(&nodes[db as usize], db).await);
+    }
+    let names = ["session:1", "cache:1", "log:1"];
+    let extra = |db: usize| 20 * (db + 1);
+    for i in 0..500usize {
+        for (db, c) in clients.iter_mut().enumerate() {
+            let key = names[i % 3];
+            let value = format!("db{db}-{i}");
+            assert_eq!(query(c, &["SET", key, &value]).await, redis::Value::Okay);
+            let item = format!("item:{}", i % extra(db));
+            assert_eq!(query(c, &["SET", &item, "x"]).await, redis::Value::Okay);
+            assert_eq!(query(c, &["GET", key]).await, data(&value), "database {db}");
+        }
+    }
+    for (db, c) in clients.iter_mut().enumerate() {
+        assert_eq!(
+            query(c, &["DBSIZE"]).await,
+            redis::Value::Int((3 + extra(db)) as i64),
+            "database {db}"
+        );
     }
 }
