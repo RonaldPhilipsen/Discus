@@ -338,8 +338,10 @@ fn flush(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     {
         return Err(CommandError::Syntax);
     }
-    // In-flight batches can still land after this point, so a flush is best-effort.
-    if cmd[0].eq_ignore_ascii_case(b"FLUSHDB") {
+    // In-flight batches can still land after this point, so a flush is best-effort. With one
+    // database, `FLUSHDB` is `FLUSHALL`, as before numbered databases: it also forgets the
+    // handoffs and the refill marks, so a fallback read or a refill cannot bring a key back.
+    if cmd[0].eq_ignore_ascii_case(b"FLUSHDB") && node.databases.cluster() > 1 {
         if let Some(r) = node.replicator() {
             r.flush_db(conn.db);
         }

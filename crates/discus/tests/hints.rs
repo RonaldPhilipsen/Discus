@@ -270,6 +270,19 @@ async fn tombstone_overflow() -> (common::cluster::Cluster, String) {
     (c, kept)
 }
 
+/// With one database, `FLUSHDB` is `FLUSHALL`: it also clears the refill marks, so a refill
+/// cannot bring a flushed key back.
+#[tokio::test]
+async fn flushdb_with_one_database_clears_the_refill_marks() {
+    let (c, _) = tombstone_overflow().await;
+    let mut client = c.nodes[0].redis().await;
+    let _: () = redis::cmd("FLUSHDB")
+        .query_async(&mut client)
+        .await
+        .unwrap();
+    assert_eq!(c.nodes[0].node.store.needs_refill(), Vec::<usize>::new());
+}
+
 #[tokio::test]
 async fn a_short_absence_keeps_the_store() {
     let (c, kept) = tombstone_overflow().await;
