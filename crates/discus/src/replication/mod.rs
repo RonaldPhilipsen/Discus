@@ -903,15 +903,8 @@ impl Replicator {
             link.saw_peer_epoch(peer, info.cluster_id, info.epoch);
             Ok(message)
         };
-        let reply = node
-            .request(
-                peer,
-                Lane::Bulk,
-                build,
-                node.live.get().replication_timeout,
-                true,
-            )
-            .await?;
+        let timeout = node.live.get().replication_timeout;
+        let reply = node.request(peer, Lane::Bulk, build, timeout, true).await?;
         // An answered bulk message shows the peer is up (spec "Target health").
         link.note_forward(peer, true);
         // The ack carries the epoch that the peer adopted, so redirects need no forward first.

@@ -417,7 +417,8 @@ async fn flush(
     match send(node, replicator, target, &batch).await {
         Some(ack) => {
             t.wanted = ack.want;
-            pace(bytes, node.live.get().handoff_rate_bytes).await;
+            let rate = node.live.get().handoff_rate_bytes;
+            pace(bytes, rate).await;
         }
         None => {
             tracing::warn!(%target, "abandoned a handoff target after its retries");

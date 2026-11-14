@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, Guard};
 use parking_lot::Mutex;
 
 use crate::config::Config;
@@ -101,8 +101,11 @@ impl Live {
         })
     }
 
-    pub fn get(&self) -> Arc<Reloadable> {
-        self.current.load_full()
+    // Every keyed read in cluster mode comes here, so a guard avoids the two atomic operations on
+    // one shared counter that a cloned Arc costs. Copy a field out before an `.await`: a held
+    // guard takes one of a few per-thread slots.
+    pub fn get(&self) -> Guard<Arc<Reloadable>> {
+        self.current.load()
     }
 
     /// Stores `next` and returns the keys that changed. The generation grows only on a change.

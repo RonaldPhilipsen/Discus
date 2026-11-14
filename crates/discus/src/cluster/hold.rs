@@ -59,8 +59,9 @@ fn delete_timeout(node: &Node, spec: &CommandSpec, cmd: &Command, write: bool) -
     if !write || super::acked_delete_keys(node, spec, cmd).is_empty() {
         return None;
     }
-    let wait = node.live.get().replication_timeout;
-    node.link().map(|link| link.write_timeout() + wait)
+    let live = node.live.get();
+    node.link()
+        .map(|_| live.forward_write_timeout + live.replication_timeout)
 }
 
 /// Forward `cmd` to `target`. A failed read gives `None`, so the caller tries the next owner. A
