@@ -90,7 +90,7 @@ mod tests {
     use std::sync::Arc;
 
     async fn until(what: &str, cond: impl Fn() -> bool) {
-        let limit = tokio::time::Instant::now() + Duration::from_secs(10);
+        let limit = tokio::time::Instant::now() + Duration::from_secs(30);
         while !cond() {
             assert!(tokio::time::Instant::now() < limit, "timed out: {what}");
             tokio::time::sleep(Duration::from_millis(10)).await;

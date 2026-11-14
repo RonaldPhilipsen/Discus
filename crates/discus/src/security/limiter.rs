@@ -78,14 +78,16 @@ mod tests {
 
     #[test]
     fn a_source_is_blocked_at_the_limit_and_freed_after_the_window() {
-        let l = FailureLimiter::new(Live::new(settings(2, Duration::from_millis(50))));
+        let live = Live::new(settings(2, Duration::from_secs(600)));
+        let l = FailureLimiter::new(live.clone());
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         l.record(ip);
         assert!(!l.blocked(ip));
         l.record(ip);
         assert!(l.blocked(ip));
         assert!(!l.blocked("10.0.0.2".parse().unwrap()));
-        std::thread::sleep(Duration::from_millis(60));
+        // A zero window has ended for every attempt, without a wait on the clock.
+        live.apply(settings(2, Duration::ZERO));
         assert!(!l.blocked(ip));
     }
 

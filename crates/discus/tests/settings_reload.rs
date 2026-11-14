@@ -47,6 +47,7 @@ async fn a_running_node_applies_a_changed_hold_budget() {
     let config = discus::Config::load_from(argv).unwrap();
     let server = discus::Server::bind(config).await.unwrap();
     let addr = server.local_addr();
+    let node = server.node().clone();
     let shutdown = CancellationToken::new();
     let _serve = tokio::spawn(server.run(shutdown.clone()));
     let _stop = shutdown.drop_guard();
@@ -69,6 +70,7 @@ async fn a_running_node_applies_a_changed_hold_budget() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    assert_eq!(node.live.get().hold_budget, Duration::from_millis(1500));
 }
 
 #[tokio::test]
