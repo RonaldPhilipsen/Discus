@@ -8,7 +8,6 @@ use discus_resp::{Command, Value};
 use super::error::CommandError;
 use crate::cluster::route::Route;
 use crate::node::{ConnState, Node};
-use crate::security::ConnAuth;
 
 /// What a command needs from the scopes of a connection (spec §14.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,8 +158,8 @@ pub fn is_unsupported(upper: &str) -> bool {
 
 /// Run a checked data command on this node with no authorization check. The entry node checked
 /// it, or the command arrived over mTLS from another node.
-pub fn execute_local(node: &Node, spec: &CommandSpec, cmd: &Command) -> Value {
-    let mut internal = ConnState::new(0, ConnAuth::default());
+pub fn execute_local(node: &Node, spec: &CommandSpec, db: u32, cmd: &Command) -> Value {
+    let mut internal = ConnState::internal(db);
     (spec.handler)(node, &mut internal, cmd).unwrap_or_else(|e| e.to_value())
 }
 

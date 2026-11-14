@@ -864,6 +864,15 @@ impl ConnState {
         }
     }
 
+    /// The state of a command that runs on this node without a client connection, in database
+    /// `db`.
+    pub fn internal(db: u32) -> ConnState {
+        ConnState {
+            db,
+            ..ConnState::new(0, ConnAuth::default())
+        }
+    }
+
     /// The next round-robin position. Each data command takes one.
     pub fn next_rr(&mut self) -> u64 {
         self.rr = self.rr.wrapping_add(1);

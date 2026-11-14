@@ -198,19 +198,23 @@ pub struct Job {
     pub redirect: bool,
     /// The connection sent `READONLY`.
     pub readonly: bool,
+    /// The database of the connection when the command arrived. A later `SELECT` in the same
+    /// pipeline does not change it.
+    pub db: u32,
 }
 
 pub type Writes = Arc<Mutex<writeset::WriteSet>>;
 
 impl Job {
     /// A job without a client connection: a forwarded command or a held retry.
-    pub fn plain(cmd: Command, spec: &'static CommandSpec) -> Job {
+    pub fn plain(cmd: Command, spec: &'static CommandSpec, db: u32) -> Job {
         Job {
             cmd,
             spec,
             rr: 0,
             redirect: false,
             readonly: false,
+            db,
         }
     }
 }
@@ -289,15 +293,16 @@ pub fn prepare(
         rr: conn.next_rr(),
         redirect: conn.redirect,
         readonly: conn.readonly,
+        db: conn.db,
     })
 }
 
 /// Execute on this node and report the stamp that the command took. The work runs in the `store`
 /// span. `Node::write` queues each key that the command changed for the other owners.
-pub fn local(node: &Node, spec: &CommandSpec, cmd: &Command) -> Reply {
+pub fn local(node: &Node, spec: &CommandSpec, db: u32, cmd: &Command) -> Reply {
     let _store = telemetry::store_span().entered();
     Node::take_applied();
-    let value = command::execute_local(node, spec, cmd);
+    let value = command::execute_local(node, spec, db, cmd);
     Reply {
         applied: Node::take_applied(),
         ..Reply::value(value)
@@ -325,12 +330,17 @@ pub(crate) fn acked_delete_keys(
 
 /// Run `cmd` here like [`local`]. A delete of a listed key then waits for one secondary. After
 /// the wait it replies with success anyway (fail open), and the hints deliver the tombstone.
-pub fn local_acked(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> Dispatch {
-    let reply = local(node, spec, &cmd);
+pub fn local_acked(
+    node: &Arc<Node>,
+    spec: &'static CommandSpec,
+    db: u32,
+    cmd: Command,
+) -> Dispatch {
+    let reply = local(node, spec, db, &cmd);
     if reply.applied.is_none() {
         return Dispatch::Ready(reply);
     }
-    let keys = acked_delete_keys(node, spec, 0, &cmd);
+    let keys = acked_delete_keys(node, spec, db, &cmd);
     let Some(replicator) = node.replicator().filter(|_| !keys.is_empty()).cloned() else {
         return Dispatch::Ready(reply);
     };
@@ -343,10 +353,10 @@ pub fn local_acked(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -
 }
 
 /// Fill `observed` and `settled` of a read of `key` that ran here.
-fn track_here(node: &Node, key: &[u8], reply: &mut Reply) {
+fn track_here(node: &Node, db: u32, key: &[u8], reply: &mut Reply) {
     if reply.observed.is_none() {
-        reply.observed = node.store.version(0, key);
-        reply.settled = node.replicator().is_some_and(|r| r.settled(0, key));
+        reply.observed = node.store.version(db, key);
+        reply.settled = node.replicator().is_some_and(|r| r.settled(db, key));
     }
 }
 
@@ -355,19 +365,20 @@ fn track_here(node: &Node, key: &[u8], reply: &mut Reply) {
 pub fn serve_here(
     node: &Arc<Node>,
     spec: &'static CommandSpec,
+    db: u32,
     cmd: Command,
     write: bool,
     owners: &[NodeId],
 ) -> Dispatch {
-    let sources = crate::replication::repair::sources(node, 0, &cmd[1], write, owners);
+    let sources = crate::replication::repair::sources(node, db, &cmd[1], write, owners);
     if sources.is_empty() {
-        return local_acked(node, spec, cmd);
+        return local_acked(node, spec, db, cmd);
     }
     let node = node.clone();
     let key = cmd[1].clone();
     Dispatch::Pending(Box::pin(async move {
-        crate::replication::repair::fetch(&node, 0, &key, sources).await;
-        local_acked(&node, spec, cmd).finish().await
+        crate::replication::repair::fetch(&node, db, &key, sources).await;
+        local_acked(&node, spec, db, cmd).finish().await
     }))
 }
 
@@ -388,6 +399,12 @@ pub fn run_hop(
     writes: Option<&Writes>,
     route: Span,
 ) -> Dispatch {
+    // A job that did not pass `prepare` on this node, such as a held retry, checks the database
+    // against the databases that this node holds.
+    if job.db >= node.databases.local() {
+        drop(route);
+        return Dispatch::Ready(Reply::value(Value::error(databases::OUT_OF_RANGE)));
+    }
     if let Some(dispatch) = crate::counter::route::intercept(node, &job, &hop) {
         drop(route);
         return dispatch;
@@ -398,7 +415,7 @@ pub fn run_hop(
     }
     if node.link().is_none() {
         drop(route);
-        return Dispatch::Ready(local(node, job.spec, &job.cmd));
+        return Dispatch::Ready(local(node, job.spec, job.db, &job.cmd));
     }
     match job.spec.route {
         Route::Single { write } => single(node, job, hop, write, writes, route),
@@ -426,7 +443,7 @@ pub fn run_hop(
         }
         Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => {
             drop(route);
-            Dispatch::Ready(local(node, job.spec, &job.cmd))
+            Dispatch::Ready(local(node, job.spec, job.db, &job.cmd))
         }
     }
 }
@@ -439,6 +456,7 @@ pub fn run_hop(
 /// unless this node owns the key and already holds a version at least as new.
 pub fn candidates(
     node: &Node,
+    db: u32,
     key: &[u8],
     owners: &[NodeId],
     write: bool,
@@ -446,7 +464,7 @@ pub fn candidates(
     need: Option<Version>,
 ) -> Vec<NodeId> {
     if let Some(need) = need.filter(|_| !write) {
-        if owners.contains(&node.id) && node.store.version(0, key).is_some_and(|v| v >= need) {
+        if owners.contains(&node.id) && node.store.version(db, key).is_some_and(|v| v >= need) {
             return vec![node.id];
         }
         return owners.iter().take(1).copied().collect();
@@ -476,6 +494,7 @@ pub(crate) fn replica_reads(node: &Node, write: bool, key: &[u8]) -> bool {
 fn spent(
     node: &Arc<Node>,
     spec: &'static CommandSpec,
+    db: u32,
     cmd: Command,
     keys: &[&[u8]],
     write: bool,
@@ -487,7 +506,7 @@ fn spent(
         None => false,
     });
     if owned_before {
-        local_acked(node, spec, cmd)
+        local_acked(node, spec, db, cmd)
     } else {
         Dispatch::Ready(Reply::try_again())
     }
@@ -531,11 +550,11 @@ fn single(
     let need = match (writes, write) {
         (Some(w), false) if tracked && owners.len() > 1 => w
             .lock()
-            .required(SetKey::of(&job.cmd[1]), std::time::Instant::now),
+            .required(SetKey::of(job.db, &job.cmd[1]), std::time::Instant::now),
         _ => None,
     };
     // Only a write, or a read that must see an earlier write, changes the write set.
-    let key = (tracked && (write || need.is_some())).then(|| SetKey::of(&job.cmd[1]));
+    let key = (tracked && (write || need.is_some())).then(|| SetKey::of(job.db, &job.cmd[1]));
     let dispatch = single_planned(node, job, owners, hop, write, need, route);
     let (Some(writes), Some(key)) = (writes, key) else {
         return dispatch;
@@ -568,19 +587,20 @@ fn single_planned(
         rr,
         redirect,
         readonly,
+        db,
     } = job;
     let redirect = redirect::applies(redirect, &hop).then_some(readonly);
     let key: &[u8] = &cmd[1];
     let plan = route.in_scope(|| {
         let forward = || {
-            let targets = candidates(node, key, &owners, write, rr, need);
+            let targets = candidates(node, db, key, &owners, write, rr, need);
             match targets.first() {
                 None => Plan::Retry,
                 Some(first) if *first == node.id => Plan::Local,
                 Some(_) => Plan::Forward(allowed(node, &hop, targets)),
             }
         };
-        match redirect.map(|ro| redirect::target(node, key, &owners, write, need, ro)) {
+        match redirect.map(|ro| redirect::target(node, db, key, &owners, write, need, ro)) {
             None => forward(),
             Some(None) => Plan::Retry,
             Some(Some(t)) if t == node.id => Plan::Local,
@@ -596,21 +616,23 @@ fn single_planned(
         Plan::Moved(moved) => return Dispatch::Ready(Reply::error(moved)),
         Plan::Local if need.is_some() || hop.track => {
             let owned = cmd[1].clone();
-            return local_acked(node, spec, cmd)
-                .then(node, move |node, reply| track_here(node, &owned, reply));
+            return local_acked(node, spec, db, cmd)
+                .then(node, move |node, reply| track_here(node, db, &owned, reply));
         }
-        Plan::Local => return serve_here(node, spec, cmd, write, &owners),
+        Plan::Local => return serve_here(node, spec, db, cmd, write, &owners),
         Plan::Forward(targets) => targets,
     };
     if targets.is_empty() {
         let owned = cmd[1].clone();
-        return spent(node, spec, cmd, &[&owned], write);
+        return spent(node, spec, db, cmd, &[&owned], write);
     }
     hop.track |= need.is_some();
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
         for target in targets {
-            if let Some(reply) = hold::send_or_hold(&node, spec, target, &cmd, &hop, write).await {
+            if let Some(reply) =
+                hold::send_or_hold(&node, spec, db, target, &cmd, &hop, write).await
+            {
                 return reply;
             }
         }
@@ -653,6 +675,22 @@ mod tests {
             panic!("GET in database 1 ran");
         };
         assert_eq!(reply, Value::error(databases::OUT_OF_RANGE));
+    }
+
+    #[test]
+    fn a_job_in_a_database_that_this_node_does_not_hold_runs_nothing() {
+        let config = Config::parse_from(["discus"]).unwrap();
+        let live = Live::new(Reloadable::from_config(&config));
+        let security = Arc::new(crate::security::tests::security(&[]));
+        let node = Arc::new(Node::new(config, security, live));
+        let cmd = crate::counter::cmd(&["SET", "k", "v"]);
+        let spec = command::lookup(&cmd[0]).unwrap();
+        let Dispatch::Ready(reply) = run(&node, Job::plain(cmd, spec, 1), None, Span::none())
+        else {
+            panic!("the job did not finish at once");
+        };
+        assert_eq!(reply.value, Value::error(databases::OUT_OF_RANGE));
+        assert!(!node.store.read(1, b"k", |e| e.is_some()));
     }
 
     #[tokio::test]

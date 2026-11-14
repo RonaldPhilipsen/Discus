@@ -291,7 +291,7 @@ async fn run_spent(node: &ClusterNode, parts: &[&str]) -> Value {
         .map(|p| Bytes::copy_from_slice(p.as_bytes()))
         .collect();
     let spec = discus::command::lookup(&cmd[0]).unwrap();
-    let job = Job::plain(cmd, spec);
+    let job = Job::plain(cmd, spec, 0);
     let hop = Hop {
         hops: MAX_HOPS,
         ..Hop::default()

@@ -13,14 +13,16 @@ use super::{Hop, Reply};
 use crate::node::Node;
 use crate::telemetry;
 
-/// Forward `cmd` to `target`. The forward carries the current epoch, the full epoch when the
+/// Forward `cmd` in database `db` to `target`. The forward carries the current epoch, the full epoch when the
 /// peer last reported an older one, the hop count, the path, and the trace
 /// context of the `forward` span. The entry node observes the applied HLC of the reply.
 /// `timeout` replaces the forward timeout of the route. Counter commands wait for a quorum on
 /// the leader, so they need longer than a store write.
+#[allow(clippy::too_many_arguments)]
 pub async fn send(
     node: &Arc<Node>,
     target: NodeId,
+    db: u32,
     cmd: &Command,
     hop: &Hop,
     mode: ForwardMode,
@@ -50,7 +52,7 @@ pub async fn send(
                 path,
                 mode,
                 track: hop.track,
-                db: 0,
+                db,
             }))
         };
         let timeout = timeout.unwrap_or(if write {

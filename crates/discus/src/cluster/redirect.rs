@@ -60,6 +60,7 @@ pub(crate) fn applies(redirect: bool, hop: &Hop) -> bool {
 /// `--read-from-replicas`, when this node owns the slot (spec "Reads and READONLY").
 pub(crate) fn target(
     node: &Node,
+    db: u32,
     key: &[u8],
     owners: &[NodeId],
     write: bool,
@@ -67,7 +68,7 @@ pub(crate) fn target(
     readonly: bool,
 ) -> Option<NodeId> {
     if !write && need.is_some() {
-        return candidates(node, key, owners, write, 0, need)
+        return candidates(node, db, key, owners, write, 0, need)
             .first()
             .copied();
     }
@@ -109,6 +110,7 @@ pub(crate) fn moved(node: &Node, key: &[u8], target: NodeId) -> Option<CommandEr
 /// slots, the write set splits the targets, the target is this node, or step 4 fails.
 pub(crate) fn multi_moved(
     node: &Node,
+    db: u32,
     keys: &[&[u8]],
     write: bool,
     need: impl Fn(&[u8]) -> Option<Version>,
@@ -122,7 +124,7 @@ pub(crate) fn multi_moved(
     let owners = node.owners(first);
     let mut to = None;
     for key in keys {
-        let t = target(node, key, &owners, write, need(key), readonly)?;
+        let t = target(node, db, key, &owners, write, need(key), readonly)?;
         if to.is_some_and(|prev| prev != t) {
             return None;
         }

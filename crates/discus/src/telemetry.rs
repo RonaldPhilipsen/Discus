@@ -343,7 +343,7 @@ pub fn dispatch_with(metrics: &Metrics, node: &Node, conn: &mut ConnState, cmd: 
     let value = match prepared {
         crate::cluster::Prepared::Done(value) => value,
         crate::cluster::Prepared::Data(job) => {
-            crate::cluster::local(node, job.spec, &job.cmd).value
+            crate::cluster::local(node, job.spec, job.db, &job.cmd).value
         }
     };
     trace.finish(&value);

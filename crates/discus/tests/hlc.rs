@@ -40,7 +40,7 @@ fn run(node: &Node, args: &[&str]) -> Value {
         .iter()
         .map(|a| Bytes::copy_from_slice(a.as_bytes()))
         .collect();
-    execute_local(node, check(lookup(&cmd[0]), &cmd).unwrap(), &cmd)
+    execute_local(node, check(lookup(&cmd[0]), &cmd).unwrap(), 0, &cmd)
 }
 
 fn version(node: &Node, key: &str) -> Version {

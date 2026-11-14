@@ -170,9 +170,17 @@ pub async fn run(
             },
             Some(leader) if hop.hops < MAX_HOPS && !hop.path.contains(&leader) => {
                 let timeout = Some(counters.settings.timeout + FORWARD_SLACK);
-                let sent =
-                    forward::send(node, leader, &cmd, &hop, ForwardMode::Route, true, timeout)
-                        .await;
+                let sent = forward::send(
+                    node,
+                    leader,
+                    0,
+                    &cmd,
+                    &hop,
+                    ForwardMode::Route,
+                    true,
+                    timeout,
+                )
+                .await;
                 match sent {
                     Ok(reply) if is_error(&reply.value, NO_LEADER) => group.distrust(leader),
                     Ok(reply) => return reply,

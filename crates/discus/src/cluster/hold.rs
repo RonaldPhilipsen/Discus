@@ -55,8 +55,14 @@ pub fn resendable(cmd: &Command, failure: Failure) -> bool {
 
 /// The forward timeout of a delete of a listed key. The owner waits for a secondary before it
 /// replies, so a timeout without this allowance would turn a fail-open delete into `-TRYAGAIN`.
-fn delete_timeout(node: &Node, spec: &CommandSpec, cmd: &Command, write: bool) -> Option<Duration> {
-    if !write || super::acked_delete_keys(node, spec, 0, cmd).is_empty() {
+fn delete_timeout(
+    node: &Node,
+    spec: &CommandSpec,
+    db: u32,
+    cmd: &Command,
+    write: bool,
+) -> Option<Duration> {
+    if !write || super::acked_delete_keys(node, spec, db, cmd).is_empty() {
         return None;
     }
     let live_settings = node.live_settings.get();
@@ -69,17 +75,28 @@ fn delete_timeout(node: &Node, spec: &CommandSpec, cmd: &Command, write: bool) -
 pub async fn send_or_hold(
     node: &Arc<Node>,
     spec: &'static CommandSpec,
+    db: u32,
     target: NodeId,
     cmd: &Command,
     hop: &Hop,
     write: bool,
 ) -> Option<Reply> {
-    let timeout = delete_timeout(node, spec, cmd, write);
-    match super::forward::send(node, target, cmd, hop, ForwardMode::Route, write, timeout).await {
+    let timeout = delete_timeout(node, spec, db, cmd, write);
+    let sent = super::forward::send(
+        node,
+        target,
+        db,
+        cmd,
+        hop,
+        ForwardMode::Route,
+        write,
+        timeout,
+    );
+    match sent.await {
         Ok(reply) => Some(reply),
         Err(_) if !write => None,
         Err(e) if hop.hops == 0 && !hop.held => {
-            Some(held(node, spec, cmd.clone(), hop.clone(), Failure::of(&e)).await)
+            Some(held(node, spec, db, cmd.clone(), hop.clone(), Failure::of(&e)).await)
         }
         Err(e) => Some(Failure::of(&e).reply()),
     }
@@ -89,6 +106,7 @@ pub async fn send_or_hold(
 pub async fn held(
     node: &Arc<Node>,
     spec: &'static CommandSpec,
+    db: u32,
     cmd: Command,
     hop: Hop,
     first: Failure,
@@ -109,7 +127,7 @@ pub async fn held(
         if Instant::now() >= deadline {
             return Reply::try_again();
         }
-        let job = Job::plain(cmd.clone(), spec);
+        let job = Job::plain(cmd.clone(), spec, db);
         let reply = run_hop(node, job, retry.clone(), None, tracing::Span::none())
             .finish()
             .await;
