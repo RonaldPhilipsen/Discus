@@ -45,9 +45,11 @@ cluster:
     # Required. A Secret with the keys ca.crt, tls.crt, and tls.key.
     secretName: ""
   san:
-    # Requires a URI SAN on every peer certificate, for example a SPIFFE identity. While this is
-    # false, every certificate from the CA is a member, so use a CA that serves only this release.
-    enabled: false
+    # Requires a URI SAN on every peer certificate. The certificate in cluster.tls.secretName must
+    # carry the URI SAN below, or the nodes refuse each other. While this is false, every
+    # certificate from the CA is a member, so use a CA that serves only this release and signs no
+    # client certificates.
+    enabled: true
     # The default is spiffe://cluster.local/ns/<namespace>/sa/<service account>.
     value: ""
 
@@ -56,7 +58,9 @@ cluster:
 clientTls:
   # A Secret with the keys tls.crt and tls.key. The default is cluster.tls.secretName.
   secretName: ""
-  # Verifies client certificates against the key ca.crt of the Secret.
+  # Verifies client certificates against the key ca.crt of the Secret. If that Secret is
+  # cluster.tls.secretName, the client CA is the cluster CA, and only the URI SAN keeps a client
+  # certificate out of the cluster. The chart then refuses cluster.san.enabled=false.
   verifyClients: false
   # A Secret with the key ca.crt that replaces the client CA, for example a private CA for client
   # certificates next to a public server certificate. The default is the Secret above.

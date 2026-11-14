@@ -109,7 +109,9 @@ CA that serves only that cluster. The flags are `--cluster-ca`, `--cluster-cert`
 ## Running a cluster
 
 On Kubernetes, install the Helm chart. Before you install it, create a Secret with the keys
-`ca.crt`, `tls.crt`, and `tls.key`.
+`ca.crt`, `tls.crt`, and `tls.key`. By default, the certificate must carry the URI SAN
+`spiffe://cluster.local/ns/<namespace>/sa/<account>`, where `<account>` is the service account of
+the release.
 
 ```sh
 helm install <release> oci://ghcr.io/ronaldphilipsen/charts/discus \
