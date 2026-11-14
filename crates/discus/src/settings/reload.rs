@@ -25,15 +25,21 @@ pub fn reload(
     let merged = base.with_file(&file)?;
     merged.validate()?;
     let mut next = Reloadable::from_config(&merged);
-    if next.databases < databases_floor {
+    let from_file = merged.file_set.contains("databases") && !base.cli_set.contains("databases");
+    let lowered = from_file && next.databases < databases_floor;
+    if lowered {
         tracing::warn!(
             "a lower databases count needs a node replacement: start new nodes with --databases <n> --lower-databases"
         );
-        next.databases = live_settings.get().databases;
-        live_settings.set_pending(vec!["databases"]);
-    } else {
-        live_settings.set_pending(Vec::new());
     }
+    if lowered || !from_file {
+        next.databases = live_settings.get().databases;
+    }
+    live_settings.set_pending(if lowered {
+        vec!["databases"]
+    } else {
+        Vec::new()
+    });
     let applied = live_settings.apply(next);
     live_settings.set_version(file.version);
     Ok(applied)
@@ -224,6 +230,24 @@ mod tests {
         let applied = reload(&base, &live_settings, "version = 1\ndatabases = 5", 1).unwrap();
         assert!(applied.is_empty());
         assert_eq!(live_settings.get().databases, 2);
+    }
+
+    #[test]
+    fn a_command_line_count_below_the_floor_is_not_pending() {
+        let (base, live_settings) = start(&["--databases", "2"]);
+        let applied = reload(&base, &live_settings, "version = 1\ndatabases = 5", 3).unwrap();
+        assert!(applied.is_empty());
+        assert!(live_settings.pending().is_empty());
+        assert_eq!(live_settings.get().databases, 2);
+    }
+
+    #[test]
+    fn an_absent_count_below_the_floor_is_not_pending() {
+        let (base, live_settings) = start(&[]);
+        let applied = reload(&base, &live_settings, "version = 1", 3).unwrap();
+        assert!(applied.is_empty());
+        assert!(live_settings.pending().is_empty());
+        assert_eq!(live_settings.get().databases, 1);
     }
 
     #[test]
