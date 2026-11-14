@@ -245,6 +245,9 @@ impl Server {
             None
         };
         let live = Live::new(Reloadable::from_config(&config));
+        if let Some(version) = config.file_version {
+            live.set_version(version);
+        }
         let security = Arc::new(
             Security::from_config(&config, live.clone()).map_err(|e| invalid(e.to_string()))?,
         );

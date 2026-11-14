@@ -71,6 +71,42 @@ async fn a_running_node_applies_a_changed_hold_budget() {
     }
 }
 
+#[tokio::test]
+async fn a_file_broken_after_the_start_keeps_the_start_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("discus.toml");
+    write_settings(&path, "version = 1\n[budget]\nhold-ms = 1500\n");
+    let path_arg = path.to_str().unwrap().to_string();
+    let mut argv = vec![
+        "discus",
+        "--listen",
+        "127.0.0.1:0",
+        "--admin-listen",
+        "127.0.0.1:0",
+        "--config",
+        path_arg.as_str(),
+        "--config-reload-secs",
+        "0",
+    ];
+    let tls = common::client_tls::server_args(&argv);
+    argv.extend(tls.iter().map(String::as_str));
+    let config = discus::Config::load_from(argv).unwrap();
+    // The startup re-apply of the node reads this broken file and fails.
+    write_settings(&path, "version = 1\n[budget]\nhold-ms = -1\n");
+    let server = discus::Server::bind(config).await.unwrap();
+    let addr = server.local_addr();
+    let node = server.node().clone();
+    let shutdown = CancellationToken::new();
+    let _serve = tokio::spawn(server.run(shutdown.clone()));
+    let _stop = shutdown.drop_guard();
+
+    let client = common::client_tls::redis_client(&format!("rediss://{addr}"));
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let info = info_discus(&mut conn).await;
+    assert!(info.contains("config_version:1\r\n"), "{info}");
+    assert_eq!(node.live.get().hold_budget, Duration::from_millis(1500));
+}
+
 fn copy(from: &Path, to: &Path) {
     std::fs::write(to, std::fs::read(from).unwrap()).unwrap();
 }

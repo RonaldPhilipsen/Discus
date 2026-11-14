@@ -384,6 +384,9 @@ pub struct Config {
     /// The `KEYS` flags whose value comes from the `--config` file.
     #[arg(skip)]
     pub file_set: BTreeSet<&'static str>,
+    /// The `version` of the last applied `--config` file.
+    #[arg(skip)]
+    pub file_version: Option<u32>,
     /// Security flags (spec §14).
     #[command(flatten)]
     pub security: crate::security::SecurityArgs,
@@ -444,6 +447,7 @@ impl Config {
             .map_err(|e| clap_message(&e))?;
         let mut config = self.clone();
         config.file_set.clear();
+        config.file_version = Some(file.version);
         for key in KEYS {
             if self.cli_set.contains(key.flag) {
                 continue;
@@ -1002,6 +1006,7 @@ mod tests {
         let config = load_with_file("version = 1\n[budget]\nhold-ms = 1500", &[]).unwrap();
         assert_eq!(config.hold_budget_ms, 1500);
         assert!(config.cli_set.is_empty());
+        assert_eq!(config.file_version, Some(1));
     }
 
     #[test]
