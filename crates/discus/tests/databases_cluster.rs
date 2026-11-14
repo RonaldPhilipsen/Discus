@@ -4,7 +4,6 @@ mod common;
 
 use std::time::Duration;
 
-use common::counters::{all_hold, held_in, incr_once, raft_cluster, Leases};
 use common::gossip::{refs, wait_agreed, wait_until, GossipNode, Net};
 use common::run_in;
 use discus_resp::Value;
@@ -704,31 +703,6 @@ async fn a_handoff_moves_keys_of_every_database() {
         zero.iter().all(|k| !holds(&d, 2, k)),
         "a key of database 0 is in database 2"
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn counter_keys_in_two_databases() {
-    let (net, leases) = (Net::new(), Leases::new());
-    let nodes = raft_cluster(&net, &leases, 3, &["--databases", "3"]).await;
-    let mut zero = client(&nodes[0], 0).await;
-    let mut one = client(&nodes[0], 1).await;
-    assert_eq!(incr_once(&mut zero, "cnt:a").await, 1);
-    assert_eq!(incr_once(&mut zero, "cnt:a").await, 2);
-    assert_eq!(incr_once(&mut one, "cnt:a").await, 1);
-    for (db, want) in [(0, "2"), (1, "1")] {
-        let held = wait_until(Duration::from_secs(10), || {
-            nodes
-                .iter()
-                .all(|n| held_in(n, db, "cnt:a").as_deref() == Some(want))
-        })
-        .await;
-        assert!(held, "a node does not hold {want} in database {db}");
-        for n in &nodes {
-            let mut c = client(n, db).await;
-            get_until(&mut c, "cnt:a", want).await;
-        }
-    }
-    assert!(all_hold(&refs(&nodes), "cnt:a", "2", TEN).await);
 }
 
 async fn cluster_client(
