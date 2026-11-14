@@ -199,6 +199,7 @@ async fn a_loop_is_detected() {
         path: vec![me, b.id],
         mode: ForwardMode::Route,
         track: false,
+        db: 0,
     };
     let reply = t
         .request(

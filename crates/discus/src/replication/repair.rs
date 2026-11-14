@@ -9,7 +9,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use discus_placement::NodeId;
 use discus_transport::Lane;
-use discus_wire::Message;
+use discus_wire::{DbKey, Message};
 
 use crate::Node;
 
@@ -53,7 +53,7 @@ pub async fn fetch(node: &Arc<Node>, key: &Bytes, sources: Vec<NodeId>) {
     for source in sources {
         let build = |_: &_| {
             Ok(Message::Fetch {
-                keys: vec![key.clone()],
+                keys: vec![DbKey::new(0, key.clone())],
             })
         };
         let reply = node

@@ -141,6 +141,7 @@ pub async fn reconcile(node: Arc<crate::Node>, old: Arc<Epoch>, new: Arc<Epoch>)
         let message = Message::Digest {
             from: old.id(),
             to: new.id(),
+            db: 0,
             sums,
         };
         for attempt in 0..ATTEMPTS {

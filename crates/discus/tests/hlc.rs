@@ -11,7 +11,7 @@ use discus::settings::{Live, Reloadable};
 use discus::Node;
 use discus_placement::mock::MockClock;
 use discus_resp::Value;
-use discus_store::{Version, NTP64};
+use discus_store::{DbKey, Version, NTP64};
 
 const START: u64 = 1_700_000_000_000;
 
@@ -150,9 +150,9 @@ fn a_replicated_batch_drops_only_the_entries_too_far_ahead() {
         ..discus_store::Entry::new(discus_store::Value::Str(Bytes::from_static(b"v")), None)
     };
     let entries = vec![
-        (Bytes::from_static(b"near"), entry(START + 10)),
-        (Bytes::from_static(b"far"), entry(START + 5_000)),
-        (Bytes::from_static(b"old"), entry(START - 10)),
+        (DbKey::new(0, &b"near"[..]), entry(START + 10)),
+        (DbKey::new(0, &b"far"[..]), entry(START + 5_000)),
+        (DbKey::new(0, &b"old"[..]), entry(START - 10)),
     ];
     assert_eq!(replicator.apply_entries(&node, entries), 2);
     assert!(node.store.entry(0, b"near").is_some());

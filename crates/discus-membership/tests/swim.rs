@@ -139,6 +139,7 @@ fn a_direct_rumor_at_the_same_incarnation_refreshes_the_rpc_address() {
         capabilities: 0,
         capacity: Capacity::default(),
         leader_hints: Bytes::new(),
+        databases: 1,
     };
     let rumor = |info| Rumor {
         info,

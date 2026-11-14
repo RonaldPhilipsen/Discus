@@ -34,13 +34,16 @@ pub use counter::{
     decode_counter_snapshot, decode_hints, encode_counter_snapshot, encode_hints, SnapshotEntries,
 };
 pub use message::{
-    Batch, BatchAck, Capacity, CounterAck, CounterMode, CounterSync, Forward, ForwardMode,
-    ForwardReply, Frame, Gossip, GossipKind, GroupHint, HandshakeCode, HandshakeFailed, Hello,
-    Liveness, MemberInfo, Message, RaftAppend, RaftConfig, RaftEntry, RaftHeader, RaftLogId,
-    RaftMembership, RaftOutcome, RaftPayload, RaftReply, RaftSnapshot, RaftVote, RaftVoteReq,
-    Regime, Rumor, TraceContext,
+    Batch, BatchAck, Capacity, CounterAck, CounterMode, CounterOp, CounterSync, Forward,
+    ForwardMode, ForwardReply, Frame, Gossip, GossipKind, GroupHint, HandshakeCode,
+    HandshakeFailed, Hello, Liveness, MemberInfo, Message, RaftAppend, RaftConfig, RaftEntry,
+    RaftHeader, RaftLogId, RaftMembership, RaftOutcome, RaftPayload, RaftReply, RaftSnapshot,
+    RaftVote, RaftVoteReq, Regime, Rumor, TraceContext,
 };
 pub use resp::encode_command;
+
+/// The key type of the wire messages, so a user of this crate needs no store dependency.
+pub use discus_store::DbKey;
 
 /// Capability bits. The agreed set of two peers is the bitwise AND of their offers. New behavior
 /// is gated by a bit that both peers advertise, never by the presence of a field.
@@ -64,6 +67,8 @@ pub mod caps {
     /// The node places keys by hash slot range. A peer without this bit places keys by the older
     /// rule, and the handshake refuses it.
     pub const SLOT_PLACEMENT: u64 = 64;
+    /// The node serves numbered databases: the `db` fields, `MOVE`, and `COPY`.
+    pub const MULTI_DB: u64 = 128;
     /// Every bit this build knows.
     pub const KNOWN: u64 = EPOCH_PUSH
         | GOSSIP

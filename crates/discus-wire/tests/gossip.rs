@@ -38,6 +38,7 @@ fn info(n: u128, port: u16, state: MemberState) -> MemberInfo {
             max: 1000,
         },
         leader_hints: Bytes::new(),
+        databases: 1,
     }
 }
 
@@ -290,4 +291,33 @@ fn an_empty_client_host_decodes_as_none() {
         panic!("not a gossip message");
     };
     assert_eq!(g.from.client_host, None);
+}
+
+#[test]
+fn a_member_without_databases_reports_one() {
+    let bytes = raw_info_gossip("127.0.0.1:7001", Some("127.0.0.1:7002"));
+    let env = flatbuffers::root::<fb::Envelope>(&bytes).unwrap();
+    let g = flatbuffers::root::<fb::Gossip>(env.payload().unwrap().bytes()).unwrap();
+    // SAFETY: the verifier checked the table, and slot VT_DATABASES holds a u32 when present.
+    let raw = unsafe {
+        g.from()
+            .unwrap()
+            ._tab
+            .get::<u32>(fb::MemberInfo::VT_DATABASES, None)
+    };
+    assert_eq!(raw, None);
+    let Message::Gossip(g) = decode_frame(&bytes, &Limits::default()).unwrap().message else {
+        panic!("not gossip");
+    };
+    assert_eq!(g.from.databases, 1);
+
+    let mut m = info(1, 7379, MemberState::Normal);
+    m.databases = 3;
+    let frame = Frame {
+        request_id: 1,
+        trace: TraceContext::default(),
+        message: Message::Gossip(Gossip::new(GossipKind::Ping, m)),
+    };
+    let decoded = decode_frame(&encode_frame(&frame), &Limits::default()).unwrap();
+    assert_eq!(decoded, frame);
 }

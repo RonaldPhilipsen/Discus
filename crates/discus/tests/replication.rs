@@ -5,11 +5,10 @@ mod common;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use common::cluster::{start_cluster, Cluster, ClusterNode};
 use common::gossip::wait_until;
 use discus_placement::{Version, NTP64};
-use discus_store::{Entry, Value};
+use discus_store::{DbKey, Entry, Value};
 use discus_wire::{Batch, Message};
 use redis::AsyncCommands;
 
@@ -135,7 +134,7 @@ async fn an_entry_too_far_ahead_is_dropped() {
     let mut e = Entry::new(Value::Str("future".into()), None);
     e.version = Version::new(ahead, c.nodes[0].id);
     let mut batch = Batch::new(n.node.epoch_id());
-    batch.entries.push((Bytes::from("far"), e));
+    batch.entries.push((DbKey::new(0, "far"), e));
     let reply = n
         .node
         .replicator()

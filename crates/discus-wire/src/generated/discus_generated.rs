@@ -2774,6 +2774,7 @@ impl<'a> Forward<'a> {
   pub const VT_PATH: ::flatbuffers::VOffsetT = 12;
   pub const VT_MODE: ::flatbuffers::VOffsetT = 14;
   pub const VT_TRACK: ::flatbuffers::VOffsetT = 16;
+  pub const VT_DB: ::flatbuffers::VOffsetT = 18;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -2785,6 +2786,7 @@ impl<'a> Forward<'a> {
     args: &'args ForwardArgs<'args>
   ) -> ::flatbuffers::WIPOffset<Forward<'bldr>> {
     let mut builder = ForwardBuilder::new(_fbb);
+    builder.add_db(args.db);
     if let Some(x) = args.path { builder.add_path(x); }
     if let Some(x) = args.epoch_body { builder.add_epoch_body(x); }
     if let Some(x) = args.epoch { builder.add_epoch(x); }
@@ -2850,6 +2852,14 @@ impl<'a> Forward<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<bool>(Forward::VT_TRACK, Some(false)).unwrap()}
   }
+  /// The database of the command.
+  #[inline]
+  pub fn db(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(Forward::VT_DB, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for Forward<'_> {
@@ -2865,6 +2875,7 @@ impl ::flatbuffers::Verifiable for Forward<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Id128>>>("path", Self::VT_PATH, false)?
      .visit_field::<ForwardMode>("mode", Self::VT_MODE, false)?
      .visit_field::<bool>("track", Self::VT_TRACK, false)?
+     .visit_field::<u32>("db", Self::VT_DB, false)?
      .finish();
     Ok(())
   }
@@ -2877,6 +2888,7 @@ pub struct ForwardArgs<'a> {
     pub path: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Id128>>>,
     pub mode: ForwardMode,
     pub track: bool,
+    pub db: u32,
 }
 impl<'a> Default for ForwardArgs<'a> {
   #[inline]
@@ -2889,6 +2901,7 @@ impl<'a> Default for ForwardArgs<'a> {
       path: None,
       mode: ForwardMode::ROUTE,
       track: false,
+      db: 0,
     }
   }
 }
@@ -2927,6 +2940,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ForwardBuilder<'a, 'b, A> {
     self.fbb_.push_slot::<bool>(Forward::VT_TRACK, track, false);
   }
   #[inline]
+  pub fn add_db(&mut self, db: u32) {
+    self.fbb_.push_slot::<u32>(Forward::VT_DB, db, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ForwardBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ForwardBuilder {
@@ -2951,6 +2968,7 @@ impl ::core::fmt::Debug for Forward<'_> {
       ds.field("path", &self.path());
       ds.field("mode", &self.mode());
       ds.field("track", &self.track());
+      ds.field("db", &self.db());
       ds.finish()
   }
 }
@@ -3430,6 +3448,7 @@ impl<'a> MemberInfo<'a> {
   pub const VT_RPC_ADDR: ::flatbuffers::VOffsetT = 24;
   pub const VT_CLIENT_ADDR: ::flatbuffers::VOffsetT = 26;
   pub const VT_CLIENT_HOST: ::flatbuffers::VOffsetT = 28;
+  pub const VT_DATABASES: ::flatbuffers::VOffsetT = 30;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -3446,6 +3465,7 @@ impl<'a> MemberInfo<'a> {
     builder.add_capabilities(args.capabilities);
     builder.add_weight(args.weight);
     builder.add_incarnation(args.incarnation);
+    builder.add_databases(args.databases);
     if let Some(x) = args.client_host { builder.add_client_host(x); }
     if let Some(x) = args.client_addr { builder.add_client_addr(x); }
     if let Some(x) = args.rpc_addr { builder.add_rpc_addr(x); }
@@ -3553,6 +3573,14 @@ impl<'a> MemberInfo<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(MemberInfo::VT_CLIENT_HOST, None)}
   }
+  /// The number of databases that the member serves. A member from an older build serves one.
+  #[inline]
+  pub fn databases(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(MemberInfo::VT_DATABASES, Some(1)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for MemberInfo<'_> {
@@ -3574,6 +3602,7 @@ impl ::flatbuffers::Verifiable for MemberInfo<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("rpc_addr", Self::VT_RPC_ADDR, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("client_addr", Self::VT_CLIENT_ADDR, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("client_host", Self::VT_CLIENT_HOST, false)?
+     .visit_field::<u32>("databases", Self::VT_DATABASES, false)?
      .finish();
     Ok(())
   }
@@ -3592,6 +3621,7 @@ pub struct MemberInfoArgs<'a> {
     pub rpc_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub client_addr: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub client_host: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub databases: u32,
 }
 impl<'a> Default for MemberInfoArgs<'a> {
   #[inline]
@@ -3610,6 +3640,7 @@ impl<'a> Default for MemberInfoArgs<'a> {
       rpc_addr: None,
       client_addr: None,
       client_host: None,
+      databases: 1,
     }
   }
 }
@@ -3672,6 +3703,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> MemberInfoBuilder<'a, 'b, A> 
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(MemberInfo::VT_CLIENT_HOST, client_host);
   }
   #[inline]
+  pub fn add_databases(&mut self, databases: u32) {
+    self.fbb_.push_slot::<u32>(MemberInfo::VT_DATABASES, databases, 1);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> MemberInfoBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     MemberInfoBuilder {
@@ -3702,6 +3737,7 @@ impl ::core::fmt::Debug for MemberInfo<'_> {
       ds.field("rpc_addr", &self.rpc_addr());
       ds.field("client_addr", &self.client_addr());
       ds.field("client_host", &self.client_host());
+      ds.field("databases", &self.databases());
       ds.finish()
   }
 }
@@ -4213,6 +4249,7 @@ impl<'a> StoredEntry<'a> {
   pub const VT_EXPIRES_AT_MS: ::flatbuffers::VOffsetT = 14;
   pub const VT_VERSION: ::flatbuffers::VOffsetT = 16;
   pub const VT_TOMBSTONE: ::flatbuffers::VOffsetT = 18;
+  pub const VT_DB: ::flatbuffers::VOffsetT = 20;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -4225,6 +4262,7 @@ impl<'a> StoredEntry<'a> {
   ) -> ::flatbuffers::WIPOffset<StoredEntry<'bldr>> {
     let mut builder = StoredEntryBuilder::new(_fbb);
     builder.add_expires_at_ms(args.expires_at_ms);
+    builder.add_db(args.db);
     if let Some(x) = args.version { builder.add_version(x); }
     if let Some(x) = args.scores { builder.add_scores(x); }
     if let Some(x) = args.items { builder.add_items(x); }
@@ -4296,6 +4334,13 @@ impl<'a> StoredEntry<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<bool>(StoredEntry::VT_TOMBSTONE, Some(false)).unwrap()}
   }
+  #[inline]
+  pub fn db(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(StoredEntry::VT_DB, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for StoredEntry<'_> {
@@ -4312,6 +4357,7 @@ impl ::flatbuffers::Verifiable for StoredEntry<'_> {
      .visit_field::<u64>("expires_at_ms", Self::VT_EXPIRES_AT_MS, false)?
      .visit_field::<Version>("version", Self::VT_VERSION, false)?
      .visit_field::<bool>("tombstone", Self::VT_TOMBSTONE, false)?
+     .visit_field::<u32>("db", Self::VT_DB, false)?
      .finish();
     Ok(())
   }
@@ -4325,6 +4371,7 @@ pub struct StoredEntryArgs<'a> {
     pub expires_at_ms: u64,
     pub version: Option<&'a Version>,
     pub tombstone: bool,
+    pub db: u32,
 }
 impl<'a> Default for StoredEntryArgs<'a> {
   #[inline]
@@ -4338,6 +4385,7 @@ impl<'a> Default for StoredEntryArgs<'a> {
       expires_at_ms: 0,
       version: None,
       tombstone: false,
+      db: 0,
     }
   }
 }
@@ -4380,6 +4428,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> StoredEntryBuilder<'a, 'b, A>
     self.fbb_.push_slot::<bool>(StoredEntry::VT_TOMBSTONE, tombstone, false);
   }
   #[inline]
+  pub fn add_db(&mut self, db: u32) {
+    self.fbb_.push_slot::<u32>(StoredEntry::VT_DB, db, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> StoredEntryBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     StoredEntryBuilder {
@@ -4405,6 +4457,7 @@ impl ::core::fmt::Debug for StoredEntry<'_> {
       ds.field("expires_at_ms", &self.expires_at_ms());
       ds.field("version", &self.version());
       ds.field("tombstone", &self.tombstone());
+      ds.field("db", &self.db());
       ds.finish()
   }
 }
@@ -4427,6 +4480,7 @@ impl<'a> ::flatbuffers::Follow<'a> for KeyVersion<'a> {
 impl<'a> KeyVersion<'a> {
   pub const VT_KEY: ::flatbuffers::VOffsetT = 4;
   pub const VT_VERSION: ::flatbuffers::VOffsetT = 6;
+  pub const VT_DB: ::flatbuffers::VOffsetT = 8;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -4438,6 +4492,7 @@ impl<'a> KeyVersion<'a> {
     args: &'args KeyVersionArgs<'args>
   ) -> ::flatbuffers::WIPOffset<KeyVersion<'bldr>> {
     let mut builder = KeyVersionBuilder::new(_fbb);
+    builder.add_db(args.db);
     if let Some(x) = args.version { builder.add_version(x); }
     if let Some(x) = args.key { builder.add_key(x); }
     builder.finish()
@@ -4458,6 +4513,13 @@ impl<'a> KeyVersion<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<Version>(KeyVersion::VT_VERSION, None)}
   }
+  #[inline]
+  pub fn db(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(KeyVersion::VT_DB, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for KeyVersion<'_> {
@@ -4468,6 +4530,7 @@ impl ::flatbuffers::Verifiable for KeyVersion<'_> {
     v.visit_table(pos)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("key", Self::VT_KEY, false)?
      .visit_field::<Version>("version", Self::VT_VERSION, false)?
+     .visit_field::<u32>("db", Self::VT_DB, false)?
      .finish();
     Ok(())
   }
@@ -4475,6 +4538,7 @@ impl ::flatbuffers::Verifiable for KeyVersion<'_> {
 pub struct KeyVersionArgs<'a> {
     pub key: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
     pub version: Option<&'a Version>,
+    pub db: u32,
 }
 impl<'a> Default for KeyVersionArgs<'a> {
   #[inline]
@@ -4482,6 +4546,7 @@ impl<'a> Default for KeyVersionArgs<'a> {
     KeyVersionArgs {
       key: None,
       version: None,
+      db: 0,
     }
   }
 }
@@ -4498,6 +4563,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> KeyVersionBuilder<'a, 'b, A> 
   #[inline]
   pub fn add_version(&mut self, version: &Version) {
     self.fbb_.push_slot_always::<&Version>(KeyVersion::VT_VERSION, version);
+  }
+  #[inline]
+  pub fn add_db(&mut self, db: u32) {
+    self.fbb_.push_slot::<u32>(KeyVersion::VT_DB, db, 0);
   }
   #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> KeyVersionBuilder<'a, 'b, A> {
@@ -4519,6 +4588,7 @@ impl ::core::fmt::Debug for KeyVersion<'_> {
     let mut ds = f.debug_struct("KeyVersion");
       ds.field("key", &self.key());
       ds.field("version", &self.version());
+      ds.field("db", &self.db());
       ds.finish()
   }
 }
@@ -4729,6 +4799,7 @@ impl<'a> BatchAck<'a> {
   pub const VT_WANT: ::flatbuffers::VOffsetT = 6;
   pub const VT_EPOCH: ::flatbuffers::VOffsetT = 8;
   pub const VT_IDLE: ::flatbuffers::VOffsetT = 10;
+  pub const VT_WANT_DBS: ::flatbuffers::VOffsetT = 12;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -4740,6 +4811,7 @@ impl<'a> BatchAck<'a> {
     args: &'args BatchAckArgs<'args>
   ) -> ::flatbuffers::WIPOffset<BatchAck<'bldr>> {
     let mut builder = BatchAckBuilder::new(_fbb);
+    if let Some(x) = args.want_dbs { builder.add_want_dbs(x); }
     if let Some(x) = args.epoch { builder.add_epoch(x); }
     if let Some(x) = args.want { builder.add_want(x); }
     builder.add_applied(args.applied);
@@ -4778,6 +4850,15 @@ impl<'a> BatchAck<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<bool>(BatchAck::VT_IDLE, Some(false)).unwrap()}
   }
+  /// The database of the key at the same position in `want`. A missing vector or a missing
+  /// position means 0.
+  #[inline]
+  pub fn want_dbs(&self) -> Option<::flatbuffers::Vector<'a, u32>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u32>>>(BatchAck::VT_WANT_DBS, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for BatchAck<'_> {
@@ -4790,6 +4871,7 @@ impl ::flatbuffers::Verifiable for BatchAck<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<Blob>>>>("want", Self::VT_WANT, false)?
      .visit_field::<EpochId>("epoch", Self::VT_EPOCH, false)?
      .visit_field::<bool>("idle", Self::VT_IDLE, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u32>>>("want_dbs", Self::VT_WANT_DBS, false)?
      .finish();
     Ok(())
   }
@@ -4799,6 +4881,7 @@ pub struct BatchAckArgs<'a> {
     pub want: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<Blob<'a>>>>>,
     pub epoch: Option<&'a EpochId>,
     pub idle: bool,
+    pub want_dbs: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u32>>>,
 }
 impl<'a> Default for BatchAckArgs<'a> {
   #[inline]
@@ -4808,6 +4891,7 @@ impl<'a> Default for BatchAckArgs<'a> {
       want: None,
       epoch: None,
       idle: false,
+      want_dbs: None,
     }
   }
 }
@@ -4834,6 +4918,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BatchAckBuilder<'a, 'b, A> {
     self.fbb_.push_slot::<bool>(BatchAck::VT_IDLE, idle, false);
   }
   #[inline]
+  pub fn add_want_dbs(&mut self, want_dbs: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u32>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BatchAck::VT_WANT_DBS, want_dbs);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> BatchAckBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     BatchAckBuilder {
@@ -4855,6 +4943,7 @@ impl ::core::fmt::Debug for BatchAck<'_> {
       ds.field("want", &self.want());
       ds.field("epoch", &self.epoch());
       ds.field("idle", &self.idle());
+      ds.field("want_dbs", &self.want_dbs());
       ds.finish()
   }
 }
@@ -4876,6 +4965,7 @@ impl<'a> ::flatbuffers::Follow<'a> for Fetch<'a> {
 
 impl<'a> Fetch<'a> {
   pub const VT_KEYS: ::flatbuffers::VOffsetT = 4;
+  pub const VT_DBS: ::flatbuffers::VOffsetT = 6;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -4887,6 +4977,7 @@ impl<'a> Fetch<'a> {
     args: &'args FetchArgs<'args>
   ) -> ::flatbuffers::WIPOffset<Fetch<'bldr>> {
     let mut builder = FetchBuilder::new(_fbb);
+    if let Some(x) = args.dbs { builder.add_dbs(x); }
     if let Some(x) = args.keys { builder.add_keys(x); }
     builder.finish()
   }
@@ -4899,6 +4990,15 @@ impl<'a> Fetch<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<Blob>>>>(Fetch::VT_KEYS, None)}
   }
+  /// The database of the key at the same position in `keys`. A missing vector or a missing
+  /// position means 0.
+  #[inline]
+  pub fn dbs(&self) -> Option<::flatbuffers::Vector<'a, u32>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u32>>>(Fetch::VT_DBS, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for Fetch<'_> {
@@ -4908,18 +5008,21 @@ impl ::flatbuffers::Verifiable for Fetch<'_> {
   ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
     v.visit_table(pos)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<Blob>>>>("keys", Self::VT_KEYS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u32>>>("dbs", Self::VT_DBS, false)?
      .finish();
     Ok(())
   }
 }
 pub struct FetchArgs<'a> {
     pub keys: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<Blob<'a>>>>>,
+    pub dbs: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u32>>>,
 }
 impl<'a> Default for FetchArgs<'a> {
   #[inline]
   fn default() -> Self {
     FetchArgs {
       keys: None,
+      dbs: None,
     }
   }
 }
@@ -4932,6 +5035,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> FetchBuilder<'a, 'b, A> {
   #[inline]
   pub fn add_keys(&mut self, keys: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , ::flatbuffers::ForwardsUOffset<Blob<'b >>>>) {
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(Fetch::VT_KEYS, keys);
+  }
+  #[inline]
+  pub fn add_dbs(&mut self, dbs: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u32>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(Fetch::VT_DBS, dbs);
   }
   #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> FetchBuilder<'a, 'b, A> {
@@ -4952,6 +5059,7 @@ impl ::core::fmt::Debug for Fetch<'_> {
   fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
     let mut ds = f.debug_struct("Fetch");
       ds.field("keys", &self.keys());
+      ds.field("dbs", &self.dbs());
       ds.finish()
   }
 }
@@ -4976,6 +5084,7 @@ impl<'a> Digest<'a> {
   pub const VT_FROM: ::flatbuffers::VOffsetT = 4;
   pub const VT_TO: ::flatbuffers::VOffsetT = 6;
   pub const VT_SUMS: ::flatbuffers::VOffsetT = 8;
+  pub const VT_DB: ::flatbuffers::VOffsetT = 10;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -4987,6 +5096,7 @@ impl<'a> Digest<'a> {
     args: &'args DigestArgs<'args>
   ) -> ::flatbuffers::WIPOffset<Digest<'bldr>> {
     let mut builder = DigestBuilder::new(_fbb);
+    builder.add_db(args.db);
     if let Some(x) = args.sums { builder.add_sums(x); }
     if let Some(x) = args.to { builder.add_to(x); }
     if let Some(x) = args.from { builder.add_from(x); }
@@ -5015,6 +5125,14 @@ impl<'a> Digest<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u64>>>(Digest::VT_SUMS, None)}
   }
+  /// The database that the sums cover.
+  #[inline]
+  pub fn db(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(Digest::VT_DB, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for Digest<'_> {
@@ -5026,6 +5144,7 @@ impl ::flatbuffers::Verifiable for Digest<'_> {
      .visit_field::<EpochId>("from", Self::VT_FROM, false)?
      .visit_field::<EpochId>("to", Self::VT_TO, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u64>>>("sums", Self::VT_SUMS, false)?
+     .visit_field::<u32>("db", Self::VT_DB, false)?
      .finish();
     Ok(())
   }
@@ -5034,6 +5153,7 @@ pub struct DigestArgs<'a> {
     pub from: Option<&'a EpochId>,
     pub to: Option<&'a EpochId>,
     pub sums: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u64>>>,
+    pub db: u32,
 }
 impl<'a> Default for DigestArgs<'a> {
   #[inline]
@@ -5042,6 +5162,7 @@ impl<'a> Default for DigestArgs<'a> {
       from: None,
       to: None,
       sums: None,
+      db: 0,
     }
   }
 }
@@ -5064,6 +5185,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> DigestBuilder<'a, 'b, A> {
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(Digest::VT_SUMS, sums);
   }
   #[inline]
+  pub fn add_db(&mut self, db: u32) {
+    self.fbb_.push_slot::<u32>(Digest::VT_DB, db, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> DigestBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     DigestBuilder {
@@ -5084,6 +5209,7 @@ impl ::core::fmt::Debug for Digest<'_> {
       ds.field("from", &self.from());
       ds.field("to", &self.to());
       ds.field("sums", &self.sums());
+      ds.field("db", &self.db());
       ds.finish()
   }
 }
@@ -5894,6 +6020,7 @@ impl<'a> RaftEntry<'a> {
   pub const VT_STAMP_MS: ::flatbuffers::VOffsetT = 8;
   pub const VT_COMMAND: ::flatbuffers::VOffsetT = 10;
   pub const VT_MEMBERSHIP: ::flatbuffers::VOffsetT = 12;
+  pub const VT_DB: ::flatbuffers::VOffsetT = 14;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -5906,6 +6033,7 @@ impl<'a> RaftEntry<'a> {
   ) -> ::flatbuffers::WIPOffset<RaftEntry<'bldr>> {
     let mut builder = RaftEntryBuilder::new(_fbb);
     builder.add_stamp_ms(args.stamp_ms);
+    builder.add_db(args.db);
     if let Some(x) = args.membership { builder.add_membership(x); }
     if let Some(x) = args.command { builder.add_command(x); }
     if let Some(x) = args.log_id { builder.add_log_id(x); }
@@ -5950,6 +6078,14 @@ impl<'a> RaftEntry<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<RaftMembership>>(RaftEntry::VT_MEMBERSHIP, None)}
   }
+  /// COMMAND: the database of the command.
+  #[inline]
+  pub fn db(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(RaftEntry::VT_DB, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for RaftEntry<'_> {
@@ -5963,6 +6099,7 @@ impl ::flatbuffers::Verifiable for RaftEntry<'_> {
      .visit_field::<u64>("stamp_ms", Self::VT_STAMP_MS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("command", Self::VT_COMMAND, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<RaftMembership>>("membership", Self::VT_MEMBERSHIP, false)?
+     .visit_field::<u32>("db", Self::VT_DB, false)?
      .finish();
     Ok(())
   }
@@ -5973,6 +6110,7 @@ pub struct RaftEntryArgs<'a> {
     pub stamp_ms: u64,
     pub command: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
     pub membership: Option<::flatbuffers::WIPOffset<RaftMembership<'a>>>,
+    pub db: u32,
 }
 impl<'a> Default for RaftEntryArgs<'a> {
   #[inline]
@@ -5983,6 +6121,7 @@ impl<'a> Default for RaftEntryArgs<'a> {
       stamp_ms: 0,
       command: None,
       membership: None,
+      db: 0,
     }
   }
 }
@@ -6013,6 +6152,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> RaftEntryBuilder<'a, 'b, A> {
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<RaftMembership>>(RaftEntry::VT_MEMBERSHIP, membership);
   }
   #[inline]
+  pub fn add_db(&mut self, db: u32) {
+    self.fbb_.push_slot::<u32>(RaftEntry::VT_DB, db, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> RaftEntryBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     RaftEntryBuilder {
@@ -6035,6 +6178,7 @@ impl ::core::fmt::Debug for RaftEntry<'_> {
       ds.field("stamp_ms", &self.stamp_ms());
       ds.field("command", &self.command());
       ds.field("membership", &self.membership());
+      ds.field("db", &self.db());
       ds.finish()
   }
 }
@@ -6847,7 +6991,7 @@ impl ::core::fmt::Debug for RaftReply<'_> {
 pub enum CounterOpOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
-/// One leader-follower op: the leader stamp and the raw RESP command.
+/// One leader-follower op: the leader stamp, the raw RESP command, and its database.
 pub struct CounterOp<'a> {
   pub _tab: ::flatbuffers::Table<'a>,
 }
@@ -6863,6 +7007,7 @@ impl<'a> ::flatbuffers::Follow<'a> for CounterOp<'a> {
 impl<'a> CounterOp<'a> {
   pub const VT_STAMP_MS: ::flatbuffers::VOffsetT = 4;
   pub const VT_COMMAND: ::flatbuffers::VOffsetT = 6;
+  pub const VT_DB: ::flatbuffers::VOffsetT = 8;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -6875,6 +7020,7 @@ impl<'a> CounterOp<'a> {
   ) -> ::flatbuffers::WIPOffset<CounterOp<'bldr>> {
     let mut builder = CounterOpBuilder::new(_fbb);
     builder.add_stamp_ms(args.stamp_ms);
+    builder.add_db(args.db);
     if let Some(x) = args.command { builder.add_command(x); }
     builder.finish()
   }
@@ -6894,6 +7040,13 @@ impl<'a> CounterOp<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(CounterOp::VT_COMMAND, None)}
   }
+  #[inline]
+  pub fn db(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(CounterOp::VT_DB, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for CounterOp<'_> {
@@ -6904,6 +7057,7 @@ impl ::flatbuffers::Verifiable for CounterOp<'_> {
     v.visit_table(pos)?
      .visit_field::<u64>("stamp_ms", Self::VT_STAMP_MS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("command", Self::VT_COMMAND, false)?
+     .visit_field::<u32>("db", Self::VT_DB, false)?
      .finish();
     Ok(())
   }
@@ -6911,6 +7065,7 @@ impl ::flatbuffers::Verifiable for CounterOp<'_> {
 pub struct CounterOpArgs<'a> {
     pub stamp_ms: u64,
     pub command: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+    pub db: u32,
 }
 impl<'a> Default for CounterOpArgs<'a> {
   #[inline]
@@ -6918,6 +7073,7 @@ impl<'a> Default for CounterOpArgs<'a> {
     CounterOpArgs {
       stamp_ms: 0,
       command: None,
+      db: 0,
     }
   }
 }
@@ -6934,6 +7090,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> CounterOpBuilder<'a, 'b, A> {
   #[inline]
   pub fn add_command(&mut self, command: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , u8>>) {
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(CounterOp::VT_COMMAND, command);
+  }
+  #[inline]
+  pub fn add_db(&mut self, db: u32) {
+    self.fbb_.push_slot::<u32>(CounterOp::VT_DB, db, 0);
   }
   #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> CounterOpBuilder<'a, 'b, A> {
@@ -6955,6 +7115,7 @@ impl ::core::fmt::Debug for CounterOp<'_> {
     let mut ds = f.debug_struct("CounterOp");
       ds.field("stamp_ms", &self.stamp_ms());
       ds.field("command", &self.command());
+      ds.field("db", &self.db());
       ds.finish()
   }
 }
@@ -7308,6 +7469,7 @@ impl<'a> CounterEntry<'a> {
   pub const VT_KEY: ::flatbuffers::VOffsetT = 4;
   pub const VT_VALUE: ::flatbuffers::VOffsetT = 6;
   pub const VT_EXPIRES_AT_MS: ::flatbuffers::VOffsetT = 8;
+  pub const VT_DB: ::flatbuffers::VOffsetT = 10;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -7320,6 +7482,7 @@ impl<'a> CounterEntry<'a> {
   ) -> ::flatbuffers::WIPOffset<CounterEntry<'bldr>> {
     let mut builder = CounterEntryBuilder::new(_fbb);
     builder.add_expires_at_ms(args.expires_at_ms);
+    builder.add_db(args.db);
     if let Some(x) = args.value { builder.add_value(x); }
     if let Some(x) = args.key { builder.add_key(x); }
     builder.finish()
@@ -7348,6 +7511,13 @@ impl<'a> CounterEntry<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u64>(CounterEntry::VT_EXPIRES_AT_MS, Some(0)).unwrap()}
   }
+  #[inline]
+  pub fn db(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(CounterEntry::VT_DB, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for CounterEntry<'_> {
@@ -7359,6 +7529,7 @@ impl ::flatbuffers::Verifiable for CounterEntry<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("key", Self::VT_KEY, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("value", Self::VT_VALUE, false)?
      .visit_field::<u64>("expires_at_ms", Self::VT_EXPIRES_AT_MS, false)?
+     .visit_field::<u32>("db", Self::VT_DB, false)?
      .finish();
     Ok(())
   }
@@ -7367,6 +7538,7 @@ pub struct CounterEntryArgs<'a> {
     pub key: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
     pub value: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
     pub expires_at_ms: u64,
+    pub db: u32,
 }
 impl<'a> Default for CounterEntryArgs<'a> {
   #[inline]
@@ -7375,6 +7547,7 @@ impl<'a> Default for CounterEntryArgs<'a> {
       key: None,
       value: None,
       expires_at_ms: 0,
+      db: 0,
     }
   }
 }
@@ -7397,6 +7570,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> CounterEntryBuilder<'a, 'b, A
     self.fbb_.push_slot::<u64>(CounterEntry::VT_EXPIRES_AT_MS, expires_at_ms, 0);
   }
   #[inline]
+  pub fn add_db(&mut self, db: u32) {
+    self.fbb_.push_slot::<u32>(CounterEntry::VT_DB, db, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> CounterEntryBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     CounterEntryBuilder {
@@ -7417,6 +7594,7 @@ impl ::core::fmt::Debug for CounterEntry<'_> {
       ds.field("key", &self.key());
       ds.field("value", &self.value());
       ds.field("expires_at_ms", &self.expires_at_ms());
+      ds.field("db", &self.db());
       ds.finish()
   }
 }

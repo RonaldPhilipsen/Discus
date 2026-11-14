@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use discus_placement::NodeId;
 use discus_resp::{Command, Value};
-use discus_wire::{encode_command, CounterAck, CounterSync, Message, Regime};
+use discus_wire::{encode_command, CounterAck, CounterOp, CounterSync, Message, Regime};
 use parking_lot::Mutex;
 use tokio::sync::{watch, Notify};
 use tokio_util::sync::CancellationToken;
@@ -237,7 +237,14 @@ impl LfLeader {
                     group,
                     regime: self.regime,
                     seq: ops.first().map_or(core.seq + 1, |o| o.0),
-                    ops: ops.into_iter().map(|(_, stamp, c)| (stamp, c)).collect(),
+                    ops: ops
+                        .into_iter()
+                        .map(|(_, stamp_ms, command)| CounterOp {
+                            stamp_ms,
+                            db: 0,
+                            command,
+                        })
+                        .collect(),
                     snapshot: None,
                 }
             };
@@ -329,10 +336,10 @@ impl Follower {
         } else if !s.ops.is_empty() {
             let last = s.seq + s.ops.len() as u64 - 1;
             if core.synced && s.seq == core.seq + 1 {
-                for (stamp, raw) in &s.ops {
-                    match parse_command(raw) {
+                for op in &s.ops {
+                    match parse_command(&op.command) {
                         Some(cmd) => {
-                            core.state.apply(*stamp, &cmd, limits);
+                            core.state.apply(op.stamp_ms, &cmd, limits);
                         }
                         None => {
                             need_snapshot = true;

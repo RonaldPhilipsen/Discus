@@ -6,7 +6,7 @@ use bytes::Bytes;
 use discus_placement::{
     ClusterId, Epoch, EpochId, Member, MemberState, NodeId, Version, Weight, NTP64,
 };
-use discus_store::{Entry, Value};
+use discus_store::{DbKey, Entry, Value};
 use flatbuffers::{FlatBufferBuilder, Vector, VerifierOptions, WIPOffset};
 
 use crate::fb;
@@ -173,6 +173,8 @@ fn client_addr_of(s: Option<&str>) -> Result<Option<SocketAddr>, DecodeError> {
 
 type Str<'a> = WIPOffset<&'a str>;
 
+type Blobs<'a> = Vector<'a, flatbuffers::ForwardsUOffset<fb::Blob<'a>>>;
+
 /// The address strings of a member, in the order that `Member` and `MemberInfo` list them.
 fn addrs_to<'a>(
     fbb: &mut FlatBufferBuilder<'a>,
@@ -275,6 +277,7 @@ fn info_to<'a>(fbb: &mut FlatBufferBuilder<'a>, m: &MemberInfo) -> WIPOffset<fb:
             capacity_used: m.capacity.used,
             capacity_max: m.capacity.max,
             leader_hints: hints,
+            databases: m.databases,
         },
     )
 }
@@ -299,6 +302,7 @@ fn info_of(m: fb::MemberInfo<'_>) -> Result<MemberInfo, DecodeError> {
             max: m.capacity_max(),
         },
         leader_hints: bytes_of(m.leader_hints()),
+        databases: m.databases(),
     })
 }
 
@@ -374,7 +378,7 @@ fn gossip_of(g: fb::Gossip<'_>) -> Result<Gossip, DecodeError> {
 fn blobs<'a, 'b>(
     fbb: &mut FlatBufferBuilder<'a>,
     items: impl Iterator<Item = &'b [u8]>,
-) -> WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<fb::Blob<'a>>>> {
+) -> WIPOffset<Blobs<'a>> {
     let items: Vec<_> = items
         .map(|b| {
             let data = fbb.create_vector(b);
@@ -384,21 +388,45 @@ fn blobs<'a, 'b>(
     fbb.create_vector(&items)
 }
 
-fn blobs_of(
-    v: Option<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<fb::Blob<'_>>>>,
-) -> Vec<Bytes> {
+fn blobs_of(v: Option<Blobs<'_>>) -> Vec<Bytes> {
     v.into_iter()
         .flatten()
         .map(|b| bytes_of(b.data()))
         .collect()
 }
 
+/// The keys of `keys` as blobs, and their databases. The databases are left out when every key
+/// is in database 0, so such a message has the same bytes as before the field existed.
+fn keys_to<'a>(
+    fbb: &mut FlatBufferBuilder<'a>,
+    keys: &[DbKey],
+) -> (WIPOffset<Blobs<'a>>, Option<WIPOffset<Vector<'a, u32>>>) {
+    let blobs = blobs(fbb, keys.iter().map(|k| &k.key[..]));
+    let dbs = keys.iter().any(|k| k.db != 0).then(|| {
+        let dbs: Vec<u32> = keys.iter().map(|k| k.db).collect();
+        fbb.create_vector(&dbs)
+    });
+    (blobs, dbs)
+}
+
+/// The keys of `blobs` in the databases at the same positions of `dbs`. A missing vector or a
+/// missing position means database 0.
+fn keys_of(blobs: Option<Blobs<'_>>, dbs: Option<Vector<'_, u32>>) -> Vec<DbKey> {
+    let dbs = dbs.into_iter().flatten().chain(std::iter::repeat(0));
+    blobs_of(blobs)
+        .into_iter()
+        .zip(dbs)
+        .map(|(key, db)| DbKey { db, key })
+        .collect()
+}
+
 fn stored_to<'a>(
     fbb: &mut FlatBufferBuilder<'a>,
-    key: &[u8],
+    key: &DbKey,
     e: &Entry,
 ) -> WIPOffset<fb::StoredEntry<'a>> {
-    let key = fbb.create_vector(key);
+    let db = key.db;
+    let key = fbb.create_vector(&key.key);
     let (kind, bytes, items, scores) = match &e.value {
         Value::Str(b) => (
             fb::ValueKind::STRING,
@@ -434,11 +462,12 @@ fn stored_to<'a>(
             expires_at_ms: e.expires_at_ms.unwrap_or(0),
             version: Some(&version),
             tombstone: e.tombstone,
+            db,
         },
     )
 }
 
-fn stored_of(s: fb::StoredEntry<'_>) -> Result<(Bytes, Entry), DecodeError> {
+fn stored_of(s: fb::StoredEntry<'_>) -> Result<(DbKey, Entry), DecodeError> {
     let key = s
         .key()
         .map(|k| Bytes::copy_from_slice(k.bytes()))
@@ -477,7 +506,7 @@ fn stored_of(s: fb::StoredEntry<'_>) -> Result<(Bytes, Entry), DecodeError> {
     );
     let expires = s.expires_at_ms();
     Ok((
-        key,
+        DbKey { db: s.db(), key },
         Entry {
             value,
             expires_at_ms: (expires != 0).then_some(expires),
@@ -499,13 +528,14 @@ fn batch_to(fbb: &mut FlatBufferBuilder<'_>, b: &Batch) {
         .offers
         .iter()
         .map(|(k, v)| {
-            let key = fbb.create_vector(k);
+            let key = fbb.create_vector(&k.key);
             let version = version_to(*v);
             fb::KeyVersion::create(
                 fbb,
                 &fb::KeyVersionArgs {
                     key: Some(key),
                     version: Some(&version),
+                    db: k.db,
                 },
             )
         })
@@ -543,7 +573,7 @@ fn batch_of(b: fb::EntryBatch<'_>) -> Result<Batch, DecodeError> {
             o.version()
                 .ok_or_else(|| invalid("offer without a version"))?,
         );
-        offers.push((key, version));
+        offers.push((DbKey { db: o.db(), key }, version));
     }
     let done = match (b.done_from(), b.done_to()) {
         (Some(f), Some(t)) => Some((epoch_id_of(f), epoch_id_of(t))),
@@ -613,6 +643,7 @@ fn build_body(fbb: &mut FlatBufferBuilder<'_>, message: &Message) {
                     path: Some(path),
                     mode: mode_to(f.mode),
                     track: f.track,
+                    db: f.db,
                 },
             );
             fbb.finish_minimal(t);
@@ -643,7 +674,7 @@ fn build_body(fbb: &mut FlatBufferBuilder<'_>, message: &Message) {
         | Message::Handoff(b)
         | Message::Entries(b) => batch_to(fbb, b),
         Message::BatchAck(a) => {
-            let want = blobs(fbb, a.want.iter().map(|k| &k[..]));
+            let (want, want_dbs) = keys_to(fbb, &a.want);
             let t = fb::BatchAck::create(
                 fbb,
                 &fb::BatchAckArgs {
@@ -651,13 +682,20 @@ fn build_body(fbb: &mut FlatBufferBuilder<'_>, message: &Message) {
                     want: Some(want),
                     epoch: Some(&epoch_id_to(a.epoch)),
                     idle: a.idle,
+                    want_dbs,
                 },
             );
             fbb.finish_minimal(t);
         }
         Message::Fetch { keys } => {
-            let keys = blobs(fbb, keys.iter().map(|k| &k[..]));
-            let t = fb::Fetch::create(fbb, &fb::FetchArgs { keys: Some(keys) });
+            let (keys, dbs) = keys_to(fbb, keys);
+            let t = fb::Fetch::create(
+                fbb,
+                &fb::FetchArgs {
+                    keys: Some(keys),
+                    dbs,
+                },
+            );
             fbb.finish_minimal(t);
         }
         m @ (Message::RaftLeader(_)
@@ -670,7 +708,7 @@ fn build_body(fbb: &mut FlatBufferBuilder<'_>, message: &Message) {
         | Message::CounterAck(_)) => {
             crate::counter::encode(fbb, m);
         }
-        Message::Digest { from, to, sums } => {
+        Message::Digest { from, to, db, sums } => {
             let sums = fbb.create_vector(sums);
             let t = fb::Digest::create(
                 fbb,
@@ -678,6 +716,7 @@ fn build_body(fbb: &mut FlatBufferBuilder<'_>, message: &Message) {
                     from: Some(&epoch_id_to(*from)),
                     to: Some(&epoch_id_to(*to)),
                     sums: Some(sums),
+                    db: *db,
                 },
             );
             fbb.finish_minimal(t);
@@ -823,6 +862,7 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
                 path: f.path().into_iter().flatten().map(node_of).collect(),
                 mode: mode_of(f.mode())?,
                 track: f.track(),
+                db: f.db(),
             })
         }
         T::FORWARD_REPLY => {
@@ -861,7 +901,7 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
             let a = root::<fb::BatchAck>(&opts, payload)?;
             Message::BatchAck(BatchAck {
                 applied: a.applied(),
-                want: blobs_of(a.want()),
+                want: keys_of(a.want(), a.want_dbs()),
                 epoch: epoch_id_of(a.epoch().ok_or_else(|| invalid("ack without an epoch"))?),
                 idle: a.idle(),
             })
@@ -869,7 +909,7 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
         T::FETCH => {
             let f = root::<fb::Fetch>(&opts, payload)?;
             Message::Fetch {
-                keys: blobs_of(f.keys()),
+                keys: keys_of(f.keys(), f.dbs()),
             }
         }
         T::DIGEST => {
@@ -877,6 +917,7 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
             Message::Digest {
                 from: epoch_id_of(d.from().ok_or_else(|| invalid("digest without an epoch"))?),
                 to: epoch_id_of(d.to().ok_or_else(|| invalid("digest without an epoch"))?),
+                db: d.db(),
                 sums: d.sums().map(|s| s.iter().collect()).unwrap_or_default(),
             }
         }

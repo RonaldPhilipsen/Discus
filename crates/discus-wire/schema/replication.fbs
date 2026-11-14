@@ -32,12 +32,14 @@ table StoredEntry {
   expires_at_ms: ulong (id: 5);
   version: Version (id: 6);
   tombstone: bool (id: 7);
+  db: uint (id: 8);
 }
 
 /// A key and the version that a handoff source holds for it.
 table KeyVersion {
   key: [ubyte] (id: 0);
   version: Version (id: 1);
+  db: uint (id: 2);
 }
 
 /// The body of REPLICATE, HINT_REPLAY, HANDOFF, and ENTRIES. A HANDOFF with no entries, no
@@ -62,11 +64,17 @@ table BatchAck {
   epoch: EpochId (id: 2);
   /// The answer to an empty HANDOFF: the sender has no handoff scan running or waiting.
   idle: bool (id: 3);
+  /// The database of the key at the same position in `want`. A missing vector or a missing
+  /// position means 0.
+  want_dbs: [uint] (id: 4);
 }
 
 /// Read repair and previous-epoch fallback. The reply is ENTRIES.
 table Fetch {
   keys: [Blob] (id: 0);
+  /// The database of the key at the same position in `keys`. A missing vector or a missing
+  /// position means 0.
+  dbs: [uint] (id: 1);
 }
 
 /// Promotion reconciliation: 256 bucket sums over the keys that moved from a removed primary
@@ -75,4 +83,6 @@ table Digest {
   from: EpochId (id: 0);
   to: EpochId (id: 1);
   sums: [ulong] (id: 2);
+  /// The database that the sums cover.
+  db: uint (id: 3);
 }

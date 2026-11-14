@@ -50,6 +50,7 @@ pub async fn send(
                 path,
                 mode,
                 track: hop.track,
+                db: 0,
             }))
         };
         let timeout = timeout.unwrap_or(if write {

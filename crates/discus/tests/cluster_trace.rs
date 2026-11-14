@@ -177,6 +177,7 @@ async fn forward_get(s: &Setup, key: &str, trace: TraceContext) -> Value {
         path: vec![sender_id],
         mode: ForwardMode::Route,
         track: false,
+        db: 0,
     };
     let reply = s
         .sender

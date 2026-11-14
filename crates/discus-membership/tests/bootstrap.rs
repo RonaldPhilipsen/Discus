@@ -203,6 +203,7 @@ fn a_discovery_refresh_keeps_learned_seeds() {
         capabilities: 0,
         capacity: Capacity::default(),
         leader_hints: Default::default(),
+        databases: 1,
     };
     let mut swim = Swim::new(SwimConfig::fast(), me);
     let holder = "10.0.0.9:7379".parse().unwrap();

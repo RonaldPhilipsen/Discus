@@ -174,7 +174,7 @@ impl CounterState {
         let entries = self
             .map
             .iter()
-            .map(|(k, e)| (&k[..], &e.value[..], e.expires_at_ms.unwrap_or(0)));
+            .map(|(k, e)| (0, &k[..], &e.value[..], e.expires_at_ms.unwrap_or(0)));
         discus_wire::encode_counter_snapshot(self.clock_ms, entries)
     }
 
@@ -185,7 +185,7 @@ impl CounterState {
             clock_ms,
             ..CounterState::default()
         };
-        for (key, value, t) in entries {
+        for (_, key, value, t) in entries {
             state.bytes += cost(&key, &value);
             let expires_at_ms = (t != 0).then_some(t);
             state.map.insert(

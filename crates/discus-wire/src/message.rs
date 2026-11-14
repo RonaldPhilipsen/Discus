@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use bytes::Bytes;
 use discus_placement::{ClusterId, Epoch, EpochId, Member, MemberState, NodeId, Version, Weight};
 use discus_resp::Value;
-use discus_store::Entry;
+use discus_store::{DbKey, Entry};
 
 /// W3C Trace Context, copied unchanged across every hop.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -63,6 +63,8 @@ pub struct Forward {
     pub mode: ForwardMode,
     /// The sender keeps the key in a write set: report `observed` and `settled`.
     pub track: bool,
+    /// The database of the command.
+    pub db: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,9 +86,9 @@ pub struct Batch {
     /// The epoch of the sender.
     pub epoch: EpochId,
     /// Full entries with their keys. The access time does not travel.
-    pub entries: Vec<(Bytes, Entry)>,
+    pub entries: Vec<(DbKey, Entry)>,
     /// `HANDOFF`: keys that another source sends in full, with the version this source holds.
-    pub offers: Vec<(Bytes, Version)>,
+    pub offers: Vec<(DbKey, Version)>,
     /// `HINT_REPLAY`: refill buckets whose hints were lost.
     pub discard: Vec<u8>,
     /// `HANDOFF`: the source finished its scan over this epoch range.
@@ -109,7 +111,7 @@ impl Batch {
 pub struct BatchAck {
     pub applied: u32,
     /// `HANDOFF`: offered keys that the receiver wants in full.
-    pub want: Vec<Bytes>,
+    pub want: Vec<DbKey>,
     pub epoch: EpochId,
     /// The answer to an empty `HANDOFF`: no handoff scan runs or waits on the sender.
     pub idle: bool,
@@ -154,9 +156,10 @@ pub struct RaftMembership {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RaftPayload {
     Blank,
-    /// The leader stamp in Unix milliseconds and the raw RESP command.
+    /// The leader stamp in Unix milliseconds, the database, and the raw RESP command.
     Command {
         stamp_ms: u64,
+        db: u32,
         command: Bytes,
     },
     Membership(RaftMembership),
@@ -267,6 +270,16 @@ pub struct RaftConfig {
     pub leader: NodeId,
 }
 
+/// One leader-follower op.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CounterOp {
+    /// The leader stamp in Unix milliseconds.
+    pub stamp_ms: u64,
+    pub db: u32,
+    /// The raw RESP command.
+    pub command: Bytes,
+}
+
 /// `COUNTER_SYNC`: ops from a leader-follower leader to its follower. `seq` numbers the first
 /// op, or the state of the snapshot. A sync without ops and without a snapshot is a heartbeat.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,8 +287,7 @@ pub struct CounterSync {
     pub group: u16,
     pub regime: Regime,
     pub seq: u64,
-    /// The leader stamp and the raw RESP command of each op.
-    pub ops: Vec<(u64, Bytes)>,
+    pub ops: Vec<CounterOp>,
     pub snapshot: Option<Bytes>,
 }
 
@@ -311,12 +323,14 @@ pub enum Message {
     Handoff(Batch),
     BatchAck(BatchAck),
     Fetch {
-        keys: Vec<Bytes>,
+        keys: Vec<DbKey>,
     },
     Entries(Batch),
     Digest {
         from: EpochId,
         to: EpochId,
+        /// The database that the sums cover.
+        db: u32,
         sums: Vec<u64>,
     },
     /// A request lists nothing. The reply lists what the receiver knows.
@@ -397,6 +411,8 @@ pub struct MemberInfo {
     pub capacity: Capacity,
     /// Counter leader hints. Opaque to membership.
     pub leader_hints: Bytes,
+    /// The number of databases that the member serves.
+    pub databases: u32,
 }
 
 impl MemberInfo {

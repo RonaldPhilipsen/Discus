@@ -253,6 +253,7 @@ impl Sim {
             capabilities: discus_wire::caps::KNOWN,
             capacity: Capacity::default(),
             leader_hints: Bytes::new(),
+            databases: 1,
         };
         let cfg = SwimConfig {
             seed: self.rng.u64(..),

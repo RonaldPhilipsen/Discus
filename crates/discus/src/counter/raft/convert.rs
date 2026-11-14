@@ -88,6 +88,7 @@ fn entry_to(e: &Entry) -> RaftEntry {
             EntryPayload::Blank => RaftPayload::Blank,
             EntryPayload::Normal(op) => RaftPayload::Command {
                 stamp_ms: op.stamp_ms,
+                db: 0,
                 command: encode_command(&op.command),
             },
             EntryPayload::Membership(m) => RaftPayload::Membership(membership_to(m)),
@@ -100,7 +101,9 @@ fn entry_of(e: RaftEntry) -> Option<Entry> {
         log_id: log_of(e.log_id),
         payload: match e.payload {
             RaftPayload::Blank => EntryPayload::Blank,
-            RaftPayload::Command { stamp_ms, command } => EntryPayload::Normal(Op {
+            RaftPayload::Command {
+                stamp_ms, command, ..
+            } => EntryPayload::Normal(Op {
                 stamp_ms,
                 command: parse_command(&command)?,
             }),

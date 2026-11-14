@@ -3,10 +3,9 @@
 //!
 //! These specs stay out of the command table, so `prepare` never finds them for a client.
 
-use bytes::Bytes;
 use discus_resp::{Command, Value};
 use discus_store::entry::{estimate_size, ENTRY_OVERHEAD};
-use discus_store::Entry;
+use discus_store::{DbKey, Entry};
 use discus_wire::{decode_frame, encode_frame, Batch, Frame, Limits, Message, TraceContext};
 
 use super::error::CommandError;
@@ -30,7 +29,7 @@ pub fn lookup_internal(name: &[u8]) -> Option<&'static CommandSpec> {
 type Reply = Result<Value, CommandError>;
 
 /// One entry in the replication codec, which handles every value type.
-fn encode(node: &Node, key: Bytes, entry: Entry) -> Vec<u8> {
+fn encode(node: &Node, key: DbKey, entry: Entry) -> Vec<u8> {
     let mut batch = Batch::new(node.epoch_id());
     batch.entries.push((key, entry));
     encode_frame(&Frame {
@@ -62,7 +61,7 @@ fn take(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
         return Ok(Value::Null);
     };
     let seen = entry.version;
-    let blob = encode(node, key.clone(), entry);
+    let blob = encode(node, DbKey::new(conn.db, key.clone()), entry);
     if blob.len() > node.config.max_value_bytes {
         return Err(CommandError::ValueTooLarge);
     }

@@ -88,6 +88,7 @@ impl Membership {
             capabilities: discus_wire::caps::KNOWN,
             capacity: Capacity::default(),
             leader_hints: Bytes::new(),
+            databases: 1,
         };
         let static_seeds = discovery::static_seeds(config);
         let mut swim = Swim::new(config.swim(), me);

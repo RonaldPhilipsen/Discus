@@ -15,7 +15,10 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use discus_placement::{range_of, slot, Epoch, EpochId, NodeId, Owners, Version, NTP64, RANGES};
+use discus_store::DbKey;
 use discus_wire::{Batch, Message};
+
+use super::in_db0;
 
 use super::Settings;
 use crate::node::EpochPin;
@@ -116,7 +119,7 @@ struct Target {
     offers: Vec<(Bytes, Version)>,
     bytes: u64,
     /// Keys the target asked for in its last acknowledgement.
-    wanted: Vec<Bytes>,
+    wanted: Vec<DbKey>,
     abandoned: bool,
 }
 
@@ -354,7 +357,7 @@ async fn confirm(
     epoch: EpochId,
 ) -> Answer {
     let mut batch = Batch::new(epoch);
-    batch.offers = offers;
+    batch.offers = in_db0(offers);
     for round in 0..2 {
         let Some(ack) = send(node, replicator, owner, &batch).await else {
             return Answer::Failed;
@@ -367,18 +370,18 @@ async fn confirm(
             };
         }
         if ack.want.is_empty() || round == 1 {
-            return Answer::Holds(ack.want.into_iter().collect());
+            return Answer::Holds(ack.want.into_iter().map(|k| k.key).collect());
         }
         let mut missing = BTreeSet::new();
         batch = Batch::new(epoch);
         for k in ack.want {
-            match node.store.entry(0, &k) {
+            match node.store.entry(k.db, &k.key) {
                 Some(e) => {
                     batch.offers.push((k.clone(), e.version));
                     batch.entries.push((k, e));
                 }
                 None => {
-                    missing.insert(k);
+                    missing.insert(k.key);
                 }
             }
         }
@@ -407,13 +410,13 @@ async fn flush(
     done: Option<(EpochId, EpochId)>,
 ) {
     let mut batch = Batch::new(node.epoch_id());
-    batch.entries = std::mem::take(&mut t.batch);
+    batch.entries = in_db0(std::mem::take(&mut t.batch));
     for k in std::mem::take(&mut t.wanted) {
-        if let Some(e) = node.store.entry(0, &k) {
+        if let Some(e) = node.store.entry(k.db, &k.key) {
             batch.entries.push((k, e));
         }
     }
-    batch.offers = std::mem::take(&mut t.offers);
+    batch.offers = in_db0(std::mem::take(&mut t.offers));
     batch.done = done;
     let bytes = std::mem::take(&mut t.bytes);
     match send(node, replicator, target, &batch).await {

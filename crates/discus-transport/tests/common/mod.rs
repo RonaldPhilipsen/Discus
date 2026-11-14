@@ -115,6 +115,7 @@ pub fn gossip_ping(from: NodeId) -> Message {
             capabilities: 0,
             capacity: Capacity::default(),
             leader_hints: Bytes::new(),
+            databases: 1,
         },
     ))
 }

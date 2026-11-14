@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use discus_placement::{ClusterId, Epoch, NodeId, Version};
-use discus_store::{refill_bucket, Entry, Store};
+use discus_store::{refill_bucket, DbKey, Entry, Store};
 use discus_transport::{Lane, PeerInfo, TransportError};
 use discus_wire::{Batch, BatchAck, Message};
 use parking_lot::{Mutex, RwLock};
@@ -747,7 +747,7 @@ impl Replicator {
                 continue;
             }
             let mut batch = Batch::new(node.epoch_id());
-            batch.entries = fill(&self.store, &q, keys);
+            batch.entries = in_db0(fill(&self.store, &q, keys));
             let started = Instant::now();
             match self.send(&node, q.peer, Message::Replicate(batch)).await {
                 Ok(_) => {
@@ -816,7 +816,7 @@ impl Replicator {
                 .map(|(k, e)| (k.clone(), e.version))
                 .collect();
             let mut batch = Batch::new(node.epoch_id());
-            batch.entries = entries;
+            batch.entries = in_db0(entries);
             match self.send(node, peer, Message::HintReplay(batch)).await {
                 Ok(_) => {
                     self.hints.lock().confirm(peer, &sent);
@@ -874,7 +874,7 @@ impl Replicator {
             };
             if !entries.is_empty() {
                 let mut batch = Batch::new(epoch.id());
-                batch.entries = entries;
+                batch.entries = in_db0(entries);
                 if let Err(e) = self.send(node, peer, Message::HintReplay(batch)).await {
                     tracing::debug!(%peer, error = %e, "a refill batch failed");
                     return false;
@@ -951,12 +951,12 @@ impl Replicator {
                 // confirms that this node stored it. An expired entry still counts: it was newer
                 // than the offer, so the offered copy must not come back.
                 let applied = self.apply_entries(&node, b.entries);
-                let want: Vec<Bytes> = b
+                let want: Vec<DbKey> = b
                     .offers
                     .into_iter()
                     .filter(|(k, v)| {
                         self.store
-                            .stored_version(0, k)
+                            .stored_version(k.db, &k.key)
                             .is_none_or(|local| local < *v)
                     })
                     .map(|(k, _)| k)
@@ -973,7 +973,7 @@ impl Replicator {
             Message::Fetch { keys } => {
                 let mut out = Batch::new(node.epoch_id());
                 for k in keys {
-                    if let Some(e) = self.store.entry(0, &k) {
+                    if let Some(e) = self.store.entry(k.db, &k.key) {
                         out.entries.push((k, e));
                     }
                 }
@@ -983,6 +983,7 @@ impl Replicator {
                 from: old,
                 to,
                 sums,
+                ..
             } => {
                 // A node that skipped the sender's new epoch uses its own current one, which
                 // has the same members once both nodes saw the same change.
@@ -1006,7 +1007,7 @@ impl Replicator {
                 .await
                 .unwrap_or_default();
                 let mut out = Batch::new(node.epoch_id());
-                out.entries = entries;
+                out.entries = in_db0(entries);
                 Message::Entries(out)
             }
             other => Message::Unsupported {
@@ -1036,7 +1037,7 @@ impl Replicator {
 
     /// Apply entries that are newer than the local ones. An entry with a version too far ahead
     /// of the local clock is dropped (spec section 8.1).
-    pub fn apply_entries(&self, node: &Node, entries: Vec<(Bytes, Entry)>) -> u32 {
+    pub fn apply_entries(&self, node: &Node, entries: Vec<(DbKey, Entry)>) -> u32 {
         #[cfg(feature = "testing")]
         if node.faults.refuse_apply.load(Ordering::Relaxed) {
             return 0;
@@ -1052,7 +1053,7 @@ impl Replicator {
                 tracing::warn!("dropped a replicated entry too far ahead of the local clock");
                 continue;
             }
-            if self.store.apply(0, &k, e) {
+            if self.store.apply(k.db, &k.key, e) {
                 applied += 1;
             }
         }
@@ -1117,7 +1118,16 @@ fn fill(store: &Store, q: &PeerQueue, keys: Vec<Bytes>) -> Vec<(Bytes, Entry)> {
     entries
 }
 
-fn ack(node: &Node, applied: u32, want: Vec<Bytes>) -> Message {
+/// The keys of the replication paths in database 0. Task 3 carries the database through those
+/// paths and removes this.
+pub(crate) fn in_db0<T>(items: Vec<(Bytes, T)>) -> Vec<(DbKey, T)> {
+    items
+        .into_iter()
+        .map(|(key, t)| (DbKey { db: 0, key }, t))
+        .collect()
+}
+
+fn ack(node: &Node, applied: u32, want: Vec<DbKey>) -> Message {
     #[cfg(feature = "testing")]
     let epoch = node
         .faults
