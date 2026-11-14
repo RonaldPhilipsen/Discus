@@ -113,6 +113,24 @@ async fn stays_out_of_range(nodes: &[&GossipNode], db: i64, window: Duration) ->
     true
 }
 
+/// Every node of `nodes` has the record of each node of `raised` with `databases` count `n`, and
+/// each node of `raised` advertises it.
+fn advertised(nodes: &[GossipNode], raised: &[&GossipNode], n: u32) -> bool {
+    raised.iter().all(|r| {
+        let id = r.node.id;
+        r.node
+            .membership()
+            .is_some_and(|m| m.local().databases == n)
+            && nodes.iter().filter(|o| o.node.id != id).all(|o| {
+                o.node.membership().is_some_and(|m| {
+                    m.members()
+                        .iter()
+                        .any(|(info, _)| info.id == id && info.databases == n)
+                })
+            })
+    })
+}
+
 async fn wait_idle(nodes: &[&GossipNode]) {
     let idle = wait_until(LONG, || {
         nodes.iter().all(|n| {
@@ -154,12 +172,14 @@ async fn a_raise_in_the_file_reaches_every_node_without_a_restart() {
         .await,
         "nodes A and B did not raise their count"
     );
-    for n in &nodes {
-        assert!(
-            wait_out_of_range(&[n], 2).await,
-            "SELECT 2 opened while C is at 1"
-        );
-    }
+    assert!(
+        wait_until(LONG, || advertised(&nodes, &[&nodes[0], &nodes[1]], 3)).await,
+        "A and B did not advertise the raised count"
+    );
+    assert!(
+        stays_out_of_range(&refs(&nodes), 2, Duration::from_secs(3)).await,
+        "SELECT 2 opened while C is at 1"
+    );
 
     write_settings(&files[2], 3);
     assert!(
