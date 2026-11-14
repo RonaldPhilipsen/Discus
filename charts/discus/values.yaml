@@ -132,6 +132,24 @@ podDisruptionBudget:
   enabled: true
   maxUnavailable: 1
 
+# A NetworkPolicy for the pods of the release. It limits ingress only, so egress stays open. It
+# needs a CNI plugin that enforces NetworkPolicy. The cluster port 7379/UDP and the RPC port
+# 7380/UDP always accept only the pods of this release.
+networkPolicy:
+  enabled: false
+  # NetworkPolicy peers that can reach the client port 6379 and the clusterClients port. An empty
+  # list allows every source. For example:
+  #   clientFrom:
+  #     - namespaceSelector:
+  #         matchLabels:
+  #           kubernetes.io/metadata.name: shop
+  clientFrom: []
+  # NetworkPolicy peers that can reach the admin port 9100. An empty list allows every source.
+  # The kubelet sends the probes to this port from the node of the pod. Most CNI plugins always
+  # allow traffic from that node, but not all of them. Before you set a list, check that your CNI
+  # plugin does, or the probes fail and the pods restart.
+  adminFrom: []
+
 # OTLP/gRPC export of metrics and traces. Logs always go to stdout.
 otel:
   enabled: false

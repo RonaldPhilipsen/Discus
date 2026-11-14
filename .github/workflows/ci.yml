@@ -88,6 +88,17 @@ jobs:
       - run: >-
           ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
           --set databases=0
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          | grep -q 'kind: NetworkPolicy'
+      - run: >-
+          helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --set networkPolicy.enabled=true
+          --set 'networkPolicy.clientFrom[0].namespaceSelector.matchLabels.team=shop'
+          | grep -A40 'kind: NetworkPolicy' | grep -q 'team: shop'
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --set networkPolicy.enabled=true --set networkPolicy.clientFrom=shop
 
   # redis-cli against a fresh node, for every supported and unsupported command.
   compat:

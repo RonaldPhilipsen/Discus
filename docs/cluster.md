@@ -325,6 +325,33 @@ A pod gets a new IP, and thus a new name, at each restart. A cluster client read
 the next topology reply or `-MOVED`. A cluster client must reach the pod network and use the
 cluster DNS. A client outside the pod network uses the Service on port 6379.
 
+The chart creates no NetworkPolicy by default. To limit the traffic into the pods, set
+`networkPolicy.enabled=true`. The policy needs a CNI plugin that enforces NetworkPolicy. It limits
+ingress only, so the pods still reach DNS, the API server, the OTLP endpoint, and the identity
+provider. The policy has these rules:
+
+| Ports | Allowed sources |
+| --- | --- |
+| 7379/UDP and 7380/UDP | Only the pods of the same release. |
+| 6379/TCP and the `clusterClients.port` | The peers in `networkPolicy.clientFrom`. An empty list allows every source. |
+| 9100/TCP | The peers in `networkPolicy.adminFrom`. An empty list allows every source. |
+
+Each list holds NetworkPolicy peers, for example a `namespaceSelector` or an `ipBlock`. This
+example allows clients from the namespace `shop` only:
+
+```yaml
+networkPolicy:
+  enabled: true
+  clientFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: shop
+```
+
+The kubelet sends the probes to port 9100 from the node of the pod. Most CNI plugins always allow
+traffic from that node, but not all of them. Before you set `networkPolicy.adminFrom`, check that
+your CNI plugin does. If it does not, the probes fail and the kubelet restarts the pods.
+
 ### Memory budget
 
 If you do not set `--max-memory`, the node reads the memory limit of the container from the
