@@ -43,6 +43,7 @@ metadata:
 data:
   discus.toml: |
     version = 1
+    databases = {{ int64 .Values.databases }}
     {{- range $section, $set := $sections }}
     {{- if $set }}
 

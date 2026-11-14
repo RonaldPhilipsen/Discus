@@ -360,6 +360,7 @@ If the file has a newer version, the error names the newest version that the bui
 
 ```toml
 version = 1
+databases = 3                  # the number of databases, a top-level key before every section
 
 # Time budgets of the request path, in milliseconds.
 [budget]
@@ -384,10 +385,13 @@ failure-window-secs = 60
 reload-secs = 10               # seconds between checks of the certificate files, 0 turns it off
 ```
 
-A real file holds only the keys that differ from the default. These are all the keys of version 1:
+A real file holds only the keys that differ from the default. The key `databases` is top-level and
+stays before every section, because a key after a section header belongs to that section. These
+are all the keys of version 1:
 
 | Section | Key | Flag |
 | --- | --- | --- |
+| none | `databases` | `--databases` |
 | `[budget]` | `forward-read-ms` | `--forward-read-timeout-ms` |
 | `[budget]` | `forward-write-ms` | `--forward-write-timeout-ms` |
 | `[budget]` | `hold-ms` | `--hold-budget-ms` |
@@ -430,11 +434,11 @@ The `discus` section of `INFO` shows these fields:
 | `config_file` | The path of `--config`. Empty without the flag. |
 | `config_version` | The version of the file in effect. |
 | `config_generation` | The number of reloads that the node applied. |
-| `config_restart_pending` | The names of reloadable settings whose new value the node cannot apply at run time. Each one needs a restart. No setting of version 1 does this yet, so the field is empty today. |
+| `config_restart_pending` | The names of reloadable settings whose new value the node cannot apply at run time. Each one needs a node replacement or a restart. A `databases` value below the current count shows as `config_restart_pending:databases`. |
 
 Two metrics count the reloads. `discus.config.reloads` has the attribute `outcome` with the value
 `applied` or `failed`. The gauge `discus.config.pending` is 1 while a new value waits for a restart.
-No setting of version 1 does this yet, so the gauge is 0 today. See [Telemetry](telemetry.md).
+A lower `databases` value in the file does this. See [Telemetry](telemetry.md).
 
 ### Settings file in the chart
 
@@ -454,11 +458,14 @@ restarts no pod. The node applies it after the kubelet syncs the file and the ne
 | `settings.auth.maxFailuresPerSource` | `[auth] max-failures-per-source` |
 | `settings.auth.failureWindowSecs` | `[auth] failure-window-secs` |
 | `settings.tls.reloadSecs` | `[tls] reload-secs` |
+| `databases` | `databases`, the top-level key |
 | `settings.extra` | A map of section to keys, for keys that a newer Discus adds. A value is an integer, a boolean, a string, or an array of those. Other values stop the render. |
 
-A null value leaves the built-in default. Do not set these flags in `extraArgs`, because a flag
-wins over the file and blocks the reload of that setting. The flags `--log-rate-limit`,
-`--otel-sampling-ratio`, and `--primary-read-prefix` stay flags that need a restart.
+The chart never renders `--databases`. A flag on the command line wins over the file, so a flag
+would block every later raise. A null value leaves the built-in default. Do not set these flags in
+`extraArgs`, because a flag wins over the file and blocks the reload of that setting. The flags
+`--log-rate-limit`, `--otel-sampling-ratio`, and `--primary-read-prefix` stay flags that need a
+restart.
 
 ## Flags
 
@@ -466,6 +473,8 @@ wins over the file and blocks the reload of that setting. The flags `--log-rate-
 | --- | --- | --- |
 | `--config` | none | The path of the TOML settings file. See [Settings file](#settings-file). |
 | `--config-reload-secs` | 10 | Seconds between checks of the settings file. `0` pauses the reload. A change of this value needs a restart. |
+| `--databases` | 1 | The number of databases, from 1 to 65536. `--membership static` refuses a value above 1. See [Databases](#databases). |
+| `--lower-databases` | off | A node that joins with a lower `--databases` value keeps it, even when the cluster has more databases. The cluster count then drops and the data of the removed databases is deleted. |
 | `--membership` | `gossip` | `gossip` finds members by itself. `static` uses the fixed `--peer` list with no failure detection. |
 | `--node-id` | random | This node's ID, 32 hex digits. Required with `--membership static`. |
 | `--cluster-id` | minted | The cluster ID, 32 hex digits. With `static`, every member uses the same value, and the flag is required. With `gossip`, it is the ID that this node gives a cluster it forms. |
@@ -624,7 +633,7 @@ address. With static membership, both show the one cluster address.
 `--membership static` keeps a fixed member list. Every node gets the same cluster ID and lists
 every other node as `<node-id>@<ip>:<port>`. Every member is `NORMAL` in epoch 1. There is no
 gossip and no failure detection, so a stopped node stays in the list. Use it for fixed test
-setups.
+setups. A static cluster keeps one database, and a node refuses `--databases` above 1.
 
 ## Make a test CA
 
@@ -694,6 +703,10 @@ key, the listeners reply differently:
 | Forward | `--listen` | The node forwards the command and returns the reply. |
 | Redirect | `--redirect-listen` | The node returns `-MOVED <slot> <host>:<port>`. |
 
+`SELECT` works on the redirect listener. A redirect connection keeps its selected database, and
+every command goes to the owner of its key in that database. The slot of a key does not depend on
+the database.
+
 ### Slots
 
 Discus maps each key to one of 16384 slots. It uses the CRC16 of the key, as Redis Cluster does.
@@ -741,8 +754,9 @@ A command with keys in several slots is served as on the forward listener. Discu
 
 On a redirect connection, `SCAN` lists only the keys of the slots that the node is the primary of.
 `DBSIZE` returns the local key count divided by the number of copies of each key. A cluster
-client scans every primary and adds the counts, so each key appears once. `FLUSHDB` and
-`FLUSHALL` still clear every member. A cluster client sends them to every primary, so the flush
+client scans every primary and adds the counts, so each key appears once. `SCAN` and `DBSIZE` work
+on the selected database. `FLUSHDB` clears the selected database on every member, and `FLUSHALL`
+clears every database on every member. A cluster client sends them to every primary, so the flush
 runs several times. This is safe.
 
 ### Addresses
@@ -1076,6 +1090,69 @@ counter bytes of the leader reach the share, a write that can grow the state ret
 commands, and `FLUSHALL` still work. An expired counter key uses the share until it is removed.
 Every 10 s, the leader of each group with expired keys removes them from every replica.
 
+## Databases
+
+A client that never sends `SELECT` uses database 0. `SELECT <db>` accepts the databases from 0 to
+the count of the cluster minus 1. The default count is 1. Each database is a separate key space,
+and a key name has the same slot and the same owners in every database. Strong counters, the keys
+with the counter prefix, are kept for each database. `MOVE` and `COPY` refuse a counter key.
+
+`SWAPDB` returns `-ERR SWAPDB is not allowed in cluster mode`, as a Valkey cluster does. `COPY`
+reads its source on the primary. `INFO keyspace` shows one line for each database that holds keys.
+See [Command compatibility](compatibility.md#numbered-databases) for every command.
+
+### How nodes share the count
+
+Each node reports its own count in its gossip record. The count of the cluster is the smallest
+count of the `NORMAL` members. `SELECT`, `MOVE`, and `COPY` compare their database number with it.
+
+- A raise applies at once.
+- A lower count applies only after it holds for 10 seconds. It never applies while a member has no
+  gossip record. Then each node deletes the data of the removed databases.
+- After a drop, a node refuses replicated data for the removed databases until the count rises
+  again. The metric `discus.databases.dropped` counts the refused entries.
+- A node that joins takes the larger of its own count and the count of the cluster, unless it runs
+  with `--lower-databases`.
+
+### Raise the count
+
+Raise the chart value `databases` and upgrade the release. The chart writes the value into the
+ConfigMap. Each node reads the file at its next reload and raises its count. No node restarts.
+`SELECT` of a new database works when the last node reports the new count. Before that, it returns
+`-ERR DB index is out of range`.
+
+A node that you start with the flag `--databases` takes the flag over the file. The chart never
+renders the flag, so a raise of the chart value always reaches the nodes.
+
+### Lower the count
+
+A lower value in the file applies nothing. The node keeps its count and shows
+`config_restart_pending:databases` in `INFO discus`.
+
+To lower the count, replace the nodes. Start the replacement nodes with the lower `--databases`
+value and with `--lower-databases`. When the first replacement node is `NORMAL`, the count of the
+cluster drops after 10 seconds. Each node then deletes the data of the removed databases. A later
+raise starts with empty databases. Lowering the count deletes data, so plan it as such.
+
+### Static membership
+
+Static nodes do not gossip, so they cannot share a count. A node with `--membership static`
+refuses `--databases` above 1.
+
+### Upgrade notes
+
+A build without multi-database support cannot join a cluster with more than one database. The join
+is refused and the node retries. While any member lacks the support, `SELECT` above 0 returns
+`-ERR multiple databases need every node to support them`. Database 0 works as before.
+
+An older build ignores the database of a message. It stores every replicated key in database 0.
+So a downgrade of a cluster that still has more than one database needs a full cold restart, and it
+loses all data.
+
+A cluster that served more than one database must not take an older build until every node has
+served 1 database for at least the 10 seconds wait plus a few purge ticks. A full cold restart
+also works. Before you lower the count, clear the databases above 0 with `FLUSHDB`.
+
 ## Multi-key and keyspace commands
 
 | Command | Behavior in a cluster |
@@ -1083,9 +1160,9 @@ Every 10 s, the leader of each group with expired keys removes them from every r
 | `MGET` | Groups the keys by owner, asks each owner once, and returns the values in the order of the request. |
 | `EXISTS` | Groups the keys by owner and adds the counts. |
 | `MSET`, `DEL` | Group the keys by owner. This is not atomic. If one part fails, the command returns `-TRYAGAIN` and the other parts stay applied. A retry of the whole command is safe. |
-| `SCAN`, `RANDOMKEY` | Look at the keys of the node that the client is connected to only. Counter keys are not listed. |
-| `DBSIZE` | Adds the key counts of every member that answers and divides the sum by the replication factor. The result is an estimate. Counter keys do not count. |
-| `FLUSHDB`, `FLUSHALL` | Clear every member that answers. Each member also drops its replication queues, its hints, and its handoffs. A write that is on its way during the flush can survive it. Then each counter group clears its counters. If a group has no leader or no quorum, the reply is `-TRYAGAIN FLUSHALL cleared the cache and <n> of <G> counter groups`. A retry is safe. |
+| `SCAN`, `RANDOMKEY` | Look at the keys of the selected database on the node that the client is connected to only. Counter keys are not listed. |
+| `DBSIZE` | Adds the key counts of the selected database on every member that answers and divides the sum by the replication factor. The result is an estimate. Counter keys do not count. |
+| `FLUSHDB`, `FLUSHALL` | `FLUSHDB` clears the selected database and `FLUSHALL` clears every database, on every member that answers. Each member also drops its replication queues, its hints, and its handoffs. A write that is on its way during the flush can survive it. Then each counter group clears its counters. If a group has no leader or no quorum, the reply is `-TRYAGAIN FLUSHALL cleared the cache and <n> of <G> counter groups`. A retry is safe. |
 
 Multi-key commands on counter keys split by group. The keys of one group run as one command on
 its leader, so they are atomic. Keys of several groups fan out like normal keys. A command that
