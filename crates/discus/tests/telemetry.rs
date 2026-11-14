@@ -12,8 +12,9 @@ use discus::settings::{Live, Reloadable};
 
 /// A node with the security state of `config`.
 fn node(config: discus::Config) -> Node {
-    let security = Security::from_config(&config).expect("valid security configuration");
     let live = Live::new(Reloadable::from_config(&config));
+    let security =
+        Security::from_config(&config, live.clone()).expect("valid security configuration");
     Node::new(config, Arc::new(security), live)
 }
 

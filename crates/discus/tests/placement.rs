@@ -11,8 +11,8 @@ fn node(args: &[&str]) -> Node {
     let mut argv = vec!["discus"];
     argv.extend_from_slice(args);
     let config = common::config(&argv);
-    let security = Security::from_config(&config).unwrap();
     let live = Live::new(Reloadable::from_config(&config));
+    let security = Security::from_config(&config, live.clone()).unwrap();
     Node::new(config, std::sync::Arc::new(security), live)
 }
 

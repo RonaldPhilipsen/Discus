@@ -36,6 +36,7 @@ pub use stream::ClientStream;
 use crate::command::table::Access;
 use crate::command::{CommandError, CommandSpec};
 use crate::node::ConnState;
+use crate::settings::Live;
 use crate::Config;
 use limiter::FailureLimiter;
 
@@ -87,7 +88,7 @@ pub struct Security {
     cert_rules: Vec<(String, Scopes)>,
     policy: Policy,
     shared_token: Option<String>,
-    max_conn_failures: u32,
+    live: Arc<Live>,
     limiter: FailureLimiter,
     admin_tls: Option<Arc<ArcSwap<rustls::ServerConfig>>>,
     admin_identities: Vec<String>,
@@ -98,7 +99,7 @@ pub struct Security {
 
 impl Security {
     /// Check the configuration and build the security state.
-    pub fn from_config(config: &Config) -> Result<Security, SecurityError> {
+    pub fn from_config(config: &Config, live: Arc<Live>) -> Result<Security, SecurityError> {
         let args = &config.security;
         tls::install_default();
         let file = match &args.auth_config {
@@ -181,11 +182,8 @@ impl Security {
             cert_rules,
             policy,
             shared_token: config.shared_token.clone(),
-            max_conn_failures: args.auth_max_failures_per_connection.max(1),
-            limiter: FailureLimiter::new(
-                args.auth_max_failures_per_source.max(1),
-                Duration::from_secs(args.auth_failure_window_secs),
-            ),
+            limiter: FailureLimiter::new(live.clone()),
+            live,
             admin_tls,
             admin_identities: file.admin.cert_identities.clone(),
             dev_insecure: args.dev_insecure_oauth2,
@@ -559,7 +557,7 @@ impl Security {
             self.limiter.record(ip);
         }
         tracing::debug!(conn = conn.id, reason, "authentication failed");
-        if conn.auth.failures >= self.max_conn_failures {
+        if conn.auth.failures >= self.live.get().auth_max_failures_per_connection.max(1) {
             tracing::debug!(
                 conn = conn.id,
                 "too many failed attempts, closing the connection"
@@ -626,7 +624,9 @@ mod tests {
         let (cert_path, key_path) = (cert_path.to_str().unwrap(), key_path.to_str().unwrap());
         let mut argv = vec!["discus", "--tls-cert", cert_path, "--tls-key", key_path];
         argv.extend_from_slice(args);
-        Security::from_config(&Config::parse_from(argv).unwrap()).unwrap()
+        let config = Config::parse_from(argv).unwrap();
+        let live = Live::new(crate::settings::Reloadable::from_config(&config));
+        Security::from_config(&config, live).unwrap()
     }
 
     #[test]

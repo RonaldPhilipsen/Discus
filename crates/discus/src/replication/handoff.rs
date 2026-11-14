@@ -195,7 +195,7 @@ pub async fn scan(
         }
         for (g, t) in targets.iter_mut() {
             if t.full() && !t.abandoned {
-                flush(node, &replicator, *g, t, None, settings).await;
+                flush(node, &replicator, *g, t, None).await;
             }
         }
         if next == 0 {
@@ -206,10 +206,10 @@ pub async fn scan(
     let range = (from.id(), to.id());
     for (g, t) in targets.iter_mut() {
         while !t.abandoned && (!t.wanted.is_empty() || t.full()) {
-            flush(node, &replicator, *g, t, None, settings).await;
+            flush(node, &replicator, *g, t, None).await;
         }
         if !t.abandoned {
-            flush(node, &replicator, *g, t, Some(range), settings).await;
+            flush(node, &replicator, *g, t, Some(range)).await;
         }
     }
     targets.values().all(|t| !t.abandoned)
@@ -403,7 +403,6 @@ async fn flush(
     target: NodeId,
     t: &mut Target,
     done: Option<(EpochId, EpochId)>,
-    settings: &Settings,
 ) {
     let mut batch = Batch::new(node.epoch_id());
     batch.entries = std::mem::take(&mut t.batch);
@@ -418,7 +417,7 @@ async fn flush(
     match send(node, replicator, target, &batch).await {
         Some(ack) => {
             t.wanted = ack.want;
-            pace(bytes, settings.handoff_rate).await;
+            pace(bytes, node.live.get().handoff_rate_bytes).await;
         }
         None => {
             tracing::warn!(%target, "abandoned a handoff target after its retries");

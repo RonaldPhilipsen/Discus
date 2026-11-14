@@ -53,13 +53,11 @@ const SEND_YIELDS: usize = 2;
 pub struct Settings {
     pub queue_keys: usize,
     pub batch_keys: usize,
-    pub timeout: Duration,
     pub retry: Duration,
     pub rf: usize,
     pub tombstone_ttl: Duration,
     pub hints: HintLimits,
     pub handoff: bool,
-    pub handoff_rate: u64,
     pub handoff_timeout: Duration,
 }
 
@@ -68,7 +66,6 @@ impl Settings {
         Settings {
             queue_keys: c.replication_queue_keys.max(1),
             batch_keys: c.replication_batch_keys.max(1),
-            timeout: Duration::from_millis(c.replication_timeout_ms),
             retry: Duration::from_millis(c.replication_retry_ms.max(1)),
             rf: c.replication_factor,
             tombstone_ttl: Duration::from_millis(c.tombstone_ttl_ms),
@@ -82,7 +79,6 @@ impl Settings {
             handoff: c.handoff,
             #[cfg(not(feature = "testing"))]
             handoff: true,
-            handoff_rate: c.handoff_rate_bytes,
             handoff_timeout: Duration::from_millis(c.handoff_timeout_ms),
         }
     }
@@ -549,7 +545,7 @@ impl Replicator {
     /// Returns the number of keys without an acknowledgment. The caller replies anyway, because
     /// the queues and the hints go on delivering those keys.
     pub async fn unacked_after_wait(&self, node: &Node, keys: &[Bytes]) -> u64 {
-        let deadline = tokio::time::Instant::now() + self.settings.timeout;
+        let deadline = tokio::time::Instant::now() + node.live.get().replication_timeout;
         loop {
             // Subscribed before the evaluation, so a batch that ends after it wakes the wait.
             let mut progress = self.progress.subscribe();
@@ -908,7 +904,13 @@ impl Replicator {
             Ok(message)
         };
         let reply = node
-            .request(peer, Lane::Bulk, build, self.settings.timeout, true)
+            .request(
+                peer,
+                Lane::Bulk,
+                build,
+                node.live.get().replication_timeout,
+                true,
+            )
             .await?;
         // An answered bulk message shows the peer is up (spec "Target health").
         link.note_forward(peer, true);

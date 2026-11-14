@@ -28,8 +28,8 @@ fn the_epoch_gauge_follows_the_adopted_epoch() {
     let h = TraceHarness::new(0.0);
     assert!(discus_telemetry::install_global(h.telemetry.metrics()));
     let config = common::config(&["discus", "--listen", "127.0.0.1:0"]);
-    let security = Security::from_config(&config).unwrap();
     let live = Live::new(Reloadable::from_config(&config));
+    let security = Security::from_config(&config, live.clone()).unwrap();
     let node = Node::new(config, Arc::new(security), live);
     assert_eq!(gauge(&h), 1.0);
 

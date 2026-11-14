@@ -20,8 +20,8 @@ fn node<const SLOT: usize>() -> Node {
     let clock = MockClock::<SLOT>;
     clock.set(START);
     let config = common::config(&["discus"]);
-    let security = Arc::new(Security::from_config(&config).unwrap());
     let live = Live::new(Reloadable::from_config(&config));
+    let security = Arc::new(Security::from_config(&config, live.clone()).unwrap());
     Node::with_clocks(config, security, live, Arc::new(clock), clock.hlc_clock())
 }
 

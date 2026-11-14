@@ -19,8 +19,9 @@ fn every_auth_attempt_is_counted() {
     assert!(discus_telemetry::install_global(h.telemetry.metrics()));
     let argv = ["discus", "--listen", "127.0.0.1:0", "--shared-token", "t"];
     let config = common::config(&argv);
-    let security = Security::from_config(&config).expect("valid security configuration");
     let live = Live::new(Reloadable::from_config(&config));
+    let security =
+        Security::from_config(&config, live.clone()).expect("valid security configuration");
     let node = Node::new(config, Arc::new(security), live);
     let mut conn = ConnState::new(1, ConnAuth::default());
     for c in [

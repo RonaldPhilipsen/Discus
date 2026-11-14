@@ -142,15 +142,15 @@ fn watch_certificates(
     stop: CancellationToken,
 ) {
     let config = &node.config;
-    let tls_reload_secs = config.tls_reload_secs;
-    let period = move || Duration::from_secs(tls_reload_secs);
+    let live = node.live.clone();
+    let period = move || live.get().tls_reload;
     let security = node.security.clone();
     let files = Security::client_tls_files(&config.security);
     file_watch::watch(
         "client certificates",
         files,
         client_seen,
-        period,
+        period.clone(),
         stop.clone(),
         move || security.reload_client_tls(),
     );
@@ -245,8 +245,9 @@ impl Server {
             None
         };
         let live = Live::new(Reloadable::from_config(&config));
-        let security =
-            Arc::new(Security::from_config(&config).map_err(|e| invalid(e.to_string()))?);
+        let security = Arc::new(
+            Security::from_config(&config, live.clone()).map_err(|e| invalid(e.to_string()))?,
+        );
         let listener = TcpListener::bind(config.listen).await?;
         let redirect = match config.redirect_listen {
             Some(addr) => Some(TcpListener::bind(addr).await?),
@@ -320,7 +321,7 @@ impl Server {
                 None => bind_transport(tc, socket, service).await?,
             };
             transports.push(rpc.clone());
-            node.set_link(ClusterLink::new(rpc, &node.config));
+            node.set_link(ClusterLink::new(rpc, node.live.clone()));
             node.set_replicator(crate::replication::Replicator::new(&node));
         }
         Ok(Server {

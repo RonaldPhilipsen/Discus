@@ -3,7 +3,6 @@
 use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::time::Duration;
 
 use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
@@ -629,18 +628,6 @@ impl Config {
     pub fn resolve_identity(&mut self) -> Result<NodeId, String> {
         self.validate()?;
         Ok(*self.node_id.get_or_insert_with(NodeId::random))
-    }
-
-    pub fn forward_read_timeout(&self) -> Duration {
-        Duration::from_millis(self.forward_read_timeout_ms)
-    }
-
-    pub fn forward_write_timeout(&self) -> Duration {
-        Duration::from_millis(self.forward_write_timeout_ms)
-    }
-
-    pub fn hold_budget(&self) -> Duration {
-        Duration::from_millis(self.hold_budget_ms)
     }
 
     /// The RESP parser limits of a client connection and of a forwarded command. The bulk limit

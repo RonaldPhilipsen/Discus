@@ -25,8 +25,8 @@ use tracing::Span;
 
 use crate::command::{self, CommandError, CommandSpec};
 use crate::node::{ConnState, Node};
+use crate::settings::Live;
 use crate::telemetry;
-use crate::Config;
 use route::Route;
 use writeset::SetKey;
 
@@ -36,9 +36,7 @@ pub const MAX_HOPS: u8 = 2;
 /// The node-to-node side of a node: the transport and the forwarding settings.
 pub struct ClusterLink {
     pub transport: Transport,
-    pub read_timeout: Duration,
-    pub write_timeout: Duration,
-    pub read_from_replicas: bool,
+    live: Arc<Live>,
     /// The epoch that each peer last reported.
     peer_epochs: Mutex<HashMap<NodeId, EpochId>>,
     /// The peers whose last forward failed (spec "Target health").
@@ -46,15 +44,25 @@ pub struct ClusterLink {
 }
 
 impl ClusterLink {
-    pub fn new(transport: Transport, config: &Config) -> ClusterLink {
+    pub fn new(transport: Transport, live: Arc<Live>) -> ClusterLink {
         ClusterLink {
             transport,
-            read_timeout: config.forward_read_timeout(),
-            write_timeout: config.forward_write_timeout(),
-            read_from_replicas: config.read_from_replicas,
+            live,
             peer_epochs: Mutex::new(HashMap::new()),
             down: RwLock::default(),
         }
+    }
+
+    pub fn read_timeout(&self) -> Duration {
+        self.live.get().forward_read_timeout
+    }
+
+    pub fn write_timeout(&self) -> Duration {
+        self.live.get().forward_write_timeout
+    }
+
+    pub fn read_from_replicas(&self) -> bool {
+        self.live.get().read_from_replicas
     }
 
     /// Record the result of a forward or a replication batch to `peer`. A timeout or a transport
@@ -449,7 +457,7 @@ pub fn candidates(
 /// A read may go to any owner, with `--read-from-replicas`, unless the key reads from the primary
 /// only (`--primary-read-prefix`).
 pub(crate) fn replica_reads(node: &Node, write: bool, key: &[u8]) -> bool {
-    !write && node.link().is_some_and(|l| l.read_from_replicas) && !node.is_primary_read_key(key)
+    !write && node.link().is_some_and(|l| l.read_from_replicas()) && !node.is_primary_read_key(key)
 }
 
 /// The budget is spent or every target is on the path. Serve locally if this node was the
@@ -597,4 +605,40 @@ fn single_planned(
         }
         Reply::try_again()
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Weak;
+
+    use discus_placement::{ClusterId, NodeId};
+    use discus_transport::testing::TestCa;
+    use discus_transport::TransportConfig;
+
+    use super::*;
+    use crate::settings::Reloadable;
+    use crate::Config;
+
+    #[tokio::test]
+    async fn the_link_reads_the_live_timeouts() {
+        let base = Reloadable::from_config(&Config::parse_from(["discus"]).unwrap());
+        let live = Live::new(base.clone());
+        let ca = TestCa::new();
+        let id = NodeId::random();
+        let config = TransportConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            ca.material("spiffe://discus.test/node"),
+            id,
+            ClusterId::mint(),
+        );
+        let transport = Transport::bind(config, Arc::new(service::NodeService(Weak::new())))
+            .await
+            .unwrap();
+        let link = ClusterLink::new(transport, live.clone());
+        live.apply(Reloadable {
+            forward_read_timeout: Duration::from_millis(200),
+            ..base
+        });
+        assert_eq!(link.read_timeout(), Duration::from_millis(200));
+    }
 }
