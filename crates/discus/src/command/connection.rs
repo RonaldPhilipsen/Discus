@@ -266,9 +266,14 @@ fn info(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         .store
         .databases()
         .into_iter()
-        .map(|db| (db, node.store.db_len(db)))
-        .filter(|(_, keys)| *keys > 0)
-        .map(|(db, keys)| format!("db{db}:keys={keys},expires=0,avg_ttl=0"))
+        .map(|db| (db, node.store.keyspace(db)))
+        .filter(|(_, k)| k.keys > 0)
+        .map(|(db, k)| {
+            format!(
+                "db{db}:keys={},expires={},avg_ttl={}",
+                k.keys, k.expires, k.avg_ttl_ms
+            )
+        })
         .collect();
     section("keyspace", &keyspace);
     section(
