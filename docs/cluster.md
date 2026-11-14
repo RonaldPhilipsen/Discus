@@ -462,7 +462,7 @@ restarts no pod. The node applies it after the kubelet syncs the file and the ne
 | `settings.extra` | A map of section to keys, for keys that a newer Discus adds. A value is an integer, a boolean, a string, or an array of those. Other values stop the render. |
 
 The chart never renders `--databases`. A flag on the command line wins over the file, so a flag
-would block every later raise. A null value leaves the built-in default. Do not set these flags in
+blocks every later raise. A null value leaves the built-in default. Do not set these flags in
 `extraArgs`, because a flag wins over the file and blocks the reload of that setting. The flags
 `--log-rate-limit`, `--otel-sampling-ratio`, and `--primary-read-prefix` stay flags that need a
 restart.
@@ -474,7 +474,7 @@ restart.
 | `--config` | none | The path of the TOML settings file. See [Settings file](#settings-file). |
 | `--config-reload-secs` | 10 | Seconds between checks of the settings file. `0` pauses the reload. A change of this value needs a restart. |
 | `--databases` | 1 | The number of databases, from 1 to 65536. `--membership static` refuses a value above 1. See [Databases](#databases). |
-| `--lower-databases` | off | A node that joins with a lower `--databases` value keeps it, even when the cluster has more databases. The cluster count then drops and the data of the removed databases is deleted. |
+| `--lower-databases` | off | A node that joins with a lower `--databases` value keeps that value. The cluster can have more databases than this node. The cluster count then drops and the data of the removed databases is deleted. |
 | `--membership` | `gossip` | `gossip` finds members by itself. `static` uses the fixed `--peer` list with no failure detection. |
 | `--node-id` | random | This node's ID, 32 hex digits. Required with `--membership static`. |
 | `--cluster-id` | minted | The cluster ID, 32 hex digits. With `static`, every member uses the same value, and the flag is required. With `gossip`, it is the ID that this node gives a cluster it forms. |
@@ -1118,11 +1118,11 @@ count of the `NORMAL` members. `SELECT`, `MOVE`, and `COPY` compare their databa
 
 Raise the chart value `databases` and upgrade the release. The chart writes the value into the
 ConfigMap. Each node reads the file at its next reload and raises its count. No node restarts.
-`SELECT` of a new database works when the last node reports the new count. Before that, it returns
-`-ERR DB index is out of range`.
+The last node reports the new count, and then `SELECT` of a new database works. Before that, it
+returns `-ERR DB index is out of range`.
 
-A node that you start with the flag `--databases` takes the flag over the file. The chart never
-renders the flag, so a raise of the chart value always reaches the nodes.
+A node that you start with `--databases` uses the flag and ignores the value in the file. The chart
+never renders the flag, so a raise of the chart value always reaches the nodes.
 
 ### Lower the count
 
@@ -1132,7 +1132,8 @@ A lower value in the file applies nothing. The node keeps its count and shows
 To lower the count, replace the nodes. Start the replacement nodes with the lower `--databases`
 value and with `--lower-databases`. When the first replacement node is `NORMAL`, the count of the
 cluster drops after 10 seconds. Each node then deletes the data of the removed databases. A later
-raise starts with empty databases. Lowering the count deletes data, so plan it as such.
+raise starts with empty databases. Lowering the count deletes data. Make sure that you want this
+first.
 
 ### Static membership
 
@@ -1142,16 +1143,17 @@ refuses `--databases` above 1.
 ### Upgrade notes
 
 A build without multi-database support cannot join a cluster with more than one database. The join
-is refused and the node retries. While any member lacks the support, `SELECT` above 0 returns
-`-ERR multiple databases need every node to support them`. Database 0 works as before.
+is refused and the node retries. In a cluster with more than one database, `SELECT` above 0
+returns `-ERR multiple databases need every node to support them` while any member lacks the
+support. Database 0 works as before.
 
 An older build ignores the database of a message. It stores every replicated key in database 0.
 So a downgrade of a cluster that still has more than one database needs a full cold restart, and it
 loses all data.
 
-A cluster that served more than one database must not take an older build until every node has
-served 1 database for at least the 10 seconds wait plus a few purge ticks. A full cold restart
-also works. Before you lower the count, clear the databases above 0 with `FLUSHDB`.
+Do not put an older build in a cluster that served more than one database. First wait until every
+node serves 1 database for the 10 second wait plus a few purge ticks. A full cold restart also
+works. Before you lower the count, clear the databases above 0 with `FLUSHDB`.
 
 ## Multi-key and keyspace commands
 

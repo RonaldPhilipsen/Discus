@@ -24,13 +24,12 @@ features from that value.
 
 A node serves the databases from 0 to the cluster count minus 1. The default count is 1. The flag
 `--databases` and the chart value `databases` set a higher count. See
-[Databases](cluster.md#databases). A connection starts in database 0, and `RESET` returns it to
-database 0.
+[Databases](cluster.md#databases). A connection starts in database 0.
 
 | Command | Behavior |
 | --- | --- |
 | `SELECT <db>` | Selects a database. A number outside the count returns `-ERR DB index is out of range`. |
-| `MOVE <key> <db>` | Moves a key to another database. It returns 0 if the destination holds the key. |
+| `MOVE <key> <db>` | Moves a key to another database. A destination that holds the key gives 0. |
 | `COPY <source> <destination> [DB <db>] [REPLACE]` | Copies a key, also into another database. |
 | `FLUSHDB` | Clears the selected database only. |
 | `FLUSHALL` | Clears every database. |
@@ -38,9 +37,11 @@ database 0.
 | `INFO keyspace` | Shows one `db<n>` line for each database that holds keys. |
 | `CONFIG GET databases` | Returns the count of the cluster. |
 
-While any member of the cluster lacks support for numbered databases, `SELECT` above 0, `MOVE`, and
-`COPY ... DB` return `-ERR multiple databases need every node to support them`. `MOVE` and `COPY`
-refuse counter keys. `COPY` to the same key in the same database returns
+Take a cluster with more than one database. If a member lacks support for numbered databases, then
+`SELECT` above 0, `MOVE`, and `COPY` return
+`-ERR multiple databases need every node to support them`.
+
+`MOVE` and `COPY` refuse counter keys. A `COPY` onto the same key in the same database returns
 `-ERR source and destination objects are the same`.
 
 ## Unsupported commands

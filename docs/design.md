@@ -1076,8 +1076,8 @@ same owners in every database.
   count rises again. The metric `discus.databases.dropped` counts the refused entries.
 - A joining node takes the larger count, unless it runs `--lower-databases`.
 - The capability bit `MULTI_DB` gates the feature (§13.3). A node without it cannot join a cluster
-  with more than one database. While any member lacks it, `SELECT` above 0, `MOVE`, and
-  `COPY ... DB` return `-ERR multiple databases need every node to support them`.
+  with more than one database. In such a cluster, while any member lacks it, `SELECT` above 0,
+  `MOVE`, and `COPY` return `-ERR multiple databases need every node to support them`.
 - `--membership static` refuses `--databases` above 1, because static nodes do not gossip.
 
 `docs/cluster.md` has the operator steps.
