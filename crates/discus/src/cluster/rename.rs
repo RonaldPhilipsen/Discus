@@ -16,18 +16,18 @@ use crate::command::{self, CommandError, CommandSpec};
 use crate::node::Node;
 use crate::telemetry;
 
-/// What each step of one `RENAME` shares.
-struct Steps {
-    node: Arc<Node>,
-    rr: u64,
-    /// The database of the `RENAME`. Both steps run in it.
-    db: u32,
-    writes: Option<Writes>,
-    hop: Hop,
+/// What each step of one `RENAME` or `COPY` shares.
+pub(super) struct Steps {
+    pub(super) node: Arc<Node>,
+    pub(super) rr: u64,
+    /// The database of the command. Each step of a `RENAME` runs in it.
+    pub(super) db: u32,
+    pub(super) writes: Option<Writes>,
+    pub(super) hop: Hop,
 }
 
 impl Steps {
-    async fn run(&self, spec: &'static CommandSpec, db: u32, cmd: Command) -> Reply {
+    pub(super) async fn run(&self, spec: &'static CommandSpec, db: u32, cmd: Command) -> Reply {
         let job = Job {
             cmd,
             spec,

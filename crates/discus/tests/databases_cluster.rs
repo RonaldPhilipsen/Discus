@@ -304,3 +304,131 @@ async fn info_keyspace_lists_each_database() {
     assert!(discus.contains("\r\ndatabases:3\r\n"), "{discus}");
     assert!(discus.contains("cluster_databases:"), "{discus}");
 }
+
+/// A cluster of `n` nodes with `extra` flags whose gate is open, so commands that change the
+/// database of a key run.
+async fn start_open(net: &Net, n: usize, extra: &[&str]) -> Vec<GossipNode> {
+    let nodes = net.start_agreed(n, extra).await;
+    for n in &nodes {
+        n.node.databases.open_gate();
+    }
+    nodes
+}
+
+const SAME: &str = "ERR source and destination objects are the same";
+
+#[tokio::test]
+async fn move_moves_a_key_to_another_database() {
+    let net = Net::new();
+    let nodes = start_open(&net, 3, &["--databases", "3", "--replication-factor", "2"]).await;
+    let a = &nodes[0].node;
+    let key = key_on(&nodes, 1, "mv");
+    assert_eq!(run_in(a, 0, &["SET", &key, "v"]).await, Value::ok());
+    assert_eq!(run_in(a, 0, &["MOVE", &key, "2"]).await, Value::Integer(1));
+    let owners = a.owners(key.as_bytes());
+    let owners: Vec<&GossipNode> = nodes.iter().filter(|n| owners.contains(&n.id)).collect();
+    assert_eq!(owners.len(), 2);
+    let moved = wait_until(TEN, || {
+        owners.iter().all(|n| holds(n, 2, &key)) && nodes.iter().all(|n| !holds(n, 0, &key))
+    })
+    .await;
+    assert!(moved, "the key is not in database 2 only on every owner");
+    assert_eq!(run_in(a, 2, &["GET", &key]).await, bulk("v"));
+}
+
+#[tokio::test]
+async fn move_refuses_a_live_destination() {
+    let net = Net::new();
+    let nodes = start_open(&net, 3, &["--databases", "3"]).await;
+    let a = &nodes[0].node;
+    let key = key_on(&nodes, 2, "mv");
+    assert_eq!(run_in(a, 0, &["SET", &key, "zero"]).await, Value::ok());
+    assert_eq!(run_in(a, 2, &["SET", &key, "two"]).await, Value::ok());
+    assert_eq!(run_in(a, 0, &["MOVE", &key, "2"]).await, Value::Integer(0));
+    assert_eq!(run_in(a, 0, &["GET", &key]).await, bulk("zero"));
+    assert_eq!(run_in(a, 2, &["GET", &key]).await, bulk("two"));
+}
+
+#[tokio::test]
+async fn move_edge_cases() {
+    let net = Net::new();
+    let nodes = start_open(&net, 3, &["--databases", "3"]).await;
+    let a = &nodes[0].node;
+    assert_eq!(run_in(a, 0, &["SET", "k", "v"]).await, Value::ok());
+    assert_eq!(run_in(a, 0, &["MOVE", "k", "0"]).await, Value::error(SAME));
+    assert_eq!(
+        run_in(a, 0, &["MOVE", "missing", "1"]).await,
+        Value::Integer(0)
+    );
+    assert_eq!(
+        run_in(a, 0, &["MOVE", "k", "3"]).await,
+        Value::error(discus::databases::OUT_OF_RANGE)
+    );
+    assert_eq!(
+        run_in(a, 0, &["MOVE", "k", "x"]).await,
+        Value::error("ERR value is not an integer or out of range")
+    );
+    assert_eq!(run_in(a, 0, &["GET", "k"]).await, bulk("v"));
+}
+
+fn pttl(v: Value) -> i64 {
+    let ms = int(v);
+    assert!(ms > 0, "no deadline: {ms}");
+    ms
+}
+
+#[tokio::test]
+async fn copy_across_slots_and_databases() {
+    let net = Net::new();
+    let nodes = start_open(&net, 3, &["--databases", "3"]).await;
+    let a = &nodes[0].node;
+    let src = key_on(&nodes, 1, "src");
+    let dst = key_on(&nodes, 2, "dst");
+    assert_eq!(
+        run_in(a, 0, &["HSET", &src, "f", "v"]).await,
+        Value::Integer(1)
+    );
+    assert_eq!(
+        run_in(a, 0, &["EXPIRE", &src, "100"]).await,
+        Value::Integer(1)
+    );
+    let copy = ["COPY", src.as_str(), dst.as_str(), "DB", "1"];
+    assert_eq!(run_in(a, 0, &copy).await, Value::Integer(1));
+    assert_eq!(run_in(a, 1, &["HGET", &dst, "f"]).await, bulk("v"));
+    assert_eq!(run_in(a, 1, &["HLEN", &dst]).await, Value::Integer(1));
+    let from = pttl(run_in(a, 0, &["PTTL", &src]).await);
+    let to = pttl(run_in(a, 1, &["PTTL", &dst]).await);
+    assert!((from - to).abs() <= 1000, "deadlines {from} and {to}");
+    assert_eq!(run_in(a, 0, &copy).await, Value::Integer(0));
+    let replace = ["COPY", src.as_str(), dst.as_str(), "DB", "1", "REPLACE"];
+    assert_eq!(run_in(a, 0, &replace).await, Value::Integer(1));
+    assert_eq!(
+        run_in(a, 0, &["HGET", &src, "f"]).await,
+        bulk("v"),
+        "COPY changed the source"
+    );
+}
+
+#[tokio::test]
+async fn copy_to_itself_is_refused() {
+    let net = Net::new();
+    let nodes = start_open(&net, 3, &["--databases", "3"]).await;
+    let a = &nodes[0].node;
+    assert_eq!(run_in(a, 0, &["SET", "k", "v"]).await, Value::ok());
+    assert_eq!(run_in(a, 0, &["COPY", "k", "k"]).await, Value::error(SAME));
+    assert_eq!(
+        run_in(a, 0, &["COPY", "k", "k", "DB", "1"]).await,
+        Value::Integer(1)
+    );
+    assert_eq!(run_in(a, 1, &["GET", "k"]).await, bulk("v"));
+}
+
+#[tokio::test]
+async fn swapdb_is_refused() {
+    let net = Net::new();
+    let nodes = start_open(&net, 1, &["--databases", "3"]).await;
+    assert_eq!(
+        run_in(&nodes[0].node, 0, &["SWAPDB", "0", "1"]).await,
+        Value::error("ERR SWAPDB is not allowed in cluster mode")
+    );
+}

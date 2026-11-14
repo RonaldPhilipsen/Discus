@@ -1,6 +1,6 @@
 //! Commands that only nodes of the cluster send to each other. They run the two halves of a
-//! `RENAME` whose keys have different primaries, and the counter part of a flush on the leader of
-//! a counter group.
+//! `RENAME` or a `COPY` whose keys have different primaries, and the counter part of a flush on
+//! the leader of a counter group.
 //!
 //! These specs stay out of the command table, so `prepare` never finds them for a client.
 
@@ -11,12 +11,13 @@ use discus_wire::{decode_frame, encode_frame, Batch, Frame, Limits, Message, Tra
 
 use super::error::CommandError;
 use super::table::CommandSpec;
-use super::util::admit;
+use super::util::{admit, upper};
 use crate::cluster::route::Route;
 use crate::node::{ConnState, Node};
 
 pub const TAKE: &CommandSpec = &CommandSpec::write("DISCUS.TAKE", 2, take);
-pub const PUT: &CommandSpec = &CommandSpec::write("DISCUS.PUT", 3, put);
+pub const PUT: &CommandSpec = &CommandSpec::write("DISCUS.PUT", -3, put);
+pub const PEEK: &CommandSpec = &CommandSpec::read("DISCUS.PEEK", 2, peek);
 
 /// `DISCUS.COUNTERFLUSH <group> <flush>`: run the flush `FLUSHALL` or `DISCUS.FLUSHDB` in the
 /// counter group `<group>`, in the database of the forward. A flush names no key, so the leader
@@ -25,7 +26,7 @@ pub const PUT: &CommandSpec = &CommandSpec::write("DISCUS.PUT", 3, put);
 pub const COUNTER_FLUSH: &CommandSpec =
     &CommandSpec::write("DISCUS.COUNTERFLUSH", 3, no_counters).with_route(Route::Local);
 
-const COMMANDS: &[&CommandSpec] = &[TAKE, PUT, COUNTER_FLUSH];
+const COMMANDS: &[&CommandSpec] = &[TAKE, PUT, PEEK, COUNTER_FLUSH];
 
 /// Look up an internal command by name, ignoring case. Only the forward path calls this.
 pub fn lookup_internal(name: &[u8]) -> Option<&'static CommandSpec> {
@@ -90,16 +91,37 @@ fn take(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     })
 }
 
-/// Write the entry that `DISCUS.TAKE` returned, with its deadline. The destination key takes a
-/// fresh version here.
+/// The entry at `cmd[1]`, encoded, or nil. An entry too large for one forward is refused.
+fn peek(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    let key = &cmd[1];
+    let Some(entry) = node.store.read(conn.db, key, |e| e.cloned()) else {
+        return Ok(Value::Null);
+    };
+    let blob = encode(node, DbKey::new(conn.db, key.clone()), entry);
+    if blob.len() > node.config.max_value_bytes {
+        return Err(CommandError::ValueTooLarge);
+    }
+    Ok(Value::bulk(blob))
+}
+
+/// Write the entry that `DISCUS.TAKE` or `DISCUS.PEEK` returned, with its deadline. The
+/// destination key takes a fresh version here. With `NX`, a live entry stays and the reply is nil.
 fn put(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    let nx = match &cmd[3..] {
+        [] => false,
+        [flag] if upper(flag) == "NX" => true,
+        _ => return Err(CommandError::Syntax),
+    };
     let entry = decode(node, &cmd[2])?;
     admit(
         node,
         estimate_size(&cmd[1], &entry).saturating_sub(ENTRY_OVERHEAD) as usize,
     )?;
-    node.write(conn.db, &cmd[1], node.stamp()?, |slot| {
+    Ok(node.write(conn.db, &cmd[1], node.stamp()?, |slot| {
+        if nx && slot.is_some() {
+            return Value::Null;
+        }
         slot.set(Some(Entry::new(entry.value, entry.expires_at_ms)));
-    });
-    Ok(Value::ok())
+        Value::ok()
+    }))
 }

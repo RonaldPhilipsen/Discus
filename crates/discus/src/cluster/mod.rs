@@ -1,5 +1,6 @@
 //! Routing: plan each command as local or forwarded, and run it (spec section 7).
 
+pub mod copy;
 pub mod forward;
 pub mod hold;
 pub mod multi;
@@ -450,6 +451,10 @@ pub fn run_hop(
         Route::Rename => {
             drop(route);
             rename::run(node, job, hop, writes)
+        }
+        Route::Copy => {
+            drop(route);
+            copy::run(node, job, hop, writes)
         }
         Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => {
             drop(route);

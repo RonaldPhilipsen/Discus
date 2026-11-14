@@ -6,6 +6,7 @@ use super::error::CommandError;
 use super::table::CommandSpec;
 use super::util::{admit, check_key, parse_i64, upper};
 use crate::cluster::route::Route;
+use crate::databases;
 use crate::node::{ConnState, Node};
 use discus_store::entry::{estimate_size, ENTRY_OVERHEAD};
 use discus_store::Entry;
@@ -19,6 +20,9 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::read("PTTL", 2, pttl),
     CommandSpec::write("PERSIST", 2, persist),
     CommandSpec::write("RENAME", 3, rename).with_route(Route::Rename),
+    CommandSpec::write("MOVE", 3, move_key),
+    CommandSpec::write("COPY", -3, copy).with_route(Route::Copy),
+    CommandSpec::connection("SWAPDB", 3, swapdb),
     CommandSpec::read("SCAN", -2, scan).with_route(Route::Local),
     CommandSpec::read("RANDOMKEY", 1, randomkey).with_route(Route::Local),
     CommandSpec::read("DBSIZE", 1, dbsize).with_route(Route::Fanout),
@@ -139,6 +143,115 @@ fn rename(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
         slot.set(Some(Entry::new(taken.value, taken.expires_at_ms)));
     });
     Ok(Value::ok())
+}
+
+fn same_objects() -> CommandError {
+    CommandError::Custom("ERR source and destination objects are the same".into())
+}
+
+/// Database `n` as a target. It must be below the cluster count, and this node must hold it.
+fn target_db(node: &Node, n: i64) -> Result<u32, CommandError> {
+    let count = node.databases.cluster().min(node.databases.local());
+    if n < 0 || n >= i64::from(count) {
+        return Err(CommandError::Custom(databases::OUT_OF_RANGE.into()));
+    }
+    Ok(n as u32)
+}
+
+/// Write `entry` at `key` in `db` with a fresh version. Without `replace`, a live entry stays.
+/// True if it wrote.
+fn place(
+    node: &Node,
+    db: u32,
+    key: &bytes::Bytes,
+    entry: Entry,
+    replace: bool,
+) -> Result<bool, CommandError> {
+    admit(
+        node,
+        estimate_size(key, &entry).saturating_sub(ENTRY_OVERHEAD) as usize,
+    )?;
+    Ok(node.write(db, key, node.stamp()?, |slot| {
+        if !replace && slot.is_some() {
+            return false;
+        }
+        slot.set(Some(Entry::new(entry.value, entry.expires_at_ms)));
+        true
+    }))
+}
+
+/// `MOVE key db`. Both databases hold the key in the same slot, so the primary does both writes.
+/// The destination goes first, so a failure between the writes keeps both copies and never
+/// loses the value.
+fn move_key(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    let key = &cmd[1];
+    let n = parse_i64(&cmd[2])?;
+    if n == i64::from(conn.db) {
+        return Err(same_objects());
+    }
+    let db = target_db(node, n)?;
+    node.databases.check_gate()?;
+    let Some(entry) = node.store.read(conn.db, key, |e| e.cloned()) else {
+        return Ok(Value::Integer(0));
+    };
+    let seen = entry.version;
+    if !place(node, db, key, entry, false)? {
+        return Ok(Value::Integer(0));
+    }
+    // A write that landed on the source after the read keeps it.
+    node.write(conn.db, key, node.stamp()?, |slot| {
+        if slot.as_ref().is_some_and(|e| e.version == seen) {
+            slot.set(None);
+        }
+    });
+    Ok(Value::Integer(1))
+}
+
+/// The options of `COPY source destination [DB db] [REPLACE]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CopyTarget {
+    pub db: u32,
+    pub replace: bool,
+}
+
+/// Parse and check `COPY` from database `db`, in the order of Valkey. The gate applies even
+/// without `DB`, because a member without it cannot run the steps of a `COPY`.
+pub(crate) fn copy_target(node: &Node, db: u32, cmd: &Command) -> Result<CopyTarget, CommandError> {
+    let mut target = CopyTarget { db, replace: false };
+    let mut i = 3;
+    while i < cmd.len() {
+        match upper(&cmd[i]).as_str() {
+            "REPLACE" => target.replace = true,
+            "DB" if i + 1 < cmd.len() => {
+                target.db = target_db(node, parse_i64(&cmd[i + 1])?)?;
+                i += 1;
+            }
+            _ => return Err(CommandError::Syntax),
+        }
+        i += 1;
+    }
+    node.databases.check_gate()?;
+    if target.db == db && cmd[1] == cmd[2] {
+        return Err(same_objects());
+    }
+    check_key(node, &cmd[2])?;
+    Ok(target)
+}
+
+/// `COPY` on a node without the cluster link. With the link, `cluster::copy` runs it.
+fn copy(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    let target = copy_target(node, conn.db, cmd)?;
+    let Some(entry) = node.store.read(conn.db, &cmd[1], |e| e.cloned()) else {
+        return Ok(Value::Integer(0));
+    };
+    let copied = place(node, target.db, &cmd[2], entry, target.replace)?;
+    Ok(Value::Integer(i64::from(copied)))
+}
+
+fn swapdb(_: &Node, _: &mut ConnState, _: &Command) -> Reply {
+    Err(CommandError::Custom(
+        "ERR SWAPDB is not allowed in cluster mode".into(),
+    ))
 }
 
 fn scan(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {

@@ -189,7 +189,6 @@ async fn every_entry_node_reaches_the_leader() {
 }
 
 #[tokio::test]
-#[ignore = "needs the MOVE and COPY commands"]
 async fn move_and_copy_on_a_counter_key_are_refused() {
     let net = common::gossip::Net::new();
     let nodes = net.start_agreed(1, &["--databases", "2"]).await;
