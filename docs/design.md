@@ -1178,7 +1178,9 @@ line. To move to it, install a new cluster. The cache starts empty.
   factor. With a policy that names other factors, a client with `tls` and no other factor gets
   `-NOAUTH`.
 - A shared token grants read-write by default and is meant for simple setups. An mTLS-only client
-  gets the scope configured for its certificate identity, read-write by default.
+  gets read-write when no certificate rule exists. With at least one rule, the client gets the
+  scope of the first rule that matches its certificate identity. An identity that matches no rule
+  does not have the `mtls` factor.
 - Each node authenticates its own client connections. A cluster client opens a connection to each
   node and authenticates on each one. The limiter of failed attempts counts per node.
 - Authorization runs before the redirect rule. A command that the scopes deny returns `-NOPERM`,

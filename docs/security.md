@@ -198,8 +198,9 @@ Connection commands need a login but no scope. They are `PING`, `ECHO`, `QUIT`, 
 Each factor grants scopes:
 
 - The shared token grants `discus.read` and `discus.write`.
-- A client certificate grants the scopes of its first matching `[[client_cert]]` rule. Without a
-  match it grants `discus.read` and `discus.write`.
+- A client certificate grants `discus.read` and `discus.write` when the `--auth-config` file has
+  no `[[client_cert]]` rule. With at least one rule, it grants the scopes of its first matching
+  rule. A certificate that matches no rule gives no `mtls` factor.
 - A token grants the scopes in its claims, or the scopes of its `sub` rule.
 
 With an `all` policy, the client gets only the scopes that every identity factor grants. With an
@@ -212,6 +213,11 @@ Client certificate rules go in the `--auth-config` file. A trailing `*` matches 
 identity = "spiffe://example.org/ns/reporting/*"
 scopes = ["discus.read"]
 ```
+
+With this file, a client whose certificate identity does not start with
+`spiffe://example.org/ns/reporting/` does not have the `mtls` factor. Discus keeps the TLS
+connection open, so the client can still log in with another factor that the policy accepts. Add
+a rule for each identity that needs access.
 
 ## Commands from other nodes
 
