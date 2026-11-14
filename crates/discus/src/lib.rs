@@ -15,6 +15,7 @@ pub mod profiling;
 pub mod replication;
 pub mod security;
 pub mod server;
+pub mod settings;
 pub mod telemetry;
 
 pub use config::{Config, LeaseKind, MembershipMode, Peer, TopologyMode};
