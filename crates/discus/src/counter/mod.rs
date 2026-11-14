@@ -646,17 +646,34 @@ impl Counters {
     /// leader moves, so the purge tick calls this again with the cluster count, and a later
     /// leader finishes the drop. The tick never uses the local count: a joiner can hold fewer
     /// databases than the cluster serves, and clients still reach the ones below the cluster
-    /// count.
+    /// count. A group with a replica that does not advertise `MULTI_DB` keeps them until a later
+    /// tick.
     pub async fn drop_databases_from(self: &Arc<Self>, node: &Arc<Node>, count: u32) {
         let flush: Command = vec![bytes::Bytes::from_static(state::FLUSH_ONE_DB)];
         for group in &self.groups {
             if self.leader(group.g) != Some(node.id) {
                 continue;
             }
-            for db in group.role().led_databases() {
-                if db < count {
-                    continue;
-                }
+            let role = group.role();
+            let databases: Vec<u32> = role
+                .led_databases()
+                .into_iter()
+                .filter(|db| *db >= count)
+                .collect();
+            if databases.is_empty() {
+                continue;
+            }
+            // A replica of an older build cannot decode `DISCUS.FLUSHDB` in its log. The next
+            // purge tick tries again, when the replicas may have changed.
+            if let Some(old) = role.replicas().into_iter().find(|r| !node.multi_db(*r)) {
+                tracing::warn!(
+                    group = group.g,
+                    replica = %old,
+                    "the counters of a dropped database stay: a replica does not support multiple databases"
+                );
+                continue;
+            }
+            for db in databases {
                 if let Err(refusal) = self.execute(group.g, db, Kind::FlushOneDb, &flush).await {
                     tracing::warn!(
                         group = group.g,

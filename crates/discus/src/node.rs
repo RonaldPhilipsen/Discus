@@ -322,6 +322,11 @@ impl Node {
         self.membership.get()
     }
 
+    /// Gossip shows that `id` advertises `MULTI_DB`. Without gossip, no node does.
+    pub fn multi_db(&self, id: NodeId) -> bool {
+        self.membership().is_some_and(|m| m.multi_db(id))
+    }
+
     /// The client address that this node advertises, when it is known.
     pub fn client_addr(&self) -> Option<SocketAddr> {
         self.client_addr.get().copied()

@@ -434,6 +434,11 @@ impl Membership {
         self.inner.lock().swim.members()
     }
 
+    /// `id` advertises `MULTI_DB`. A node without a record does not.
+    pub fn multi_db(&self, id: NodeId) -> bool {
+        self.inner.lock().swim.multi_db(id)
+    }
+
     pub fn liveness(&self, id: NodeId) -> Option<Liveness> {
         self.inner.lock().swim.liveness(id)
     }

@@ -408,6 +408,56 @@ async fn dropped_databases_lose_their_counters() {
     assert!(all_hold_in(&nodes, 0, &key, Some("1")).await);
 }
 
+/// A follower without `MULTI_DB` cannot decode `DISCUS.FLUSHDB`, so a leader keeps the counters
+/// of a dropped database while that follower replicates its group.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drop_skips_a_group_with_a_replica_without_multi_db() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let old_flags: Vec<&str> = DB2
+        .iter()
+        .chain(&["--test-without-multi-db"])
+        .copied()
+        .collect();
+    let (old, old_gate) = join(&net, &leases, socket().0, &[], &old_flags).await;
+    assert!(wait_until(Duration::from_secs(10), || old.is_normal()).await);
+    let (new, _) = join_to(&net, &leases, &[&old], DB2).await;
+    let both = [&old, &new];
+    wait_agreed(&both, Duration::from_secs(10)).await;
+    assert!(
+        wait_until(Duration::from_secs(10), || settled(&both)).await,
+        "the groups did not settle"
+    );
+    // The leader must be the node of this build, so the old node holds the log as a follower.
+    if role(&old, 0) == "leader" {
+        old_gate.store(false, Ordering::Relaxed);
+    }
+    assert!(
+        wait_until(Duration::from_secs(30), || role(&new, 0) == "leader"
+            && status(&new, 0).follower == Some(old.id)
+            && status(&old, 0).synced)
+        .await,
+        "the node of this build did not lead group 0 with the old node as its follower"
+    );
+    let key = key_of_group(&new, 0);
+    let counters = new.node.counters().unwrap();
+    let incr = vec![Bytes::from_static(b"INCR"), Bytes::from(key.clone())];
+    assert_eq!(
+        counters.execute(0, 1, Kind::Incr, &incr).await,
+        Ok(Value::Integer(1))
+    );
+    assert!(
+        wait_until(Duration::from_secs(10), || held_in(&old, 1, &key)
+            .as_deref()
+            == Some("1"))
+        .await,
+        "the follower did not get the counter"
+    );
+    counters.drop_databases_from(&new.node, 1).await;
+    for n in both {
+        assert_eq!(held_in(n, 1, &key).as_deref(), Some("1"), "{}", n.id);
+    }
+}
+
 /// Counters of a database above the local count stay on a group whose leader missed the drop.
 /// The next leader removes them on its purge tick.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

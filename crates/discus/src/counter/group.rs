@@ -67,6 +67,20 @@ impl Role {
         }
     }
 
+    /// The other nodes that replicate the log of this leader: the LF follower, or the Raft voters
+    /// and learners. Empty if this role does not lead.
+    pub(super) fn replicas(&self) -> Vec<NodeId> {
+        match self {
+            Role::Leader(l) if l.serving() => l.follower().into_iter().collect(),
+            Role::Raft(r) if r.leads() => {
+                let mut nodes = r.replica.voter_nodes();
+                nodes.extend(r.replica.learner_nodes());
+                nodes
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// True when this role leads its group and holds a key that expired by `now_ms`.
     pub(super) fn leads_expired(&self, now_ms: u64) -> bool {
         match self {
