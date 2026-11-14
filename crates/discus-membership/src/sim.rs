@@ -269,7 +269,7 @@ impl Sim {
             ..self.cfg.clone()
         };
         f(&mut info, &mut cfg);
-        let served = info.databases;
+        let served = 1;
         let node = SimNode {
             swim: Swim::new(cfg, info),
             host: SimHost::new(id),

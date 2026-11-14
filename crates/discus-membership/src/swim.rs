@@ -156,7 +156,10 @@ pub struct Swim {
     evidence_dropped: u64,
     /// Whether the multiplier was at or above the evidence cutoff at the last change.
     shedding: bool,
-    /// The database count that this node serves, from [`Swim::served_databases`].
+    /// The database count that this node serves, from [`Swim::served_databases`]. It starts at
+    /// 1, not at the own count: a higher count applies at once, so the first known view raises
+    /// it, and the dwell then only keeps a count that the cluster really served. Starting at the
+    /// own count would serve databases for the dwell that the cluster then deletes.
     served: u32,
     lowering: Option<Lowering>,
 }
@@ -165,7 +168,6 @@ impl Swim {
     /// A node that is not in a cluster yet. It starts seeking at its first tick.
     pub fn new(cfg: SwimConfig, me: MemberInfo) -> Swim {
         let rng = fastrand::Rng::with_seed(cfg.seed);
-        let served = me.databases;
         Swim {
             health: LocalHealth::new(&cfg),
             cfg,
@@ -198,7 +200,7 @@ impl Swim {
             last_epoch: None,
             limiter: JoinLimiter::default(),
             detector_n: 1,
-            served,
+            served: 1,
             lowering: None,
         }
     }

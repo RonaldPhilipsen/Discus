@@ -49,6 +49,16 @@ impl Databases {
         }
     }
 
+    /// A node with membership: it serves database 0 only, with the gate closed, until the first
+    /// membership view. Until then it does not know the cluster count, and a write to a database
+    /// that the cluster does not serve would be deleted by the drop that follows.
+    pub fn awaiting_view(local: u32, lower: bool) -> Databases {
+        let dbs = Databases::new(local, lower);
+        dbs.cluster.store(1, Ordering::Relaxed);
+        dbs.multi_db.store(false, Ordering::Relaxed);
+        dbs
+    }
+
     pub fn local(&self) -> u32 {
         self.local.load(Ordering::Relaxed)
     }
@@ -229,6 +239,18 @@ mod tests {
         assert!(!dbs.holds(2));
         assert_eq!(dbs.set_view(3, true), None);
         assert!(dbs.holds(2));
+    }
+
+    #[test]
+    fn a_node_with_membership_serves_one_database_until_the_first_view() {
+        let dbs = Databases::awaiting_view(3, false);
+        assert_eq!(dbs.local(), 3);
+        assert_eq!(dbs.cluster(), 1);
+        assert!(!dbs.multi_db());
+        assert_eq!(dbs.check_select(2), err(OUT_OF_RANGE));
+        assert!(dbs.holds(2));
+        assert_eq!(dbs.set_view(3, true), None);
+        assert_eq!(dbs.check_select(2), Ok(2));
     }
 
     #[test]

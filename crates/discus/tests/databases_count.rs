@@ -98,6 +98,21 @@ async fn wait_out_of_range(nodes: &[&GossipNode], db: i64) -> bool {
     }
 }
 
+/// True if `SELECT db` stays out of range on every node of `nodes` for all of `window`. A single
+/// poll can pass before the change under test reaches a node, so this keeps asking.
+async fn stays_out_of_range(nodes: &[&GossipNode], db: i64, window: Duration) -> bool {
+    let end = tokio::time::Instant::now() + window;
+    while tokio::time::Instant::now() < end {
+        for n in nodes {
+            if !selects_out_of_range(n, db).await {
+                return false;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    true
+}
+
 async fn wait_idle(nodes: &[&GossipNode]) {
     let idle = wait_until(LONG, || {
         nodes.iter().all(|n| {
@@ -188,12 +203,28 @@ async fn a_rolling_replacement_from_one_to_three_keeps_database_zero() {
         let seeds: Vec<_> = nodes.iter().map(|n| n.cluster_addr).collect();
         let fresh = net.start(&seeds, &["--databases", "3"]).await;
         nodes.push(fresh);
+        // The fresh node holds 3, but the old nodes hold 1, so the cluster count is 1. A write to
+        // database 2 on the fresh node would be lost.
+        assert!(
+            stays_out_of_range(&refs(&nodes), 2, Duration::from_secs(3)).await,
+            "SELECT 2 opened while the fresh node joined"
+        );
         wait_agreed(&refs(&nodes), LONG).await;
         wait_idle(&refs(&nodes)).await;
+        assert!(
+            stays_out_of_range(&refs(&nodes), 2, Duration::from_secs(3)).await,
+            "SELECT 2 opened while an old node is a member"
+        );
         let old = nodes.remove(0);
         old.shutdown.cancel();
         wait_agreed(&refs(&nodes), LONG).await;
         wait_idle(&refs(&nodes)).await;
+        if nodes.iter().any(|n| n.node.databases.local() == 1) {
+            assert!(
+                stays_out_of_range(&refs(&nodes), 2, Duration::from_secs(3)).await,
+                "SELECT 2 opened while an old node is a member"
+            );
+        }
     }
 
     let mut got = 0;

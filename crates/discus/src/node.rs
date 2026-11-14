@@ -259,7 +259,11 @@ impl Node {
             config.max_memory / 100 * config.write_set_memory_percent,
             Some(store.clone()),
         ));
-        let databases = Arc::new(Databases::new(config.databases, config.lower_databases));
+        let databases = Arc::new(if config.gossip_enabled() {
+            Databases::awaiting_view(config.databases, config.lower_databases)
+        } else {
+            Databases::new(config.databases, config.lower_databases)
+        });
         Node {
             config,
             id,

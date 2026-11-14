@@ -192,6 +192,9 @@ fn the_cluster_count_is_the_smallest_normal_count() {
     sim.run_ms(1_000);
     for &o in &ids {
         assert_eq!(sim.cluster_databases(o), Some(1), "{o}");
+        // A node never serves its own count before the cluster does: a write to database 2
+        // there would be deleted when the lower count applies.
+        assert_eq!(sim.served_databases(o), 1, "{o}");
     }
     sim.set_databases(ids[2], 3);
     assert_eq!(sim.node(ids[2]).swim.me().databases, 3);
@@ -199,7 +202,6 @@ fn the_cluster_count_is_the_smallest_normal_count() {
         ids.iter()
             .all(|&o| s.cluster_databases(o) == Some(3) && s.served_databases(o) == 3)
     });
-    // The count was 1 for less than the dwell, so the nodes that started with 3 kept theirs.
     no_drops(&sim, &ids);
 }
 
