@@ -245,6 +245,15 @@ impl Security {
         if oauth.is_empty() {
             return fail("the policy uses oauth2, but --auth-config lists no trusted issuer");
         }
+        #[cfg(all(feature = "testing", feature = "oauth2-introspection"))]
+        let oauth = match args.test_introspection_cache_secs {
+            Some(secs) => {
+                let mut oauth = oauth;
+                oauth.set_introspection_cache_secs(secs);
+                oauth
+            }
+            None => oauth,
+        };
         Ok(Some(oauth))
     }
 
@@ -316,18 +325,24 @@ impl Security {
             tracing::debug!("admin bearer token over plaintext refused");
             return false;
         }
+        // A source over its failed-attempt limit never reaches the identity provider.
+        if peer.addr.is_some_and(|ip| self.limiter.blocked(ip)) {
+            tracing::debug!("admin bearer token refused, the source is over its limit");
+            return false;
+        }
         #[cfg(feature = "oauth2")]
         if let Some(o) = &self.oauth {
             o.prefetch(token.as_bytes()).await;
-            return match o.check(token.as_bytes(), oauth2::unix_now()) {
-                Ok(c) => c.scopes.is_admin(),
-                Err(reject) => {
-                    tracing::debug!(reason = %reject, "admin token refused");
-                    false
-                }
-            };
+            match o.check(token.as_bytes(), oauth2::unix_now()) {
+                Ok(c) if c.scopes.is_admin() => return true,
+                Ok(_) => tracing::debug!("admin token refused, it has no discus.admin scope"),
+                Err(reject) => tracing::debug!(reason = %reject, "admin token refused"),
+            }
         }
         let _ = token;
+        if let Some(ip) = peer.addr {
+            self.limiter.record(ip);
+        }
         false
     }
 
@@ -355,21 +370,30 @@ impl Security {
         }
     }
 
-    /// True for a command that `prefetch` must see before it runs.
-    pub fn wants_prefetch(&self, cmd: &discus_resp::Command) -> bool {
+    /// True for a command that `prefetch` must see before it runs, and for every command of a
+    /// connection whose introspected grant is due for a recheck. A connection without such a
+    /// grant pays only the `Option` test, and one with such a grant pays a clock read.
+    pub fn wants_prefetch(&self, conn: &ConnState, cmd: &discus_resp::Command) -> bool {
         #[cfg(feature = "oauth2")]
         if self.oauth.is_some() {
+            #[cfg(feature = "oauth2-introspection")]
+            if recheck_due(conn) {
+                return true;
+            }
             let name = &cmd[0];
             return name.eq_ignore_ascii_case(b"AUTH") || name.eq_ignore_ascii_case(b"HELLO");
         }
-        let _ = cmd;
+        let _ = (conn, cmd);
         false
     }
 
     /// The async part of `AUTH` and `HELLO ... AUTH`: refresh the JWKS on an unknown `kid`, so
     /// the synchronous handler finds the key.
     /// A source over its failed-attempt limit never reaches the identity provider.
-    pub async fn prefetch(&self, conn: &ConnState, cmd: &discus_resp::Command) {
+    /// Before that, it introspects again the opaque token of a grant that is due.
+    pub async fn prefetch(&self, conn: &mut ConnState, cmd: &discus_resp::Command) {
+        #[cfg(feature = "oauth2-introspection")]
+        self.refresh_grant(conn).await;
         #[cfg(feature = "oauth2")]
         if let (Some(o), Some(token)) = (&self.oauth, token_arg(cmd)) {
             if conn.auth.peer.is_some_and(|ip| self.limiter.blocked(ip)) {
@@ -378,6 +402,40 @@ impl Security {
             o.prefetch(token).await;
         }
         let _ = (conn, cmd);
+    }
+
+    /// Introspect the opaque token of a due grant again, and drop the grant unless the answer
+    /// says the token is active. No answer also drops the grant: a provider that is unreachable
+    /// cannot confirm that the token is not revoked, so the node fails closed.
+    ///
+    /// The failed-attempt limit does not apply here. The grant came from a valid token, and
+    /// each token costs at most one request per cache time.
+    #[cfg(feature = "oauth2-introspection")]
+    async fn refresh_grant(&self, conn: &mut ConnState) {
+        let Some(o) = &self.oauth else {
+            return;
+        };
+        if !recheck_due(conn) {
+            return;
+        }
+        let Some(raw) = conn.auth.token.as_ref().map(|t| t.raw.clone()) else {
+            return;
+        };
+        o.prefetch(&raw).await;
+        match o.check(&raw, oauth2::unix_now()) {
+            Ok(c) => {
+                if let Some(t) = conn.auth.token.as_mut() {
+                    t.exp = c.exp;
+                    t.nbf = c.nbf;
+                    t.scopes = c.scopes;
+                    t.recheck = c.recheck;
+                }
+            }
+            Err(reject) => {
+                tracing::debug!(conn = conn.id, reason = %reject, "token no longer active");
+                conn.auth.token = None;
+            }
+        }
     }
 
     /// The grant of a verified certificate identity. Read-write without a matching rule.
@@ -513,6 +571,7 @@ impl Security {
                         scopes: claims.scopes,
                         // An introspected token has no JWKS to check against again.
                         generation: oauth2::is_jwt(token).then_some(generation),
+                        recheck: claims.recheck,
                     });
                     Ok(())
                 }
@@ -597,6 +656,17 @@ impl Security {
     }
 }
 
+/// True when the connection holds an introspected grant whose answer ended. Only such a grant
+/// reads the clock.
+#[cfg(feature = "oauth2-introspection")]
+fn recheck_due(conn: &ConnState) -> bool {
+    conn.auth
+        .token
+        .as_ref()
+        .and_then(|t| t.recheck)
+        .is_some_and(|at| oauth2::unix_now() > at)
+}
+
 /// The token of `AUTH [user] <token>` or `HELLO ... AUTH <user> <token>`.
 #[cfg(feature = "oauth2")]
 fn token_arg(cmd: &discus_resp::Command) -> Option<&[u8]> {
@@ -606,6 +676,10 @@ fn token_arg(cmd: &discus_resp::Command) -> Option<&[u8]> {
             2 | 3 => Some(&cmd[cmd.len() - 1]),
             _ => None,
         };
+    }
+    // `prefetch` also runs for other commands when a grant is due. Their arguments are data.
+    if !name.eq_ignore_ascii_case(b"HELLO") {
+        return None;
     }
     (1..cmd.len())
         .find(|&i| cmd[i].eq_ignore_ascii_case(b"AUTH") && i + 2 < cmd.len())
