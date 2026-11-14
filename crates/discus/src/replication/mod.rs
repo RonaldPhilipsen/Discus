@@ -1253,6 +1253,30 @@ mod tests {
     }
 
     #[test]
+    fn a_partial_raise_keeps_refusing_the_databases_above_it() {
+        let config = crate::Config::parse_from(["discus", "--databases", "3"]).unwrap();
+        let live = crate::settings::Live::new(crate::settings::Reloadable::from_config(&config));
+        let security = Arc::new(crate::security::tests::security(&[]));
+        let node = Arc::new(Node::new(config, security, live));
+        let r = Replicator::new(&node);
+        let entry = |db: u32| {
+            let e = Entry {
+                version: node.stamp().unwrap(),
+                ..Entry::new(Value::Str("v".into()), None)
+            };
+            vec![(DbKey::new(db, &b"k"[..]), e)]
+        };
+        assert_eq!(node.databases.set_view(1, true), Some(1));
+        assert_eq!(node.databases.set_view(2, true), None);
+        assert_eq!(r.apply_entries(&node, entry(1)), 1);
+        assert_eq!(r.apply_entries(&node, entry(2)), 0);
+        assert_eq!(node.store.db_len(2), 0);
+        assert_eq!(node.databases.set_view(3, true), None);
+        assert_eq!(r.apply_entries(&node, entry(2)), 1);
+        assert_eq!(node.store.db_len(2), 1);
+    }
+
+    #[test]
     fn a_refill_page_crosses_databases() {
         let (me, peer) = (NodeId::from_u128(1), NodeId::from_u128(2));
         let id = EpochId {

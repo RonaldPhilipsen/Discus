@@ -26,7 +26,7 @@ pub struct Databases {
     /// The lowest count that a drop applied on this node, `u32::MAX` for none. Inbound data at
     /// or above it is refused: nodes end the dwell of a lower count at different times, so a
     /// peer that still serves the old count can send entries that nobody could read here. A
-    /// later view above the floor lifts it.
+    /// later raise moves it up to the new count, and a count that reaches `local` clears it.
     floor: AtomicU32,
     /// `--lower-databases`: a joiner keeps its own count instead of the larger cluster count.
     lower: bool,
@@ -104,8 +104,15 @@ impl Databases {
             self.floor.fetch_min(cluster, Ordering::Relaxed);
             return Some(cluster);
         }
+        // A raise moves the floor up to the new count only: the databases between the new count
+        // and `local` were dropped too, and clients still cannot reach them.
         if cluster > self.floor.load(Ordering::Relaxed) {
-            self.floor.store(u32::MAX, Ordering::Relaxed);
+            let floor = if cluster >= self.local() {
+                u32::MAX
+            } else {
+                cluster
+            };
+            self.floor.store(floor, Ordering::Relaxed);
         }
         None
     }
@@ -243,6 +250,17 @@ mod tests {
         assert_eq!(dbs.set_view(3, true), None);
         assert!(dbs.holds(1) && dbs.holds(2));
         assert!(!dbs.holds(3));
+    }
+
+    #[test]
+    fn a_partial_raise_moves_the_floor_to_the_new_count() {
+        let dbs = Databases::new(3, false);
+        assert_eq!(dbs.set_view(1, true), Some(1));
+        assert_eq!(dbs.set_view(2, true), None);
+        assert!(dbs.holds(1));
+        assert!(!dbs.holds(2));
+        assert_eq!(dbs.set_view(3, true), None);
+        assert!(dbs.holds(2));
     }
 
     #[test]
