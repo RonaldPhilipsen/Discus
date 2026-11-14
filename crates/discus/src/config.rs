@@ -132,8 +132,8 @@ pub struct Config {
     /// Number of owners per key: the primary plus its secondaries. At least 1.
     #[arg(long, default_value_t = discus_placement::DEFAULT_RF, value_parser = parse_rf)]
     pub replication_factor: usize,
-    /// The number of databases that clients can select, as `databases` in Valkey. Above 1 needs
-    /// gossip membership.
+    /// The number of databases that clients can select with `SELECT`, as in Valkey. Above 1
+    /// needs gossip membership.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=65536))]
     pub databases: u32,
     /// Keep this node's `--databases` when it joins a cluster with more databases. The cluster
