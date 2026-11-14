@@ -110,8 +110,9 @@ impl Live {
 
     /// Stores `next` and returns the keys that changed. The generation grows only on a change.
     pub fn apply(&self, next: Reloadable) -> Vec<&'static str> {
-        let previous = self.current.swap(Arc::new(next));
-        let changed = previous.changed(&self.current.load());
+        let next = Arc::new(next);
+        let previous = self.current.swap(next.clone());
+        let changed = previous.changed(&next);
         if !changed.is_empty() {
             self.generation.fetch_add(1, Ordering::AcqRel);
         }
