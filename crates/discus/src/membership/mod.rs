@@ -220,7 +220,7 @@ impl Membership {
             max: node.config.max_memory,
         };
         let now = self.now();
-        let (actions, mine, cluster, multi_db) = self.drive(|swim, host| {
+        let (actions, mine, served, multi_db) = self.drive(|swim, host| {
             swim.set_capacity(capacity);
             swim.observe_lag(node.lag().lag_ms());
             let actions = swim.tick(now, host);
@@ -228,13 +228,13 @@ impl Membership {
             (
                 actions,
                 swim.me().databases,
-                swim.cluster_databases(&epoch),
+                swim.served_databases(now, &epoch),
                 swim.all_multi_db(&epoch),
             )
         });
         self.dispatch(actions);
         node.databases.raise_local(mine);
-        if let Some(n) = node.databases.set_view(cluster, multi_db) {
+        if let Some(n) = node.databases.set_view(served, multi_db) {
             node.drop_databases_from(n);
         }
         let count = normal_count(node.epochs().current());

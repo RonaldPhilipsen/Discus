@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use discus_membership::sim::Sim;
-use discus_membership::SwimConfig;
+use discus_membership::{SwimConfig, DATABASES_DWELL_MS};
 use discus_placement::NodeId;
 use discus_wire::{caps, Gossip, GossipKind, Liveness, MemberInfo};
 
@@ -166,6 +166,16 @@ fn placed(sim: &Sim, ids: &[NodeId], j: NodeId) -> bool {
     ids.iter().all(|&o| sim.epoch(o).is_normal(j))
 }
 
+fn no_drops(sim: &Sim, ids: &[NodeId]) {
+    for &o in ids {
+        assert!(
+            sim.database_drops(o).is_empty(),
+            "{o} dropped {:?}",
+            sim.database_drops(o)
+        );
+    }
+}
+
 #[test]
 fn the_cluster_count_is_the_smallest_normal_count() {
     let mut sim = Sim::new(7, SwimConfig::fast());
@@ -176,11 +186,16 @@ fn the_cluster_count_is_the_smallest_normal_count() {
     });
     sim.run_ms(1_000);
     for &o in &ids {
-        assert_eq!(sim.cluster_databases(o), 1, "{o}");
+        assert_eq!(sim.cluster_databases(o), Some(1), "{o}");
     }
     sim.set_databases(ids[2], 3);
     assert_eq!(sim.node(ids[2]).swim.me().databases, 3);
-    sim.run_until(10_000, |s| ids.iter().all(|&o| s.cluster_databases(o) == 3));
+    sim.run_until(10_000, |s| {
+        ids.iter()
+            .all(|&o| s.cluster_databases(o) == Some(3) && s.served_databases(o) == 3)
+    });
+    // The count was 1 for less than the dwell, so the nodes that started with 3 kept theirs.
+    no_drops(&sim, &ids);
 }
 
 #[test]
@@ -194,19 +209,23 @@ fn a_joiner_takes_the_larger_count() {
     sim.run_until(30_000, |s| {
         lowest = ids
             .iter()
-            .map(|&o| s.cluster_databases(o))
+            .filter_map(|&o| s.cluster_databases(o))
             .fold(lowest, u32::min);
         s.is_normal(j) && placed(s, &ids, j)
     });
     assert_eq!(sim.node(j).swim.me().databases, 3);
     assert_eq!(lowest, 3, "the cluster count dropped during the join");
-    for &o in ids.iter().chain([&j]) {
-        assert_eq!(sim.cluster_databases(o), 3, "{o}");
+    sim.run_ms(DATABASES_DWELL_MS * 2);
+    let all: Vec<NodeId> = ids.iter().copied().chain([j]).collect();
+    for &o in &all {
+        assert_eq!(sim.cluster_databases(o), Some(3), "{o}");
+        assert_eq!(sim.served_databases(o), 3, "{o}");
     }
+    no_drops(&sim, &all);
 }
 
 #[test]
-fn a_lower_databases_joiner_keeps_its_count() {
+fn a_lower_databases_joiner_lowers_the_count_after_the_dwell() {
     let mut sim = Sim::new(9, SwimConfig::fast());
     let ids = sim.cluster_with(3, multi_db(3));
     sim.run_ms(1_000);
@@ -215,11 +234,96 @@ fn a_lower_databases_joiner_keeps_its_count() {
         cfg.lower_databases = true;
     });
     sim.start(j, &[ids[1]]);
-    sim.run_until(30_000, |s| s.is_normal(j) && placed(s, &ids, j));
-    assert_eq!(sim.node(j).swim.me().databases, 1);
-    sim.run_until(10_000, |s| {
-        ids.iter().chain([&j]).all(|&o| s.cluster_databases(o) == 1)
+    let mut first_seen: Vec<Option<u64>> = vec![None; ids.len()];
+    let mut see = |s: &Sim| {
+        for (i, &o) in ids.iter().enumerate() {
+            if first_seen[i].is_none() && s.cluster_databases(o) == Some(1) {
+                first_seen[i] = Some(s.now());
+            }
+        }
+    };
+    sim.run_until(30_000, |s| {
+        see(s);
+        s.is_normal(j) && placed(s, &ids, j)
     });
+    assert_eq!(sim.node(j).swim.me().databases, 1);
+    sim.run_until(DATABASES_DWELL_MS * 3, |s| {
+        see(s);
+        ids.iter().chain([&j]).all(|&o| s.served_databases(o) == 1)
+    });
+    for (i, &o) in ids.iter().enumerate() {
+        let seen = first_seen[i].expect("the node saw the lower count");
+        let drops = sim.database_drops(o);
+        assert_eq!(drops.len(), 1, "{o}: {drops:?}");
+        let (at, count) = drops[0];
+        assert_eq!(count, 1);
+        assert!(
+            at - seen >= DATABASES_DWELL_MS,
+            "{o} dropped {} ms after it saw the lower count",
+            at - seen
+        );
+    }
+}
+
+#[test]
+fn a_dip_shorter_than_the_dwell_drops_nothing() {
+    let mut sim = Sim::new(14, SwimConfig::fast());
+    let ids = sim.cluster_with(3, multi_db(3));
+    sim.run_ms(1_000);
+    let j = sim.add_node_with(|info, cfg| {
+        multi_db(1)(0, info, cfg);
+        cfg.lower_databases = true;
+    });
+    sim.start(j, &[ids[1]]);
+    sim.run_until(30_000, |s| {
+        s.is_normal(j) && ids.iter().any(|&o| s.cluster_databases(o) == Some(1))
+    });
+    let dip = sim.now();
+    sim.kill(j);
+    sim.run_until(DATABASES_DWELL_MS, |s| {
+        ids.iter().all(|&o| s.cluster_databases(o) == Some(3))
+    });
+    assert!(sim.now() - dip < DATABASES_DWELL_MS);
+    sim.run_ms(DATABASES_DWELL_MS * 2);
+    for &o in &ids {
+        assert_eq!(sim.served_databases(o), 3, "{o}");
+    }
+    no_drops(&sim, &ids);
+}
+
+#[test]
+fn a_member_without_a_record_keeps_the_view() {
+    use discus_placement::{Epoch, EpochId, Member, MemberState, Weight};
+
+    let mut sim = Sim::new(15, SwimConfig::fast());
+    let ids = sim.cluster_with(3, multi_db(3));
+    sim.run_ms(1_000);
+    let current = sim.epoch(ids[0]);
+    let unknown = NodeId::from_u128(u128::MAX);
+    let addr = "10.9.9.9:7379".parse().unwrap();
+    let mut members = current.members().to_vec();
+    members.push(Member {
+        id: unknown,
+        addr,
+        rpc_addr: addr,
+        client_addr: None,
+        client_host: None,
+        state: MemberState::Normal,
+        weight: Weight::default(),
+    });
+    let id = EpochId {
+        generation: current.id().generation + 1,
+        origin: ids[0],
+    };
+    let epoch = Epoch::new(id, current.cluster_id(), members).unwrap();
+    sim.adopt(ids[0], epoch);
+    assert!(sim.epoch(ids[0]).is_normal(unknown));
+    assert_eq!(sim.cluster_databases(ids[0]), None);
+    sim.run_ms(DATABASES_DWELL_MS * 2);
+    for &o in &ids {
+        assert_eq!(sim.served_databases(o), 3, "{o}");
+    }
+    no_drops(&sim, &ids);
 }
 
 /// Ask `member` to admit `j` with one `JOIN`, as the joiner would.
@@ -250,7 +354,7 @@ fn a_node_without_multi_db_cannot_join_a_multi_database_cluster() {
     assert!(!sim.is_normal(j));
     for &o in &ids {
         assert!(sim.epoch(o).member(j).is_none(), "{o} placed the joiner");
-        assert_eq!(sim.cluster_databases(o), 3);
+        assert_eq!(sim.cluster_databases(o), Some(3));
     }
 
     let mut sim = Sim::new(11, SwimConfig::fast());

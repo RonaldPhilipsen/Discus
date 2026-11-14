@@ -118,6 +118,10 @@ pub struct SimNode {
     /// The cluster ID that this node mints if it wins the lease.
     candidate: ClusterId,
     next_renew: Millis,
+    /// The database count from [`Swim::served_databases`] after the last tick.
+    served: u32,
+    /// When the served count went down, and to what: each one is a drop of databases.
+    database_drops: Vec<(Millis, u32)>,
 }
 
 enum SimLease {
@@ -265,6 +269,7 @@ impl Sim {
             ..self.cfg.clone()
         };
         f(&mut info, &mut cfg);
+        let served = info.databases;
         let node = SimNode {
             swim: Swim::new(cfg, info),
             host: SimHost::new(id),
@@ -280,6 +285,8 @@ impl Sim {
             lease_requests: 0,
             candidate: ClusterId::from_u128(self.rng.u128(1..)),
             next_renew: 0,
+            served,
+            database_drops: Vec::new(),
         };
         self.by_addr.insert(addr, id);
         self.nodes.insert(id, node);
@@ -428,7 +435,17 @@ impl Sim {
         self.node_mut(id).swim.set_databases(n);
     }
 
-    pub fn cluster_databases(&self, id: NodeId) -> u32 {
+    /// The database count that `id` served after its last tick.
+    pub fn served_databases(&self, id: NodeId) -> u32 {
+        self.nodes[&id].served
+    }
+
+    /// When the served count of `id` went down, and to what.
+    pub fn database_drops(&self, id: NodeId) -> &[(Millis, u32)] {
+        &self.nodes[&id].database_drops
+    }
+
+    pub fn cluster_databases(&self, id: NodeId) -> Option<u32> {
         let n = &self.nodes[&id];
         n.swim.cluster_databases(&n.host.epoch())
     }
@@ -532,6 +549,11 @@ impl Sim {
                 node.host.now = now;
                 node.swim.observe_lag(node.lag_ms);
                 let actions = node.swim.tick(now, &mut node.host);
+                let served = node.swim.served_databases(now, &node.host.epoch());
+                if served < node.served {
+                    node.database_drops.push((now, served));
+                }
+                node.served = served;
                 self.send(id, actions);
             }
             self.after_tick();

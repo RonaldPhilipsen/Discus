@@ -44,6 +44,19 @@ const LEAVE_FANOUT: usize = 3;
 /// database.
 const MULTI_DB_RETRY_MS: u32 = 5_000;
 
+/// A lower cluster database count must hold this long before the node serves it. The drop that
+/// follows deletes data, so a count that dips for a moment, such as a member that joins with
+/// fewer databases and leaves again, must not cause it.
+pub const DATABASES_DWELL_MS: Millis = 10_000;
+
+/// A lower database count that waits for [`DATABASES_DWELL_MS`].
+#[derive(Debug, Clone, Copy)]
+struct Lowering {
+    since: Millis,
+    /// The highest count seen since `since`: the count to serve when the dwell ends.
+    count: u32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Action {
     pub token: u64,
@@ -143,12 +156,16 @@ pub struct Swim {
     evidence_dropped: u64,
     /// Whether the multiplier was at or above the evidence cutoff at the last change.
     shedding: bool,
+    /// The database count that this node serves, from [`Swim::served_databases`].
+    served: u32,
+    lowering: Option<Lowering>,
 }
 
 impl Swim {
     /// A node that is not in a cluster yet. It starts seeking at its first tick.
     pub fn new(cfg: SwimConfig, me: MemberInfo) -> Swim {
         let rng = fastrand::Rng::with_seed(cfg.seed);
+        let served = me.databases;
         Swim {
             health: LocalHealth::new(&cfg),
             cfg,
@@ -181,6 +198,8 @@ impl Swim {
             last_epoch: None,
             limiter: JoinLimiter::default(),
             detector_n: 1,
+            served,
+            lowering: None,
         }
     }
 
@@ -290,23 +309,48 @@ impl Swim {
         }
     }
 
-    /// The databases that the cluster serves: the smallest count of the `NORMAL` members of
-    /// `epoch`. A member without a record counts as 1, as a build without databases would. With
-    /// no `NORMAL` member, the node serves its own count.
-    pub fn cluster_databases(&self, epoch: &Epoch) -> u32 {
-        epoch
-            .normal()
-            .map(|m| self.databases_of(m.id))
-            .min()
-            .unwrap_or(self.me.databases)
-            .max(1)
+    /// The smallest database count of the `NORMAL` members of `epoch`, at least 1. `None` while
+    /// a member of `epoch` has no record or no member is `NORMAL`: the count is unknown then,
+    /// and a guess could delete databases that clients still reach.
+    pub fn cluster_databases(&self, epoch: &Epoch) -> Option<u32> {
+        let mut lowest: Option<u32> = None;
+        for m in epoch.members() {
+            let databases = if m.id == self.me.id {
+                self.me.databases
+            } else {
+                self.members.get(&m.id)?.info.databases
+            };
+            if m.state == MemberState::Normal {
+                lowest = Some(lowest.map_or(databases, |l| l.min(databases)));
+            }
+        }
+        lowest.map(|n| n.max(1))
     }
 
-    fn databases_of(&self, id: NodeId) -> u32 {
-        if id == self.me.id {
-            return self.me.databases;
+    /// The database count that this node serves at `now`, from the view of `epoch`. A higher
+    /// count applies at once. A lower one applies once the counts seen stayed below the served
+    /// count for [`DATABASES_DWELL_MS`]. An unknown count keeps the served count and restarts the
+    /// dwell. Call it on every tick.
+    pub fn served_databases(&mut self, now: Millis, epoch: &Epoch) -> u32 {
+        match self.cluster_databases(epoch) {
+            None => self.lowering = None,
+            Some(n) if n >= self.served => {
+                self.served = n;
+                self.lowering = None;
+            }
+            Some(n) => {
+                let lowering = self.lowering.get_or_insert(Lowering {
+                    since: now,
+                    count: n,
+                });
+                lowering.count = lowering.count.max(n);
+                if now.saturating_sub(lowering.since) >= DATABASES_DWELL_MS {
+                    self.served = lowering.count;
+                    self.lowering = None;
+                }
+            }
         }
-        self.members.get(&id).map_or(1, |r| r.info.databases)
+        self.served
     }
 
     /// Every member of `epoch` advertises `MULTI_DB`. A member without a record does not.
@@ -1351,8 +1395,8 @@ impl Swim {
         if msg.cluster_id != ClusterId::NIL && msg.cluster_id != self.cluster_id {
             return self.bare(GossipKind::JoinReply, host);
         }
-        if msg.from.capabilities & caps::MULTI_DB == 0 && self.cluster_databases(&host.epoch()) > 1
-        {
+        let multi = self.served > 1 || self.cluster_databases(&host.epoch()).is_some_and(|n| n > 1);
+        if msg.from.capabilities & caps::MULTI_DB == 0 && multi {
             tracing::warn!(
                 joiner = %msg.from.id,
                 addr = %src,
