@@ -297,6 +297,16 @@ impl Replica {
     pub async fn shutdown(&self) {
         let _ = self.raft.shutdown().await;
     }
+
+    /// Shut down and return the final state: every write that got a reply is in it. openraft
+    /// applies entries, and sends their replies, in a task that outlives the shutdown, so the
+    /// seal stops the applies that come after this read.
+    pub async fn stop(&self) -> CounterState {
+        self.shutdown().await;
+        let mut sm = self.sm.lock();
+        sm.sealed = true;
+        sm.state.get().clone()
+    }
 }
 
 /// The replicas `ids` of membership `m` with their nodes.
@@ -470,6 +480,70 @@ mod tests {
         wait_learners(&d, 1).await;
         for r in [&a, &b, &c, &d] {
             r.shutdown().await;
+        }
+    }
+
+    /// openraft applies entries in a task that outlives `Raft::shutdown`. Every write that a
+    /// client saw succeed must still be in the final state.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::await_holding_lock)] // the held lock stops the apply worker
+    async fn the_final_state_holds_every_acknowledged_write() {
+        let link = Arc::new(MemLink::default());
+        let budget = Arc::new(Budget::new(u64::MAX, None));
+        for _ in 0..5 {
+            let a = replica(&link, 1, 1_000_000, &budget).await;
+            a.bootstrap(
+                NodeId::from_u128(1),
+                &CounterState::new(),
+                5,
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+            let writers: Vec<_> = (0..32)
+                .map(|_| {
+                    let a = a.clone();
+                    tokio::spawn(async move {
+                        let mut ok = 0;
+                        while a
+                            .raft
+                            .client_write(Op {
+                                stamp_ms: 10,
+                                command: cmd(&["INCR", "cnt:x"]),
+                            })
+                            .await
+                            .is_ok()
+                        {
+                            ok += 1;
+                        }
+                        ok
+                    })
+                })
+                .collect();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            // The worker waits for this lock with committed entries in hand, and the stop
+            // races it for the lock.
+            let held = a.sm.lock();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let stop = {
+                let a = a.clone();
+                tokio::spawn(async move { a.stop().await })
+            };
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            drop(held);
+            let state = stop.await.unwrap();
+            let mut ok = 0;
+            for w in writers {
+                ok += w.await.unwrap();
+            }
+            let value: i64 = state.get(b"cnt:x").map_or(0, |e| {
+                std::str::from_utf8(&e.value).unwrap().parse().unwrap()
+            });
+            assert!(ok > 0, "no write succeeded");
+            assert!(
+                ok <= value,
+                "{ok} writes succeeded, but the value is {value}"
+            );
         }
     }
 

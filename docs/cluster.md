@@ -724,7 +724,7 @@ Hints have these bounds:
 - An age of the tombstone TTL.
 
 A bound evicts the oldest hints. An evicted hint is lost. The next replay starts with the part of
-the key space of each lost hint. The secondary drops its copies of those keys, and the primary
+the key space of each lost hint. The secondary drops its copies of those keys. The primary
 sends its entries of those parts again, so the secondary has every copy back without a read. Then
 the remaining hints follow. If the replay fails or the epoch changes before the end, the next
 replay drops and sends those parts again.
@@ -777,16 +777,17 @@ start a handoff, so a new owner does not start empty.
   value. The fallback ends in three cases: every old owner finished or gave up, the old owners
   leave, or `--handoff-timeout-ms` (default 5 minutes) ends. After that, a miss is a miss.
 - After a scan reached every new owner, the old owner drops the keys it no longer owns. First it
-  offers each key at its version to every current owner, which asks for the key if its own copy
-  is older, and sends what they ask for. A key stays when an owner did not answer, did not store
-  the key, runs another epoch, or a newer write changed the key in the meantime.
+  offers each key at its version to every current owner. An owner asks for the key if its own
+  copy is older, and the old owner sends what the owners ask for. The old owner keeps a key in
+  these cases: an owner did not answer, an owner did not store the key, an owner runs another
+  epoch, or a newer write changed the key in the meantime.
 - After an epoch change, keys that wait in a replication queue or a hint for a node that no
   longer owns them, or that left, go to the queues of their current owners.
 - A receiver keeps an expired entry until the sweep removes it, and an older copy never replaces
   it. After the sweep, or after a tombstone outlived `--tombstone-ttl-ms`, the receiver has no
-  record of the key, so an older copy from a handoff can bring the key back. The drop of moved
-  keys offers its copies to every current owner, so a key that expired and was swept while the
-  scan ran can come back once.
+  record of the key. An older copy from a handoff can then bring the key back. The drop of moved
+  keys offers its copies to every current owner. Thus a key that expired during the scan, and
+  that the sweep removed, can come back once.
 
 `/startupz` passes only after the node received its handoff. A rolling restart therefore waits for
 each new pod to fill before it replaces the next one.

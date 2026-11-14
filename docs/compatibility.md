@@ -157,15 +157,15 @@ fills its share, a counter write that can grow it returns
 
 ## Build features
 
-Cargo features select optional subsystems and the TLS backend at compile time. The security
-features (`oauth2`, `oauth2-introspection`, `k8s`, the TLS backends, and the trust roots) work
-today, as [security.md](security.md) describes. `otel` and the Kubernetes `Lease` provider arrive
-in later releases. The `discus` section of `INFO` and the first log line show the build
+Cargo features select optional subsystems and the TLS backend at compile time.
+[Security](security.md) describes the security features, and [Telemetry](telemetry.md) describes
+`otel` and `pyroscope`. The `discus` section of `INFO` and the first log line show the build
 identifier, the enabled features, the TLS backend, and the trust root source.
 
 | Feature | Default | Adds |
 | --- | --- | --- |
 | `otel` | on | OpenTelemetry metrics and traces |
+| `pyroscope` | off | Continuous CPU profiles for Pyroscope |
 | `oauth2` | on | OAuth 2.0 token validation |
 | `oauth2-introspection` | off | RFC 7662 introspection, turns on `oauth2` |
 | `k8s` | on | The Kubernetes `Lease` provider and service account tokens |
@@ -244,11 +244,11 @@ Counter keys add these deviations:
 ## Baseline
 
 This is a smoke test of one node on one machine, not a gate. Run it with `mise run bench`, which
-builds a release binary and runs `redis-benchmark -t set,get -n 200000 -P 16 -q` over the loopback
-interface.
+builds a release binary and runs `redis-benchmark --tls -t set,get -n 200000 -P 16 -q` over the
+loopback interface. The numbers are from 2026-11-13.
 
 | Item | Value |
 | --- | --- |
 | Machine | AMD Ryzen 9 9950X3D, 16 cores (32 threads), Linux 7.2 |
-| `SET` | 1,149,425 requests per second, p50 0.679 ms |
-| `GET` | 4,255,319 requests per second, p50 0.095 ms |
+| `SET` | 1,183,432 requests per second, p50 0.623 ms |
+| `GET` | 2,985,074 requests per second, p50 0.119 ms |

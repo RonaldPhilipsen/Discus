@@ -1,118 +1,180 @@
-# Discus
+# ![Discus: connect to any node](docs/resources/logo/discus.svg)
 
-A Redis-compatible cache that scales horizontally and stays highly available without Redis Cluster
-or Redis Sentinel.
+This README is a quick start. The [documentation](#documentation) section links to the full guides.
 
-## Goal
+## What is Discus?
 
-Discus is a shared-nothing cache server written in Rust. It speaks RESP, so ordinary Redis clients
-work, but clients and load balancers never need to know the cluster topology: a connection can land
-on any node, and the cluster routes each request internally.
+Discus is a Redis-compatible cache server, written in Rust. You add nodes to get more throughput.
+If a node fails, the cache stays online. It needs no Redis Cluster and no Redis Sentinel.
 
-The target is a cache, not a durable database. Discus should:
+Every node is the same. Each node stores data, routes requests, finds the other nodes, and copies
+data to them. A client can connect to any node. That node serves the key, or it forwards the
+command to the node that owns the key. Thus ordinary Redis clients and load balancers do not have
+to know the cluster layout. Redis Cluster clients can also read the slot map and send each command
+straight to the owner.
 
-- scale throughput by adding nodes;
-- survive node loss without taking the cache offline;
-- let clients stay topology-unaware;
-- stay permissively licensed.
+Discus is a cache, not a database. It keeps all data in memory and writes nothing to disk. When
+a whole cluster restarts, the cache starts empty.
 
-## Why not Redis Cluster or Sentinel?
+The main parts of the design are these:
 
-**Sentinel** provides failover, but not horizontal scale. Replicas are passive and read-only, so the
-extra nodes do not add usable capacity.
+- Gossip (nodes tell each other about members) finds the nodes and detects failures.
+- Rendezvous hashing picks three owners for each key from the member list. No central service
+  keeps a key directory.
+- The primary owner applies a write, answers the client, and copies the write to the other owners
+  later. A node failure can lose the last writes.
+- When a node fails, a secondary owner becomes the primary. No person has to act.
+- When a node joins, the current owners send it the keys that it now owns.
 
-**Redis Cluster** provides scale, but it exposes an N×M slot topology to clients and operators.
-Clients must understand `MOVED`/`ASK`, multi-key operations are constrained by slots, and resharding
-is an operational burden.
+Discus supports strings, hashes, sets, and sorted sets. It does not support transactions, Lua,
+Pub/Sub, streams, or blocking commands. [Command compatibility](docs/compatibility.md) lists every
+command.
 
-**Dragonfly** shows that a single logical database can scale without client-visible slots, but it
-uses a more restrictive license than a permissive open-source license.
+### Strong counters
 
-Discus takes a different path: gossip-based membership, deterministic placement, and any-node
-routing.
+Keys under the prefix `cnt:` are strong counters. `INCR`, `GET`, `SET`, `DEL`, and `EXPIRE` on
+these keys are linearizable: every node returns the same value. During a network partition, the
+smaller side refuses writes with `-TRYAGAIN`. Strong counters cost more latency than normal keys,
+and a full cold restart loses them. Normal keys keep the fast path.
 
-## Why this design?
+### Why not Redis Cluster or Sentinel?
 
-**Cache semantics unlock a simpler consistency model.** A cache can tolerate stale reads and
-last-write-wins conflicts. That removes the need for consensus, two-phase commit, and cross-shard
-transactions, which are what make distributed databases expensive.
+Sentinel gives failover, but not more capacity. Its replicas only serve reads.
 
-**Shared-nothing scales horizontally.** Each node owns its memory and its slice of the keyspace.
-There is no shared disk or shared database to become a bottleneck.
+Redis Cluster gives more capacity, but clients must know the slot layout. They must handle `MOVED`
+and `ASK`, and multi-key commands must stay in one slot. If the cluster grows, operators must move
+slots by hand.
 
-**Gossip plus deterministic hashing removes the placement service.** Gossip carries liveness and
-node metadata, never a key directory. Every node computes the same owners from the member list, so
-placement needs no central coordinator and no per-key index.
+Discus gives both. A client can connect to any node, and nodes find each other without a central
+service.
 
-**Any-node routing keeps clients simple.** A load balancer can send each connection to any healthy
-node. The entry node serves local keys or forwards one hop to an owner. Clients stay ordinary Redis
-clients.
+## Building Discus
 
-**Asynchronous replication keeps writes fast.** The primary applies a write locally and
-acknowledges, then replicates in the background. The tradeoff is cache-grade durability: a node
-failure can lose the last writes, which is acceptable for a cache.
+Discus builds on Linux with the Rust toolchain. The file `mise.toml` lists the versions that the
+project uses.
 
-**Automatic failover replaces Sentinel.** Failure detection and placement recomputation promote a
-secondary without manual intervention.
+```sh
+cargo build --release -p discus
+```
 
-**Rust for predictable latency.** No garbage-collector pauses, memory safety, and a mature async
-networking ecosystem.
+The binary is `target/release/discus`.
 
-## What it does
+Cargo features select optional parts and the TLS library at build time. The default build has
+OpenTelemetry, OAuth 2.0, Kubernetes support, and the `aws-lc-rs` TLS library. This command builds
+a binary with no optional parts:
 
-- One tier of identical nodes: data, routing, gossip, and replication all live in each node.
-- Rendezvous hashing over the member list, replication factor 3 by default.
-- Any node accepts any key; the entry node routes internally.
-- Async replication, read repair, and promotion reconciliation.
-- Bulk handoff on join: current owners stream moved entries to the joining node, with lazy refill as
-  the fallback.
-- A small command surface: strings, hashes, sets, and sorted sets.
-- No transactions, Lua, pub/sub, streams, queues, or blocking commands.
+```sh
+cargo build --release -p discus --no-default-features --features tls-aws-lc,roots-system
+```
 
-## Strong counters
+[Build features](docs/compatibility.md#build-features) lists every feature.
 
-Counters are the one place where Discus offers a strong guarantee. Keys under the `cnt:` prefix
-(configurable) form a separate keyspace backed by Raft groups. `INCR`, `GET`, `SET`, `DEL`, and
-`EXPIRE` on those keys are linearizable: any node returns the same value, and the minority side of a
-partition rejects writes with `-TRYAGAIN`.
+## Running Discus
 
-The tradeoffs are explicit: strong counters pay a consensus round-trip, are CP during partitions,
-and are lost if the whole cluster restarts cold. Normal keys keep the fast, asynchronous, AP path.
+Every client connection uses TLS, so a node needs a certificate and a key. If you do not have a
+certificate, make a test CA and a certificate for `localhost` with the script in this repository:
 
-This is a keyspace rather than a per-command flag because `SET` and `GET` on the same key must
-follow the same path. A strong `INCR` mixed with an asynchronous `SET` would break the guarantee.
+```sh
+scripts/dev-cert.sh certs
+```
 
-## Decisions
+The script writes `certs/ca.pem`, `certs/cert.pem`, and `certs/key.pem`. Then start one node:
 
-- **Deployment:** Kubernetes, single zone initially.
-- **Security:** every client connection uses TLS, and client certificates (mTLS) are a choice.
-  Node-to-node traffic always uses mTLS with cert-manager-issued certificates. See
-  [Security](docs/security.md).
-- **Restarts:** cold restarts are acceptable; the cache starts empty.
-- **Latency targets:** local hit p99 ≤ 1 ms, remote hit p99 ≤ 2 ms, and p99 ≤ 5 ms during a
-  membership change.
-- **Data types:** strings, hashes, sets, and sorted sets.
-- **Strong counters:** linearizable `INCR` on an opt-in counter keyspace (`cnt:` prefix), backed by
-  per-group Raft with RF=3. CP during partitions, and counters are lost on a full cold restart.
-  Normal keys stay AP.
-- **Handoff:** join handoff is in v0.1. Current owners stream the moved entries through a `HANDOFF`
-  RPC. The new owner applies only newer HLC entries and falls back to the previous owners for
-  misses. Drain streaming reuses the mechanism in a later release.
+```sh
+./target/release/discus --tls-cert certs/cert.pem --tls-key certs/key.pem
+```
 
-## Non-goals
+The node listens for clients on port 6379. After about ten seconds, it forms a cluster of one node.
+Run `discus --help` to see every flag.
 
-Durability, persistence, transactions, Lua, pub/sub, streams, blocking commands, Redis Cluster
-slot management, Sentinel compatibility, cross-datacenter replication, strong consistency,
-and multi-tenancy.
+## Running Discus with TLS
 
-## Status
+TLS on the client port is always on. There is no plaintext mode. The flags `--tls-cert` and
+`--tls-key` take PEM files, and the certificate file can hold a chain.
 
-Design phase for v0.1. This README records the goal and the reasoning behind the design.
+To ask every client for a certificate (mTLS), add the CA that signs the client certificates:
 
-Operator guides: [command compatibility](docs/compatibility.md), [running a static
-cluster](docs/cluster.md), [security](docs/security.md), and [telemetry](docs/telemetry.md).
+```sh
+./target/release/discus --tls-cert certs/cert.pem --tls-key certs/key.pem \
+  --tls-client-ca certs/client-ca.pem
+```
+
+Discus can also ask clients for an OAuth 2.0 token or a Kubernetes service account token.
+[Security](docs/security.md) tells how to set the authentication policy.
+
+Node-to-node traffic always uses QUIC with mTLS. Each node of a cluster needs a certificate from a
+CA that serves only that cluster. The flags are `--cluster-ca`, `--cluster-cert`, and
+`--cluster-key`.
+
+## Running a cluster
+
+On Kubernetes, install the Helm chart. Before you install it, create a Secret with the keys
+`ca.crt`, `tls.crt`, and `tls.key`.
+
+```sh
+helm install <release> oci://ghcr.io/ronaldphilipsen/charts/discus \
+  --version <version> \
+  --namespace <namespace> \
+  --set cluster.tls.secretName=<secret>
+```
+
+Outside Kubernetes, give each node the other nodes as seeds with `--peer`, and set
+`--lease-provider none`. [Running a cluster](docs/cluster.md) shows a three-node example on one
+host. It also covers failure detection, replication, drain, and memory limits.
+
+## Playing with Discus
+
+Use `redis-cli` to send commands. Start a node as described in
+[Running Discus](#running-discus), then run this command in another terminal:
+
+```text
+$ redis-cli --tls --cacert certs/ca.pem
+127.0.0.1:6379> PING
+PONG
+127.0.0.1:6379> SET foo bar
+OK
+127.0.0.1:6379> GET foo
+"bar"
+127.0.0.1:6379> HSET user:1 name Ada
+(integer) 1
+127.0.0.1:6379> INCR cnt:visits
+(integer) 1
+127.0.0.1:6379> INFO discus
+# discus
+discus_build:dev
+...
+```
+
+`INFO discus` shows the build, the node ID, the cluster ID, and the members.
+
+## Installing Discus
+
+Each release publishes a container image and a Helm chart:
+
+- The image `ghcr.io/ronaldphilipsen/discus:<version>`.
+- The image `ghcr.io/ronaldphilipsen/discus:<version>-pyroscope`, with the CPU profiler.
+- The chart `oci://ghcr.io/ronaldphilipsen/charts/discus`, with the same version as the image.
+
+The [releases page](https://github.com/RonaldPhilipsen/discus/releases) lists the versions.
+
+## Documentation
+
+- [Command compatibility](docs/compatibility.md): the supported commands and the differences from
+  Redis.
+- [Running a cluster](docs/cluster.md): deployment, flags, membership, replication, and failover.
+- [Security](docs/security.md): TLS, client authentication, scopes, and the admin port.
+- [Telemetry](docs/telemetry.md): metrics, traces, logs, and CPU profiles.
+- [Design](docs/design.md): the full design and the reasons for each choice.
+- [Stress testing](docs/stress-testing.md): load and fault tests for a release candidate.
+- [Benchmark methodology](docs/benchmarks/methodology.md): how the benchmarks compare Discus with
+  Valkey. The results are in [docs/benchmarks](docs/benchmarks).
+
+## Code contributions
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before you open a pull request. It describes the pull
+request titles, the commands to run first, and the release process.
 
 ## License
 
-TBD. The intent is a permissive license, and every dependency on the critical path must also be
-permissively licensed.
+Discus uses the [MIT License](LICENSE). Every dependency on the critical path also has a permissive
+license.

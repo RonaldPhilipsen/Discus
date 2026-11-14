@@ -411,13 +411,12 @@ impl Group {
                 return;
             }
         }
-        // A leader applies a write before its reply leaves, and after the shutdown no write
-        // commits through this replica. So the state read after the shutdown holds every write
-        // that this leader acknowledged.
-        replica.shutdown().await;
+        // A leader applies a write before its reply leaves, and after the stop no write commits
+        // or applies through this replica. So the final state holds every write that this
+        // leader acknowledged.
+        let state = replica.stop().await;
         let why = "switched down to leader-follower mode";
-        let Some(leader) = self.become_leader(counters, seen, replica.state(), lease_until, why)
-        else {
+        let Some(leader) = self.become_leader(counters, seen, state, lease_until, why) else {
             return;
         };
         discus_telemetry::global()

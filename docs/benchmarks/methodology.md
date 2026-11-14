@@ -91,10 +91,10 @@ From 2026-11-13, every Discus run has CPU profiling on. The Discus nodes push pr
 Pyroscope server of the cluster. The script does this by default. Each result line has
 `start_ms` and `end_ms`. Use them to select the time range of one run in Pyroscope.
 
-The release images do not contain the `pyroscope` feature. For each release, the release
-pipeline also pushes an image with the feature, with the same tag and the suffix `-pyroscope`,
-for example `1.2.5-pyroscope`. To test a build that is not a release, build and push the second
-image yourself. Run this command in the repository root:
+The release images do not contain the `pyroscope` feature. For each release, the release pipeline
+also pushes an image with the feature. That image has the same tag and the suffix `-pyroscope`, for
+example `0.4.9-pyroscope`. To test a build that is not a release, build and push the second image
+yourself. Run this command in the repository root:
 
 ```sh
 docker build --build-arg FEATURES=pyroscope --build-arg VERSION=<tag> \
