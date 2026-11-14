@@ -9,6 +9,7 @@ use bytes::Bytes;
 use hashbrown::hash_map::EntryRef;
 use hashbrown::HashMap;
 use parking_lot::RwLock;
+use smallvec::SmallVec;
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 use crate::entry::estimate_size;
@@ -90,8 +91,9 @@ pub(crate) struct DbShard {
 /// and goes does not allocate each time.
 #[derive(Default)]
 pub(crate) struct ShardInner {
-    /// Sorted by database. Most shards hold one database, so a lookup is one compare.
-    pub(crate) dbs: Vec<(u32, DbShard)>,
+    /// Sorted by database. Most shards hold one database, so a lookup is one compare. The first
+    /// database stays inline, so its map is found without a load through a heap pointer.
+    pub(crate) dbs: SmallVec<[(u32, DbShard); 1]>,
 }
 
 impl ShardInner {
@@ -647,7 +649,7 @@ impl Store {
             let removed = {
                 let mut guard = shard.inner.write();
                 let from = guard.dbs.partition_point(|(db, _)| *db < count);
-                guard.dbs.split_off(from)
+                guard.dbs.drain(from..).collect::<Vec<_>>()
             };
             dropped += removed
                 .into_iter()

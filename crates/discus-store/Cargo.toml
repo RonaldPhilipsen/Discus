@@ -12,6 +12,7 @@ discus-placement = { path = "../discus-placement" }
 fastrand = "2"
 hashbrown = "0.17"
 parking_lot = "0.13"
+smallvec = "1"
 tokio = { version = "1", features = ["rt", "time", "macros", "sync"] }
 tokio-util = "0.7"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
