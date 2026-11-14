@@ -46,6 +46,8 @@ pub fn spawn(node: &Arc<Node>, stop: CancellationToken) {
             }
         }
     }
+    // A gauge exports nothing until its first record, so a node that never reloads shows it too.
+    discus_telemetry::global().config_pending(!live.pending().is_empty());
     let period_secs = base.config_reload_secs;
     file_watch::watch(
         "settings",
