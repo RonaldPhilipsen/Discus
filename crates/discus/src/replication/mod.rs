@@ -476,13 +476,13 @@ impl Replicator {
     /// Queue `key` of database `db`, which a local write just changed, for every other current
     /// owner.
     pub fn written(&self, node: &Node, db: u32, key: &Bytes) {
-        self.queue_for(node.owners(key), &DbKey::new(db, key.clone()));
+        self.queue_for(node.owners(key), db, key);
     }
 
     /// Queue `key` for every owner in `owners` but this node. One read of the peer map serves
     /// every owner that has a queue. Hints wait until the read ends, because `hint` reads the
     /// map again and a second read can deadlock behind a waiting writer.
-    fn queue_for(&self, owners: impl IntoIterator<Item = NodeId>, key: &DbKey) {
+    fn queue_for(&self, owners: impl IntoIterator<Item = NodeId>, db: u32, key: &Bytes) {
         let mut missing = Vec::new();
         let mut hints = Vec::new();
         {
@@ -495,14 +495,14 @@ impl Replicator {
                     missing.push(owner);
                     continue;
                 };
-                if let Some(k) = q.push(key) {
+                if let Some(k) = q.push(db, key) {
                     hints.push((q.clone(), k));
                 }
             }
         }
         for owner in missing {
             let q = self.queue(owner);
-            if let Some(k) = q.push(key) {
+            if let Some(k) = q.push(db, key) {
                 hints.push((q, k));
             }
         }
@@ -543,7 +543,8 @@ impl Replicator {
         self.peers.read().values().all(|q| !q.holds(key)) && !self.hints.lock().holds(key)
     }
 
-    /// Drop the queued keys and the hints of database `db`, after a flush of that database.
+    /// Drop the queued keys (not those in flight) and the hints of database `db`, after a flush of
+    /// that database.
     pub fn flush_db(&self, db: u32) {
         for q in self.peers.read().values() {
             q.retain(|k| k.db != db);
@@ -642,7 +643,7 @@ impl Replicator {
         moved.sort_unstable();
         moved.dedup();
         for k in &moved {
-            self.queue_for(current.owners(&k.key, rf), k);
+            self.queue_for(current.owners(&k.key, rf), k.db, &k.key);
         }
         self.sync_charge();
         self.prune_handoffs(current);
@@ -1242,7 +1243,7 @@ mod tests {
             store.write(k.db, &k.key, Version::zero(), |slot| {
                 slot.set(Some(Entry::new(Value::Str(big.clone()), None)));
             });
-            q.push(k);
+            q.push(k.db, &k.key);
         }
         let entries = fill(&store, &q, q.take(keys.len()));
         assert!(entries.len() < keys.len());

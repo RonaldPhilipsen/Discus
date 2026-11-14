@@ -11,6 +11,7 @@ use hashlink::LinkedHashMap;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
+use bytes::Bytes;
 use discus_placement::NodeId;
 use discus_store::{AsDbKey, DbKey};
 
@@ -56,18 +57,20 @@ impl PeerQueue {
         }
     }
 
-    /// Queue `key`. A key already queued keeps one place. Returns the key to hint instead: `key`
-    /// itself while the peer is down, or the oldest key when the queue overflowed.
-    pub fn push(&self, key: &DbKey) -> Option<DbKey> {
+    /// Queue `key` of database `db`. A key already queued keeps one place. Returns the key to
+    /// hint instead: `key` itself while the peer is down, or the oldest key when the queue
+    /// overflowed.
+    pub fn push(&self, db: u32, key: &Bytes) -> Option<DbKey> {
         let mut s = self.state.lock();
         if s.down {
-            return Some(key.clone());
+            return Some(DbKey::new(db, key.clone()));
         }
-        // A key already queued moves to the back. Only a new key is cloned.
-        if s.keys.to_back(key).is_some() {
+        // A key already queued moves to the back. Only a new key is cloned: the first clone of a
+        // key from the RESP parser allocates.
+        if s.keys.to_back(&(db, &key[..]) as &dyn AsDbKey).is_some() {
             return None;
         }
-        s.keys.insert(key.clone(), ());
+        s.keys.insert(DbKey::new(db, key.clone()), ());
         let out = if s.keys.len() > self.cap {
             s.lagging = true;
             s.keys.pop_front().map(|(old, ())| old)
@@ -181,19 +184,33 @@ impl PeerQueue {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
-
     use super::*;
 
+    fn b(s: &str) -> Bytes {
+        Bytes::copy_from_slice(s.as_bytes())
+    }
+
     fn k(s: &str) -> DbKey {
-        DbKey::new(0, Bytes::copy_from_slice(s.as_bytes()))
+        DbKey::new(0, b(s))
+    }
+
+    #[test]
+    fn a_queued_key_keeps_its_first_copy() {
+        let q = PeerQueue::new(NodeId::from_u128(1), 8);
+        let first = b("a");
+        q.push(0, &first);
+        q.push(0, &b("a"));
+        assert_eq!(q.len(), 1);
+        let taken = q.take(10);
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].key.as_ptr(), first.as_ptr());
     }
 
     #[test]
     fn a_key_waits_once() {
         let q = PeerQueue::new(NodeId::from_u128(1), 8);
-        assert_eq!(q.push(&k("a")), None);
-        assert_eq!(q.push(&k("a")), None);
+        assert_eq!(q.push(0, &b("a")), None);
+        assert_eq!(q.push(0, &b("a")), None);
         assert_eq!(q.len(), 1);
         assert_eq!(q.take(10), vec![k("a")]);
         assert!(q.holds(&k("a")));
@@ -205,8 +222,8 @@ mod tests {
     fn the_same_key_in_two_databases_waits_twice() {
         let q = PeerQueue::new(NodeId::from_u128(1), 8);
         let other = DbKey::new(1, k("a").key);
-        assert_eq!(q.push(&k("a")), None);
-        assert_eq!(q.push(&other), None);
+        assert_eq!(q.push(0, &b("a")), None);
+        assert_eq!(q.push(other.db, &other.key), None);
         assert_eq!(q.len(), 2);
         assert_eq!(q.take(10), vec![k("a"), other.clone()]);
         assert!(q.holds(&other));
@@ -217,9 +234,9 @@ mod tests {
     fn overflow_drops_the_oldest_and_marks_lagging() {
         let q = PeerQueue::new(NodeId::from_u128(1), 4);
         for i in 0..4 {
-            assert_eq!(q.push(&k(&i.to_string())), None);
+            assert_eq!(q.push(0, &b(&i.to_string())), None);
         }
-        assert_eq!(q.push(&k("x")), Some(k("0")));
+        assert_eq!(q.push(0, &b("x")), Some(k("0")));
         assert!(!q.take_drained());
         q.take(4);
         assert!(q.take_drained());
@@ -229,22 +246,22 @@ mod tests {
     #[test]
     fn a_failed_batch_returns_every_key_and_marks_the_peer_down() {
         let q = PeerQueue::new(NodeId::from_u128(1), 8);
-        q.push(&k("a"));
-        q.push(&k("b"));
+        q.push(0, &b("a"));
+        q.push(0, &b("b"));
         q.take(1);
         let mut back = q.failed();
         back.sort();
         assert_eq!(back, vec![k("a"), k("b")]);
-        assert_eq!(q.push(&k("c")), Some(k("c")));
+        assert_eq!(q.push(0, &b("c")), Some(k("c")));
         q.set_up();
-        assert_eq!(q.push(&k("c")), None);
+        assert_eq!(q.push(0, &b("c")), None);
     }
 
     #[test]
     fn queues_drop_keys_no_longer_owned() {
         let q = PeerQueue::new(NodeId::from_u128(1), 8);
-        q.push(&k("keep"));
-        q.push(&k("gone"));
+        q.push(0, &b("keep"));
+        q.push(0, &b("gone"));
         q.retain(|key| key.key.as_ref() == b"keep");
         assert_eq!(q.len(), 1);
         assert!(q.holds(&k("keep")));

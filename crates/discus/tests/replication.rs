@@ -211,6 +211,18 @@ async fn a_node_ignores_databases_that_it_does_not_hold() {
     };
     let keys: Vec<DbKey> = found.entries.into_iter().map(|(k, _)| k).collect();
     assert_eq!(keys, vec![held]);
+
+    let epoch = n.epoch_id();
+    let digest = Message::Digest {
+        from: epoch,
+        to: epoch,
+        db: 1,
+        sums: vec![1; 256],
+    };
+    let Message::Entries(answer) = r.handle(id, digest).await else {
+        panic!("a digest of another database gets entries");
+    };
+    assert!(answer.entries.is_empty());
 }
 
 /// `flush_db` drops the queued keys of one database and keeps the others.

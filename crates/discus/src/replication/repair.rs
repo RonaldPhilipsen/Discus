@@ -13,8 +13,8 @@ use discus_wire::{DbKey, Message};
 
 use crate::Node;
 
-/// The nodes to ask before `key` of database `db` is served here, in order. Empty when the local entry (or
-/// tombstone) is there, or when this node is the primary of a read.
+/// The nodes to ask before `key` of database `db` is served here, in order. Empty when the local
+/// entry (or tombstone) is there, or when this node is the primary of a read.
 ///
 /// While a handoff toward this node is incomplete, the previous owners come first, for reads
 /// and writes. A write then applies to the handed-off value, so an `INCR` on a moved key does
@@ -44,8 +44,8 @@ pub fn sources(node: &Node, db: u32, key: &[u8], write: bool, owners: &[NodeId])
     out
 }
 
-/// Ask `sources` in order for `key` of database `db` and apply the first answer that has it. Each request has
-/// the read forward timeout. A failed source is skipped.
+/// Ask `sources` in order for `key` of database `db` and apply the first answer that has it. Each
+/// request has the read forward timeout. A failed source is skipped.
 pub async fn fetch(node: &Arc<Node>, db: u32, key: &Bytes, sources: Vec<NodeId>) {
     let (Some(link), Some(replicator)) = (node.link(), node.replicator()) else {
         return;
