@@ -971,14 +971,16 @@ impl Replicator {
                 self.saw_generation(&b);
                 // The entries apply first, so an offer of a key that the same batch carries
                 // confirms that this node stored it. An expired entry still counts: it was newer
-                // than the offer, so the offered copy must not come back.
+                // than the offer, so the offered copy must not come back. An offer of a database
+                // that this node does not hold stays wanted: the entry is refused, the second
+                // round asks again, and the source keeps what may be its only copy.
                 let applied = self.apply_entries(&node, b.entries);
                 let want: Vec<DbKey> = b
                     .offers
                     .into_iter()
                     .filter(|(k, v)| {
-                        holds_db(&node, k.db)
-                            && self
+                        !holds_db(&node, k.db)
+                            || self
                                 .store
                                 .stored_version(k.db, &k.key)
                                 .is_none_or(|local| local < *v)

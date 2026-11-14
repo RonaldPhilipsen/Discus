@@ -177,7 +177,8 @@ async fn a_slow_replica_does_not_slow_writes() {
 }
 
 /// A node holds only its own databases. Entries and offers of another database change nothing,
-/// so a peer cannot create maps here for a database that this node does not have.
+/// so a peer cannot create maps here for a database that this node does not have. Such an offer
+/// is wanted, because this node does not hold the key.
 #[tokio::test]
 async fn a_node_ignores_databases_that_it_does_not_hold() {
     let c = start_cluster(1, &[]).await;
@@ -201,7 +202,13 @@ async fn a_node_ignores_databases_that_it_does_not_hold() {
     let Message::BatchAck(ack) = r.handle(id, Message::Handoff(offer)).await else {
         panic!("a handoff gets an acknowledgement");
     };
-    assert_eq!(ack.want, vec![DbKey::new(0, &b"x"[..])]);
+    // The offer of database 1 stays wanted, so a source that drops keys after a handoff keeps
+    // its copy. Wanting it creates no map.
+    assert_eq!(
+        ack.want,
+        vec![DbKey::new(0, &b"x"[..]), DbKey::new(1, &b"x"[..])]
+    );
+    assert_eq!(n.store.databases(), vec![0]);
 
     let fetch = Message::Fetch {
         keys: vec![held.clone(), other],

@@ -637,3 +637,27 @@ async fn the_drop_never_brings_back_an_expired_key() {
     }
     assert!(old.node.store.entry(0, key).is_none());
 }
+
+/// The owners hold one database, so they cannot take a key of database 2. They do not hold it
+/// either, so the old owner keeps its copy.
+#[tokio::test]
+async fn the_drop_keeps_a_database_that_the_owners_do_not_hold() {
+    let net = Net::new();
+    let Held {
+        nodes,
+        joiner: _joiner,
+        lost,
+        early,
+    } = held_drop(&net, "unheld").await;
+    let old = &nodes[0];
+    old.node.databases.raise_local(3);
+    let mut entry = discus_store::Entry::new(discus_store::Value::Str("two".into()), None);
+    entry.version = early;
+    assert!(old.node.store.apply(2, lost[0].as_bytes(), entry));
+    release(old).await;
+    assert!(
+        old.node.store.read(2, lost[0].as_bytes(), |e| e.is_some()),
+        "the only copy in database 2 was dropped"
+    );
+    assert_eq!(held(old, &lost), 0);
+}
