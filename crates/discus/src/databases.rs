@@ -61,8 +61,13 @@ impl Databases {
     }
 
     /// Take the membership view. `Some(cluster)` if the cluster count dropped. The gate opens only
-    /// if this build knows `MULTI_DB` too.
+    /// if this build knows `MULTI_DB` too. The count stays at least 1, so database 0 always
+    /// serves.
     pub fn set_view(&self, cluster: u32, multi_db: bool) -> Option<u32> {
+        let cluster = cluster.max(1);
+        // A reader can see the new gate with the old count for a moment. That is harmless:
+        // `prepare` checks the count again on every data command, so a database above the new
+        // count is refused once the count store lands.
         self.multi_db.store(
             multi_db && caps::KNOWN & caps::MULTI_DB != 0,
             Ordering::Relaxed,
@@ -108,15 +113,29 @@ mod tests {
 
     #[test]
     fn select_parses_like_valkey() {
+        // Task 11 removes this guard, when `KNOWN` gets `MULTI_DB`.
         if caps::KNOWN & caps::MULTI_DB == 0 {
             return;
         }
         let dbs = Databases::new(3, false);
         dbs.set_view(3, true);
-        assert_eq!(dbs.check_select(-1), err(OUT_OF_RANGE));
-        assert_eq!(dbs.check_select(4294967296), err(OUT_OF_RANGE));
         assert_eq!(dbs.check_select(2), Ok(2));
-        assert_eq!(dbs.check_select(3), err(OUT_OF_RANGE));
+    }
+
+    #[test]
+    fn select_refuses_the_range_edges() {
+        let dbs = Databases::new(3, false);
+        for db in [-1, 4294967296, 3] {
+            assert_eq!(dbs.check_select(db), err(OUT_OF_RANGE), "{db}");
+        }
+    }
+
+    #[test]
+    fn the_cluster_count_stays_at_least_one() {
+        let dbs = Databases::new(3, false);
+        assert_eq!(dbs.set_view(0, true), Some(1));
+        assert_eq!(dbs.cluster(), 1);
+        assert_eq!(dbs.check_select(0), Ok(0));
     }
 
     #[test]
