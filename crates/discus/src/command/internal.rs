@@ -17,7 +17,10 @@ use crate::node::{ConnState, Node};
 
 pub const TAKE: &CommandSpec = &CommandSpec::write("DISCUS.TAKE", 2, take);
 pub const PUT: &CommandSpec = &CommandSpec::write("DISCUS.PUT", -3, put);
-pub const PEEK: &CommandSpec = &CommandSpec::read("DISCUS.PEEK", 2, peek);
+/// `DISCUS.PEEK` reads the primary: a lagging replica would give `COPY` an old value, and the put
+/// would store it with a fresh version. It changes nothing, so it records and replicates nothing.
+pub const PEEK: &CommandSpec =
+    &CommandSpec::read("DISCUS.PEEK", 2, peek).with_route(Route::Single { write: true });
 
 /// `DISCUS.COUNTERFLUSH <group> <flush>`: run the flush `FLUSHALL` or `DISCUS.FLUSHDB` in the
 /// counter group `<group>`, in the database of the forward. A flush names no key, so the leader
@@ -124,4 +127,16 @@ fn put(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
         slot.set(Some(Entry::new(entry.value, entry.expires_at_ms)));
         Value::ok()
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command::table::Access;
+
+    #[test]
+    fn peek_reads_the_primary_with_the_read_scope() {
+        assert_eq!(PEEK.route, Route::Single { write: true });
+        assert_eq!(PEEK.access, Access::Read);
+    }
 }

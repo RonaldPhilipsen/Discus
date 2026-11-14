@@ -424,6 +424,25 @@ async fn copy_to_itself_is_refused() {
 }
 
 #[tokio::test]
+async fn copy_parses_every_option_before_the_range() {
+    let net = Net::new();
+    let nodes = start_open(&net, 1, &["--databases", "3"]).await;
+    let a = &nodes[0].node;
+    assert_eq!(
+        run_in(a, 0, &["COPY", "a", "b", "DB", "99", "BOGUS"]).await,
+        Value::error("ERR syntax error")
+    );
+    assert_eq!(
+        run_in(a, 0, &["COPY", "a", "b", "DB", "99"]).await,
+        Value::error(discus::databases::OUT_OF_RANGE)
+    );
+    assert_eq!(
+        run_in(a, 0, &["COPY", "a", "b", "DB", "x", "BOGUS"]).await,
+        Value::error("ERR value is not an integer or out of range")
+    );
+}
+
+#[tokio::test]
 async fn swapdb_is_refused() {
     let net = Net::new();
     let nodes = start_open(&net, 1, &["--databases", "3"]).await;
@@ -527,6 +546,46 @@ async fn a_move_and_a_copy_read_their_own_write_in_the_target_database() {
     );
     assert_eq!(query(&mut conn, &["SELECT", "1"]).await, redis::Value::Okay);
     assert_eq!(query(&mut conn, &["GET", &dst]).await, data("copied"));
+    for n in &nodes {
+        n.node
+            .faults
+            .hold_replication
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A lagging replica of the source must not feed a `COPY` from a connection that did not write
+/// the source: the entry node is the replica of `src` and holds a stale copy, and replication is
+/// held, so only a peek on the primary sees the new value.
+#[tokio::test]
+async fn copy_reads_the_source_on_the_primary() {
+    let net = Net::new();
+    let nodes = start_open(
+        &net,
+        3,
+        &["--replication-factor", "2", "--read-from-replicas"],
+    )
+    .await;
+    let a = &nodes[0].node;
+    let src = key_replicated_on(&nodes, 0, "src");
+    let p = nodes
+        .iter()
+        .position(|n| n.id == a.owners(src.as_bytes())[0])
+        .unwrap();
+    let dst = key_on(&nodes, p, "dst");
+    for n in &nodes {
+        n.node
+            .faults
+            .hold_replication
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    assert_eq!(run_in(a, 0, &["SET", &src, "new"]).await, Value::ok());
+    plant_stale(&nodes[0], 0, &src, "stale");
+    assert_eq!(
+        run_in(a, 0, &["COPY", &src, &dst, "REPLACE"]).await,
+        Value::Integer(1)
+    );
+    assert_eq!(run_in(&nodes[p].node, 0, &["GET", &dst]).await, bulk("new"));
     for n in &nodes {
         n.node
             .faults

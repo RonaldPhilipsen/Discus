@@ -227,17 +227,21 @@ pub(crate) struct CopyTarget {
 /// without `DB`, because a member without it cannot run the steps of a `COPY`.
 pub(crate) fn copy_target(node: &Node, db: u32, cmd: &Command) -> Result<CopyTarget, CommandError> {
     let mut target = CopyTarget { db, replace: false };
+    let mut named = None;
     let mut i = 3;
     while i < cmd.len() {
         match upper(&cmd[i]).as_str() {
             "REPLACE" => target.replace = true,
             "DB" if i + 1 < cmd.len() => {
-                target.db = target_db(node, parse_i64(&cmd[i + 1])?)?;
+                named = Some(parse_i64(&cmd[i + 1])?);
                 i += 1;
             }
             _ => return Err(CommandError::Syntax),
         }
         i += 1;
+    }
+    if let Some(n) = named {
+        target.db = target_db(node, n)?;
     }
     node.databases.check_gate()?;
     if target.db == db && cmd[1] == cmd[2] {
