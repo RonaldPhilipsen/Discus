@@ -233,11 +233,20 @@ The node limits failed `AUTH` attempts in two ways:
 
 - After 5 failed attempts, the node closes the connection. Set the number with
   `--auth-max-failures-per-connection`.
-- After 20 failed attempts from one source address within 60 seconds, the node refuses every
-  `AUTH` from that address until the window ends. It does not check the token. Set the numbers
-  with `--auth-max-failures-per-source` and `--auth-failure-window-secs`.
+- After 20 failed attempts from one source within 60 seconds, the node refuses every `AUTH` from
+  that source until the window ends. It does not check the token. Set the numbers with
+  `--auth-max-failures-per-source` and `--auth-failure-window-secs`.
+
+A source is one IPv4 address or one IPv6 /64 network. Thus all addresses in the same /64 share
+one count. An IPv4-mapped IPv6 address such as `::ffff:192.0.2.1` counts as its IPv4 address.
 
 Successful attempts never count.
+
+The node tracks at most 65,536 sources at the same time. When this table is full, failed attempts
+from all other sources go to one shared count. When the shared count reaches the limit, the node
+refuses every `AUTH` from a source that is not in the table until the window ends. This also
+refuses a new client that has the correct token. Connections that are already authenticated
+continue to work.
 
 ## OAuth 2.0
 
@@ -483,7 +492,7 @@ identity provider without `ca_file`.
 | `--dev-insecure-oauth2` | off | Allows `http` issuers, and admin bearer tokens on a plaintext admin port. Development only. |
 | `--auth-clock-skew-secs` | 60 | The clock skew allowed on token times. |
 | `--auth-max-failures-per-connection` | 5 | Failed attempts that close a connection. |
-| `--auth-max-failures-per-source` | 20 | Failed attempts per source address in one window. |
+| `--auth-max-failures-per-source` | 20 | Failed attempts per source in one window. An IPv6 source is a /64 network. |
 | `--auth-failure-window-secs` | 60 | The window of the per-source limit. |
 | `--admin-tls` | off | Serves the admin port over TLS. |
 | `--tls-reload-secs` | 10 | Seconds between checks of the certificate files. `0` turns the reload off. |
