@@ -182,6 +182,26 @@ mod tokens {
     }
 
     #[tokio::test]
+    async fn the_status_page_shows_the_policy_without_the_old_tls_factor() {
+        let ca = TestCa::new();
+        let idp = MockIdp::start(&ca).await;
+        let file = write_file(&ca, "auth.toml", &idp.toml(&ca, ""));
+        let node = start(&[
+            "--auth-policy",
+            "all:tls,oauth2",
+            "--dev-insecure-oauth2",
+            "--auth-config",
+            &file,
+        ])
+        .await;
+        let ready = std::time::Duration::from_secs(10);
+        assert!(security_support::wait_status(node.admin, "/readyz", 200, ready).await);
+        let (code, body) = get(&node, "/admin/security", Some(&idp.token("discus.admin"))).await;
+        assert_eq!(code, 200, "{body}");
+        assert!(body.contains("\"policy\":\"all:oauth2\""), "{body}");
+    }
+
+    #[tokio::test]
     async fn a_token_without_discus_admin_is_refused() {
         let ca = TestCa::new();
         let idp = MockIdp::start(&ca).await;

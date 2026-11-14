@@ -110,10 +110,18 @@ impl Security {
             None => AuthFile::default(),
         };
         let policy = match &args.auth_policy {
-            Some(p) => Policy::parse(p)?,
-            None if config.shared_token.is_some() => {
-                Policy::All(vec![Factor::Tls, Factor::SharedToken])
+            Some(p) => {
+                let parsed = Policy::parse(p)?;
+                if parsed.dropped_tls {
+                    tracing::warn!(
+                        policy = %parsed.policy,
+                        "--auth-policy names the factor tls, which is no longer needed because \
+                         every client uses TLS. Remove tls from the list"
+                    );
+                }
+                parsed.policy
             }
+            None if config.shared_token.is_some() => Policy::All(vec![Factor::SharedToken]),
             // Every client uses TLS, so `none` means TLS without credentials.
             None => Policy::None,
         };
@@ -409,7 +417,6 @@ impl Security {
         peer: SocketAddr,
     ) -> io::Result<(ClientStream, ConnAuth)> {
         let mut auth = ConnAuth::new(Some(peer.ip()));
-        auth.tls = true;
         let forwarded = if self.mode == TlsMode::Lb {
             if !self.lb_sources.iter().any(|n| n.contains(&peer.ip())) {
                 return Err(io::Error::new(
@@ -640,15 +647,22 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_shared_token_default_and_the_old_spelling_give_the_same_policy() {
+        let default = security(&["--shared-token", "x"]);
+        assert_eq!(default.policy.to_string(), "all:shared_token");
+        let old = security(&[
+            "--shared-token",
+            "x",
+            "--auth-policy",
+            "all:tls,shared_token",
+        ]);
+        assert_eq!(old.policy, default.policy);
+    }
+
+    #[test]
     fn a_read_only_connection_cannot_write() {
         let s = security(&["--shared-token", "x"]);
-        let mut conn = ConnState::new(
-            1,
-            ConnAuth {
-                tls: true,
-                ..ConnAuth::default()
-            },
-        );
+        let mut conn = ConnState::new(1, ConnAuth::default());
         assert_eq!(
             s.authorize(&mut conn, spec(b"GET")),
             Err(CommandError::NoAuth)

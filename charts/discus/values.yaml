@@ -64,7 +64,7 @@ clientTls:
   # With verifyClients: optional or required.
   clientAuth: optional
 
-# The flag --auth-policy, for example all:mtls or all:tls,oauth2. An empty value uses the node
+# The flag --auth-policy, for example all:mtls or all:oauth2. An empty value uses the node
 # default none: every client uses TLS and needs no credentials.
 authPolicy: ""
 authConfig:

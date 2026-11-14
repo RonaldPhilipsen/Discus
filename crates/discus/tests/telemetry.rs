@@ -203,13 +203,7 @@ mod otel {
         let h = TraceHarness::new(0.0);
         let m = h.telemetry.metrics();
         let node = node(args(&["--shared-token", "t"]));
-        let mut conn = ConnState::new(
-            1,
-            ConnAuth {
-                tls: true,
-                ..ConnAuth::default()
-            },
-        );
+        let mut conn = ConnState::new(1, ConnAuth::default());
         for c in [
             &["AUTH", "wrong"][..],
             &["AUTH", "t"],

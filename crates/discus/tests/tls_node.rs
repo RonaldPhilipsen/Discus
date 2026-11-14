@@ -18,13 +18,13 @@ fn tls_args<'a>(ca: &'a TestCa, server: &'a security_support::CertFiles) -> Vec<
 }
 
 #[tokio::test]
-async fn tls_plus_shared_token_needs_auth_over_tls() {
+async fn the_shared_token_policy_needs_auth() {
     let ca = TestCa::new();
     let server = ca.server_cert();
     let mut args = tls_args(&ca, &server);
     args.extend([
         "--auth-policy",
-        "all:tls,shared_token",
+        "all:shared_token",
         "--shared-token",
         "s3cret",
     ]);

@@ -17,13 +17,13 @@ By default, a node asks only for TLS. Each client connects with TLS and needs no
 discus --tls-cert /etc/discus/tls.crt --tls-key /etc/discus/tls.key
 ```
 
-To also ask each client for an OAuth 2.0 token, set the policy `all:tls,oauth2`:
+To also ask each client for an OAuth 2.0 token, set the policy `all:oauth2`:
 
 ```bash
 discus \
   --tls-cert /etc/discus/tls.crt \
   --tls-key /etc/discus/tls.key \
-  --auth-policy all:tls,oauth2 \
+  --auth-policy all:oauth2 \
   --auth-config /etc/discus/auth.toml
 ```
 
@@ -123,11 +123,10 @@ that the scopes deny returns `-NOPERM`, never `-MOVED`.
 
 ## Authentication policy
 
-The flag `--auth-policy` sets which factors a client needs. There are four factors:
+The flag `--auth-policy` sets which factors a client needs. There are three factors:
 
 | Factor | The client has it when |
 | --- | --- |
-| `tls` | It uses TLS. This factor never identifies a client, so it never works alone. |
 | `mtls` | It presents a verified client certificate. |
 | `oauth2` | It sends a valid OAuth 2.0 token with `AUTH`. |
 | `shared_token` | It sends the shared token with `AUTH`. |
@@ -138,14 +137,17 @@ The policy has one of these forms:
 - `any:<factor>,<factor>`. The client needs one factor.
 - `none`. Every client is in, with read and write access. Every client still uses TLS.
 
-The node refuses to start with a policy that `tls` alone can meet, for example `all:tls` or
-`any:tls,oauth2`. For TLS without credentials, use `none`.
+Every client uses TLS, so TLS is not a factor. Older versions had a factor `tls`. The node still
+accepts `tls` in an `all:` list, ignores it, and logs a warning at startup. For example,
+`all:tls,oauth2` means `all:oauth2`. The node refuses to start with `tls` in an `any:` list, or
+with `all:tls`, because these policies would let every client in. For TLS without credentials,
+use `none`.
 
 Without `--auth-policy`, the node picks a default:
 
 | Setting | Default policy |
 | --- | --- |
-| `--shared-token` set | `all:tls,shared_token` |
+| `--shared-token` set | `all:shared_token` |
 | No shared token | `none` |
 
 A shared token that the policy does not use stops the node at startup. With `none`, every client
@@ -156,10 +158,10 @@ Examples:
 
 | Goal | Policy |
 | --- | --- |
-| TLS and a token from an identity provider | `all:tls,oauth2` |
+| A token from an identity provider | `all:oauth2` |
 | A client certificate or a token | `any:mtls,oauth2` |
 | A client certificate and a token | `all:mtls,oauth2` |
-| A simple setup with one password over TLS | `all:tls,shared_token` |
+| A simple setup with one password | `all:shared_token` |
 
 ### Commands
 
