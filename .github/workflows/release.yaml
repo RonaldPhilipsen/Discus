@@ -36,7 +36,7 @@ jobs:
           fetch-depth: 0
       - name: Calculate version
         id: semversie
-        uses: RonaldPhilipsen/semVersie@61a735e7d9e3d6e258d3288d09c1289a5a23ca69 # v2.3.5
+        uses: RonaldPhilipsen/semVersie@d9fb879058f41166c1b18f7974eaed5620dd596b # v2.3.6
 
   build:
     name: Build image (${{ matrix.variant.name }})
