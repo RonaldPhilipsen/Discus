@@ -63,6 +63,12 @@ jobs:
           --set clientTls.verifyClients=true,clientTls.clientAuth=required
           --set clientTls.clientCaSecretName=discus-client-ca
           --set 'authPolicy=all:mtls\,oauth2' --set authConfig.secretName=discus-auth
+      - run: >-
+          helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --set settings.budget.holdMs=1500 | grep -A12 'discus.toml' | grep -q 'hold-ms = 1500'
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --set settings.budget.holdMs=fast
 
   # redis-cli against a fresh node, for every supported and unsupported command.
   compat:

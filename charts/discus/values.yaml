@@ -72,6 +72,34 @@ authConfig:
   # issuers and the client certificate rules. See docs/security.md.
   secretName: ""
 
+# The settings that a node reloads while it runs. The chart writes them to a ConfigMap, mounts it
+# at /settings, and passes --config=/settings/discus.toml. A change reaches the pods after the
+# kubelet syncs the ConfigMap and the node polls the file, so it needs no restart.
+# A null value leaves the built-in default. Do not set these settings in extraArgs: a flag
+# overrides the file, and the node then ignores a reload of that setting.
+settings:
+  budget:
+    forwardReadMs: null
+    forwardWriteMs: null
+    holdMs: null
+    replicationMs: null
+  reads:
+    fromReplicas: null
+  handoff:
+    rateBytes: null
+  auth:
+    maxFailuresPerConnection: null
+    maxFailuresPerSource: null
+    failureWindowSecs: null
+  tls:
+    reloadSecs: null
+  # A map of section name to a map of keys. The chart merges it into the file, for settings that a
+  # newer Discus adds, for example:
+  #   extra:
+  #     budget:
+  #       some-new-key: 5
+  extra: {}
+
 # The termination grace period of the pod is this value plus 15 seconds.
 shutdownTimeoutSeconds: 30
 

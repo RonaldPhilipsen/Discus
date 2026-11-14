@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "settings": {
+      "type": "object",
+      "properties": {
+        "budget": {
+          "type": "object",
+          "properties": {
+            "forwardReadMs": { "type": ["integer", "null"], "minimum": 0 },
+            "forwardWriteMs": { "type": ["integer", "null"], "minimum": 0 },
+            "holdMs": { "type": ["integer", "null"], "minimum": 0 },
+            "replicationMs": { "type": ["integer", "null"], "minimum": 0 }
+          }
+        },
+        "reads": {
+          "type": "object",
+          "properties": {
+            "fromReplicas": { "type": ["boolean", "null"] }
+          }
+        },
+        "handoff": {
+          "type": "object",
+          "properties": {
+            "rateBytes": { "type": ["integer", "null"], "minimum": 0 }
+          }
+        },
+        "auth": {
+          "type": "object",
+          "properties": {
+            "maxFailuresPerConnection": { "type": ["integer", "null"], "minimum": 0 },
+            "maxFailuresPerSource": { "type": ["integer", "null"], "minimum": 0 },
+            "failureWindowSecs": { "type": ["integer", "null"], "minimum": 0 }
+          }
+        },
+        "tls": {
+          "type": "object",
+          "properties": {
+            "reloadSecs": { "type": ["integer", "null"], "minimum": 0 }
+          }
+        },
+        "extra": { "type": "object" }
+      }
+    }
+  }
+}
