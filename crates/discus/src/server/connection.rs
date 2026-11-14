@@ -21,15 +21,18 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::BytesMut;
-use discus_resp::{encode, Command, Parser, Protocol, Value};
+use discus_resp::{encode, Command, Limits, Parser, Protocol, Value};
 use discus_telemetry::Metrics;
 use futures::future::{AbortHandle, Abortable, BoxFuture};
 use futures::stream::{FuturesOrdered, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::time::Instant;
 use tracing::Instrument;
 
 use super::order::{KeyOrder, Keys, WaitFor};
@@ -40,6 +43,14 @@ use crate::telemetry::CommandTrace;
 
 /// Flush when this many reply bytes are pending.
 const FLUSH_BYTES: usize = 1 << 20;
+
+/// The largest bulk argument and the largest buffered request of a connection that has not met
+/// the authentication policy yet. `HELLO` and `AUTH` with the largest token (16 KiB) fit.
+const PREAUTH_REQUEST_BYTES: usize = 64 * 1024;
+
+/// The most arguments in one command of such a connection. The longest command that it needs,
+/// `HELLO 3 AUTH <user> <token> SETNAME <name>`, has 7.
+const PREAUTH_ARRAY_LEN: usize = 64;
 
 /// One reply in request order.
 struct Slot {
@@ -254,22 +265,53 @@ impl Pipeline {
 /// Run the transport setup of a new connection (TLS or the PROXY header), then serve it.
 /// `redirect` marks a connection of the redirect listener.
 pub async fn accept(tcp: TcpStream, peer: SocketAddr, node: Arc<Node>, redirect: bool) {
+    let accepted = Instant::now();
     let local_addr = tcp.local_addr().ok();
     match node.security.accept(tcp, peer).await {
-        Ok((stream, auth)) => serve(stream, auth, node, redirect, local_addr).await,
+        Ok((stream, auth)) => serve(stream, auth, node, redirect, local_addr, accepted).await,
         Err(e) => tracing::debug!(%peer, error = %e, "client connection setup failed"),
     }
 }
 
-/// Serve one connection until it closes.
+/// Serve one connection until it closes. A connection that does not meet the authentication
+/// policy within `--auth-timeout-secs` of `accepted` closes.
 pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     mut stream: S,
     auth: ConnAuth,
     node: Arc<Node>,
     redirect: bool,
     local_addr: Option<SocketAddr>,
+    accepted: Instant,
 ) {
-    serve_until_closed(&mut stream, auth, node, redirect, local_addr).await;
+    let timeout = node.config.security.auth_timeout_secs;
+    let authenticated = AtomicBool::new(node.security.is_authenticated(&auth));
+    let serving = serve_until_closed(
+        &mut stream,
+        auth,
+        node,
+        redirect,
+        local_addr,
+        &authenticated,
+    );
+    if timeout == 0 || authenticated.load(Ordering::Relaxed) {
+        serving.await;
+    } else {
+        let deadline = tokio::time::sleep_until(accepted + Duration::from_secs(timeout));
+        tokio::pin!(deadline);
+        // Once the policy is met, the deadline costs one atomic load at each wake of the task.
+        let expired = std::future::poll_fn(|cx| {
+            if authenticated.load(Ordering::Relaxed) {
+                std::task::Poll::Pending
+            } else {
+                deadline.as_mut().poll(cx)
+            }
+        });
+        tokio::select! {
+            biased;
+            () = serving => {}
+            () = expired => tracing::debug!("client connection closed: no authentication in time"),
+        }
+    }
     // A TLS client sees a clean end only after close_notify. A client that never reads cannot
     // hold the task past the limit.
     let _ = tokio::time::timeout(CLOSE_TIMEOUT, stream.shutdown()).await;
@@ -284,12 +326,24 @@ async fn serve_until_closed<S: AsyncRead + AsyncWrite + Unpin>(
     node: Arc<Node>,
     redirect: bool,
     local_addr: Option<SocketAddr>,
+    authenticated: &AtomicBool,
 ) {
     let _guard = node.track_connection();
     let cfg = &node.config;
     let max_pipeline = cfg.max_pipeline.max(1);
-    let max_request = cfg.max_request_bytes;
-    let mut parser = Parser::new(cfg.parser_limits());
+    let limits = cfg.parser_limits();
+    // Until the connection meets the policy, the node buffers only what a credential needs.
+    let mut preauth = !authenticated.load(Ordering::Relaxed);
+    let (mut max_request, mut parser) = if preauth {
+        let small = Limits {
+            max_bulk_bytes: limits.max_bulk_bytes.min(PREAUTH_REQUEST_BYTES),
+            max_array_len: limits.max_array_len.min(PREAUTH_ARRAY_LEN),
+        };
+        let max_request = cfg.max_request_bytes.min(PREAUTH_REQUEST_BYTES);
+        (max_request, Parser::new(small))
+    } else {
+        (cfg.max_request_bytes, Parser::new(limits))
+    };
     let mut conn = ConnState::new(node.next_conn_id(), auth);
     conn.redirect = redirect;
     conn.local_addr = local_addr;
@@ -317,6 +371,15 @@ async fn serve_until_closed<S: AsyncRead + AsyncWrite + Unpin>(
                         p.prefetch(&cmd).await;
                     }
                     p.submit(cmd);
+                    // `AUTH` changes the connection inside `submit`, even when its reply waits
+                    // behind earlier ones. So the normal limits already hold for a large command
+                    // that follows it in the same pipeline.
+                    if preauth && node.security.is_authenticated(&p.conn.auth) {
+                        preauth = false;
+                        max_request = cfg.max_request_bytes;
+                        parser.set_limits(limits);
+                        authenticated.store(true, Ordering::Relaxed);
+                    }
                 }
                 Ok(None) => {
                     if parser.buffered() > max_request {

@@ -123,6 +123,9 @@ pub struct Config {
     /// Maximum in-flight commands per connection.
     #[arg(long, default_value_t = 10_000)]
     pub max_pipeline: usize,
+    /// Maximum open client connections on both client listeners. 0 means no limit.
+    #[arg(long, default_value_t = 10_000)]
+    pub max_clients: usize,
     /// Maximum members in one collection value.
     #[arg(long, default_value_t = 1_048_576)]
     pub max_collection_members: usize,

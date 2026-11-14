@@ -192,6 +192,28 @@ async fn accept_on(listener: Option<&TcpListener>) -> io::Result<(TcpStream, Soc
     }
 }
 
+/// Serve a connection that a client listener accepted. At `--max-clients` open connections the
+/// node closes it instead, before the transport setup, so a refused connection costs no handshake.
+fn start_client(
+    node: &Arc<Node>,
+    tracker: &TaskTracker,
+    hard_stop: &Arc<connection::HardStop>,
+    (stream, peer): (TcpStream, SocketAddr),
+    redirect: bool,
+) {
+    let Some(slot) = node.admit_client() else {
+        discus_telemetry::global().rejected_connection();
+        tracing::debug!(%peer, "client connection refused: --max-clients reached");
+        return;
+    };
+    let _ = stream.set_nodelay(true);
+    let node = node.clone();
+    tracker.spawn(hard_stop.run(async move {
+        let _slot = slot;
+        connection::accept(stream, peer, node, redirect).await;
+    }));
+}
+
 /// A node with both listeners bound.
 pub struct Server {
     listener: TcpListener,
@@ -476,17 +498,11 @@ impl Server {
                 _ = shutdown.cancelled() => break Ok(()),
                 _ = drain.cancelled() => break Ok(()),
                 accepted = listener.accept() => match accepted {
-                    Ok((stream, peer)) => {
-                        let _ = stream.set_nodelay(true);
-                        tracker.spawn(hard_stop.run(connection::accept(stream, peer, node.clone(), false)));
-                    }
+                    Ok(client) => start_client(&node, &tracker, &hard_stop, client, false),
                     Err(e) => break Err(e),
                 },
                 accepted = accept_on(redirect.as_ref()) => match accepted {
-                    Ok((stream, peer)) => {
-                        let _ = stream.set_nodelay(true);
-                        tracker.spawn(hard_stop.run(connection::accept(stream, peer, node.clone(), true)));
-                    }
+                    Ok(client) => start_client(&node, &tracker, &hard_stop, client, true),
                     Err(e) => break Err(e),
                 },
             }

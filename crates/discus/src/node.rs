@@ -81,6 +81,9 @@ pub struct Node {
     pub live_settings: Arc<Live>,
     next_conn_id: AtomicU64,
     connected: AtomicUsize,
+    /// Client connections from accept to close. Unlike `connected`, it counts a connection
+    /// during its transport setup.
+    client_slots: AtomicUsize,
     phase: AtomicU8,
     link: OnceLock<ClusterLink>,
     membership: OnceLock<Arc<Membership>>,
@@ -282,6 +285,7 @@ impl Node {
             live_settings,
             next_conn_id: AtomicU64::new(1),
             connected: AtomicUsize::new(0),
+            client_slots: AtomicUsize::new(0),
             phase: AtomicU8::new(Phase::Starting as u8),
             link: OnceLock::new(),
             membership: OnceLock::new(),
@@ -737,6 +741,21 @@ impl Node {
         ConnectionGuard(self.clone())
     }
 
+    /// Take a slot for a connection that a client listener accepted, or `None` when
+    /// `--max-clients` connections hold one. The slot is free again when the guard drops.
+    pub fn admit_client(self: &Arc<Self>) -> Option<ClientSlot> {
+        let max = match self.config.max_clients {
+            0 => usize::MAX,
+            max => max,
+        };
+        self.client_slots
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |open| {
+                (open < max).then_some(open + 1)
+            })
+            .ok()
+            .map(|_| ClientSlot(self.clone()))
+    }
+
     pub fn connected_clients(&self) -> usize {
         self.connected.load(Ordering::Relaxed)
     }
@@ -936,6 +955,15 @@ pub struct ConnectionGuard(Arc<Node>);
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         self.0.connected.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// One of the `--max-clients` connection slots.
+pub struct ClientSlot(Arc<Node>);
+
+impl Drop for ClientSlot {
+    fn drop(&mut self) {
+        self.0.client_slots.fetch_sub(1, Ordering::Relaxed);
     }
 }
 

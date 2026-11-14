@@ -239,6 +239,28 @@ The node limits failed `AUTH` attempts in two ways:
 
 Successful attempts never count.
 
+## Limits before authentication
+
+With a policy other than `none`, a connection that has not met the policy yet gets small limits.
+A client without a credential then cannot use much memory on the node.
+
+- One argument and one buffered request are at most 64 KiB, and one command has at most 64
+  arguments. This is enough for `HELLO` and `AUTH` with the largest token. A larger request gets
+  a protocol error, and the node closes the connection.
+- The connection has 30 seconds from the accept to meet the policy. After that the node closes it.
+  Set the time with `--auth-timeout-secs`. The value `0` turns the deadline off.
+
+When the connection meets the policy, the normal limits apply from the next command. So a client
+can send `AUTH` and a large `SET` in one pipeline. A client certificate that meets the policy
+alone gives the normal limits from the start. The normal limits then stay for the life of the
+connection.
+
+The node also limits the number of open client connections, with every policy. The default is
+10000. Set it with `--max-clients`. The value `0` turns the limit off. The count includes
+connections in the TLS handshake, and the listener and the redirect listener share it. At the
+limit, the node accepts a new TCP connection and closes it at once, before the TLS handshake. The
+metric `discus.client.rejected_connections` counts these connections.
+
 ## OAuth 2.0
 
 Discus is an OAuth 2.0 resource server. It does not issue tokens. It checks each JSON Web Token
@@ -485,6 +507,8 @@ identity provider without `ca_file`.
 | `--auth-max-failures-per-connection` | 5 | Failed attempts that close a connection. |
 | `--auth-max-failures-per-source` | 20 | Failed attempts per source address in one window. |
 | `--auth-failure-window-secs` | 60 | The window of the per-source limit. |
+| `--auth-timeout-secs` | 30 | Seconds that a new connection gets to meet the policy. `0` turns the deadline off. |
+| `--max-clients` | 10000 | Open client connections on both client listeners. `0` means no limit. |
 | `--admin-tls` | off | Serves the admin port over TLS. |
 | `--tls-reload-secs` | 10 | Seconds between checks of the certificate files. `0` turns the reload off. |
 
