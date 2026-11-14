@@ -1148,12 +1148,12 @@ returns `-ERR multiple databases need every node to support them` while any memb
 support. Database 0 works as before.
 
 An older build ignores the database of a message. It stores every replicated key in database 0.
-So a downgrade of a cluster that still has more than one database needs a full cold restart, and it
-loses all data.
+The Raft log of a counter group can also keep commands for databases above 0 after the count
+drops. An older node that joins the group replays them into database 0.
 
-Do not put an older build in a cluster that served more than one database. First wait until every
-node serves 1 database for the 10 second wait plus a few purge ticks. A full cold restart also
-works. Before you lower the count, clear the databases above 0 with `FLUSHDB`.
+A cluster that served more than one database needs a full cold restart before it takes an older
+build. A cold restart loses all data. A lower count and a wait are not enough. Before you lower
+the count, clear the databases above 0 with `FLUSHDB`.
 
 ## Multi-key and keyspace commands
 
