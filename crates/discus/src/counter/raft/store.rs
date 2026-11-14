@@ -132,6 +132,9 @@ pub struct Sm {
     current: Option<(SnapshotMeta, Vec<u8>)>,
     /// Snapshots that this replica installed from a leader.
     pub installed: u64,
+    /// The final state was read (see [`super::Replica::stop`]). No later entry applies or gets a
+    /// reply.
+    pub sealed: bool,
 }
 
 impl Sm {
@@ -143,6 +146,7 @@ impl Sm {
             limits,
             current: None,
             installed: 0,
+            sealed: false,
         }
     }
 }
@@ -187,6 +191,10 @@ impl RaftStateMachine<TypeConfig> for SmStore {
     {
         let entries: Vec<EntryResponder<TypeConfig>> = entries.try_collect().await?;
         let mut sm = self.0.lock();
+        if sm.sealed {
+            // The dropped responders fail the writes, so their clients see them in doubt.
+            return Ok(());
+        }
         for (e, responder) in entries {
             sm.last_applied = Some(e.log_id);
             let reply = match e.payload {
@@ -250,5 +258,44 @@ impl SnapshotReceiverFactory<TypeConfig> for SmStore {
 
     async fn begin_receiving_snapshot(&mut self) -> Result<SnapshotData, io::Error> {
         Ok(Cursor::new(Vec::new()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::counter::cmd;
+    use crate::counter::raft::Op;
+    use openraft::impls::leader_id_adv::LeaderId;
+
+    fn incr(index: u64) -> Result<EntryResponder<TypeConfig>, io::Error> {
+        let log_id = LogId::new(
+            LeaderId {
+                term: 1,
+                node_id: 1,
+            },
+            index,
+        );
+        let payload = EntryPayload::Normal(Op {
+            stamp_ms: 10,
+            command: cmd(&["INCR", "cnt:x"]),
+        });
+        Ok((Entry { log_id, payload }, None))
+    }
+
+    /// The worker can reach the lock after the final state was read. Its entries must not apply.
+    #[tokio::test]
+    async fn a_sealed_state_machine_applies_nothing() {
+        let limits = Limits {
+            max_value_bytes: 1 << 20,
+        };
+        let budget = Arc::new(Budget::new(u64::MAX, None));
+        let mut store = SmStore(Arc::new(Mutex::new(Sm::new(budget, limits))));
+        store.apply(futures::stream::iter([incr(1)])).await.unwrap();
+        store.0.lock().sealed = true;
+        store.apply(futures::stream::iter([incr(2)])).await.unwrap();
+        let sm = store.0.lock();
+        assert_eq!(sm.state.get().get(b"cnt:x").unwrap().value, "1");
+        assert_eq!(sm.last_applied.map(|l| l.index), Some(1));
     }
 }
