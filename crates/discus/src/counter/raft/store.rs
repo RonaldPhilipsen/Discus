@@ -207,7 +207,7 @@ impl RaftStateMachine<TypeConfig> for SmStore {
                 }
                 EntryPayload::Normal(op) => {
                     let limits = sm.limits;
-                    sm.state.apply(op.stamp_ms, &op.command, &limits)
+                    sm.state.apply(op.stamp_ms, op.db, &op.command, &limits)
                 }
                 EntryPayload::Membership(m) => {
                     sm.membership = StoredMembership::new(Some(e.log_id), m);
@@ -269,6 +269,10 @@ mod tests {
     use openraft::impls::leader_id_adv::LeaderId;
 
     fn incr(index: u64) -> Result<EntryResponder<TypeConfig>, io::Error> {
+        incr_in(index, 0)
+    }
+
+    fn incr_in(index: u64, db: u32) -> Result<EntryResponder<TypeConfig>, io::Error> {
         let log_id = LogId::new(
             LeaderId {
                 term: 1,
@@ -278,24 +282,41 @@ mod tests {
         );
         let payload = EntryPayload::Normal(Op {
             stamp_ms: 10,
+            db,
             command: cmd(&["INCR", "cnt:x"]),
         });
         Ok((Entry { log_id, payload }, None))
     }
 
-    /// The worker can reach the lock after the final state was read. Its entries must not apply.
-    #[tokio::test]
-    async fn a_sealed_state_machine_applies_nothing() {
+    fn store() -> SmStore {
         let limits = Limits {
             max_value_bytes: 1 << 20,
         };
         let budget = Arc::new(Budget::new(u64::MAX, None));
-        let mut store = SmStore(Arc::new(Mutex::new(Sm::new(budget, limits))));
+        SmStore(Arc::new(Mutex::new(Sm::new(budget, limits))))
+    }
+
+    #[tokio::test]
+    async fn a_log_entry_applies_in_its_database() {
+        let mut store = store();
+        store
+            .apply(futures::stream::iter([incr_in(1, 2), incr_in(2, 2)]))
+            .await
+            .unwrap();
+        let sm = store.0.lock();
+        assert_eq!(sm.state.get().get(2, b"cnt:x").unwrap().value, "2");
+        assert_eq!(sm.state.get().databases(), [2]);
+    }
+
+    /// The worker can reach the lock after the final state was read. Its entries must not apply.
+    #[tokio::test]
+    async fn a_sealed_state_machine_applies_nothing() {
+        let mut store = store();
         store.apply(futures::stream::iter([incr(1)])).await.unwrap();
         store.0.lock().sealed = true;
         store.apply(futures::stream::iter([incr(2)])).await.unwrap();
         let sm = store.0.lock();
-        assert_eq!(sm.state.get().get(b"cnt:x").unwrap().value, "1");
+        assert_eq!(sm.state.get().get(0, b"cnt:x").unwrap().value, "1");
         assert_eq!(sm.last_applied.map(|l| l.index), Some(1));
     }
 }

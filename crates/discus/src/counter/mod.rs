@@ -585,8 +585,15 @@ impl Counters {
         self.group(g).leader(node.id, &epoch)
     }
 
-    /// Execute a counter command on this node, which believes it leads group `g`.
-    pub async fn execute(&self, g: u16, kind: Kind, cmd: &Command) -> Result<Value, Refusal> {
+    /// Execute a counter command in database `db` on this node, which believes it leads group
+    /// `g`.
+    pub async fn execute(
+        &self,
+        g: u16,
+        db: u32,
+        kind: Kind,
+        cmd: &Command,
+    ) -> Result<Value, Refusal> {
         if !kind.is_read() && !kind.is_shrinking() && self.budget.full() {
             return Ok(Value::error(
                 "OOM command not allowed when the counter reserve is full",
@@ -597,6 +604,7 @@ impl Counters {
             Role::Leader(l) => {
                 l.execute(
                     kind,
+                    db,
                     cmd,
                     now_ms,
                     &self.settings.limits,
@@ -604,7 +612,10 @@ impl Counters {
                 )
                 .await
             }
-            Role::Raft(r) if r.leads() => r.execute(kind, cmd, now_ms, self.settings.timeout).await,
+            Role::Raft(r) if r.leads() => {
+                r.execute(kind, db, cmd, now_ms, self.settings.timeout)
+                    .await
+            }
             Role::Idle | Role::Follower(_) | Role::Raft(_) => Err(Refusal::NotLeader),
         }
     }
@@ -619,8 +630,33 @@ impl Counters {
                 continue;
             }
             let g = g as u16;
-            if let Err(refusal) = self.execute(g, Kind::Purge, &purge).await {
+            if let Err(refusal) = self.execute(g, 0, Kind::Purge, &purge).await {
                 tracing::debug!(group = g, ?refusal, "the purge did not apply");
+            }
+        }
+    }
+
+    /// Remove the counters of every database from `count` up in each group that `node` leads:
+    /// one `DISCUS.FLUSHDB` log entry for each such database, so the followers drop them too. A
+    /// group led elsewhere drops them on its own leader.
+    pub async fn drop_databases_from(self: &Arc<Self>, node: &Arc<Node>, count: u32) {
+        let flush: Command = vec![bytes::Bytes::from_static(state::FLUSH_ONE_DB)];
+        for group in &self.groups {
+            if self.leader(group.g) != Some(node.id) {
+                continue;
+            }
+            for db in group.role().led_databases() {
+                if db < count {
+                    continue;
+                }
+                if let Err(refusal) = self.execute(group.g, db, Kind::FlushOneDb, &flush).await {
+                    tracing::debug!(
+                        group = group.g,
+                        db,
+                        ?refusal,
+                        "the database drop did not apply"
+                    );
+                }
             }
         }
     }

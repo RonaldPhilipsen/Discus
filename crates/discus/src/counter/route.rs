@@ -14,12 +14,13 @@ use discus_resp::{Command, Value};
 use discus_wire::ForwardMode;
 use futures::future::join_all;
 
-use super::state::Kind;
+use super::state::{Kind, FLUSH_ONE_DB};
 use super::{Counters, Refusal};
 use crate::cluster::multi::{split, Merge};
 use crate::cluster::route::key_args;
 use crate::cluster::{forward, Dispatch, Hop, Job, Reply, MAX_HOPS};
-use crate::command::util::{check_key, check_mset, check_value};
+use crate::command::internal::COUNTER_FLUSH;
+use crate::command::util::{check_key, check_mset, check_value, parse_i64};
 use crate::command::{CommandError, CommandSpec};
 use crate::Node;
 
@@ -47,8 +48,12 @@ fn is_error(v: &Value, text: &str) -> bool {
 /// Take a command with counter keys. `None` for any other command.
 pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
     let counters = node.counters()?;
+    let Some(args) = key_args(job.spec.route, &job.cmd) else {
+        return (job.spec.name == COUNTER_FLUSH.name)
+            .then(|| group_flush(node, counters, job, hop));
+    };
     let (mut keys, mut strong) = (0, 0);
-    for key in key_args(job.spec.route, &job.cmd)? {
+    for key in args {
         keys += 1;
         strong += usize::from(node.is_counter_key(key));
     }
@@ -65,16 +70,51 @@ pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
         return Some(Dispatch::Ready(Reply::error(e)));
     }
     let (node, counters, cmd, hop) = (node.clone(), counters.clone(), job.cmd.clone(), hop.clone());
-    let route = job.spec.route;
+    let (route, db) = (job.spec.route, job.db);
     Some(Dispatch::Pending(Box::pin(async move {
         match Merge::of(route) {
-            Some((merge, width)) => fan_out(&node, &counters, kind, cmd, hop, merge, width).await,
+            Some((merge, width)) => {
+                fan_out(&node, &counters, db, kind, cmd, hop, merge, width).await
+            }
             None => {
                 let g = counters.group_of(&cmd[1]);
-                run(&node, &counters, g, kind, cmd, hop).await
+                run(&node, &counters, g, db, kind, cmd, hop).await
             }
         }
     })))
+}
+
+/// The flushes of a counter group. They name no key.
+fn is_group_flush(kind: Kind) -> bool {
+    matches!(kind, Kind::FlushAll | Kind::FlushOneDb)
+}
+
+/// A flush names no key, so its forward to a group leader names the group:
+/// `DISCUS.COUNTERFLUSH <group> <flush>`.
+fn group_flush_command(g: u16, cmd: &Command) -> Command {
+    let mut wrapped = Vec::with_capacity(cmd.len() + 2);
+    wrapped.push(Bytes::from_static(COUNTER_FLUSH.name.as_bytes()));
+    wrapped.push(Bytes::from(g.to_string()));
+    wrapped.extend(cmd.iter().cloned());
+    wrapped
+}
+
+/// Run `DISCUS.COUNTERFLUSH <group> <flush>` that an entry node forwarded.
+fn group_flush(node: &Arc<Node>, counters: &Arc<Counters>, job: &Job, hop: &Hop) -> Dispatch {
+    let groups = counters.settings.groups;
+    let g = parse_i64(&job.cmd[1])
+        .ok()
+        .and_then(|g| u16::try_from(g).ok())
+        .filter(|g| *g < groups);
+    let flush: Command = job.cmd[2..].to_vec();
+    let kind = Kind::of(&flush[0]).filter(|k| is_group_flush(*k));
+    let (Some(g), Some(kind)) = (g, kind) else {
+        return Dispatch::Ready(error("ERR malformed DISCUS.COUNTERFLUSH"));
+    };
+    let (node, counters, hop, db) = (node.clone(), counters.clone(), hop.clone(), job.db);
+    Dispatch::Pending(Box::pin(async move {
+        run(&node, &counters, g, db, kind, flush, hop).await
+    }))
 }
 
 fn check_sizes(node: &Node, kind: Kind, cmd: &Command) -> Result<(), CommandError> {
@@ -109,9 +149,11 @@ fn failed(parts: &[Reply]) -> Option<Reply> {
 }
 
 /// Split by group and merge like a normal multi-key command (spec section 7.3).
+#[allow(clippy::too_many_arguments)]
 async fn fan_out(
     node: &Arc<Node>,
     counters: &Arc<Counters>,
+    db: u32,
     kind: Kind,
     cmd: Command,
     hop: Hop,
@@ -122,13 +164,14 @@ async fn fan_out(
         return Reply::try_again();
     };
     if groups.len() == 1 {
-        return run(node, counters, groups[0].target, kind, cmd, hop).await;
+        return run(node, counters, groups[0].target, db, kind, cmd, hop).await;
     }
     let parts = join_all(groups.iter_mut().map(|g| {
         run(
             node,
             counters,
             g.target,
+            db,
             kind,
             mem::take(&mut g.cmd),
             hop.clone(),
@@ -145,13 +188,14 @@ async fn fan_out(
     }
 }
 
-/// Run one command of group `g` on its leader. The entry node waits up to the counter timeout
-/// for a leader and tries again after a refusal that applied nothing. A forwarded copy tries
-/// once, so the entry node keeps the only retry loop.
+/// Run one command of group `g` in database `db` on its leader. The entry node waits up to the
+/// counter timeout for a leader and tries again after a refusal that applied nothing. A
+/// forwarded copy tries once, so the entry node keeps the only retry loop.
 pub async fn run(
     node: &Arc<Node>,
     counters: &Arc<Counters>,
     g: u16,
+    db: u32,
     kind: Kind,
     cmd: Command,
     hop: Hop,
@@ -163,18 +207,28 @@ pub async fn run(
     loop {
         let changed = group.changed.notified();
         match counters.leader(g) {
-            Some(leader) if leader == node.id => match counters.execute(g, kind, &cmd).await {
+            Some(leader) if leader == node.id => match counters.execute(g, db, kind, &cmd).await {
                 Ok(v) => return Reply::value(v),
                 Err(Refusal::InDoubt) => return error(IN_DOUBT),
                 Err(Refusal::NotLeader) => {}
             },
             Some(leader) if hop.hops < MAX_HOPS && !hop.path.contains(&leader) => {
                 let timeout = Some(counters.settings.timeout + FORWARD_SLACK);
+                // An older leader does not know `DISCUS.COUNTERFLUSH` and answers it with an
+                // error, so the group form waits for the gate. Without it, the flush goes out as
+                // before, and a leader of this build answers it without clearing anything.
+                let wrapped;
+                let sent = if is_group_flush(kind) && node.databases.multi_db() {
+                    wrapped = group_flush_command(g, &cmd);
+                    &wrapped
+                } else {
+                    &cmd
+                };
                 let sent = forward::send(
                     node,
                     leader,
-                    0,
-                    &cmd,
+                    db,
+                    sent,
                     &hop,
                     ForwardMode::Route,
                     true,
@@ -203,7 +257,9 @@ pub async fn run(
 
 /// `FLUSHALL` and `FLUSHDB` on the entry node: the cache broadcast, then every counter group
 /// (spec section 12.1). A group without a leader or a quorum keeps its counters, and the reply
-/// says how many groups were cleared.
+/// says how many groups were cleared. `FLUSHDB` clears the counters of database `db` only when
+/// the gate is open. Before that, only database 0 holds keys, so it clears every database, as
+/// before numbered databases.
 pub fn broadcast(node: &Arc<Node>, spec: &'static CommandSpec, db: u32, cmd: Command) -> Dispatch {
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
@@ -216,18 +272,16 @@ pub fn broadcast(node: &Arc<Node>, spec: &'static CommandSpec, db: u32, cmd: Com
         if matches!(cache.value, Value::Error(_)) {
             return cache;
         }
-        let flush: Command = vec![Bytes::from_static(b"FLUSHALL")];
+        let (kind, name) = if spec.name == "FLUSHDB" && node.databases.multi_db() {
+            (Kind::FlushOneDb, FLUSH_ONE_DB)
+        } else {
+            (Kind::FlushAll, &b"FLUSHALL"[..])
+        };
+        let flush: Command = vec![Bytes::from_static(name)];
         let groups = counters.settings.groups;
-        let parts = join_all((0..groups).map(|g| {
-            run(
-                &node,
-                &counters,
-                g,
-                Kind::FlushAll,
-                flush.clone(),
-                Hop::default(),
-            )
-        }))
+        let parts = join_all(
+            (0..groups).map(|g| run(&node, &counters, g, db, kind, flush.clone(), Hop::default())),
+        )
         .await;
         let cleared = parts
             .iter()

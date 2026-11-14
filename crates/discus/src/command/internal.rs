@@ -1,5 +1,6 @@
 //! Commands that only nodes of the cluster send to each other. They run the two halves of a
-//! `RENAME` whose keys have different primaries.
+//! `RENAME` whose keys have different primaries, and the counter part of a flush on the leader of
+//! a counter group.
 //!
 //! These specs stay out of the command table, so `prepare` never finds them for a client.
 
@@ -11,12 +12,20 @@ use discus_wire::{decode_frame, encode_frame, Batch, Frame, Limits, Message, Tra
 use super::error::CommandError;
 use super::table::CommandSpec;
 use super::util::admit;
+use crate::cluster::route::Route;
 use crate::node::{ConnState, Node};
 
 pub const TAKE: &CommandSpec = &CommandSpec::write("DISCUS.TAKE", 2, take);
 pub const PUT: &CommandSpec = &CommandSpec::write("DISCUS.PUT", 3, put);
 
-const COMMANDS: &[&CommandSpec] = &[TAKE, PUT];
+/// `DISCUS.COUNTERFLUSH <group> <flush>`: run the flush `FLUSHALL` or `DISCUS.FLUSHDB` in the
+/// counter group `<group>`, in the database of the forward. A flush names no key, so the leader
+/// cannot find the group from the flush alone. The counter router takes it before any handler,
+/// so the handler runs only on a node without counter groups.
+pub const COUNTER_FLUSH: &CommandSpec =
+    &CommandSpec::write("DISCUS.COUNTERFLUSH", 3, no_counters).with_route(Route::Local);
+
+const COMMANDS: &[&CommandSpec] = &[TAKE, PUT, COUNTER_FLUSH];
 
 /// Look up an internal command by name, ignoring case. Only the forward path calls this.
 pub fn lookup_internal(name: &[u8]) -> Option<&'static CommandSpec> {
@@ -27,6 +36,12 @@ pub fn lookup_internal(name: &[u8]) -> Option<&'static CommandSpec> {
 }
 
 type Reply = Result<Value, CommandError>;
+
+fn no_counters(_: &Node, _: &mut ConnState, _: &Command) -> Reply {
+    Err(CommandError::Custom(
+        "ERR this node runs no counter groups".into(),
+    ))
+}
 
 /// One entry in the replication codec, which handles every value type.
 fn encode(node: &Node, key: DbKey, entry: Entry) -> Vec<u8> {

@@ -58,6 +58,15 @@ impl Role {
         }
     }
 
+    /// The databases with keys, if this role leads its group. Empty otherwise.
+    pub(super) fn led_databases(&self) -> Vec<u32> {
+        match self {
+            Role::Leader(l) if l.serving() => l.databases(),
+            Role::Raft(r) if r.leads() => r.replica.databases(),
+            _ => Vec::new(),
+        }
+    }
+
     /// True when this role leads its group and holds a key that expired by `now_ms`.
     pub(super) fn leads_expired(&self, now_ms: u64) -> bool {
         match self {

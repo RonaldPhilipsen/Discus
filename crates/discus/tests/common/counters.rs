@@ -62,10 +62,15 @@ pub fn role(n: &GossipNode, g: u16) -> &'static str {
 
 /// The value that node `n` holds for `key` in its counter state.
 pub fn held(n: &GossipNode, key: &str) -> Option<String> {
+    held_in(n, 0, key)
+}
+
+/// The value that node `n` holds for `key` of database `db` in its counter state.
+pub fn held_in(n: &GossipNode, db: u32, key: &str) -> Option<String> {
     let c = n.node.counters().unwrap();
     let state = c.held_state(c.group_of(key.as_bytes()))?;
     state
-        .get(key.as_bytes())
+        .get(db, key.as_bytes())
         .map(|e| String::from_utf8_lossy(&e.value).into_owned())
 }
 

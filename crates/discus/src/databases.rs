@@ -88,6 +88,12 @@ impl Databases {
         Ok(db as u32)
     }
 
+    /// Open the gate whatever this build and the members know, so tests reach the gated paths.
+    #[cfg(feature = "testing")]
+    pub fn open_gate(&self) {
+        self.multi_db.store(true, Ordering::Relaxed);
+    }
+
     pub fn check_gate(&self) -> Result<(), CommandError> {
         if self.multi_db() {
             Ok(())

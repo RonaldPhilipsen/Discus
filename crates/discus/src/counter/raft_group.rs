@@ -61,21 +61,26 @@ impl RaftRole {
             .max(now_ms)
     }
 
-    /// Run one command on the leader: a read after ReadIndex, a write through the log.
+    /// Run one command in database `db` on the leader: a read after ReadIndex, a write through
+    /// the log.
     pub async fn execute(
         &self,
         kind: Kind,
+        db: u32,
         cmd: &Command,
         now_ms: u64,
         timeout: Duration,
     ) -> Result<Value, Refusal> {
         let span = crate::telemetry::raft_span();
-        self.run(kind, cmd, now_ms, timeout).instrument(span).await
+        self.run(kind, db, cmd, now_ms, timeout)
+            .instrument(span)
+            .await
     }
 
     async fn run(
         &self,
         kind: Kind,
+        db: u32,
         cmd: &Command,
         now_ms: u64,
         timeout: Duration,
@@ -83,12 +88,19 @@ impl RaftRole {
         let raft = &self.replica.raft;
         if kind.is_read() {
             return match tokio::time::timeout(timeout, self.replica.ensure_linearizable()).await {
-                Ok(Ok(_)) => Ok(self.replica.sm.lock().state.get().read(now_ms, kind, cmd)),
+                Ok(Ok(_)) => Ok(self
+                    .replica
+                    .sm
+                    .lock()
+                    .state
+                    .get()
+                    .read(now_ms, db, kind, cmd)),
                 _ => Err(Refusal::NotLeader),
             };
         }
         let op = Op {
             stamp_ms: self.stamp(now_ms),
+            db,
             command: cmd.clone(),
         };
         match tokio::time::timeout(timeout, raft.client_write(op)).await {

@@ -439,8 +439,10 @@ pub fn run_hop(
                 node, job.db, &job.cmd,
             )))
         }
-        // Only the counter part of a flush reaches here: the cache broadcast uses LOCAL mode. It
-        // must not clear this node's store. TODO(Task 7): run the counter flush of the group here.
+        // Only the counter part of a flush from an entry node without the gate reaches here: the
+        // cache broadcast uses LOCAL mode, and with the gate the counter part is
+        // `DISCUS.COUNTERFLUSH`. It names no group, so it clears nothing, and it must not clear
+        // this node's store.
         Route::Broadcast if hop.hops > 0 => {
             drop(route);
             Dispatch::Ready(Reply::value(Value::ok()))

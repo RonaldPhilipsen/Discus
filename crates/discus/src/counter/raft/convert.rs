@@ -88,7 +88,7 @@ fn entry_to(e: &Entry) -> RaftEntry {
             EntryPayload::Blank => RaftPayload::Blank,
             EntryPayload::Normal(op) => RaftPayload::Command {
                 stamp_ms: op.stamp_ms,
-                db: 0,
+                db: op.db,
                 command: encode_command(&op.command),
             },
             EntryPayload::Membership(m) => RaftPayload::Membership(membership_to(m)),
@@ -102,9 +102,12 @@ fn entry_of(e: RaftEntry) -> Option<Entry> {
         payload: match e.payload {
             RaftPayload::Blank => EntryPayload::Blank,
             RaftPayload::Command {
-                stamp_ms, command, ..
+                stamp_ms,
+                db,
+                command,
             } => EntryPayload::Normal(Op {
                 stamp_ms,
+                db,
                 command: parse_command(&command)?,
             }),
             RaftPayload::Membership(m) => EntryPayload::Membership(membership_of(m)?),
@@ -310,11 +313,20 @@ mod tests {
                     log_id: log_id(19),
                     payload: EntryPayload::Normal(Op {
                         stamp_ms: 1234,
+                        db: 0,
                         command: cmd(&["INCR", "cnt:a", "EX", "5"]),
                     }),
                 },
                 Entry {
                     log_id: log_id(20),
+                    payload: EntryPayload::Normal(Op {
+                        stamp_ms: 1235,
+                        db: 7,
+                        command: cmd(&["INCR", "cnt:a"]),
+                    }),
+                },
+                Entry {
+                    log_id: log_id(21),
                     payload: EntryPayload::Membership(membership()),
                 },
             ],

@@ -8,14 +8,16 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use common::counters::{
-    all_hold, group_of, incr_until, leader_of, purge_reaches_every_replica, role, start, status,
-    Leases, FAST, GROUPS,
+    all_hold, group_of, held_in, incr_until, leader_of, purge_reaches_every_replica, role, start,
+    status, Leases, FAST, GROUPS,
 };
 use common::gossip::{refs, socket, wait_agreed, wait_until, GossipNode, Net, Opts};
+use common::run_in;
 use discus::counter::state::Kind;
 use discus::counter::Refusal;
 use discus_placement::mock::MockClock;
 use discus_placement::{Clock, SystemClock};
+use discus_resp::Value;
 use redis::AsyncCommands;
 
 /// Every group has one leader and a synced follower among `nodes`.
@@ -134,13 +136,13 @@ async fn a_leader_stops_at_the_lease_margin() {
     let early = stop.saturating_duration_since(Instant::now());
     if early > Duration::from_millis(100) {
         assert!(
-            counters.execute(g, Kind::Incr, &cmd).await.is_ok(),
+            counters.execute(g, 0, Kind::Incr, &cmd).await.is_ok(),
             "stopped before the margin"
         );
     }
     tokio::time::sleep_until((stop + Duration::from_millis(50)).into()).await;
     assert_eq!(
-        counters.execute(g, Kind::Incr, &cmd).await,
+        counters.execute(g, 0, Kind::Incr, &cmd).await,
         Err(Refusal::NotLeader)
     );
     assert!(
@@ -260,7 +262,7 @@ async fn expiry_is_identical_under_clock_skew() {
         let deadline = |n: &GossipNode| {
             let c = n.node.counters().unwrap();
             c.held_state(g)
-                .and_then(|s| s.get(key.as_bytes()).and_then(|e| e.expires_at_ms))
+                .and_then(|s| s.get(0, key.as_bytes()).and_then(|e| e.expires_at_ms))
         };
         assert!(
             wait_until(Duration::from_secs(3), || deadline(&na).is_some()
@@ -282,4 +284,99 @@ async fn a_purge_removes_expired_keys_from_leader_and_follower() {
     let (net, leases) = (Net::new(), Leases::new());
     let (nodes, _gates) = two(&net, &leases, &[]).await;
     purge_reaches_every_replica(&refs(&nodes)).await;
+}
+
+/// A counter key of group `g`.
+fn key_of_group(n: &GossipNode, g: u16) -> String {
+    (0..)
+        .map(|i| format!("cnt:flush{i}"))
+        .find(|k| group_of(n, k) == g)
+        .unwrap()
+}
+
+/// Every node holds `want` for `key` of database `db`.
+async fn all_hold_in(nodes: &[GossipNode], db: u32, key: &str, want: Option<&str>) -> bool {
+    wait_until(Duration::from_secs(10), || {
+        nodes.iter().all(|n| held_in(n, db, key).as_deref() == want)
+    })
+    .await
+}
+
+/// Two nodes with the gate closed, a counter key of group 0 in databases 0 and 1, and the entry
+/// node that does not lead group 0.
+async fn counters_in_two_databases(net: &Net, leases: &Leases) -> (Vec<GossipNode>, usize, String) {
+    let (nodes, _gates) = two(net, leases, &["--databases", "2"]).await;
+    let leader = leader_of(&refs(&nodes), 0).unwrap().id;
+    let entry = nodes.iter().position(|n| n.id != leader).unwrap();
+    let key = key_of_group(&nodes[entry], 0);
+    for db in [0, 1] {
+        assert_eq!(
+            run_in(&nodes[entry].node, db, &["INCR", &key]).await,
+            Value::Integer(1)
+        );
+        assert!(all_hold_in(&nodes, db, &key, Some("1")).await);
+    }
+    (nodes, entry, key)
+}
+
+/// The counter part of a flush reaches a leader that is not the entry node, and that leader
+/// clears the counters of its group: `FLUSHDB` in one database, `FLUSHALL` in every one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flush_clears_the_counters_of_a_remote_leader() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (nodes, entry, key) = counters_in_two_databases(&net, &leases).await;
+    for n in &nodes {
+        n.node.databases.open_gate();
+    }
+    let a = &nodes[entry].node;
+    assert_eq!(run_in(a, 1, &["FLUSHDB"]).await, Value::ok());
+    assert!(
+        all_hold_in(&nodes, 1, &key, None).await,
+        "FLUSHDB in database 1 left the counter"
+    );
+    assert!(
+        all_hold_in(&nodes, 0, &key, Some("1")).await,
+        "FLUSHDB in database 1 cleared database 0"
+    );
+    assert_eq!(run_in(a, 1, &["INCR", &key]).await, Value::Integer(1));
+    assert_eq!(run_in(a, 1, &["FLUSHALL"]).await, Value::ok());
+    for db in [0, 1] {
+        assert!(
+            all_hold_in(&nodes, db, &key, None).await,
+            "FLUSHALL left the counter of database {db}"
+        );
+    }
+}
+
+/// Without the gate, the counter part of a flush goes out as before. A leader of this build
+/// answers it without touching its cache.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flush_without_the_gate_keeps_the_cache_of_a_remote_leader() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (nodes, entry, _key) = counters_in_two_databases(&net, &leases).await;
+    let a = &nodes[entry].node;
+    for i in 0..20 {
+        let k = format!("plain{i}");
+        assert_eq!(run_in(a, 0, &["SET", &k, "v"]).await, Value::ok());
+    }
+    let before: Vec<usize> = nodes.iter().map(|n| n.node.store.db_len(0)).collect();
+    assert!(before.iter().all(|n| *n > 0), "{before:?}");
+    assert_eq!(run_in(a, 1, &["FLUSHDB"]).await, Value::ok());
+    let after: Vec<usize> = nodes.iter().map(|n| n.node.store.db_len(0)).collect();
+    assert_eq!(after, before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropped_databases_lose_their_counters() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (nodes, _entry, key) = counters_in_two_databases(&net, &leases).await;
+    for n in &nodes {
+        n.node
+            .counters()
+            .unwrap()
+            .drop_databases_from(&n.node, 1)
+            .await;
+    }
+    assert!(all_hold_in(&nodes, 1, &key, None).await);
+    assert!(all_hold_in(&nodes, 0, &key, Some("1")).await);
 }
