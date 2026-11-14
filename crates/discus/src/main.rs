@@ -1,4 +1,3 @@
-use clap::Parser;
 use discus::{Config, Server};
 use tokio_util::sync::CancellationToken;
 
@@ -8,7 +7,13 @@ use tokio_util::sync::CancellationToken;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> std::io::Result<()> {
-    let config = Config::parse();
+    let config = match Config::load_from(std::env::args_os()) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("discus: {e}");
+            std::process::exit(2);
+        }
+    };
     let target = discus::priority::data_thread_target(config.data_nice);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -61,6 +66,16 @@ async fn run(mut config: Config, nice_target: Option<i32>) -> std::io::Result<()
         max_memory = config.max_memory,
         "starting"
     );
+    for key in discus::settings::KEYS {
+        let source = if config.cli_set.contains(key.flag) {
+            "command line"
+        } else if config.file_set.contains(key.flag) {
+            "file"
+        } else {
+            continue;
+        };
+        tracing::info!(setting = key.flag, source, "setting source");
+    }
     let server = Server::bind(config).await?;
     discus::telemetry::observe_store(server.node());
     tracing::info!(client = %server.local_addr(), admin = %server.admin_addr(), "bound");

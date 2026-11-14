@@ -1,11 +1,15 @@
-//! Node configuration, parsed from command-line flags.
+//! Node configuration, parsed from command-line flags and the optional `--config` file.
 
+use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::{Parser, ValueEnum};
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use discus_placement::{ClusterId, NodeId};
+
+use crate::settings::{FileSettings, KEYS};
 
 /// A peer: `<addr>` or `<node-id>@<addr>`, with an optional `/<client-addr>` after the address.
 /// With gossip it is a discovery seed, and the ID is only an expectation. With static membership
@@ -362,6 +366,18 @@ pub struct Config {
     /// Time between probes of a peer that missed a batch, in milliseconds.
     #[arg(long, default_value_t = 1_000)]
     pub replication_retry_ms: u64,
+    /// A TOML file with the reloadable settings. A flag on the command line wins over the file.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+    /// Seconds between checks of the `--config` file.
+    #[arg(long, default_value_t = 10)]
+    pub config_reload_secs: u64,
+    /// The `KEYS` flags whose value comes from the command line. A reload never changes them.
+    #[arg(skip)]
+    pub cli_set: BTreeSet<&'static str>,
+    /// The `KEYS` flags whose value comes from the `--config` file.
+    #[arg(skip)]
+    pub file_set: BTreeSet<&'static str>,
     /// Security flags (spec §14).
     #[command(flatten)]
     pub security: crate::security::SecurityArgs,
@@ -381,6 +397,73 @@ impl Config {
         T: Into<std::ffi::OsString> + Clone,
     {
         <Config as Parser>::try_parse_from(args)
+    }
+
+    /// Parse the flags, apply the `--config` file, and validate. Like `Parser::parse`, an error
+    /// in the flags prints the clap message and exits; other errors are returned.
+    pub fn load_from<I, T>(args: I) -> Result<Config, String>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let matches = Config::command()
+            .try_get_matches_from(args)
+            .unwrap_or_else(|e| e.exit());
+        let mut config = Config::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+        config.cli_set = KEYS
+            .iter()
+            .filter(|k| matches.value_source(k.flag) == Some(ValueSource::CommandLine))
+            .map(|k| k.flag)
+            .collect();
+        if let Some(path) = &config.config {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("--config {}: {e}", path.display()))?;
+            let file = crate::settings::parse(&text, &restart_only)?;
+            config = config.with_file(&file)?;
+        }
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// A copy with each file value applied, except the flags in `cli_set`. A flag that is in
+    /// neither gets its default, so a key removed from the file stops counting. A value goes
+    /// through the clap parser of its flag, so it obeys the same types and ranges as on the
+    /// command line.
+    pub fn with_file(&self, file: &FileSettings) -> Result<Config, String> {
+        let mut command = Config::command();
+        let defaults = command
+            .try_get_matches_from_mut(["discus"])
+            .and_then(|m| Config::from_arg_matches(&m))
+            .map_err(|e| clap_message(&e))?;
+        let mut config = self.clone();
+        config.file_set.clear();
+        for key in KEYS {
+            if self.cli_set.contains(key.flag) {
+                continue;
+            }
+            let Some(value) = file.values.get(key.flag) else {
+                copy_flag(&mut config, &defaults, key.flag);
+                continue;
+            };
+            let path = match key.section {
+                Some(section) => format!("{section}.{}", key.key),
+                None => key.key.to_string(),
+            };
+            let text = match value {
+                toml::Value::String(s) => s.clone(),
+                toml::Value::Integer(i) => i.to_string(),
+                toml::Value::Boolean(b) => b.to_string(),
+                _ => return Err(format!("{path}: must be a number or a boolean")),
+            };
+            let argument = format!("--{}={text}", key.flag.replace('_', "-"));
+            let parsed = command
+                .try_get_matches_from_mut(["discus", argument.as_str()])
+                .and_then(|m| Config::from_arg_matches(&m))
+                .map_err(|e| format!("{path}: {}", clap_message(&e)))?;
+            copy_flag(&mut config, &parsed, key.flag);
+            config.file_set.insert(key.flag);
+        }
+        Ok(config)
     }
 
     /// True when the topology commands answer.
@@ -571,6 +654,43 @@ impl Config {
                 .saturating_add(1 << 20),
             ..discus_resp::Limits::default()
         }
+    }
+}
+
+/// True for the long name of a flag that the settings file cannot set.
+fn restart_only(name: &str) -> bool {
+    Config::command()
+        .get_arguments()
+        .any(|a| a.get_long() == Some(name) && !KEYS.iter().any(|k| k.flag == a.get_id()))
+}
+
+/// The first line of a clap error, without the `error: ` prefix and the help hint.
+fn clap_message(error: &clap::Error) -> String {
+    let text = error.render().to_string();
+    let line = text.lines().next().unwrap_or_default();
+    line.strip_prefix("error: ").unwrap_or(line).to_string()
+}
+
+fn copy_flag(to: &mut Config, from: &Config, flag: &str) {
+    match flag {
+        "forward_read_timeout_ms" => to.forward_read_timeout_ms = from.forward_read_timeout_ms,
+        "forward_write_timeout_ms" => to.forward_write_timeout_ms = from.forward_write_timeout_ms,
+        "hold_budget_ms" => to.hold_budget_ms = from.hold_budget_ms,
+        "replication_timeout_ms" => to.replication_timeout_ms = from.replication_timeout_ms,
+        "read_from_replicas" => to.read_from_replicas = from.read_from_replicas,
+        "handoff_rate_bytes" => to.handoff_rate_bytes = from.handoff_rate_bytes,
+        "auth_max_failures_per_connection" => {
+            to.security.auth_max_failures_per_connection =
+                from.security.auth_max_failures_per_connection
+        }
+        "auth_max_failures_per_source" => {
+            to.security.auth_max_failures_per_source = from.security.auth_max_failures_per_source
+        }
+        "auth_failure_window_secs" => {
+            to.security.auth_failure_window_secs = from.security.auth_failure_window_secs
+        }
+        "tls_reload_secs" => to.tls_reload_secs = from.tls_reload_secs,
+        _ => unreachable!("KEYS names {flag}, which copy_flag does not copy"),
     }
 }
 
@@ -866,5 +986,129 @@ mod tests {
             let err = bad.unwrap_err();
             assert!(err.contains("--client-advertise"), "{err}");
         }
+    }
+
+    fn settings_file(text: &str) -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, text.as_bytes()).unwrap();
+        file
+    }
+
+    fn load_with_file(text: &str, extra: &[&str]) -> Result<Config, String> {
+        let file = settings_file(text);
+        let path = file.path().to_str().unwrap().to_string();
+        let mut argv = vec!["discus", "--config", path.as_str()];
+        argv.extend(extra);
+        Config::load_from(argv)
+    }
+
+    #[test]
+    fn a_file_sets_a_reloadable_value() {
+        let config = load_with_file("version = 1\n[budget]\nhold-ms = 1500", &[]).unwrap();
+        assert_eq!(config.hold_budget_ms, 1500);
+        assert!(config.cli_set.is_empty());
+    }
+
+    #[test]
+    fn a_flag_wins_over_the_file() {
+        let config = load_with_file(
+            "version = 1\n[budget]\nhold-ms = 1500",
+            &["--hold-budget-ms", "2000"],
+        )
+        .unwrap();
+        assert_eq!(config.hold_budget_ms, 2000);
+        assert!(config.cli_set.contains("hold_budget_ms"));
+    }
+
+    #[test]
+    fn the_default_stays_without_flag_or_key() {
+        let config = load_with_file("version = 1", &[]).unwrap();
+        assert_eq!(config.forward_read_timeout_ms, 500);
+    }
+
+    #[test]
+    fn a_bad_file_stops_the_start() {
+        let error = load_with_file("version = 1\n[budget]\nhold-ms = \"x\"", &[]).unwrap_err();
+        assert!(error.contains("budget.hold-ms"), "{error}");
+    }
+
+    #[test]
+    fn a_restart_only_flag_name_is_refused() {
+        let error = load_with_file("version = 1\nmax-memory = 1", &[]).unwrap_err();
+        assert_eq!(error, "max-memory needs a restart: pass it as --max-memory");
+    }
+
+    #[test]
+    fn a_reloadable_flag_name_points_to_its_section() {
+        let error = load_with_file("version = 1\nhold-budget-ms = 1", &[]).unwrap_err();
+        assert!(error.contains("unknown"), "{error}");
+        assert!(error.contains("[budget] hold-ms"), "{error}");
+    }
+
+    #[test]
+    fn without_config_nothing_changes() {
+        let loaded = Config::load_from(["discus"]).unwrap();
+        let parsed = Config::parse_from(["discus"]).unwrap();
+        assert_eq!(format!("{loaded:?}"), format!("{parsed:?}"));
+    }
+
+    #[test]
+    fn every_key_is_a_flag_with_the_same_long_name() {
+        let command = <Config as clap::CommandFactory>::command();
+        for key in crate::settings::KEYS {
+            let arg = command
+                .get_arguments()
+                .find(|a| a.get_id() == key.flag)
+                .unwrap_or_else(|| panic!("no flag {}", key.flag));
+            assert_eq!(arg.get_long(), Some(key.flag.replace('_', "-").as_str()));
+        }
+    }
+
+    #[test]
+    fn every_key_reaches_its_flag() {
+        let text = "version = 1\n\
+            [budget]\nforward-read-ms = 11\nforward-write-ms = 12\nhold-ms = 13\n\
+            replication-ms = 14\n\
+            [reads]\nfrom-replicas = false\n\
+            [handoff]\nrate-bytes = 15\n\
+            [auth]\nmax-failures-per-connection = 16\nmax-failures-per-source = 17\n\
+            failure-window-secs = 18\n\
+            [tls]\nreload-secs = 19\n";
+        let config = load_with_file(text, &[]).unwrap();
+        assert_eq!(config.forward_read_timeout_ms, 11);
+        assert_eq!(config.forward_write_timeout_ms, 12);
+        assert_eq!(config.hold_budget_ms, 13);
+        assert_eq!(config.replication_timeout_ms, 14);
+        assert!(!config.read_from_replicas);
+        assert_eq!(config.handoff_rate_bytes, 15);
+        assert_eq!(config.security.auth_max_failures_per_connection, 16);
+        assert_eq!(config.security.auth_max_failures_per_source, 17);
+        assert_eq!(config.security.auth_failure_window_secs, 18);
+        assert_eq!(config.tls_reload_secs, 19);
+        assert_eq!(config.file_set.len(), crate::settings::KEYS.len());
+    }
+
+    #[test]
+    fn a_key_removed_from_the_file_returns_to_its_default() {
+        let config = load_with_file("version = 1\n[budget]\nhold-ms = 1500", &[]).unwrap();
+        let empty = crate::settings::parse("version = 1", &|_| false).unwrap();
+        let reloaded = config.with_file(&empty).unwrap();
+        assert_eq!(reloaded.hold_budget_ms, 3_000);
+        assert!(reloaded.file_set.is_empty());
+    }
+
+    #[test]
+    fn a_reload_keeps_the_command_line_value() {
+        let config = load_with_file("version = 1", &["--hold-budget-ms", "2000"]).unwrap();
+        let file =
+            crate::settings::parse("version = 1\n[budget]\nhold-ms = 1500", &|_| false).unwrap();
+        assert_eq!(config.with_file(&file).unwrap().hold_budget_ms, 2000);
+    }
+
+    #[test]
+    fn a_missing_file_names_the_path() {
+        let error =
+            Config::load_from(["discus", "--config", "/nonexistent/discus.toml"]).unwrap_err();
+        assert!(error.contains("/nonexistent/discus.toml"), "{error}");
     }
 }

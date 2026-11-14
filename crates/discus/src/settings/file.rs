@@ -56,7 +56,7 @@ pub fn parse(text: &str, restart_only: &dyn Fn(&str) -> bool) -> Result<FileSett
     let table: toml::Table = text.parse().map_err(|e| format!("invalid TOML: {e}"))?;
 
     let version = match table.get("version") {
-        None => return Err("`version` is missing; it must be the first key".to_string()),
+        None => return Err("`version` is missing; it is required".to_string()),
         Some(toml::Value::Integer(v)) => *v,
         Some(_) => return Err("`version` must be an integer".to_string()),
     };
@@ -112,9 +112,18 @@ pub fn parse(text: &str, restart_only: &dyn Fn(&str) -> bool) -> Result<FileSett
 
 fn unknown_or_restart(path: &str, name: &str, restart_only: &dyn Fn(&str) -> bool) -> String {
     if restart_only(name) {
-        format!("{name} needs a restart: pass it as --{name}")
-    } else {
-        format!("unknown setting `{path}`")
+        return format!("{name} needs a restart: pass it as --{name}");
+    }
+    // Clap derives a long name from the field name, so the flag ID with dashes is the long name.
+    let same_flag = KEYS.iter().find(|k| k.flag.replace('_', "-") == name);
+    match same_flag {
+        Some(Key {
+            section: Some(section),
+            key,
+            ..
+        }) => format!("unknown setting `{path}`; use `[{section}] {key}` for --{name}"),
+        Some(Key { key, .. }) => format!("unknown setting `{path}`; use `{key}` for --{name}"),
+        None => format!("unknown setting `{path}`"),
     }
 }
 
