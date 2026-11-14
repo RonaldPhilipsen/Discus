@@ -25,8 +25,6 @@ async fn info_discus(conn: &mut redis::aio::MultiplexedConnection) -> String {
         .unwrap()
 }
 
-// Task 7 adds `config_generation` to INFO and removes the ignore.
-#[ignore]
 #[tokio::test]
 async fn a_running_node_applies_a_changed_hold_budget() {
     let dir = tempfile::tempdir().unwrap();
@@ -144,4 +142,51 @@ async fn a_zero_tls_period_pauses_and_resumes() {
         tls_connect(addr, &new, None).await.is_ok()
     })
     .await;
+}
+
+#[tokio::test]
+async fn info_shows_the_settings_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("discus.toml");
+    write_settings(&path, "version = 1\n[budget]\nhold-ms = 3000\n");
+    let path_arg = path.to_str().unwrap().to_string();
+    let mut argv = vec![
+        "discus",
+        "--listen",
+        "127.0.0.1:0",
+        "--admin-listen",
+        "127.0.0.1:0",
+        "--config",
+        path_arg.as_str(),
+        "--config-reload-secs",
+        "0",
+    ];
+    let tls = common::client_tls::server_args(&argv);
+    argv.extend(tls.iter().map(String::as_str));
+    let config = discus::Config::load_from(argv).unwrap();
+    let server = discus::Server::bind(config).await.unwrap();
+    let addr = server.local_addr();
+    let node = server.node().clone();
+    let shutdown = CancellationToken::new();
+    let _serve = tokio::spawn(server.run(shutdown.clone()));
+    let _stop = shutdown.drop_guard();
+
+    let client = common::client_tls::redis_client(&format!("rediss://{addr}"));
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let info = info_discus(&mut conn).await;
+    assert!(
+        info.contains(&format!("config_file:{path_arg}\r\n")),
+        "{info}"
+    );
+    assert!(info.contains("config_version:1\r\n"), "{info}");
+    assert!(info.contains("config_generation:0\r\n"), "{info}");
+    assert!(info.contains("config_restart_pending:\r\n"), "{info}");
+
+    let reload = |text: &str| discus::settings::reload::reload(&node.config, &node.live, text);
+    let a = "version = 1\n[budget]\nhold-ms = 3000\n";
+    let b = "version = 1\n[budget]\nhold-ms = 1500\n";
+    reload(b).unwrap();
+    reload(a).unwrap();
+    let info = info_discus(&mut conn).await;
+    assert!(info.contains("config_generation:2\r\n"), "{info}");
 }
