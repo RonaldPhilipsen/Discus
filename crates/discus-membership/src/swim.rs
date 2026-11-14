@@ -355,17 +355,14 @@ impl Swim {
 
     /// Every member of `epoch` advertises `MULTI_DB`. A member without a record does not.
     pub fn all_multi_db(&self, epoch: &Epoch) -> bool {
-        epoch.members().iter().all(|m| self.multi_db(m.id))
-    }
-
-    /// `id` advertises `MULTI_DB`. A node without a record does not.
-    pub fn multi_db(&self, id: NodeId) -> bool {
-        let capabilities = if id == self.me.id {
-            Some(self.me.capabilities)
-        } else {
-            self.members.get(&id).map(|r| r.info.capabilities)
-        };
-        capabilities.is_some_and(|c| c & caps::MULTI_DB != 0)
+        epoch.members().iter().all(|m| {
+            let capabilities = if m.id == self.me.id {
+                Some(self.me.capabilities)
+            } else {
+                self.members.get(&m.id).map(|r| r.info.capabilities)
+            };
+            capabilities.is_some_and(|c| c & caps::MULTI_DB != 0)
+        })
     }
 
     fn bump(&mut self) {

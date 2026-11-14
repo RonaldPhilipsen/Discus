@@ -408,10 +408,12 @@ async fn dropped_databases_lose_their_counters() {
     assert!(all_hold_in(&nodes, 0, &key, Some("1")).await);
 }
 
-/// A follower without `MULTI_DB` cannot decode `DISCUS.FLUSHDB`, so a leader keeps the counters
-/// of a dropped database while that follower replicates its group.
+/// A leader drops the counters of a database above the cluster count at once, even while a
+/// follower without `MULTI_DB` replicates the group. An old follower ignores `DISCUS.FLUSHDB`,
+/// but its snapshot decoder puts every database into one map, so a snapshot must not carry the
+/// dropped database: its keys would overwrite database 0 there.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_drop_skips_a_group_with_a_replica_without_multi_db() {
+async fn a_drop_leaves_database_zero_on_a_follower_without_multi_db() {
     let (net, leases) = (Net::new(), Leases::new());
     let old_flags: Vec<&str> = DB2
         .iter()
@@ -441,21 +443,31 @@ async fn a_drop_skips_a_group_with_a_replica_without_multi_db() {
     let key = key_of_group(&new, 0);
     let counters = new.node.counters().unwrap();
     let incr = vec![Bytes::from_static(b"INCR"), Bytes::from(key.clone())];
-    assert_eq!(
-        counters.execute(0, 1, Kind::Incr, &incr).await,
-        Ok(Value::Integer(1))
-    );
-    assert!(
-        wait_until(Duration::from_secs(10), || held_in(&old, 1, &key)
-            .as_deref()
-            == Some("1"))
-        .await,
-        "the follower did not get the counter"
-    );
-    counters.drop_databases_from(&new.node, 1).await;
-    for n in both {
-        assert_eq!(held_in(n, 1, &key).as_deref(), Some("1"), "{}", n.id);
+    for (db, times) in [(0, 1), (1, 5)] {
+        for _ in 0..times {
+            assert!(counters.execute(0, db, Kind::Incr, &incr).await.is_ok());
+        }
     }
+    let synced = wait_until(Duration::from_secs(10), || {
+        held_in(&old, 0, &key).as_deref() == Some("1")
+            && held_in(&old, 1, &key).as_deref() == Some("5")
+    })
+    .await;
+    assert!(synced, "the follower did not get both counters");
+    counters.drop_databases_from(&new.node, 1).await;
+    assert_eq!(held_in(&new, 1, &key), None);
+    // A follower of an older build would ignore the entry. This one applies it, which shows that
+    // the entry reached it.
+    assert!(
+        wait_until(Duration::from_secs(10), || held_in(&old, 1, &key).is_none()).await,
+        "the drop did not reach the follower"
+    );
+    for n in both {
+        assert_eq!(held_in(n, 0, &key).as_deref(), Some("1"), "{}", n.id);
+    }
+    // A snapshot to the follower comes from this state.
+    let held = counters.held_state(0).unwrap();
+    assert_eq!(held.databases(), [0]);
 }
 
 /// Counters of a database above the local count stay on a group whose leader missed the drop.
