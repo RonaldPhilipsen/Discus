@@ -29,8 +29,11 @@ async fn read_all(files: &[PathBuf]) -> io::Result<Vec<Vec<u8>>> {
     Ok(out)
 }
 
+/// How long a paused watcher waits before it reads the period again.
+const PAUSED_RECHECK: Duration = Duration::from_secs(1);
+
 /// Call `reload` after a change to the content of `files`. `what` names the reloaded thing in the
-/// log. `period` is read before every check, so a change of the period applies at once. A zero
+/// log. `period` is read before every wait, so a new period applies after the current wait ends. A zero
 /// period pauses the checks, and the task reads the period again after one second.
 pub fn watch(
     what: &'static str,
@@ -80,9 +83,6 @@ pub fn watch(
     });
 }
 
-/// How long a paused watcher waits before it reads the period again.
-const PAUSED_RECHECK: Duration = Duration::from_secs(1);
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +95,33 @@ mod tests {
             assert!(tokio::time::Instant::now() < limit, "timed out: {what}");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// A watcher never reads a half-written file when the file changes with one rename.
+    fn atomic_write(path: &std::path::Path, content: &str) {
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, content).unwrap();
+        std::fs::rename(&tmp, path).unwrap();
+    }
+
+    /// A period closure that counts its calls, so a test can wait for the watcher to check again.
+    fn counted(
+        millis: Arc<AtomicU64>,
+    ) -> (Arc<AtomicUsize>, impl Fn() -> Duration + Send + 'static) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        (calls, move || {
+            c.fetch_add(1, Ordering::SeqCst);
+            Duration::from_millis(millis.load(Ordering::SeqCst))
+        })
+    }
+
+    async fn after_more_calls(calls: &AtomicUsize, more: usize) {
+        let target = calls.load(Ordering::SeqCst) + more;
+        until("the watcher keeps checking", || {
+            calls.load(Ordering::SeqCst) >= target
+        })
+        .await;
     }
 
     fn counter() -> (
@@ -123,18 +150,12 @@ mod tests {
         let seen = snapshot(&files);
         let (count, reload) = counter();
         let stop = CancellationToken::new();
-        watch(
-            "test files",
-            files,
-            seen,
-            || Duration::from_millis(10),
-            stop.clone(),
-            reload,
-        );
+        let (calls, period) = counted(Arc::new(AtomicU64::new(10)));
+        watch("test files", files, seen, period, stop.clone(), reload);
         std::os::unix::fs::symlink("v2", root.join("..data.tmp")).unwrap();
         std::fs::rename(root.join("..data.tmp"), root.join("..data")).unwrap();
         until("the swap reloads", || count.load(Ordering::SeqCst) == 1).await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        after_more_calls(&calls, 3).await;
         assert_eq!(count.load(Ordering::SeqCst), 1);
         stop.cancel();
     }
@@ -148,18 +169,12 @@ mod tests {
         let seen = snapshot(&files);
         let (count, reload) = counter();
         let stop = CancellationToken::new();
-        watch(
-            "test files",
-            files,
-            seen,
-            || Duration::from_millis(10),
-            stop.clone(),
-            reload,
-        );
+        let (calls, period) = counted(Arc::new(AtomicU64::new(10)));
+        watch("test files", files, seen, period, stop.clone(), reload);
         std::fs::remove_file(&path).unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        after_more_calls(&calls, 3).await;
         assert_eq!(count.load(Ordering::SeqCst), 0);
-        std::fs::write(&path, "two").unwrap();
+        atomic_write(&path, "two");
         until("the new file reloads", || count.load(Ordering::SeqCst) == 1).await;
         stop.cancel();
     }
@@ -173,18 +188,11 @@ mod tests {
         let seen = snapshot(&files);
         let (count, reload) = counter();
         let millis = Arc::new(AtomicU64::new(0));
-        let m = millis.clone();
+        let (calls, period) = counted(millis.clone());
         let stop = CancellationToken::new();
-        watch(
-            "test files",
-            files,
-            seen,
-            move || Duration::from_millis(m.load(Ordering::SeqCst)),
-            stop.clone(),
-            reload,
-        );
-        std::fs::write(&path, "two").unwrap();
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        watch("test files", files, seen, period, stop.clone(), reload);
+        atomic_write(&path, "two");
+        after_more_calls(&calls, 3).await;
         assert_eq!(count.load(Ordering::SeqCst), 0);
         millis.store(10, Ordering::SeqCst);
         until("the resumed checks reload", || {
