@@ -389,13 +389,22 @@ pub struct Config {
 }
 
 impl Config {
-    /// Parse from an argument list. The first item is the program name.
+    /// Parse from an argument list, without the `--config` file. The first item is the program
+    /// name. Every way to build a `Config` comes here, so `cli_set` is always filled.
     pub fn parse_from<I, T>(args: I) -> Result<Config, clap::Error>
     where
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
     {
-        <Config as Parser>::try_parse_from(args)
+        let mut command = Config::command();
+        let matches = command.try_get_matches_from_mut(args)?;
+        let mut config = Config::from_arg_matches(&matches).map_err(|e| e.format(&mut command))?;
+        config.cli_set = KEYS
+            .iter()
+            .filter(|k| matches.value_source(k.flag) == Some(ValueSource::CommandLine))
+            .map(|k| k.flag)
+            .collect();
+        Ok(config)
     }
 
     /// Parse the flags, apply the `--config` file, and validate. Like `Parser::parse`, an error
@@ -405,15 +414,7 @@ impl Config {
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
     {
-        let matches = Config::command()
-            .try_get_matches_from(args)
-            .unwrap_or_else(|e| e.exit());
-        let mut config = Config::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
-        config.cli_set = KEYS
-            .iter()
-            .filter(|k| matches.value_source(k.flag) == Some(ValueSource::CommandLine))
-            .map(|k| k.flag)
-            .collect();
+        let mut config = Config::parse_from(args).unwrap_or_else(|e| e.exit());
         if let Some(path) = &config.config {
             let text = std::fs::read_to_string(path)
                 .map_err(|e| format!("--config {}: {e}", path.display()))?;
@@ -1090,6 +1091,20 @@ mod tests {
         let file =
             crate::settings::parse("version = 1\n[budget]\nhold-ms = 1500", &|_| false).unwrap();
         assert_eq!(config.with_file(&file).unwrap().hold_budget_ms, 2000);
+    }
+
+    #[test]
+    fn parse_from_records_the_command_line_flags() {
+        let file = settings_file("version = 1\n[budget]\nhold-ms = 1500");
+        let path = file.path().to_str().unwrap();
+        let config =
+            Config::parse_from(["discus", "--config", path, "--hold-budget-ms", "2000"]).unwrap();
+        assert_eq!(config.cli_set, BTreeSet::from(["hold_budget_ms"]));
+        let parsed = crate::settings::parse(&std::fs::read_to_string(path).unwrap(), &|_| false);
+        assert_eq!(
+            config.with_file(&parsed.unwrap()).unwrap().hold_budget_ms,
+            2000
+        );
     }
 
     #[test]
