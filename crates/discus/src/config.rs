@@ -231,15 +231,18 @@ pub struct Config {
     pub cluster_key: Option<PathBuf>,
     /// Seconds between checks of the certificate files, of the client listener and of the
     /// cluster. After a change, new connections use the new certificates. 0 turns it off.
+    /// Also `[tls] reload-secs` in the --config file.
     #[arg(long, default_value_t = 10)]
     pub tls_reload_secs: u64,
     /// The URI SAN that every peer certificate must carry. Empty: any certificate from the CA.
     #[arg(long, default_value = "spiffe://cluster.local/ns/default/sa/discus")]
     pub cluster_san: String,
     /// Forward timeout for reads, in milliseconds. Then the next owner is tried.
+    /// Also `[budget] forward-read-ms` in the --config file.
     #[arg(long, default_value_t = 500)]
     pub forward_read_timeout_ms: u64,
     /// Forward timeout for writes, in milliseconds.
+    /// Also `[budget] forward-write-ms` in the --config file.
     #[arg(long, default_value_t = 2000)]
     pub forward_write_timeout_ms: u64,
     /// Timeout for a QUIC connect plus HELLO, in milliseconds.
@@ -256,6 +259,7 @@ pub struct Config {
     pub cluster_max_frame_bytes: usize,
     /// Read from any owner, with this node first when it owns the key (spec section 7). With
     /// `false`, every read goes to the primary.
+    /// Also `[reads] from-replicas` in the --config file.
     #[arg(long, default_value_t = true, num_args = 0..=1, default_missing_value = "true",
           action = clap::ArgAction::Set)]
     pub read_from_replicas: bool,
@@ -266,10 +270,12 @@ pub struct Config {
     #[arg(long, default_value_t = 512)]
     pub replication_batch_keys: usize,
     /// Time for a peer to acknowledge a replication batch, in milliseconds.
+    /// Also `[budget] replication-ms` in the --config file.
     #[arg(long, default_value_t = 1_000)]
     pub replication_timeout_ms: u64,
     /// Time that a write to a failed primary waits for a new primary, in milliseconds. Then it
     /// returns `-TRYAGAIN`.
+    /// Also `[budget] hold-ms` in the --config file.
     #[arg(long, default_value_t = 3_000)]
     pub hold_budget_ms: u64,
     /// Keys in the write set of one connection, at most.
@@ -343,6 +349,7 @@ pub struct Config {
     #[arg(long, default_value_t = 45_000)]
     pub counter_settle_timeout_ms: u64,
     /// Bytes per second that one handoff scan sends at most.
+    /// Also `[handoff] rate-bytes` in the --config file.
     #[arg(long, default_value_t = 33_554_432)]
     pub handoff_rate_bytes: u64,
     /// Time after which a node gives up on an incoming handoff, in milliseconds. Its
@@ -1049,6 +1056,21 @@ mod tests {
                 .find(|a| a.get_id() == key.flag)
                 .unwrap_or_else(|| panic!("no flag {}", key.flag));
             assert_eq!(arg.get_long(), Some(key.flag.replace('_', "-").as_str()));
+        }
+    }
+
+    #[test]
+    fn the_help_of_every_key_names_its_file_key() {
+        let command = <Config as clap::CommandFactory>::command();
+        for key in crate::settings::KEYS {
+            let arg = command
+                .get_arguments()
+                .find(|a| a.get_id() == key.flag)
+                .unwrap();
+            let help = arg.get_help().map(ToString::to_string).unwrap_or_default();
+            let section = key.section.expect("every reloadable key has a section");
+            let named = format!("Also `[{section}] {}` in the --config file", key.key);
+            assert!(help.contains(&named), "--{}: {help}", key.flag);
         }
     }
 
