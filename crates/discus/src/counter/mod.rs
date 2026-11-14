@@ -455,6 +455,9 @@ impl Counters {
             every.tick().await;
             while s.run_until_cancelled(every.tick()).await.is_some() {
                 me.purge().await;
+                if let Some(node) = me.node() {
+                    me.drop_databases_from(&node, node.databases.local()).await;
+                }
             }
         });
         let Some(membership) = self.node().and_then(|n| n.membership().cloned()) else {
@@ -638,7 +641,9 @@ impl Counters {
 
     /// Remove the counters of every database from `count` up in each group that `node` leads:
     /// one `DISCUS.FLUSHDB` log entry for each such database, so the followers drop them too. A
-    /// group led elsewhere drops them on its own leader.
+    /// group led elsewhere drops them on its own leader. A drop can fail or miss a group whose
+    /// leader moves, so the purge tick calls this again with the local count of this node, and a
+    /// later leader finishes the drop.
     pub async fn drop_databases_from(self: &Arc<Self>, node: &Arc<Node>, count: u32) {
         let flush: Command = vec![bytes::Bytes::from_static(state::FLUSH_ONE_DB)];
         for group in &self.groups {
@@ -650,11 +655,11 @@ impl Counters {
                     continue;
                 }
                 if let Err(refusal) = self.execute(group.g, db, Kind::FlushOneDb, &flush).await {
-                    tracing::debug!(
+                    tracing::warn!(
                         group = group.g,
                         db,
                         ?refusal,
-                        "the database drop did not apply"
+                        "the counters of a dropped database stay until the next try"
                     );
                 }
             }

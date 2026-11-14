@@ -380,3 +380,37 @@ async fn dropped_databases_lose_their_counters() {
     assert!(all_hold_in(&nodes, 1, &key, None).await);
     assert!(all_hold_in(&nodes, 0, &key, Some("1")).await);
 }
+
+/// Counters of a database above the local count stay on a group whose leader missed the drop.
+/// The next leader removes them on its purge tick.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_later_leader_removes_the_counters_of_a_dropped_database() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (nodes, _gates) = two(&net, &leases, &["--databases", "2"]).await;
+    let leader = leader_of(&refs(&nodes), 0).unwrap();
+    let survivor = nodes.iter().find(|n| n.id != leader.id).unwrap();
+    let key = key_of_group(leader, 0);
+    // A write of database 5 that the range check would refuse: as if the count dropped from 6 to
+    // 2 and the leader never ran the drop.
+    let counters = leader.node.counters().unwrap();
+    let incr = vec![Bytes::from_static(b"INCR"), Bytes::from(key.clone())];
+    assert_eq!(
+        counters.execute(0, 5, Kind::Incr, &incr).await,
+        Ok(Value::Integer(1))
+    );
+    assert!(
+        wait_until(Duration::from_secs(10), || held_in(survivor, 5, &key)
+            .as_deref()
+            == Some("1"))
+        .await,
+        "the follower did not get the counter of database 5"
+    );
+    leader.kill();
+    assert!(
+        wait_until(Duration::from_secs(60), || {
+            role(survivor, 0) == "leader" && held_in(survivor, 5, &key).is_none()
+        })
+        .await,
+        "the new leader kept the counters of database 5"
+    );
+}

@@ -26,6 +26,9 @@ pub struct Databases {
     /// `--lower-databases`: a joiner keeps its own count instead of the larger cluster count.
     lower: bool,
     dropped: Mutex<HashSet<u32>>,
+    /// Set by [`Databases::open_gate`]: the gate stays open whatever the membership view says.
+    #[cfg(feature = "testing")]
+    pinned: AtomicBool,
 }
 
 impl Databases {
@@ -36,6 +39,8 @@ impl Databases {
             multi_db: AtomicBool::new(caps::KNOWN & caps::MULTI_DB != 0),
             lower,
             dropped: Mutex::default(),
+            #[cfg(feature = "testing")]
+            pinned: AtomicBool::new(false),
         }
     }
 
@@ -68,10 +73,10 @@ impl Databases {
         // A reader can see the new gate with the old count for a moment. That is harmless:
         // `prepare` checks the count again on every data command, so a database above the new
         // count is refused once the count store lands.
-        self.multi_db.store(
-            multi_db && caps::KNOWN & caps::MULTI_DB != 0,
-            Ordering::Relaxed,
-        );
+        let open = multi_db && caps::KNOWN & caps::MULTI_DB != 0;
+        #[cfg(feature = "testing")]
+        let open = open || self.pinned.load(Ordering::Relaxed);
+        self.multi_db.store(open, Ordering::Relaxed);
         let old = self.cluster.swap(cluster, Ordering::Relaxed);
         (cluster < old).then_some(cluster)
     }
@@ -89,8 +94,10 @@ impl Databases {
     }
 
     /// Open the gate whatever this build and the members know, so tests reach the gated paths.
+    /// It stays open: a later membership view cannot close it.
     #[cfg(feature = "testing")]
     pub fn open_gate(&self) {
+        self.pinned.store(true, Ordering::Relaxed);
         self.multi_db.store(true, Ordering::Relaxed);
     }
 
@@ -126,6 +133,16 @@ mod tests {
         let dbs = Databases::new(3, false);
         dbs.set_view(3, true);
         assert_eq!(dbs.check_select(2), Ok(2));
+    }
+
+    #[cfg(feature = "testing")]
+    #[test]
+    fn a_view_cannot_close_an_opened_gate() {
+        let dbs = Databases::new(3, false);
+        dbs.open_gate();
+        dbs.set_view(3, false);
+        assert!(dbs.multi_db());
+        assert_eq!(dbs.check_gate(), Ok(()));
     }
 
     #[test]
