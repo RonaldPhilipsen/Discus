@@ -18,7 +18,7 @@ pub mod tls;
 
 use std::io;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -78,6 +78,19 @@ impl ClientTlsFiles {
     }
 }
 
+/// The token in the file of `--shared-token-file`, without trailing whitespace.
+fn read_shared_token(path: &Path) -> io::Result<String> {
+    let content = std::fs::read_to_string(path)?;
+    let token = content.trim_end();
+    if token.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the file has no token",
+        ));
+    }
+    Ok(token.to_string())
+}
+
 /// The security state of a node.
 pub struct Security {
     mode: TlsMode,
@@ -87,7 +100,9 @@ pub struct Security {
     lb_identity_tlv: Option<u8>,
     cert_rules: Vec<(String, Scopes)>,
     policy: Policy,
-    shared_token: Option<String>,
+    /// A reload of `shared_token_file` replaces the content.
+    shared_token: Option<ArcSwap<String>>,
+    shared_token_file: Option<PathBuf>,
     live_settings: Arc<Live>,
     limiter: FailureLimiter,
     admin_tls: Option<Arc<ArcSwap<rustls::ServerConfig>>>,
@@ -109,11 +124,26 @@ impl Security {
             Some(path) => AuthFile::load(path)?,
             None => AuthFile::default(),
         };
+        let shared_token = match (&config.shared_token, &config.shared_token_file) {
+            (Some(_), Some(_)) => {
+                return fail("set --shared-token or --shared-token-file, not both");
+            }
+            (Some(token), None) => {
+                tracing::warn!(
+                    "--shared-token shows the token in the process list and in the pod spec. Use \
+                     --shared-token-file"
+                );
+                Some(token.clone())
+            }
+            (None, Some(path)) => Some(
+                read_shared_token(path)
+                    .map_err(|e| format!("--shared-token-file {}: {e}", path.display()))?,
+            ),
+            (None, None) => None,
+        };
         let policy = match &args.auth_policy {
             Some(p) => Policy::parse(p)?,
-            None if config.shared_token.is_some() => {
-                Policy::All(vec![Factor::Tls, Factor::SharedToken])
-            }
+            None if shared_token.is_some() => Policy::All(vec![Factor::Tls, Factor::SharedToken]),
             // Every client uses TLS, so `none` means TLS without credentials.
             None => Policy::None,
         };
@@ -126,12 +156,20 @@ impl Security {
         if policy.uses(Factor::Mtls) && args.tls_client_ca.is_none() {
             return fail("the policy uses mtls, so set --tls-client-ca");
         }
-        match (policy.uses(Factor::SharedToken), &config.shared_token) {
-            (true, None) => return fail("the policy uses shared_token, so set --shared-token"),
+        match (policy.uses(Factor::SharedToken), &shared_token) {
+            (true, None) => {
+                return fail(
+                    "the policy uses shared_token, so set --shared-token-file or --shared-token",
+                )
+            }
             (false, Some(_)) => {
+                let flag = match config.shared_token_file {
+                    Some(_) => "--shared-token-file",
+                    None => "--shared-token",
+                };
                 return fail(format!(
-                    "--shared-token is set, but the policy {policy} does not use shared_token"
-                ))
+                    "{flag} is set, but the policy {policy} does not use shared_token"
+                ));
             }
             _ => {}
         }
@@ -184,7 +222,8 @@ impl Security {
             lb_identity_tlv: args.lb_identity_tlv,
             cert_rules,
             policy,
-            shared_token: config.shared_token.clone(),
+            shared_token: shared_token.map(ArcSwap::from_pointee),
+            shared_token_file: config.shared_token_file.clone(),
             limiter: FailureLimiter::new(live_settings.clone()),
             live_settings,
             admin_tls,
@@ -293,6 +332,20 @@ impl Security {
         self.server_tls.store(Arc::new(listener));
         if let (Some(slot), Some(admin)) = (&self.admin_tls, admin) {
             slot.store(Arc::new(admin));
+        }
+        Ok(())
+    }
+
+    /// The file that [`Security::reload_shared_token`] reads, with `--shared-token-file`.
+    pub fn shared_token_file(&self) -> Option<&Path> {
+        self.shared_token_file.as_deref()
+    }
+
+    /// Read the shared token file again, and use the token for every new `AUTH`. A connection
+    /// that is logged in stays logged in. On an error, the node keeps its current token.
+    pub fn reload_shared_token(&self) -> io::Result<()> {
+        if let (Some(slot), Some(path)) = (&self.shared_token, &self.shared_token_file) {
+            slot.store(Arc::new(read_shared_token(path)?));
         }
         Ok(())
     }
@@ -489,7 +542,7 @@ impl Security {
         let oauth2_only = user.is_some_and(|u| u.eq_ignore_ascii_case(b"OAUTH2"));
         if !oauth2_only && self.policy.uses(Factor::SharedToken) {
             if let Some(expected) = &self.shared_token {
-                if bool::from(expected.as_bytes().ct_eq(token)) {
+                if bool::from(expected.load().as_bytes().ct_eq(token)) {
                     conn.auth.shared = true;
                     return Ok(());
                 }
@@ -637,6 +690,31 @@ pub(crate) mod tests {
         let config = Config::parse_from(argv).unwrap();
         let live_settings = Live::new(crate::settings::Reloadable::from_config(&config));
         Security::from_config(&config, live_settings).unwrap()
+    }
+
+    #[test]
+    fn a_failed_token_reload_keeps_the_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("token");
+        std::fs::write(&file, "old\n").unwrap();
+        let s = security(&["--shared-token-file", file.to_str().unwrap()]);
+        let accepts = |token: &[u8]| {
+            let mut conn = ConnState::new(1, ConnAuth::default());
+            s.authenticate(&mut conn, None, token).is_ok()
+        };
+        assert!(accepts(b"old"));
+
+        std::fs::write(&file, "\n").unwrap();
+        assert!(s.reload_shared_token().is_err());
+        std::fs::remove_file(&file).unwrap();
+        assert!(s.reload_shared_token().is_err());
+        assert!(accepts(b"old"));
+        assert!(!accepts(b""));
+
+        std::fs::write(&file, "new\n").unwrap();
+        s.reload_shared_token().unwrap();
+        assert!(accepts(b"new"));
+        assert!(!accepts(b"old"));
     }
 
     #[test]
