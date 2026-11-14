@@ -25,12 +25,22 @@ fn promoted(n: &GossipNode) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn startupz_waits_for_counter_promotion() {
     let (net, leases) = (Net::new(), Leases::new());
-    let nodes = raft_cluster(&net, &leases, 3, &[]).await;
-    let (fourth, _) = join_to(&net, &leases, &refs(&nodes), &flags(&[])).await;
-    fourth.stall_counters(400);
-    let mut all = refs(&nodes);
-    all.push(&fourth);
-    wait_agreed(&all, Duration::from_secs(15)).await;
+    let mut nodes = raft_cluster(&net, &leases, 3, &[]).await;
+    // A joiner outside the first three of every group has nothing to wait for. Node IDs are
+    // random, so that happens in about one run of 256 with four groups.
+    let fourth = loop {
+        assert!(nodes.len() < 8, "no joiner became a counter target");
+        let (joiner, _) = join_to(&net, &leases, &refs(&nodes), &flags(&[])).await;
+        joiner.stall_counters(400);
+        let mut all = refs(&nodes);
+        all.push(&joiner);
+        wait_agreed(&all, Duration::from_secs(15)).await;
+        if !targeted(&joiner).is_empty() {
+            break joiner;
+        }
+        joiner.stall_counters(0);
+        nodes.push(joiner);
+    };
     let mut waited = false;
     let unstall = tokio::time::Instant::now() + Duration::from_secs(3);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
