@@ -241,3 +241,26 @@ async fn flush_db_drops_the_queue_of_one_database() {
     assert!(!r.settled(0, &key));
     a.faults.hold_replication.store(false, Ordering::Relaxed);
 }
+
+/// A drop flushes the queued keys of every dropped database, also one whose map is empty.
+#[tokio::test]
+async fn a_drop_flushes_the_queue_of_a_database_without_entries() {
+    let c = start_cluster(2, &["--replication-factor", "2"]).await;
+    let a = &c.nodes[0].node;
+    a.faults.hold_replication.store(true, Ordering::Relaxed);
+    let key = bytes::Bytes::from_static(b"k");
+    let r = a.replicator().unwrap().clone();
+    for db in [0, 1, 2] {
+        r.written(a, db, &key);
+    }
+    assert!(a.store.databases().iter().all(|db| *db == 0));
+    a.drop_databases_from(1);
+    assert!(
+        wait_until(Duration::from_secs(10), || r.settled(1, &key)
+            && r.settled(2, &key))
+        .await,
+        "the queued keys of databases 1 and 2 stayed"
+    );
+    assert!(!r.settled(0, &key));
+    a.faults.hold_replication.store(false, Ordering::Relaxed);
+}

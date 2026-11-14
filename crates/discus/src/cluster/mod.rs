@@ -402,7 +402,7 @@ pub fn run_hop(
 ) -> Dispatch {
     // A job that did not pass `prepare` on this node, such as a held retry, checks the database
     // against the databases that this node holds.
-    if job.db >= node.databases.local() {
+    if !node.databases.holds(job.db) {
         drop(route);
         return Dispatch::Ready(Reply::value(Value::error(databases::OUT_OF_RANGE)));
     }

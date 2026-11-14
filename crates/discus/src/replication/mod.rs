@@ -553,6 +553,16 @@ impl Replicator {
         self.sync_charge();
     }
 
+    /// Drop the queued keys (not those in flight) and the hints of every database from `count`
+    /// up, in one pass. It also covers databases whose map is empty.
+    pub fn flush_databases_from(&self, count: u32) {
+        for q in self.peers.read().values() {
+            q.retain(|k| k.db < count);
+        }
+        self.hints.lock().retain(|_, k| k.db < count);
+        self.sync_charge();
+    }
+
     /// Wait until each of `keys` reached one other owner, for at most the replication timeout.
     /// Returns the number of keys without an acknowledgment. The caller replies anyway, because
     /// the queues and the hints go on delivering those keys.
@@ -1073,7 +1083,7 @@ impl Replicator {
                     tracing::warn!(
                         db = k.db,
                         local = node.databases.local(),
-                        "dropped replicated entries of a database that this node does not hold"
+                        "dropped replicated entries of a database that this node does not hold or dropped"
                     );
                 }
                 continue;
@@ -1154,7 +1164,7 @@ fn fill(store: &Store, q: &PeerQueue, keys: Vec<DbKey>) -> Vec<(DbKey, Entry)> {
 /// This node holds database `db`. Inbound entries, offers, fetches, and digests of any other
 /// database are dropped, so a peer with more databases cannot create maps here.
 fn holds_db(node: &Node, db: u32) -> bool {
-    db < node.databases.local()
+    node.databases.holds(db)
 }
 
 fn ack(node: &Node, applied: u32, want: Vec<DbKey>) -> Message {
@@ -1217,6 +1227,29 @@ mod tests {
             !node.databases.first_drop(4),
             "the drop of database 4 was not recorded"
         );
+    }
+
+    #[test]
+    fn a_dropped_database_refuses_entries_until_a_raise() {
+        let config = crate::Config::parse_from(["discus", "--databases", "3"]).unwrap();
+        let live = crate::settings::Live::new(crate::settings::Reloadable::from_config(&config));
+        let security = Arc::new(crate::security::tests::security(&[]));
+        let node = Arc::new(Node::new(config, security, live));
+        let r = Replicator::new(&node);
+        let entry = |key: &'static [u8]| {
+            let e = Entry {
+                version: node.stamp().unwrap(),
+                ..Entry::new(Value::Str("v".into()), None)
+            };
+            (DbKey::new(2, key), e)
+        };
+        assert_eq!(node.databases.set_view(1, true), Some(1));
+        assert_eq!(node.databases.local(), 3);
+        assert_eq!(r.apply_entries(&node, vec![entry(b"a")]), 0);
+        assert_eq!(node.store.db_len(2), 0);
+        assert_eq!(node.databases.set_view(3, true), None);
+        assert_eq!(r.apply_entries(&node, vec![entry(b"b")]), 1);
+        assert_eq!(node.store.db_len(2), 1);
     }
 
     #[test]

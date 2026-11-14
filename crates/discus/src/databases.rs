@@ -23,6 +23,11 @@ pub struct Databases {
     cluster: AtomicU32,
     /// Every member supports numbered databases, and so does this build.
     multi_db: AtomicBool,
+    /// The lowest count that a drop applied on this node, `u32::MAX` for none. Inbound data at
+    /// or above it is refused: nodes end the dwell of a lower count at different times, so a
+    /// peer that still serves the old count can send entries that nobody could read here. A
+    /// later view above the floor lifts it.
+    floor: AtomicU32,
     /// `--lower-databases`: a joiner keeps its own count instead of the larger cluster count.
     lower: bool,
     dropped: Mutex<HashSet<u32>>,
@@ -40,6 +45,7 @@ impl Databases {
             local: AtomicU32::new(local),
             cluster: AtomicU32::new(local),
             multi_db: AtomicBool::new(caps::KNOWN & caps::MULTI_DB != 0),
+            floor: AtomicU32::new(u32::MAX),
             lower,
             dropped: Mutex::default(),
             #[cfg(feature = "testing")]
@@ -57,6 +63,11 @@ impl Databases {
         self.cluster.load(Ordering::Relaxed)
     }
 
+    /// This node holds database `db` and accepts data for it.
+    pub fn holds(&self, db: u32) -> bool {
+        db < self.local() && db < self.floor.load(Ordering::Relaxed)
+    }
+
     pub fn multi_db(&self) -> bool {
         self.multi_db.load(Ordering::Relaxed)
     }
@@ -70,8 +81,9 @@ impl Databases {
         self.local.fetch_max(n, Ordering::Relaxed) < n
     }
 
-    /// Take the membership view. `Some(cluster)` if the cluster count dropped. The gate opens only
-    /// if this build knows `MULTI_DB` too. The count stays at least 1, so database 0 always
+    /// Take the membership view. `Some(cluster)` if the cluster count dropped: the floor then
+    /// refuses inbound data at or above it before the caller drops the databases. The gate opens
+    /// only if this build knows `MULTI_DB` too. The count stays at least 1, so database 0 always
     /// serves.
     pub fn set_view(&self, cluster: u32, multi_db: bool) -> Option<u32> {
         #[cfg(feature = "testing")]
@@ -88,7 +100,14 @@ impl Databases {
         let open = open || self.pinned.load(Ordering::Relaxed);
         self.multi_db.store(open, Ordering::Relaxed);
         let old = self.cluster.swap(cluster, Ordering::Relaxed);
-        (cluster < old).then_some(cluster)
+        if cluster < old {
+            self.floor.fetch_min(cluster, Ordering::Relaxed);
+            return Some(cluster);
+        }
+        if cluster > self.floor.load(Ordering::Relaxed) {
+            self.floor.store(u32::MAX, Ordering::Relaxed);
+        }
+        None
     }
 
     /// The database of `SELECT <db>`. The range check comes first, as in Valkey, so a client sees
@@ -209,6 +228,21 @@ mod tests {
         assert_eq!(dbs.set_view(3, true), None);
         assert_eq!(dbs.set_view(1, true), Some(1));
         assert_eq!(dbs.set_view(3, true), None);
+    }
+
+    #[test]
+    fn a_drop_sets_a_floor_that_a_raise_lifts() {
+        let dbs = Databases::new(3, false);
+        assert!(dbs.holds(2));
+        assert_eq!(dbs.set_view(1, true), Some(1));
+        assert_eq!(dbs.local(), 3);
+        assert!(dbs.holds(0));
+        assert!(!dbs.holds(1) && !dbs.holds(2));
+        assert_eq!(dbs.set_view(1, true), None);
+        assert!(!dbs.holds(1));
+        assert_eq!(dbs.set_view(3, true), None);
+        assert!(dbs.holds(1) && dbs.holds(2));
+        assert!(!dbs.holds(3));
     }
 
     #[test]

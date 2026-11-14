@@ -467,7 +467,8 @@ impl Node {
 
     /// Drop every database from `count` up: its entries, its queued keys and hints, and the
     /// counters of the groups that this node leads. The cluster count dropped to `count`, so
-    /// clients can no longer reach them.
+    /// clients can no longer reach them. `Databases::set_view` already set the floor, so no
+    /// inbound entry lands in them between the drop and a later raise.
     pub fn drop_databases_from(self: &Arc<Self>, count: u32) {
         let node = self.clone();
         tokio::spawn(async move {
@@ -484,9 +485,7 @@ impl Node {
             .await
             .unwrap_or_default();
             if let Some(r) = node.replicator() {
-                for db in &removed {
-                    r.flush_db(*db);
-                }
+                r.flush_databases_from(count);
             }
             if !removed.is_empty() {
                 tracing::info!(

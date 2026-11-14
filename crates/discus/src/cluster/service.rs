@@ -144,7 +144,7 @@ async fn forwarded(
         return Reply::try_again();
     }
     // The sender checked the database against the cluster count, but this node can hold fewer.
-    if f.db >= node.databases.local() {
+    if !node.databases.holds(f.db) {
         return Reply::value(Value::error(crate::databases::OUT_OF_RANGE));
     }
     let cmd = match parse(node, &f.command) {
