@@ -102,7 +102,7 @@ async fn an_acknowledged_delete_survives_a_failover() {
         wait_until(Duration::from_secs(10), || primary
             .replicator()
             .unwrap()
-            .settled(k.as_bytes()))
+            .settled(0, k.as_bytes()))
         .await
     );
     let del: i64 = c.del(&k).await.unwrap();
@@ -147,7 +147,7 @@ async fn an_untransmitted_incr_is_retried() {
         wait_until(Duration::from_secs(3), || primary
             .replicator()
             .unwrap()
-            .settled(k.as_bytes()))
+            .settled(0, k.as_bytes()))
         .await
     );
     nodes[0].kill();

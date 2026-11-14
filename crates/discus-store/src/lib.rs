@@ -18,7 +18,7 @@ pub use entry::{estimate_size, Entry};
 pub use evict::Admit;
 pub use glob::glob_match;
 pub use store::{
-    refill_bucket, DbKey, EntryCursor, Pressure, Slot, Store, StoreConfig,
+    refill_bucket, AsDbKey, DbKey, EntryCursor, Pressure, Slot, Store, StoreConfig,
     DEFAULT_TOMBSTONE_TTL_MS, HASH_SEED,
 };
 pub use ttl::{every, on_events};

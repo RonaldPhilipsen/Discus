@@ -9,9 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use discus_placement::{NodeId, Version};
-use discus_store::{estimate_size, refill_bucket, Entry};
+use discus_store::{estimate_size, refill_bucket, AsDbKey, DbKey, Entry};
 use lru::LruCache;
 
 /// The bookkeeping cost of one hint on top of its entry: its LRU node and its place in the
@@ -34,10 +33,10 @@ pub struct Hint {
 }
 
 struct Target {
-    hints: LruCache<Bytes, Hint>,
+    hints: LruCache<DbKey, Hint>,
     /// The hints by version. A replay batch takes the oldest versions from here, so a replay of
     /// N hints costs O(N log N) in all, not a sort of every hint per batch.
-    order: BTreeSet<(Version, Bytes)>,
+    order: BTreeSet<(Version, DbKey)>,
     bytes: u64,
     /// The refill buckets of lost hints, each with the mark of its latest loss.
     lost: BTreeMap<u8, u64>,
@@ -47,14 +46,14 @@ struct Target {
 
 impl Target {
     /// Store a hint in place of an older hint of the key.
-    fn put(&mut self, key: Bytes, hint: Hint) {
+    fn put(&mut self, key: DbKey, hint: Hint) {
         self.pop(&key);
         self.bytes += hint.size;
         self.order.insert((hint.entry.version, key.clone()));
         self.hints.push(key, hint);
     }
 
-    fn pop(&mut self, key: &[u8]) -> Option<Hint> {
+    fn pop(&mut self, key: &DbKey) -> Option<Hint> {
         let (k, h) = self.hints.pop_entry(key)?;
         self.order.remove(&(h.entry.version, k));
         self.bytes -= h.size;
@@ -69,7 +68,7 @@ impl Target {
         self.order.remove(&(h.entry.version, k.clone()));
         self.bytes -= h.size;
         self.marks += 1;
-        self.lost.insert(refill_bucket(&k), self.marks);
+        self.lost.insert(refill_bucket(&k.key), self.marks);
         true
     }
 }
@@ -116,12 +115,12 @@ impl HintStore {
     }
 
     /// Any target holds a hint for `key`.
-    pub fn holds(&self, key: &[u8]) -> bool {
+    pub fn holds(&self, key: &dyn AsDbKey) -> bool {
         self.targets.values().any(|t| t.hints.contains(key))
     }
 
     /// `target` has a hint for `key`.
-    pub fn holds_for(&self, target: NodeId, key: &[u8]) -> bool {
+    pub fn holds_for(&self, target: NodeId, key: &dyn AsDbKey) -> bool {
         self.targets
             .get(&target)
             .is_some_and(|t| t.hints.contains(key))
@@ -132,11 +131,11 @@ impl HintStore {
     pub fn record(
         &mut self,
         target: NodeId,
-        key: Bytes,
+        key: DbKey,
         entry: Entry,
         now: Instant,
     ) -> Vec<(NodeId, u64)> {
-        let size = estimate_size(&key, &entry) + HINT_OVERHEAD;
+        let size = estimate_size(&key.key, &entry) + HINT_OVERHEAD;
         let t = self.targets.entry(target).or_insert_with(Target::new);
         let hint = Hint {
             entry,
@@ -205,7 +204,7 @@ impl HintStore {
     }
 
     /// Up to `max` hints of `target` in HLC order, oldest version first.
-    pub fn batch(&self, target: NodeId, max: usize) -> Vec<(Bytes, Entry)> {
+    pub fn batch(&self, target: NodeId, max: usize) -> Vec<(DbKey, Entry)> {
         let Some(t) = self.targets.get(&target) else {
             return Vec::new();
         };
@@ -217,7 +216,7 @@ impl HintStore {
     }
 
     /// The target acknowledged these hints. A hint that a newer write replaced stays.
-    pub fn confirm(&mut self, target: NodeId, sent: &[(Bytes, Version)]) {
+    pub fn confirm(&mut self, target: NodeId, sent: &[(DbKey, Version)]) {
         let Some(t) = self.targets.get_mut(&target) else {
             return;
         };
@@ -251,9 +250,8 @@ impl HintStore {
         }
     }
 
-    /// Drop every hint of `target`, which never returns.
     /// Drop every hint of `target`. Returns the keys of the dropped hints.
-    pub fn drop_target(&mut self, target: NodeId) -> Vec<Bytes> {
+    pub fn drop_target(&mut self, target: NodeId) -> Vec<DbKey> {
         self.targets
             .remove(&target)
             .map(|t| t.hints.iter().map(|(k, _)| k.clone()).collect())
@@ -262,9 +260,9 @@ impl HintStore {
 
     /// Keep only the hints for which `keep(target, key)` holds. Dropped hints are not lost:
     /// the target no longer owns the key.
-    pub fn retain(&mut self, mut keep: impl FnMut(NodeId, &Bytes) -> bool) {
+    pub fn retain(&mut self, mut keep: impl FnMut(NodeId, &DbKey) -> bool) {
         for (id, t) in &mut self.targets {
-            let drop: Vec<Bytes> = t
+            let drop: Vec<DbKey> = t
                 .hints
                 .iter()
                 .map(|(k, _)| k)
@@ -298,6 +296,7 @@ fn bump(out: &mut Vec<(NodeId, u64)>, target: NodeId) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use discus_placement::NTP64;
     use discus_store::Value;
 
@@ -318,8 +317,22 @@ mod tests {
         e
     }
 
-    fn k(s: &str) -> Bytes {
-        Bytes::copy_from_slice(s.as_bytes())
+    fn k(s: &str) -> DbKey {
+        DbKey::new(0, Bytes::copy_from_slice(s.as_bytes()))
+    }
+
+    #[test]
+    fn hints_of_two_databases_do_not_coalesce() {
+        let mut h = HintStore::new(limits(10));
+        let now = Instant::now();
+        let other = DbKey::new(2, k("a").key);
+        h.record(T, k("a"), entry(1), now);
+        h.record(T, other.clone(), entry(2), now);
+        assert_eq!(h.count(T), 2);
+        let batch: Vec<DbKey> = h.batch(T, 10).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(batch, vec![k("a"), other.clone()]);
+        assert!(h.holds_for(T, &other));
+        assert!(!h.holds(&DbKey::new(1, k("a").key)));
     }
 
     #[test]
@@ -338,9 +351,9 @@ mod tests {
     fn holds_for_looks_at_one_target_only() {
         let mut h = HintStore::new(limits(10));
         h.record(T, k("a"), entry(1), Instant::now());
-        assert!(h.holds_for(T, b"a"));
-        assert!(!h.holds_for(T, b"b"));
-        assert!(!h.holds_for(NodeId::from_u128(10), b"a"));
+        assert!(h.holds_for(T, &k("a")));
+        assert!(!h.holds_for(T, &k("b")));
+        assert!(!h.holds_for(NodeId::from_u128(10), &k("a")));
     }
 
     #[test]
@@ -390,7 +403,7 @@ mod tests {
         h.record(T, k("late"), entry(30), now);
         h.record(T, k("early"), entry(10), now);
         h.record(T, k("mid"), entry(20), now);
-        let keys: Vec<Bytes> = h.batch(T, 2).into_iter().map(|(k, _)| k).collect();
+        let keys: Vec<DbKey> = h.batch(T, 2).into_iter().map(|(k, _)| k).collect();
         assert_eq!(keys, vec![k("early"), k("mid")]);
         h.confirm(
             T,
@@ -408,7 +421,7 @@ mod tests {
         let now = Instant::now();
         h.record(T, k("keep"), entry(1), now);
         h.record(T, k("gone"), entry(2), now);
-        h.retain(|_, key| key.as_ref() == b"keep");
+        h.retain(|_, key| key.key.as_ref() == b"keep");
         assert_eq!(h.count(T), 1);
         assert!(h.lost(T).buckets.is_empty());
         assert_eq!(h.drop_target(T), vec![k("keep")]);
@@ -465,14 +478,14 @@ mod tests {
         h.record(T, k("b"), entry(20), now);
         h.record(T, k("e"), entry(1), now);
         h.confirm(T, &[(k("c"), entry(8).version)]);
-        h.retain(|_, key| key.as_ref() != b"d");
+        h.retain(|_, key| key.key.as_ref() != b"d");
         for t in h.targets.values() {
             assert_eq!(t.order.len(), t.hints.len());
             for (v, key) in &t.order {
                 assert_eq!(t.hints.peek(key).map(|x| x.entry.version), Some(*v));
             }
         }
-        let keys: Vec<Bytes> = h.batch(T, 10).into_iter().map(|(k, _)| k).collect();
+        let keys: Vec<DbKey> = h.batch(T, 10).into_iter().map(|(k, _)| k).collect();
         assert_eq!(keys, vec![k("e"), k("b")]);
         h.expire(now + Duration::from_secs(61));
         assert!(h.batch(T, 10).is_empty());

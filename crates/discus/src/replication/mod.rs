@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use discus_placement::{ClusterId, Epoch, NodeId, Version};
-use discus_store::{refill_bucket, DbKey, Entry, Store};
+use discus_store::{refill_bucket, AsDbKey, DbKey, Entry, EntryCursor, Store};
 use discus_transport::{Lane, PeerInfo, TransportError};
 use discus_wire::{Batch, BatchAck, Message};
 use parking_lot::{Mutex, RwLock};
@@ -432,8 +432,8 @@ impl Replicator {
     }
 
     /// Record a hint for the peer of `q` with the current entry of `key`.
-    fn hint(&self, q: &PeerQueue, key: Bytes) {
-        let Some(entry) = self.store.entry(0, &key) else {
+    fn hint(&self, q: &PeerQueue, key: DbKey) {
+        let Some(entry) = self.store.entry(key.db, &key.key) else {
             return;
         };
         let evicted = self.hints.lock().record(q.peer, key, entry, Instant::now());
@@ -445,10 +445,10 @@ impl Replicator {
     }
 
     /// Record a hint for the peer of `q` for each of `keys`, under one hold of the hint lock.
-    fn hint_all(&self, q: &PeerQueue, keys: Vec<Bytes>) {
-        let entries: Vec<(Bytes, Entry)> = keys
+    fn hint_all(&self, q: &PeerQueue, keys: Vec<DbKey>) {
+        let entries: Vec<(DbKey, Entry)> = keys
             .into_iter()
-            .filter_map(|k| self.store.entry(0, &k).map(|e| (k, e)))
+            .filter_map(|k| self.store.entry(k.db, &k.key).map(|e| (k, e)))
             .collect();
         if entries.is_empty() {
             return;
@@ -473,15 +473,16 @@ impl Replicator {
         self.hints.lock().count(target)
     }
 
-    /// Queue `key`, which a local write just changed, for every other current owner.
-    pub fn written(&self, node: &Node, key: &Bytes) {
-        self.queue_for(node.owners(key), key);
+    /// Queue `key` of database `db`, which a local write just changed, for every other current
+    /// owner.
+    pub fn written(&self, node: &Node, db: u32, key: &Bytes) {
+        self.queue_for(node.owners(key), &DbKey::new(db, key.clone()));
     }
 
     /// Queue `key` for every owner in `owners` but this node. One read of the peer map serves
     /// every owner that has a queue. Hints wait until the read ends, because `hint` reads the
     /// map again and a second read can deadlock behind a waiting writer.
-    fn queue_for(&self, owners: impl IntoIterator<Item = NodeId>, key: &Bytes) {
+    fn queue_for(&self, owners: impl IntoIterator<Item = NodeId>, key: &DbKey) {
         let mut missing = Vec::new();
         let mut hints = Vec::new();
         {
@@ -535,16 +536,26 @@ impl Replicator {
         self.peers.read().get(&peer).map_or(0, |q| q.len())
     }
 
-    /// No queue, batch in flight, or hint holds `key`: every replica acknowledged its latest
-    /// write.
-    pub fn settled(&self, key: &[u8]) -> bool {
+    /// No queue, batch in flight, or hint holds `key` of database `db`: every replica
+    /// acknowledged its latest write.
+    pub fn settled(&self, db: u32, key: &[u8]) -> bool {
+        let key: &dyn AsDbKey = &(db, key);
         self.peers.read().values().all(|q| !q.holds(key)) && !self.hints.lock().holds(key)
+    }
+
+    /// Drop the queued keys and the hints of database `db`, after a flush of that database.
+    pub fn flush_db(&self, db: u32) {
+        for q in self.peers.read().values() {
+            q.retain(|k| k.db != db);
+        }
+        self.hints.lock().retain(|_, k| k.db != db);
+        self.sync_charge();
     }
 
     /// Wait until each of `keys` reached one other owner, for at most the replication timeout.
     /// Returns the number of keys without an acknowledgment. The caller replies anyway, because
     /// the queues and the hints go on delivering those keys.
-    pub async fn unacked_after_wait(&self, node: &Node, keys: &[Bytes]) -> u64 {
+    pub async fn unacked_after_wait(&self, node: &Node, keys: &[DbKey]) -> u64 {
         let deadline = tokio::time::Instant::now() + node.live_settings.get().replication_timeout;
         loop {
             // Subscribed before the evaluation, so a batch that ends after it wakes the wait.
@@ -562,13 +573,13 @@ impl Replicator {
         }
     }
 
-    fn unacked(&self, node: &Node, keys: &[Bytes]) -> u64 {
+    fn unacked(&self, node: &Node, keys: &[DbKey]) -> u64 {
         keys.iter().filter(|k| !self.acked(node, k)).count() as u64
     }
 
-    fn acked(&self, node: &Node, key: &Bytes) -> bool {
+    fn acked(&self, node: &Node, key: &DbKey) -> bool {
         // Read before the locks below: `adopt_epoch` takes them under the epoch lock.
-        let owners = node.owners(key);
+        let owners = node.owners(&key.key);
         let mut others = owners.iter().filter(|o| **o != self.id).peekable();
         if others.peek().is_none() {
             return true;
@@ -598,11 +609,11 @@ impl Replicator {
     /// reconciliation uses the `old` to `new` step.
     pub fn on_epoch(&self, old: &Arc<Epoch>, new: &Arc<Epoch>, current: &Epoch) {
         let rf = self.settings.rf;
-        let mut moved: Vec<Bytes> = Vec::new();
+        let mut moved: Vec<DbKey> = Vec::new();
         self.peers.write().retain(|peer, q| {
             let member = current.member(*peer).is_some();
             q.retain(|k| {
-                let keep = member && current.owners(k, rf).contains(peer);
+                let keep = member && current.owners(&k.key, rf).contains(peer);
                 if !keep {
                     moved.push(k.clone());
                 }
@@ -621,7 +632,7 @@ impl Replicator {
                 }
             }
             hints.retain(|target, k| {
-                let keep = current.owners(k, rf).contains(&target);
+                let keep = current.owners(&k.key, rf).contains(&target);
                 if !keep {
                     moved.push(k.clone());
                 }
@@ -631,7 +642,7 @@ impl Replicator {
         moved.sort_unstable();
         moved.dedup();
         for k in &moved {
-            self.queue_for(current.owners(k, rf), k);
+            self.queue_for(current.owners(&k.key, rf), k);
         }
         self.sync_charge();
         self.prune_handoffs(current);
@@ -747,7 +758,7 @@ impl Replicator {
                 continue;
             }
             let mut batch = Batch::new(node.epoch_id());
-            batch.entries = in_db0(fill(&self.store, &q, keys));
+            batch.entries = fill(&self.store, &q, keys);
             let started = Instant::now();
             match self.send(&node, q.peer, Message::Replicate(batch)).await {
                 Ok(_) => {
@@ -811,12 +822,12 @@ impl Replicator {
             if entries.is_empty() {
                 return true;
             }
-            let sent: Vec<(Bytes, Version)> = entries
+            let sent: Vec<(DbKey, Version)> = entries
                 .iter()
                 .map(|(k, e)| (k.clone(), e.version))
                 .collect();
             let mut batch = Batch::new(node.epoch_id());
-            batch.entries = in_db0(entries);
+            batch.entries = entries;
             match self.send(node, peer, Message::HintReplay(batch)).await {
                 Ok(_) => {
                     self.hints.lock().confirm(peer, &sent);
@@ -858,7 +869,7 @@ impl Replicator {
             rf: self.settings.rf,
             keys: self.settings.batch_keys,
         };
-        let mut cursor = 0;
+        let mut cursor = EntryCursor::default();
         loop {
             #[cfg(feature = "testing")]
             crate::node::Faults::wait(&node.faults.hold_refill, &node.faults.refill_held).await;
@@ -874,15 +885,15 @@ impl Replicator {
             };
             if !entries.is_empty() {
                 let mut batch = Batch::new(epoch.id());
-                batch.entries = in_db0(entries);
+                batch.entries = entries;
                 if let Err(e) = self.send(node, peer, Message::HintReplay(batch)).await {
                     tracing::debug!(%peer, error = %e, "a refill batch failed");
                     return false;
                 }
             }
-            if next == 0 {
+            let Some(next) = next else {
                 return node.epochs().current().id() == epoch.id();
-            }
+            };
             cursor = next;
         }
     }
@@ -955,9 +966,11 @@ impl Replicator {
                     .offers
                     .into_iter()
                     .filter(|(k, v)| {
-                        self.store
-                            .stored_version(k.db, &k.key)
-                            .is_none_or(|local| local < *v)
+                        holds_db(&node, k.db)
+                            && self
+                                .store
+                                .stored_version(k.db, &k.key)
+                                .is_none_or(|local| local < *v)
                     })
                     .map(|(k, _)| k)
                     .collect();
@@ -972,7 +985,7 @@ impl Replicator {
             }
             Message::Fetch { keys } => {
                 let mut out = Batch::new(node.epoch_id());
-                for k in keys {
+                for k in keys.into_iter().filter(|k| holds_db(&node, k.db)) {
                     if let Some(e) = self.store.entry(k.db, &k.key) {
                         out.entries.push((k, e));
                     }
@@ -982,9 +995,12 @@ impl Replicator {
             Message::Digest {
                 from: old,
                 to,
+                db,
                 sums,
-                ..
             } => {
+                if !holds_db(&node, db) {
+                    return Message::Entries(Batch::new(node.epoch_id()));
+                }
                 // A node that skipped the sender's new epoch uses its own current one, which
                 // has the same members once both nodes saw the same change.
                 let (old, new) = {
@@ -1002,12 +1018,12 @@ impl Replicator {
                 };
                 let (store, rf, me) = (self.store.clone(), self.settings.rf, self.id);
                 let entries = tokio::task::spawn_blocking(move || {
-                    digest::answer(&store, &old, &new, rf, from, me, &sums)
+                    digest::answer(&store, &old, &new, rf, from, me, db, &sums)
                 })
                 .await
                 .unwrap_or_default();
                 let mut out = Batch::new(node.epoch_id());
-                out.entries = in_db0(entries);
+                out.entries = entries;
                 Message::Entries(out)
             }
             other => Message::Unsupported {
@@ -1036,7 +1052,8 @@ impl Replicator {
     }
 
     /// Apply entries that are newer than the local ones. An entry with a version too far ahead
-    /// of the local clock is dropped (spec section 8.1).
+    /// of the local clock is dropped (spec section 8.1), and so is an entry of a database that
+    /// this node does not hold.
     pub fn apply_entries(&self, node: &Node, entries: Vec<(DbKey, Entry)>) -> u32 {
         #[cfg(feature = "testing")]
         if node.faults.refuse_apply.load(Ordering::Relaxed) {
@@ -1049,6 +1066,9 @@ impl Replicator {
         let checked = newest.is_some_and(|v| node.hlc.observe(v).is_ok());
         let mut applied = 0;
         for (k, e) in entries {
+            if !holds_db(node, k.db) {
+                continue;
+            }
             if !checked && node.hlc.observe(e.version).is_err() {
                 tracing::warn!("dropped a replicated entry too far ahead of the local clock");
                 continue;
@@ -1074,13 +1094,17 @@ struct RefillPage {
 }
 
 impl RefillPage {
-    /// The next batch from `cursor`: about `keys` matching entries, or about [`BATCH_BYTES`].
-    /// Returns the cursor to go on from, 0 at the end.
-    fn read(&self, store: &Store, mut cursor: u64) -> (u64, Vec<(Bytes, Entry)>) {
+    /// The next batch from `cursor`, in every database: about `keys` matching entries, or about
+    /// [`BATCH_BYTES`]. Returns the cursor to go on from, `None` at the end.
+    fn read(
+        &self,
+        store: &Store,
+        mut cursor: EntryCursor,
+    ) -> (Option<EntryCursor>, Vec<(DbKey, Entry)>) {
         let mut out = Vec::new();
         let mut bytes = 0;
         loop {
-            let (next, entries) = store.scan_entries(0, cursor, self.keys, |k, _| {
+            let (next, entries) = store.scan_all_entries(cursor, self.keys, |_, k, _| {
                 if !self.wanted[usize::from(refill_bucket(k))] {
                     return false;
                 }
@@ -1088,12 +1112,12 @@ impl RefillPage {
                 owners.first() == Some(&self.me) && owners.contains(&self.peer)
             });
             for (k, e) in entries {
-                bytes += discus_store::estimate_size(&k, &e);
+                bytes += discus_store::estimate_size(&k.key, &e);
                 out.push((k, e));
             }
-            cursor = next;
-            if cursor == 0 || out.len() >= self.keys || bytes >= BATCH_BYTES {
-                return (cursor, out);
+            match next {
+                Some(next) if out.len() < self.keys && bytes < BATCH_BYTES => cursor = next,
+                _ => return (next, out),
             }
         }
     }
@@ -1101,13 +1125,13 @@ impl RefillPage {
 
 /// The current entries of `keys` for one replication batch, up to about [`BATCH_BYTES`]. The
 /// keys past the limit go back to `q`, so acknowledging the batch does not drop them.
-fn fill(store: &Store, q: &PeerQueue, keys: Vec<Bytes>) -> Vec<(Bytes, Entry)> {
+fn fill(store: &Store, q: &PeerQueue, keys: Vec<DbKey>) -> Vec<(DbKey, Entry)> {
     let mut entries = Vec::new();
     let mut bytes = 0;
     let mut keys = keys.into_iter();
     for k in keys.by_ref() {
-        if let Some(e) = store.entry(0, &k) {
-            bytes += discus_store::estimate_size(&k, &e);
+        if let Some(e) = store.entry(k.db, &k.key) {
+            bytes += discus_store::estimate_size(&k.key, &e);
             entries.push((k, e));
         }
         if bytes > BATCH_BYTES {
@@ -1118,13 +1142,10 @@ fn fill(store: &Store, q: &PeerQueue, keys: Vec<Bytes>) -> Vec<(Bytes, Entry)> {
     entries
 }
 
-/// The keys of the replication paths in database 0. Task 3 carries the database through those
-/// paths and removes this.
-pub(crate) fn in_db0<T>(items: Vec<(Bytes, T)>) -> Vec<(DbKey, T)> {
-    items
-        .into_iter()
-        .map(|(key, t)| (DbKey { db: 0, key }, t))
-        .collect()
+/// This node holds database `db`. Inbound entries, offers, fetches, and digests of any other
+/// database are dropped, so a peer with more databases cannot create maps here.
+fn holds_db(node: &Node, db: u32) -> bool {
+    db < node.local_databases()
 }
 
 fn ack(node: &Node, applied: u32, want: Vec<DbKey>) -> Message {
@@ -1147,17 +1168,78 @@ fn ack(node: &Node, applied: u32, want: Vec<DbKey>) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use discus_placement::ManualClock;
-    use discus_store::{StoreConfig, Value};
+    use std::net::SocketAddr;
+
+    use discus_placement::{EpochId, ManualClock, Member, MemberState, Weight};
+    use discus_store::{EntryCursor, StoreConfig, Value};
+
+    fn member(id: NodeId) -> Member {
+        let addr = SocketAddr::from(([10, 0, 0, id.as_u128() as u8], 7000));
+        Member {
+            id,
+            addr,
+            rpc_addr: addr,
+            client_addr: None,
+            client_host: None,
+            state: MemberState::Normal,
+            weight: Weight::default(),
+        }
+    }
+
+    #[test]
+    fn a_refill_page_crosses_databases() {
+        let (me, peer) = (NodeId::from_u128(1), NodeId::from_u128(2));
+        let id = EpochId {
+            generation: 1,
+            origin: me,
+        };
+        let epoch = Arc::new(
+            Epoch::new(id, ClusterId::from_u128(1), vec![member(me), member(peer)]).unwrap(),
+        );
+        let store = Store::new(StoreConfig::default(), Arc::new(ManualClock::new(1)));
+        let mut want = Vec::new();
+        for db in [0, 3] {
+            for i in 0..40 {
+                let key = Bytes::from(format!("k{i}"));
+                store.write(db, &key, Version::zero(), |slot| {
+                    slot.set(Some(Entry::new(Value::Str("v".into()), None)));
+                });
+                if epoch.primary(&key) == Some(me) {
+                    want.push(DbKey::new(db, key));
+                }
+            }
+        }
+        assert!(want.iter().any(|k| k.db == 0) && want.iter().any(|k| k.db == 3));
+        let page = RefillPage {
+            wanted: [true; 256],
+            epoch,
+            me,
+            peer,
+            rf: 2,
+            keys: 3,
+        };
+        let mut got = Vec::new();
+        let mut cursor = Some(EntryCursor::default());
+        while let Some(c) = cursor {
+            let (next, entries) = page.read(&store, c);
+            got.extend(entries.into_iter().map(|(k, _)| k));
+            cursor = next;
+        }
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
+    }
 
     #[test]
     fn keys_past_the_batch_size_stay_queued() {
         let store = Store::new(StoreConfig::default(), Arc::new(ManualClock::new(1)));
         let q = PeerQueue::new(NodeId::from_u128(1), 1024);
         let big = Bytes::from(vec![b'x'; 100 << 10]);
-        let keys: Vec<Bytes> = (0..64).map(|i| Bytes::from(format!("k{i}"))).collect();
+        let keys: Vec<DbKey> = (0..64)
+            .map(|i| DbKey::new(i % 2, Bytes::from(format!("k{i}"))))
+            .collect();
         for k in &keys {
-            store.write(0, k, Version::zero(), |slot| {
+            store.write(k.db, &k.key, Version::zero(), |slot| {
                 slot.set(Some(Entry::new(Value::Str(big.clone()), None)));
             });
             q.push(k);
@@ -1165,7 +1247,7 @@ mod tests {
         let entries = fill(&store, &q, q.take(keys.len()));
         assert!(entries.len() < keys.len());
         q.acked();
-        let mut sent: Vec<Bytes> = entries.into_iter().map(|(k, _)| k).collect();
+        let mut sent: Vec<DbKey> = entries.into_iter().map(|(k, _)| k).collect();
         while !q.is_empty() {
             sent.extend(
                 fill(&store, &q, q.take(keys.len()))

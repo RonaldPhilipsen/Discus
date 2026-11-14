@@ -1,6 +1,8 @@
 //! The sharded in-memory map.
 
+use std::borrow::Borrow;
 use std::collections::BTreeSet;
+use std::hash::{Hash, Hasher};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -52,7 +54,7 @@ impl Default for StoreConfig {
 }
 
 /// A key with the database that holds it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DbKey {
     pub db: u32,
     pub key: Bytes,
@@ -64,6 +66,59 @@ impl DbKey {
             db,
             key: key.into(),
         }
+    }
+}
+
+/// A database and a key, borrowed. A map keyed by [`DbKey`] looks up `&(db, key) as &dyn AsDbKey`
+/// without a copy of the key.
+pub trait AsDbKey {
+    fn db(&self) -> u32;
+    fn key(&self) -> &[u8];
+}
+
+impl AsDbKey for DbKey {
+    fn db(&self) -> u32 {
+        self.db
+    }
+    fn key(&self) -> &[u8] {
+        &self.key
+    }
+}
+
+impl AsDbKey for (u32, &[u8]) {
+    fn db(&self) -> u32 {
+        self.0
+    }
+    fn key(&self) -> &[u8] {
+        self.1
+    }
+}
+
+// `DbKey` and its borrowed form must hash alike, so both use this one impl.
+impl Hash for dyn AsDbKey + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.db().hash(state);
+        self.key().hash(state);
+    }
+}
+
+impl Hash for DbKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self as &dyn AsDbKey).hash(state);
+    }
+}
+
+impl PartialEq for dyn AsDbKey + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.db() == other.db() && self.key() == other.key()
+    }
+}
+
+impl Eq for dyn AsDbKey + '_ {}
+
+impl<'a> Borrow<dyn AsDbKey + 'a> for DbKey {
+    fn borrow(&self) -> &(dyn AsDbKey + 'a) {
+        self
     }
 }
 
@@ -833,5 +888,14 @@ mod tests {
         for shard in &s.shards {
             assert!(shard.inner.read().dbs.is_empty());
         }
+    }
+
+    #[test]
+    fn a_borrowed_db_key_finds_its_key_only() {
+        let set: std::collections::HashSet<DbKey> = [DbKey::new(1, &b"k"[..])].into();
+        let hit: &dyn AsDbKey = &(1, &b"k"[..]);
+        let other_db: &dyn AsDbKey = &(0, &b"k"[..]);
+        assert!(set.contains(hit));
+        assert!(!set.contains(other_db));
     }
 }

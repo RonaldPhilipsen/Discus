@@ -175,3 +175,57 @@ async fn a_slow_replica_does_not_slow_writes() {
         .await
     );
 }
+
+/// A node holds only its own databases. Entries and offers of another database change nothing,
+/// so a peer cannot create maps here for a database that this node does not have.
+#[tokio::test]
+async fn a_node_ignores_databases_that_it_does_not_hold() {
+    let c = start_cluster(1, &[]).await;
+    let (n, id) = (&c.nodes[0].node, c.nodes[0].id);
+    let r = n.replicator().unwrap().clone();
+    let stamp = n.stamp().unwrap();
+    let entry = Entry {
+        version: stamp,
+        ..Entry::new(Value::Str("v".into()), None)
+    };
+    let (held, other) = (DbKey::new(0, &b"k"[..]), DbKey::new(1, &b"k"[..]));
+    let entries = vec![(held.clone(), entry.clone()), (other.clone(), entry)];
+    assert_eq!(r.apply_entries(n, entries), 1);
+    assert_eq!(n.store.databases(), vec![0]);
+
+    let mut offer = Batch::new(n.epoch_id());
+    offer.offers = vec![
+        (DbKey::new(0, &b"x"[..]), stamp),
+        (DbKey::new(1, &b"x"[..]), stamp),
+    ];
+    let Message::BatchAck(ack) = r.handle(id, Message::Handoff(offer)).await else {
+        panic!("a handoff gets an acknowledgement");
+    };
+    assert_eq!(ack.want, vec![DbKey::new(0, &b"x"[..])]);
+
+    let fetch = Message::Fetch {
+        keys: vec![held.clone(), other],
+    };
+    let Message::Entries(found) = r.handle(id, fetch).await else {
+        panic!("a fetch gets entries");
+    };
+    let keys: Vec<DbKey> = found.entries.into_iter().map(|(k, _)| k).collect();
+    assert_eq!(keys, vec![held]);
+}
+
+/// `flush_db` drops the queued keys of one database and keeps the others.
+#[tokio::test]
+async fn flush_db_drops_the_queue_of_one_database() {
+    let c = start_cluster(2, &["--replication-factor", "2"]).await;
+    let a = &c.nodes[0].node;
+    a.faults.hold_replication.store(true, Ordering::Relaxed);
+    let key = bytes::Bytes::from_static(b"k");
+    let r = a.replicator().unwrap().clone();
+    r.written(a, 0, &key);
+    r.written(a, 1, &key);
+    assert!(!r.settled(0, &key) && !r.settled(1, &key));
+    r.flush_db(1);
+    assert!(r.settled(1, &key));
+    assert!(!r.settled(0, &key));
+    a.faults.hold_replication.store(false, Ordering::Relaxed);
+}

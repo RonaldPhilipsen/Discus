@@ -142,7 +142,7 @@ async fn the_write_set_lets_go_once_replicas_catch_up() {
             .node
             .replicator()
             .unwrap()
-            .settled(k.as_bytes()))
+            .settled(0, k.as_bytes()))
         .await
     );
     let v: String = conn.get(&k).await.unwrap();

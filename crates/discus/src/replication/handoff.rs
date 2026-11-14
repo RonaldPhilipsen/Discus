@@ -13,12 +13,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use discus_placement::{range_of, slot, Epoch, EpochId, NodeId, Owners, Version, NTP64, RANGES};
-use discus_store::DbKey;
+use discus_store::{DbKey, EntryCursor};
 use discus_wire::{Batch, Message};
-
-use super::in_db0;
 
 use super::Settings;
 use crate::node::EpochPin;
@@ -115,8 +112,8 @@ fn covers(to: EpochId, new: EpochId) -> bool {
 /// What a scan sends to one target.
 #[derive(Default)]
 struct Target {
-    batch: Vec<(Bytes, discus_store::Entry)>,
-    offers: Vec<(Bytes, Version)>,
+    batch: Vec<(DbKey, discus_store::Entry)>,
+    offers: Vec<(DbKey, Version)>,
     bytes: u64,
     /// Keys the target asked for in its last acknowledgement.
     wanted: Vec<DbKey>,
@@ -158,18 +155,18 @@ pub async fn scan(
     let rf = settings.rf;
     let changed = from.changed_ranges(&to, rf);
     tracing::info!(from = %from.id(), to = %to.id(), targets = targets.len(), "handoff scan");
-    let mut cursor = 0;
+    let mut cursor = EntryCursor::default();
     loop {
         #[cfg(feature = "testing")]
         crate::node::Faults::wait(&node.faults.hold_scan, &node.faults.scan_held).await;
         let (next, entries) = node
             .store
-            .scan_entries(0, cursor, STEP, |_, e| e.version.time() <= watermark);
+            .scan_all_entries(cursor, STEP, |_, _, e| e.version.time() <= watermark);
         for (k, e) in entries {
-            if !changed.contains(range_of(slot(&k))) {
+            if !changed.contains(range_of(slot(&k.key))) {
                 continue;
             }
-            let old_owners = from.owners(&k, rf);
+            let old_owners = from.owners(&k.key, rf);
             let survivors: Vec<NodeId> = old_owners
                 .iter()
                 .copied()
@@ -178,7 +175,7 @@ pub async fn scan(
             let Some(rank) = survivors.iter().position(|s| *s == me) else {
                 continue;
             };
-            for g in to.owners(&k, rf) {
+            for g in to.owners(&k.key, rf) {
                 if old_owners.contains(&g) {
                     continue;
                 }
@@ -189,7 +186,7 @@ pub async fn scan(
                     continue;
                 }
                 if rank == 0 {
-                    t.bytes += discus_store::estimate_size(&k, &e);
+                    t.bytes += discus_store::estimate_size(&k.key, &e);
                     t.batch.push((k.clone(), e.clone()));
                 } else {
                     t.offers.push((k.clone(), e.version));
@@ -201,9 +198,9 @@ pub async fn scan(
                 flush(node, &replicator, *g, t, None).await;
             }
         }
-        if next == 0 {
+        let Some(next) = next else {
             break;
-        }
+        };
         cursor = next;
     }
     let range = (from.id(), to.id());
@@ -263,7 +260,7 @@ pub async fn drop_lost(
     };
     let mut failed: BTreeSet<NodeId> = BTreeSet::new();
     let mut dropped = 0;
-    let mut cursor = 0;
+    let mut cursor = EntryCursor::default();
     loop {
         #[cfg(feature = "testing")]
         crate::node::Faults::wait(&node.faults.hold_drop, &node.faults.drop_held).await;
@@ -271,17 +268,20 @@ pub async fn drop_lost(
             stopped(node, "this node moved on to another epoch");
             return dropped;
         }
-        let (next, entries) = node.store.scan_entries(0, cursor, STEP, |k, e| {
+        let (next, entries) = node.store.scan_all_entries(cursor, STEP, |_, k, e| {
             lost[usize::from(range_of(slot(k)))] && e.version.time() <= watermark
         });
-        let offered: Vec<(Bytes, Version, Owners)> = entries
+        let offered: Vec<(DbKey, Version, Owners)> = entries
             .into_iter()
-            .map(|(k, e)| (k.clone(), e.version, current.owners(&k, rf)))
+            .map(|(k, e)| {
+                let owners = current.owners(&k.key, rf);
+                (k, e.version, owners)
+            })
             .filter(|(_, _, owners)| {
                 !owners.is_empty() && !owners.iter().any(|o| failed.contains(o))
             })
             .collect();
-        let mut offers: HashMap<NodeId, Vec<(Bytes, Version)>> = HashMap::new();
+        let mut offers: HashMap<NodeId, Vec<(DbKey, Version)>> = HashMap::new();
         for (k, v, owners) in &offered {
             for o in owners {
                 offers.entry(*o).or_default().push((k.clone(), *v));
@@ -317,17 +317,17 @@ pub async fn drop_lost(
                 Some(Answer::Holds(missing)) => !missing.contains(&k),
                 _ => false,
             });
-            if !held || !replicator.settled(&k) {
+            if !held || !replicator.settled(k.db, &k.key) {
                 continue;
             }
             let removed = node
                 .store
-                .remove_if(0, &k, |e| e.version == v && !moved_on());
+                .remove_if(k.db, &k.key, |e| e.version == v && !moved_on());
             dropped += usize::from(removed);
         }
-        if next == 0 {
+        let Some(next) = next else {
             return dropped;
-        }
+        };
         cursor = next;
     }
 }
@@ -336,7 +336,7 @@ pub async fn drop_lost(
 enum Answer {
     /// The owner is in the epoch of the drop and holds every offered key at the offered version
     /// or newer, but these.
-    Holds(BTreeSet<Bytes>),
+    Holds(BTreeSet<DbKey>),
     /// The owner still runs an older epoch, where this node can own the keys. It can forward a
     /// command on them here, so they stay.
     Behind,
@@ -353,11 +353,11 @@ async fn confirm(
     node: &Arc<Node>,
     replicator: &crate::replication::Replicator,
     owner: NodeId,
-    offers: Vec<(Bytes, Version)>,
+    offers: Vec<(DbKey, Version)>,
     epoch: EpochId,
 ) -> Answer {
     let mut batch = Batch::new(epoch);
-    batch.offers = in_db0(offers);
+    batch.offers = offers;
     for round in 0..2 {
         let Some(ack) = send(node, replicator, owner, &batch).await else {
             return Answer::Failed;
@@ -370,7 +370,7 @@ async fn confirm(
             };
         }
         if ack.want.is_empty() || round == 1 {
-            return Answer::Holds(ack.want.into_iter().map(|k| k.key).collect());
+            return Answer::Holds(ack.want.into_iter().collect());
         }
         let mut missing = BTreeSet::new();
         batch = Batch::new(epoch);
@@ -381,7 +381,7 @@ async fn confirm(
                     batch.entries.push((k, e));
                 }
                 None => {
-                    missing.insert(k.key);
+                    missing.insert(k);
                 }
             }
         }
@@ -410,13 +410,13 @@ async fn flush(
     done: Option<(EpochId, EpochId)>,
 ) {
     let mut batch = Batch::new(node.epoch_id());
-    batch.entries = in_db0(std::mem::take(&mut t.batch));
+    batch.entries = std::mem::take(&mut t.batch);
     for k in std::mem::take(&mut t.wanted) {
         if let Some(e) = node.store.entry(k.db, &k.key) {
             batch.entries.push((k, e));
         }
     }
-    batch.offers = in_db0(std::mem::take(&mut t.offers));
+    batch.offers = std::mem::take(&mut t.offers);
     batch.done = done;
     let bytes = std::mem::take(&mut t.bytes);
     match send(node, replicator, target, &batch).await {

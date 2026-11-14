@@ -359,7 +359,7 @@ async fn a_write_queued_during_the_epoch_change_reaches_the_new_owners() {
         .hold_replication
         .store(false, Ordering::Relaxed);
 
-    assert!(wait_until(FORM, || rep.settled(&key)).await);
+    assert!(wait_until(FORM, || rep.settled(0, &key)).await);
     for n in &all {
         if new.owners(&key, 3).contains(&n.id) {
             let got = n.node.store.entry(0, &key).map(|e| e.value);

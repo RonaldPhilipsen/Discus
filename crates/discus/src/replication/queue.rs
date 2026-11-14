@@ -6,13 +6,13 @@
 
 use std::collections::HashSet;
 
-use bytes::Bytes;
 use foldhash::fast::RandomState;
 use hashlink::LinkedHashMap;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
 use discus_placement::NodeId;
+use discus_store::{AsDbKey, DbKey};
 
 /// The queue of one peer.
 pub struct PeerQueue {
@@ -28,9 +28,9 @@ struct QueueState {
     /// Oldest key first. A removed key leaves its node on the free list of the map, so a queue
     /// that keeps its size allocates nothing for a new key.
     /// Both maps hash with a random seed, so clients cannot choose keys that collide.
-    keys: LinkedHashMap<Bytes, (), RandomState>,
+    keys: LinkedHashMap<DbKey, (), RandomState>,
     /// Keys of the batch on the wire, until the peer acknowledges it.
-    inflight: HashSet<Bytes, RandomState>,
+    inflight: HashSet<DbKey, RandomState>,
     /// The last batch failed. Writes go to hints until a probe succeeds.
     down: bool,
     /// The queue overflowed since the last drain below the low-water mark.
@@ -58,7 +58,7 @@ impl PeerQueue {
 
     /// Queue `key`. A key already queued keeps one place. Returns the key to hint instead: `key`
     /// itself while the peer is down, or the oldest key when the queue overflowed.
-    pub fn push(&self, key: &Bytes) -> Option<Bytes> {
+    pub fn push(&self, key: &DbKey) -> Option<DbKey> {
         let mut s = self.state.lock();
         if s.down {
             return Some(key.clone());
@@ -80,7 +80,7 @@ impl PeerQueue {
     }
 
     /// Take up to `max` of the oldest keys and mark them in flight.
-    pub fn take(&self, max: usize) -> Vec<Bytes> {
+    pub fn take(&self, max: usize) -> Vec<DbKey> {
         let mut s = self.state.lock();
         let mut out = Vec::new();
         while out.len() < max {
@@ -95,7 +95,7 @@ impl PeerQueue {
 
     /// Put back keys taken for a batch that had no room for them. They go first in line, in
     /// their order. A key written again since `take` already has its place.
-    pub fn untake(&self, keys: impl DoubleEndedIterator<Item = Bytes>) {
+    pub fn untake(&self, keys: impl DoubleEndedIterator<Item = DbKey>) {
         let mut s = self.state.lock();
         for k in keys.rev() {
             s.inflight.remove(&k);
@@ -113,10 +113,10 @@ impl PeerQueue {
 
     /// The batch in flight failed. Its keys and the queued keys come back for hints, and the
     /// peer is down until a probe succeeds.
-    pub fn failed(&self) -> Vec<Bytes> {
+    pub fn failed(&self) -> Vec<DbKey> {
         let mut s = self.state.lock();
         s.down = true;
-        let mut out: Vec<Bytes> = s.inflight.drain().collect();
+        let mut out: Vec<DbKey> = s.inflight.drain().collect();
         while let Some((k, ())) = s.keys.pop_front() {
             out.push(k);
         }
@@ -167,13 +167,13 @@ impl PeerQueue {
     }
 
     /// The key is queued or in flight.
-    pub fn holds(&self, key: &[u8]) -> bool {
+    pub fn holds(&self, key: &dyn AsDbKey) -> bool {
         let s = self.state.lock();
         s.keys.contains_key(key) || s.inflight.contains(key)
     }
 
     /// Drop the queued keys for which `keep` is false.
-    pub fn retain(&self, mut keep: impl FnMut(&Bytes) -> bool) {
+    pub fn retain(&self, mut keep: impl FnMut(&DbKey) -> bool) {
         let mut s = self.state.lock();
         s.keys.retain(|k, _| keep(k));
     }
@@ -181,10 +181,12 @@ impl PeerQueue {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+
     use super::*;
 
-    fn k(s: &str) -> Bytes {
-        Bytes::copy_from_slice(s.as_bytes())
+    fn k(s: &str) -> DbKey {
+        DbKey::new(0, Bytes::copy_from_slice(s.as_bytes()))
     }
 
     #[test]
@@ -194,9 +196,21 @@ mod tests {
         assert_eq!(q.push(&k("a")), None);
         assert_eq!(q.len(), 1);
         assert_eq!(q.take(10), vec![k("a")]);
-        assert!(q.holds(b"a"));
+        assert!(q.holds(&k("a")));
         q.acked();
-        assert!(!q.holds(b"a"));
+        assert!(!q.holds(&k("a")));
+    }
+
+    #[test]
+    fn the_same_key_in_two_databases_waits_twice() {
+        let q = PeerQueue::new(NodeId::from_u128(1), 8);
+        let other = DbKey::new(1, k("a").key);
+        assert_eq!(q.push(&k("a")), None);
+        assert_eq!(q.push(&other), None);
+        assert_eq!(q.len(), 2);
+        assert_eq!(q.take(10), vec![k("a"), other.clone()]);
+        assert!(q.holds(&other));
+        assert!(!q.holds(&DbKey::new(2, k("a").key)));
     }
 
     #[test]
@@ -231,8 +245,8 @@ mod tests {
         let q = PeerQueue::new(NodeId::from_u128(1), 8);
         q.push(&k("keep"));
         q.push(&k("gone"));
-        q.retain(|key| key.as_ref() == b"keep");
+        q.retain(|key| key.key.as_ref() == b"keep");
         assert_eq!(q.len(), 1);
-        assert!(q.holds(b"keep"));
+        assert!(q.holds(&k("keep")));
     }
 }

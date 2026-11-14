@@ -766,10 +766,17 @@ impl Node {
         if changed {
             APPLIED.with(|a| a.set(Some(stamp)));
             if let Some(replicator) = self.replicator() {
-                replicator.written(self, key);
+                replicator.written(self, db, key);
             }
         }
         result
+    }
+
+    /// The databases that this node holds: 0 up to this count, exclusive. Inbound replication
+    /// of any other database is dropped. Task 4 returns `Databases::local` here; until then
+    /// `--databases` does not exist and its default is 1.
+    pub fn local_databases(&self) -> u32 {
+        1
     }
 
     pub fn next_conn_id(&self) -> u64 {

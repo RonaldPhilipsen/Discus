@@ -14,9 +14,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use discus_placement::{ClusterId, EpochId, NodeId, Owners, Version};
 use discus_resp::{Command, Value};
+use discus_store::DbKey;
 use discus_transport::Transport;
 use discus_wire::TraceContext;
 use futures::future::BoxFuture;
@@ -299,16 +299,22 @@ pub fn local(node: &Node, spec: &CommandSpec, cmd: &Command) -> Reply {
     }
 }
 
-/// The keys of `cmd` that must reach a secondary before the reply: the listed keys of a command
-/// that deletes them. A deleted session must stay deleted when the primary fails.
-pub(crate) fn acked_delete_keys(node: &Node, spec: &CommandSpec, cmd: &Command) -> Vec<Bytes> {
+/// The keys of `cmd` in database `db` that must reach a secondary before the reply: the listed
+/// keys of a command that deletes them. A deleted session must stay deleted when the primary
+/// fails.
+pub(crate) fn acked_delete_keys(
+    node: &Node,
+    spec: &CommandSpec,
+    db: u32,
+    cmd: &Command,
+) -> Vec<DbKey> {
     if !matches!(spec.name, "DEL" | "GETDEL" | "DISCUS.TAKE") {
         return Vec::new();
     }
     cmd[1..]
         .iter()
         .filter(|k| node.is_primary_read_key(k))
-        .cloned()
+        .map(|k| DbKey::new(db, k.clone()))
         .collect()
 }
 
@@ -319,7 +325,7 @@ pub fn local_acked(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -
     if reply.applied.is_none() {
         return Dispatch::Ready(reply);
     }
-    let keys = acked_delete_keys(node, spec, &cmd);
+    let keys = acked_delete_keys(node, spec, 0, &cmd);
     let Some(replicator) = node.replicator().filter(|_| !keys.is_empty()).cloned() else {
         return Dispatch::Ready(reply);
     };
@@ -335,7 +341,7 @@ pub fn local_acked(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -
 fn track_here(node: &Node, key: &[u8], reply: &mut Reply) {
     if reply.observed.is_none() {
         reply.observed = node.store.version(0, key);
-        reply.settled = node.replicator().is_some_and(|r| r.settled(key));
+        reply.settled = node.replicator().is_some_and(|r| r.settled(0, key));
     }
 }
 
@@ -348,14 +354,14 @@ pub fn serve_here(
     write: bool,
     owners: &[NodeId],
 ) -> Dispatch {
-    let sources = crate::replication::repair::sources(node, &cmd[1], write, owners);
+    let sources = crate::replication::repair::sources(node, 0, &cmd[1], write, owners);
     if sources.is_empty() {
         return local_acked(node, spec, cmd);
     }
     let node = node.clone();
     let key = cmd[1].clone();
     Dispatch::Pending(Box::pin(async move {
-        crate::replication::repair::fetch(&node, &key, sources).await;
+        crate::replication::repair::fetch(&node, 0, &key, sources).await;
         local_acked(&node, spec, cmd).finish().await
     }))
 }

@@ -56,7 +56,7 @@ pub fn resendable(cmd: &Command, failure: Failure) -> bool {
 /// The forward timeout of a delete of a listed key. The owner waits for a secondary before it
 /// replies, so a timeout without this allowance would turn a fail-open delete into `-TRYAGAIN`.
 fn delete_timeout(node: &Node, spec: &CommandSpec, cmd: &Command, write: bool) -> Option<Duration> {
-    if !write || super::acked_delete_keys(node, spec, cmd).is_empty() {
+    if !write || super::acked_delete_keys(node, spec, 0, cmd).is_empty() {
         return None;
     }
     let live_settings = node.live_settings.get();

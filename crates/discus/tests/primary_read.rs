@@ -139,7 +139,7 @@ async fn settled(c: &Cluster, key: &str) {
             .node
             .replicator()
             .unwrap()
-            .settled(key.as_bytes()))
+            .settled(0, key.as_bytes()))
         .await
     );
 }
@@ -323,7 +323,7 @@ async fn a_former_primary_waits_for_a_secondary_on_a_spent_delete() {
         let replicator = former.node.replicator().unwrap();
         assert!(
             wait_until(Duration::from_secs(10), || replicator
-                .settled(key.as_bytes()))
+                .settled(0, key.as_bytes()))
             .await
         );
         stall(&others, SLOW_MS);
