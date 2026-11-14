@@ -280,3 +280,33 @@ fn counter_roles_use_bounded_states() {
     }
     assert!(check([("state", "group-3")]).is_err());
 }
+
+#[test]
+fn config_metrics_export() {
+    let h = MetricHarness::new();
+    let m = &h.metrics;
+    m.config_reload(true);
+    m.config_reload(true);
+    m.config_reload(false);
+    m.config_pending(true);
+    let points = h.points();
+    let applied = find(
+        &points,
+        "discus.config.reloads",
+        Some(("outcome", "applied")),
+    )
+    .unwrap();
+    assert_eq!(applied.value, 2.0);
+    let failed = find(
+        &points,
+        "discus.config.reloads",
+        Some(("outcome", "failed")),
+    )
+    .unwrap();
+    assert_eq!(failed.value, 1.0);
+    assert_eq!(
+        find(&points, "discus.config.pending", None).unwrap().value,
+        1.0
+    );
+    assert_bounded(&points);
+}

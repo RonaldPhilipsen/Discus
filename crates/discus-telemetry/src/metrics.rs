@@ -19,7 +19,7 @@ use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 use opentelemetry::{KeyValue, StringValue, Value};
 
 #[cfg(feature = "otel")]
-use crate::attrs::{check, Attribute};
+use crate::attrs::{check, Attribute, ReloadOutcome};
 use crate::attrs::{
     CommandLabel, CounterMode, CounterRole, MemberState, MisrouteReason, NodeLabel, Status,
     TopologyCommand, TransportChannel,
@@ -154,6 +154,8 @@ struct Instruments {
     counter_mode_switches: Counter<u64>,
     counter_failovers: Counter<u64>,
     raft_single_voter_groups: Gauge<u64>,
+    config_reloads: Counter<u64>,
+    config_pending: Gauge<u64>,
     store: Arc<Slot<StoreStats>>,
     health: Arc<Slot<HealthStats>>,
     transport: Arc<TransportSources>,
@@ -435,6 +437,14 @@ impl Metrics {
                 "discus.raft.single_voter_groups",
                 "Raft groups led by this node that have one voter",
             ),
+            config_reloads: counter(
+                "discus.config.reloads",
+                "Reloads of the settings file by outcome",
+            ),
+            config_pending: gauge(
+                "discus.config.pending",
+                "1 while a changed setting waits for a restart",
+            ),
             store,
             health,
             transport,
@@ -694,5 +704,24 @@ impl Metrics {
     pub fn raft_single_voter_groups(&self, count: u64) {
         #[cfg(feature = "otel")]
         self.with(|i| i.raft_single_voter_groups.record(count, &[]));
+    }
+
+    #[inline]
+    pub fn config_reload(&self, ok: bool) {
+        #[cfg(feature = "otel")]
+        {
+            let outcome = if ok {
+                ReloadOutcome::Applied
+            } else {
+                ReloadOutcome::Failed
+            };
+            self.with(|i| i.config_reloads.add(1, &[kv(Attribute::Outcome(outcome))]));
+        }
+    }
+
+    #[inline]
+    pub fn config_pending(&self, pending: bool) {
+        #[cfg(feature = "otel")]
+        self.with(|i| i.config_pending.record(u64::from(pending), &[]));
     }
 }

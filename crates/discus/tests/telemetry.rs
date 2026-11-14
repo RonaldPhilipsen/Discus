@@ -8,11 +8,13 @@ use std::sync::Arc;
 
 use discus::node::{ConnState, Node};
 use discus::security::{ConnAuth, Security};
+use discus::settings::{Live, Reloadable};
 
 /// A node with the security state of `config`.
 fn node(config: discus::Config) -> Node {
     let security = Security::from_config(&config).expect("valid security configuration");
-    Node::new(config, Arc::new(security))
+    let live = Live::new(Reloadable::from_config(&config));
+    Node::new(config, Arc::new(security), live)
 }
 
 /// Parse `discus --listen 127.0.0.1:0` followed by `extra`.

@@ -11,6 +11,7 @@ mod common;
 
 use discus::node::Node;
 use discus::security::Security;
+use discus::settings::{Live, Reloadable};
 use discus_placement::{Epoch, EpochId};
 use discus_telemetry::testing::TraceHarness;
 
@@ -28,7 +29,8 @@ fn the_epoch_gauge_follows_the_adopted_epoch() {
     assert!(discus_telemetry::install_global(h.telemetry.metrics()));
     let config = common::config(&["discus", "--listen", "127.0.0.1:0"]);
     let security = Security::from_config(&config).unwrap();
-    let node = Node::new(config, Arc::new(security));
+    let live = Live::new(Reloadable::from_config(&config));
+    let node = Node::new(config, Arc::new(security), live);
     assert_eq!(gauge(&h), 1.0);
 
     let members = node.epochs().current().members().to_vec();

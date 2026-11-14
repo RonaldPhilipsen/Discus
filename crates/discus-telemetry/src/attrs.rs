@@ -1,7 +1,7 @@
 //! Metric attributes and the cardinality guard (spec §15.4).
 //!
-//! Every metric attribute is one of the eleven typed values of [`Attribute`], under one of the
-//! seven keys of [`ALLOWED_KEYS`]. A `command` value is a `&'static str` from the command table or
+//! Every metric attribute is one of the twelve typed values of [`Attribute`], under one of the
+//! eight keys of [`ALLOWED_KEYS`]. A `command` value is a `&'static str` from the command table or
 //! a [`TopologyCommand`], so it comes from the code, never from a client. A node or peer label is a short hex node ID, so the
 //! number of values is bounded by the cluster size. [`check`] validates raw pairs against the
 //! same rules. The metrics handle runs it in debug builds, and the tests run it on every exported
@@ -10,8 +10,8 @@
 use std::sync::Arc;
 
 /// The only attribute keys that a metric can carry.
-pub const ALLOWED_KEYS: [&str; 7] = [
-    "command", "status", "node", "peer", "state", "channel", "reason",
+pub const ALLOWED_KEYS: [&str; 8] = [
+    "command", "status", "node", "peer", "state", "channel", "reason", "outcome",
 ];
 
 const MAX_COMMAND_LEN: usize = 32;
@@ -154,6 +154,14 @@ label_enum! {
     }
 }
 
+label_enum! {
+    /// The outcome of a reload of the settings file.
+    ReloadOutcome {
+        Applied => "applied",
+        Failed => "failed",
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Attribute {
     Command(CommandLabel),
@@ -169,6 +177,7 @@ pub enum Attribute {
     Reason(MisrouteReason),
     /// A topology subcommand under the key `command`.
     Topology(TopologyCommand),
+    Outcome(ReloadOutcome),
 }
 
 impl Attribute {
@@ -180,6 +189,7 @@ impl Attribute {
             Attribute::Peer(_) => "peer",
             Attribute::Channel(_) => "channel",
             Attribute::Reason(_) => "reason",
+            Attribute::Outcome(_) => "outcome",
             Attribute::State(_) | Attribute::Role(_) | Attribute::Mode(_) => "state",
         }
     }
@@ -201,6 +211,7 @@ impl Attribute {
             Attribute::Channel(c) => c.as_str(),
             Attribute::Reason(r) => r.as_str(),
             Attribute::Topology(t) => t.as_str(),
+            Attribute::Outcome(o) => o.as_str(),
         })
     }
 }
@@ -252,6 +263,7 @@ pub fn check<'a>(attrs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Result<
             ),
             "channel" => ("channel", TransportChannel::parse(value).is_some()),
             "reason" => ("reason", MisrouteReason::parse(value).is_some()),
+            "outcome" => ("outcome", ReloadOutcome::parse(value).is_some()),
             other => return Err(GuardError::DisallowedKey(other.to_owned())),
         };
         if !ok {

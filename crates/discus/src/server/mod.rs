@@ -21,6 +21,7 @@ use crate::config::LeaseKind;
 use crate::control::ControlLane;
 use crate::membership::{discovery, Membership};
 use crate::security::Security;
+use crate::settings::{Live, Reloadable};
 use crate::{Config, Node, Phase};
 
 /// The HLC clock and the wall clock of one node.
@@ -106,7 +107,7 @@ async fn bind_transport(
 }
 
 mod connection;
-mod file_watch;
+pub(crate) mod file_watch;
 mod order;
 
 /// Export the metrics of `transport`. Its events feed the peer error and QUIC failure metrics.
@@ -243,6 +244,7 @@ impl Server {
         } else {
             None
         };
+        let live = Live::new(Reloadable::from_config(&config));
         let security =
             Arc::new(Security::from_config(&config).map_err(|e| invalid(e.to_string()))?);
         let listener = TcpListener::bind(config.listen).await?;
@@ -264,8 +266,8 @@ impl Server {
             (false, _) => None,
         };
         let node = Arc::new(match opts.clocks {
-            Some((hlc_clock, wall)) => Node::with_clocks(config, security, wall, hlc_clock),
-            None => Node::new(config, security),
+            Some((hlc_clock, wall)) => Node::with_clocks(config, security, live, wall, hlc_clock),
+            None => Node::new(config, security, live),
         });
         let leases = match opts.counter_leases {
             Some(leases) => Some(leases),
@@ -379,6 +381,7 @@ impl Server {
         } = self;
         let stop_background = CancellationToken::new();
         watch_certificates(&node, transports, tls_seen, stop_background.clone());
+        crate::settings::reload::spawn(&node, stop_background.clone());
         {
             let node = node.clone();
             discus_store::every(

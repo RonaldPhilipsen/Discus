@@ -658,7 +658,7 @@ impl Config {
 }
 
 /// True for the long name of a flag that the settings file cannot set.
-fn restart_only(name: &str) -> bool {
+pub(crate) fn restart_only(name: &str) -> bool {
     Config::command()
         .get_arguments()
         .any(|a| a.get_long() == Some(name) && !KEYS.iter().any(|k| k.flag == a.get_id()))

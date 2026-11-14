@@ -28,6 +28,7 @@ use crate::lag::LagProbe;
 use crate::membership::Membership;
 use crate::replication::Replicator;
 use crate::security::{ConnAuth, Security};
+use crate::settings::Live;
 use crate::Config;
 
 thread_local! {
@@ -73,6 +74,8 @@ pub struct Node {
     pub started_at: Instant,
     pub store: Arc<Store>,
     pub security: Arc<Security>,
+    /// The reloadable settings, replaced as a whole on a reload of the `--config` file.
+    pub live: Arc<Live>,
     next_conn_id: AtomicU64,
     connected: AtomicUsize,
     phase: AtomicU8,
@@ -195,8 +198,14 @@ impl Drop for EpochPin {
 }
 
 impl Node {
-    pub fn new(config: Config, security: Arc<Security>) -> Node {
-        Node::with_clocks(config, security, Arc::new(SystemClock), hlc::system_clock)
+    pub fn new(config: Config, security: Arc<Security>, live: Arc<Live>) -> Node {
+        Node::with_clocks(
+            config,
+            security,
+            live,
+            Arc::new(SystemClock),
+            hlc::system_clock,
+        )
     }
 
     /// A node on the given clocks: `wall` for TTL and eviction, `hlc_clock` for the HLC. Tests
@@ -204,6 +213,7 @@ impl Node {
     pub fn with_clocks(
         config: Config,
         security: Arc<Security>,
+        live: Arc<Live>,
         wall: Arc<dyn Clock>,
         hlc_clock: fn() -> NTP64,
     ) -> Node {
@@ -257,6 +267,7 @@ impl Node {
             store,
             write_budget,
             security,
+            live,
             next_conn_id: AtomicU64::new(1),
             connected: AtomicUsize::new(0),
             phase: AtomicU8::new(Phase::Starting as u8),

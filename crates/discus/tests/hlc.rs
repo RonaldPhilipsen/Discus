@@ -7,6 +7,7 @@ mod common;
 use bytes::Bytes;
 use discus::command::{check, execute_local, lookup};
 use discus::security::Security;
+use discus::settings::{Live, Reloadable};
 use discus::Node;
 use discus_placement::mock::MockClock;
 use discus_resp::Value;
@@ -20,7 +21,8 @@ fn node<const SLOT: usize>() -> Node {
     clock.set(START);
     let config = common::config(&["discus"]);
     let security = Arc::new(Security::from_config(&config).unwrap());
-    Node::with_clocks(config, security, Arc::new(clock), clock.hlc_clock())
+    let live = Live::new(Reloadable::from_config(&config));
+    Node::with_clocks(config, security, live, Arc::new(clock), clock.hlc_clock())
 }
 
 fn ms(n: u64) -> NTP64 {
