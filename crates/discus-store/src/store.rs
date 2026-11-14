@@ -801,3 +801,37 @@ impl Store {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use discus_placement::ManualClock;
+
+    use super::*;
+
+    #[test]
+    fn an_unused_database_creates_no_map() {
+        let s = Store::new(
+            StoreConfig {
+                shards: 16,
+                ..StoreConfig::default()
+            },
+            Arc::new(ManualClock::new(0)),
+        );
+        let stamp = Version::new(crate::NTP64(1), crate::NodeId::from_u128(1));
+        for i in 0..64 {
+            let key = format!("k{i}");
+            assert!(!s.read(7, key.as_bytes(), |e| e.is_some()));
+            assert_eq!(s.version(7, key.as_bytes()), None);
+            assert_eq!(s.entry(7, key.as_bytes()), None);
+            let (_, changed) = s.write_changed(7, key.as_bytes(), stamp, |slot| slot.take());
+            assert!(!changed);
+        }
+        assert_eq!(s.scan(7, 0, 100, None), (0, Vec::new()));
+        assert_eq!(s.random_key(7), None);
+        for shard in &s.shards {
+            assert!(shard.inner.read().dbs.is_empty());
+        }
+    }
+}
