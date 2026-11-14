@@ -157,8 +157,13 @@ fn a_direct_rumor_at_the_same_incarnation_refreshes_the_rpc_address() {
 fn multi_db(databases: u32) -> impl FnMut(usize, &mut MemberInfo, &mut SwimConfig) {
     move |_, info, _| {
         info.databases = databases;
-        info.capabilities = caps::KNOWN | caps::MULTI_DB;
+        info.capabilities = caps::KNOWN;
     }
+}
+
+/// A joiner of a build without numbered databases.
+fn without_multi_db(info: &mut MemberInfo, _: &mut SwimConfig) {
+    info.capabilities = caps::KNOWN & !caps::MULTI_DB;
 }
 
 /// Every node of `ids` lists `j` as `NORMAL` in its epoch.
@@ -182,7 +187,7 @@ fn the_cluster_count_is_the_smallest_normal_count() {
     let counts = [3, 3, 1];
     let ids = sim.cluster_with(3, |i, info, _| {
         info.databases = counts[i];
-        info.capabilities = caps::KNOWN | caps::MULTI_DB;
+        info.capabilities = caps::KNOWN;
     });
     sim.run_ms(1_000);
     for &o in &ids {
@@ -346,8 +351,7 @@ fn a_node_without_multi_db_cannot_join_a_multi_database_cluster() {
     let mut sim = Sim::new(10, SwimConfig::fast());
     let ids = sim.cluster_with(3, multi_db(3));
     sim.run_ms(1_000);
-    let j = sim.add_node();
-    assert_eq!(sim.node(j).swim.me().capabilities & caps::MULTI_DB, 0);
+    let j = sim.add_node_with(without_multi_db);
     assert!(join_reply(&mut sim, ids[0], j).retry_after_ms > 0);
     sim.start(j, &[ids[1]]);
     sim.run_ms(20_000);
@@ -360,7 +364,7 @@ fn a_node_without_multi_db_cannot_join_a_multi_database_cluster() {
     let mut sim = Sim::new(11, SwimConfig::fast());
     let ids = sim.cluster_with(3, multi_db(1));
     sim.run_ms(1_000);
-    let j = sim.add_node();
+    let j = sim.add_node_with(without_multi_db);
     sim.start(j, &[ids[1]]);
     sim.run_until(30_000, |s| s.is_normal(j) && placed(s, &ids, j));
 }

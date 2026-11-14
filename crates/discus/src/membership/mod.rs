@@ -74,17 +74,13 @@ impl Membership {
         rpc_advertise: SocketAddr,
     ) -> Arc<Membership> {
         let config = &node.config;
-        // Test builds advertise `MULTI_DB` before release builds know it, so a cluster of them
-        // admits joiners while it serves more than one database. `Databases::set_view` still
-        // keeps the gate closed until `KNOWN` has it.
+        let capabilities = discus_wire::caps::KNOWN;
         #[cfg(feature = "testing")]
         let capabilities = if config.test_without_multi_db {
-            discus_wire::caps::KNOWN & !discus_wire::caps::MULTI_DB
+            capabilities & !discus_wire::caps::MULTI_DB
         } else {
-            discus_wire::caps::KNOWN | discus_wire::caps::MULTI_DB
+            capabilities
         };
-        #[cfg(not(feature = "testing"))]
-        let capabilities = discus_wire::caps::KNOWN;
         let client_addr = node.resolve_client_addr(advertise.ip());
         let me = MemberInfo {
             id: node.id,

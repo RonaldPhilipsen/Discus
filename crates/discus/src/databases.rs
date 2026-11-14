@@ -4,7 +4,6 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use discus_wire::caps;
 use parking_lot::Mutex;
 
 use crate::command::CommandError;
@@ -31,9 +30,6 @@ pub struct Databases {
     /// `--lower-databases`: a joiner keeps its own count instead of the larger cluster count.
     lower: bool,
     dropped: Mutex<HashSet<u32>>,
-    /// Set by [`Databases::open_gate`]: the gate stays open whatever the membership view says.
-    #[cfg(feature = "testing")]
-    pinned: AtomicBool,
     /// Set by [`Databases::pin_cluster`]: the cluster count that every view takes, 0 for none.
     #[cfg(feature = "testing")]
     pinned_cluster: AtomicU32,
@@ -44,12 +40,10 @@ impl Databases {
         Databases {
             local: AtomicU32::new(local),
             cluster: AtomicU32::new(local),
-            multi_db: AtomicBool::new(caps::KNOWN & caps::MULTI_DB != 0),
+            multi_db: AtomicBool::new(true),
             floor: AtomicU32::new(u32::MAX),
             lower,
             dropped: Mutex::default(),
-            #[cfg(feature = "testing")]
-            pinned: AtomicBool::new(false),
             #[cfg(feature = "testing")]
             pinned_cluster: AtomicU32::new(0),
         }
@@ -82,9 +76,8 @@ impl Databases {
     }
 
     /// Take the membership view. `Some(cluster)` if the cluster count dropped: the floor then
-    /// refuses inbound data at or above it before the caller drops the databases. The gate opens
-    /// only if this build knows `MULTI_DB` too. The count stays at least 1, so database 0 always
-    /// serves.
+    /// refuses inbound data at or above it before the caller drops the databases. The count stays
+    /// at least 1, so database 0 always serves.
     pub fn set_view(&self, cluster: u32, multi_db: bool) -> Option<u32> {
         #[cfg(feature = "testing")]
         let cluster = match self.pinned_cluster.load(Ordering::Relaxed) {
@@ -95,10 +88,7 @@ impl Databases {
         // A reader can see the new gate with the old count for a moment. That is harmless:
         // `prepare` checks the count again on every data command, so a database above the new
         // count is refused once the count store lands.
-        let open = multi_db && caps::KNOWN & caps::MULTI_DB != 0;
-        #[cfg(feature = "testing")]
-        let open = open || self.pinned.load(Ordering::Relaxed);
-        self.multi_db.store(open, Ordering::Relaxed);
+        self.multi_db.store(multi_db, Ordering::Relaxed);
         let old = self.cluster.swap(cluster, Ordering::Relaxed);
         if cluster < old {
             self.floor.fetch_min(cluster, Ordering::Relaxed);
@@ -127,14 +117,6 @@ impl Databases {
             self.check_gate()?;
         }
         Ok(db as u32)
-    }
-
-    /// Open the gate whatever this build and the members know, so tests reach the gated paths.
-    /// It stays open: a later membership view cannot close it.
-    #[cfg(feature = "testing")]
-    pub fn open_gate(&self) {
-        self.pinned.store(true, Ordering::Relaxed);
-        self.multi_db.store(true, Ordering::Relaxed);
     }
 
     /// Fix the cluster count at `n` whatever the membership view says, so tests reach counts
@@ -170,23 +152,9 @@ mod tests {
 
     #[test]
     fn select_parses_like_valkey() {
-        // Task 11 removes this guard, when `KNOWN` gets `MULTI_DB`.
-        if caps::KNOWN & caps::MULTI_DB == 0 {
-            return;
-        }
         let dbs = Databases::new(3, false);
         dbs.set_view(3, true);
         assert_eq!(dbs.check_select(2), Ok(2));
-    }
-
-    #[cfg(feature = "testing")]
-    #[test]
-    fn a_view_cannot_close_an_opened_gate() {
-        let dbs = Databases::new(3, false);
-        dbs.open_gate();
-        dbs.set_view(3, false);
-        assert!(dbs.multi_db());
-        assert_eq!(dbs.check_gate(), Ok(()));
     }
 
     #[cfg(feature = "testing")]

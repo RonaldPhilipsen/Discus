@@ -76,7 +76,8 @@ pub mod caps {
         | COUNTERS
         | SHARED_STREAM
         | SHARED_READS
-        | SLOT_PLACEMENT;
+        | SLOT_PLACEMENT
+        | MULTI_DB;
 }
 
 /// The frame limit before `HELLO` completes, and the smallest offer that `HELLO` accepts.

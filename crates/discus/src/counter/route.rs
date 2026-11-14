@@ -22,6 +22,7 @@ use crate::cluster::{forward, Dispatch, Hop, Job, Reply, MAX_HOPS};
 use crate::command::internal::COUNTER_FLUSH;
 use crate::command::util::{check_key, check_mset, check_value, parse_i64};
 use crate::command::{CommandError, CommandSpec};
+use crate::databases::Databases;
 use crate::Node;
 
 /// The leader refused before it applied anything. The entry node tries again.
@@ -257,9 +258,7 @@ pub async fn run(
 
 /// `FLUSHALL` and `FLUSHDB` on the entry node: the cache broadcast, then every counter group
 /// (spec section 12.1). A group without a leader or a quorum keeps its counters, and the reply
-/// says how many groups were cleared. `FLUSHDB` clears the counters of database `db` only when
-/// the gate is open. Before that, only database 0 holds keys, so it clears every database, as
-/// before numbered databases.
+/// says how many groups were cleared.
 pub fn broadcast(node: &Arc<Node>, spec: &'static CommandSpec, db: u32, cmd: Command) -> Dispatch {
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
@@ -272,11 +271,7 @@ pub fn broadcast(node: &Arc<Node>, spec: &'static CommandSpec, db: u32, cmd: Com
         if matches!(cache.value, Value::Error(_)) {
             return cache;
         }
-        let (kind, name) = if spec.name == "FLUSHDB" && node.databases.multi_db() {
-            (Kind::FlushOneDb, FLUSH_ONE_DB)
-        } else {
-            (Kind::FlushAll, &b"FLUSHALL"[..])
-        };
+        let (kind, name) = counter_flush(&node.databases, spec.name);
         let flush: Command = vec![Bytes::from_static(name)];
         let groups = counters.settings.groups;
         let parts = join_all(
@@ -296,9 +291,36 @@ pub fn broadcast(node: &Arc<Node>, spec: &'static CommandSpec, db: u32, cmd: Com
     }))
 }
 
+/// The counter flush of `FLUSHALL` or `FLUSHDB`. `FLUSHDB` clears the counters of its database
+/// only, but `DISCUS.FLUSHDB` goes into a counter log only while the gate is open and the cluster
+/// serves more than one database: a replica of an older build, whose log decoder does not know
+/// it, can join a cluster with one database. There, only database 0 holds keys, so `FLUSHALL`
+/// clears the same counters.
+fn counter_flush(dbs: &Databases, name: &str) -> (Kind, &'static [u8]) {
+    if name == "FLUSHDB" && dbs.multi_db() && dbs.cluster() > 1 {
+        (Kind::FlushOneDb, FLUSH_ONE_DB)
+    } else {
+        (Kind::FlushAll, b"FLUSHALL")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flushdb_logs_its_database_only_with_more_than_one() {
+        let one = Databases::new(1, false);
+        one.set_view(1, true);
+        assert!(one.multi_db());
+        assert_eq!(counter_flush(&one, "FLUSHDB").1, b"FLUSHALL");
+        let three = Databases::new(3, false);
+        three.set_view(3, true);
+        assert_eq!(counter_flush(&three, "FLUSHDB").1, FLUSH_ONE_DB);
+        assert_eq!(counter_flush(&three, "FLUSHALL").1, b"FLUSHALL");
+        three.set_view(3, false);
+        assert_eq!(counter_flush(&three, "FLUSHDB").1, b"FLUSHALL");
+    }
 
     fn ok() -> Reply {
         Reply::value(Value::Integer(1))

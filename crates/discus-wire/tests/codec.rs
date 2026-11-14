@@ -442,7 +442,7 @@ fn forward_round_trips_its_database() {
 }
 
 #[test]
-fn known_capabilities_leave_out_multi_db() {
+fn known_capabilities_include_multi_db() {
     assert_eq!(discus_wire::caps::MULTI_DB, 128);
-    assert_eq!(discus_wire::caps::KNOWN & discus_wire::caps::MULTI_DB, 0);
+    assert_ne!(discus_wire::caps::KNOWN & discus_wire::caps::MULTI_DB, 0);
 }

@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use common::counters::{
-    all_hold, group_of, held_in, incr_until, leader_of, purge_reaches_every_replica, role, start,
-    status, Leases, FAST, GROUPS,
+    all_hold, group_of, held_in, incr_until, join, join_to, leader_of, purge_reaches_every_replica,
+    role, start, status, Leases, FAST, GROUPS,
 };
 use common::gossip::{refs, socket, wait_agreed, wait_until, GossipNode, Net, Opts};
 use common::run_in;
@@ -302,11 +302,28 @@ async fn all_hold_in(nodes: &[GossipNode], db: u32, key: &str, want: Option<&str
     .await
 }
 
-/// Two nodes with the gate closed, a counter key of group 0 in databases 0 and 1, and the entry
-/// node that does not lead group 0.
-async fn counters_in_two_databases(net: &Net, leases: &Leases) -> (Vec<GossipNode>, usize, String) {
-    let (nodes, _gates) = two(net, leases, &["--databases", "2"]).await;
-    let leader = leader_of(&refs(&nodes), 0).unwrap().id;
+const DB2: &[&str] = &["--databases", "2"];
+
+/// Two nodes with 2 databases, a counter key of group 0 in databases 0 and 1, and the entry node
+/// that does not lead group 0. The first node forms the cluster alone with `first` and its flags
+/// of 2 databases, so it can stand in for an older build: a joiner without `MULTI_DB` is refused.
+async fn counters_in_two_databases(
+    net: &Net,
+    leases: &Leases,
+    first: &[&str],
+) -> (Vec<GossipNode>, usize, String) {
+    let flags: Vec<&str> = DB2.iter().chain(first).copied().collect();
+    let (a, _) = join(net, leases, socket().0, &[], &flags).await;
+    assert!(wait_until(Duration::from_secs(10), || a.is_normal()).await);
+    let (b, _) = join_to(net, leases, &[&a], DB2).await;
+    let nodes = vec![a, b];
+    let refs = refs(&nodes);
+    wait_agreed(&refs, Duration::from_secs(10)).await;
+    assert!(
+        wait_until(Duration::from_secs(10), || settled(&refs)).await,
+        "the groups did not settle"
+    );
+    let leader = leader_of(&refs, 0).unwrap().id;
     let entry = nodes.iter().position(|n| n.id != leader).unwrap();
     let key = key_of_group(&nodes[entry], 0);
     for db in [0, 1] {
@@ -324,10 +341,13 @@ async fn counters_in_two_databases(net: &Net, leases: &Leases) -> (Vec<GossipNod
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_flush_clears_the_counters_of_a_remote_leader() {
     let (net, leases) = (Net::new(), Leases::new());
-    let (nodes, entry, key) = counters_in_two_databases(&net, &leases).await;
-    for n in &nodes {
-        n.node.databases.open_gate();
-    }
+    let (nodes, entry, key) = counters_in_two_databases(&net, &leases, &[]).await;
+    assert!(
+        wait_until(Duration::from_secs(10), || nodes
+            .iter()
+            .all(|n| n.node.databases.multi_db()))
+        .await
+    );
     let a = &nodes[entry].node;
     assert_eq!(run_in(a, 1, &["FLUSHDB"]).await, Value::ok());
     assert!(
@@ -353,7 +373,14 @@ async fn a_flush_clears_the_counters_of_a_remote_leader() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_flush_without_the_gate_keeps_the_cache_of_a_remote_leader() {
     let (net, leases) = (Net::new(), Leases::new());
-    let (nodes, entry, _key) = counters_in_two_databases(&net, &leases).await;
+    let (nodes, entry, _key) =
+        counters_in_two_databases(&net, &leases, &["--test-without-multi-db"]).await;
+    assert!(
+        wait_until(Duration::from_secs(10), || nodes
+            .iter()
+            .all(|n| !n.node.databases.multi_db()))
+        .await
+    );
     let a = &nodes[entry].node;
     for i in 0..20 {
         let k = format!("plain{i}");
@@ -369,7 +396,7 @@ async fn a_flush_without_the_gate_keeps_the_cache_of_a_remote_leader() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dropped_databases_lose_their_counters() {
     let (net, leases) = (Net::new(), Leases::new());
-    let (nodes, _entry, key) = counters_in_two_databases(&net, &leases).await;
+    let (nodes, _entry, key) = counters_in_two_databases(&net, &leases, &[]).await;
     for n in &nodes {
         n.node
             .counters()

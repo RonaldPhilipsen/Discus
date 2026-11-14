@@ -305,22 +305,14 @@ async fn info_keyspace_lists_each_database() {
     assert!(discus.contains("cluster_databases:"), "{discus}");
 }
 
-/// A cluster of `n` nodes with `extra` flags whose gate is open, so commands that change the
-/// database of a key run.
-async fn start_open(net: &Net, n: usize, extra: &[&str]) -> Vec<GossipNode> {
-    let nodes = net.start_agreed(n, extra).await;
-    for n in &nodes {
-        n.node.databases.open_gate();
-    }
-    nodes
-}
-
 const SAME: &str = "ERR source and destination objects are the same";
 
 #[tokio::test]
 async fn move_moves_a_key_to_another_database() {
     let net = Net::new();
-    let nodes = start_open(&net, 3, &["--databases", "3", "--replication-factor", "2"]).await;
+    let nodes = net
+        .start_agreed(3, &["--databases", "3", "--replication-factor", "2"])
+        .await;
     let a = &nodes[0].node;
     let key = key_on(&nodes, 1, "mv");
     assert_eq!(run_in(a, 0, &["SET", &key, "v"]).await, Value::ok());
@@ -339,7 +331,7 @@ async fn move_moves_a_key_to_another_database() {
 #[tokio::test]
 async fn move_refuses_a_live_destination() {
     let net = Net::new();
-    let nodes = start_open(&net, 3, &["--databases", "3"]).await;
+    let nodes = net.start_agreed(3, &["--databases", "3"]).await;
     let a = &nodes[0].node;
     let key = key_on(&nodes, 2, "mv");
     assert_eq!(run_in(a, 0, &["SET", &key, "zero"]).await, Value::ok());
@@ -352,7 +344,7 @@ async fn move_refuses_a_live_destination() {
 #[tokio::test]
 async fn move_edge_cases() {
     let net = Net::new();
-    let nodes = start_open(&net, 3, &["--databases", "3"]).await;
+    let nodes = net.start_agreed(3, &["--databases", "3"]).await;
     let a = &nodes[0].node;
     assert_eq!(run_in(a, 0, &["SET", "k", "v"]).await, Value::ok());
     assert_eq!(run_in(a, 0, &["MOVE", "k", "0"]).await, Value::error(SAME));
@@ -380,7 +372,7 @@ fn pttl(v: Value) -> i64 {
 #[tokio::test]
 async fn copy_across_slots_and_databases() {
     let net = Net::new();
-    let nodes = start_open(&net, 3, &["--databases", "3"]).await;
+    let nodes = net.start_agreed(3, &["--databases", "3"]).await;
     let a = &nodes[0].node;
     let src = key_on(&nodes, 1, "src");
     let dst = key_on(&nodes, 2, "dst");
@@ -412,7 +404,7 @@ async fn copy_across_slots_and_databases() {
 #[tokio::test]
 async fn copy_to_itself_is_refused() {
     let net = Net::new();
-    let nodes = start_open(&net, 3, &["--databases", "3"]).await;
+    let nodes = net.start_agreed(3, &["--databases", "3"]).await;
     let a = &nodes[0].node;
     assert_eq!(run_in(a, 0, &["SET", "k", "v"]).await, Value::ok());
     assert_eq!(run_in(a, 0, &["COPY", "k", "k"]).await, Value::error(SAME));
@@ -426,7 +418,7 @@ async fn copy_to_itself_is_refused() {
 #[tokio::test]
 async fn copy_parses_every_option_before_the_range() {
     let net = Net::new();
-    let nodes = start_open(&net, 1, &["--databases", "3"]).await;
+    let nodes = net.start_agreed(1, &["--databases", "3"]).await;
     let a = &nodes[0].node;
     assert_eq!(
         run_in(a, 0, &["COPY", "a", "b", "DB", "99", "BOGUS"]).await,
@@ -445,7 +437,7 @@ async fn copy_parses_every_option_before_the_range() {
 #[tokio::test]
 async fn swapdb_is_refused() {
     let net = Net::new();
-    let nodes = start_open(&net, 1, &["--databases", "3"]).await;
+    let nodes = net.start_agreed(1, &["--databases", "3"]).await;
     assert_eq!(
         run_in(&nodes[0].node, 0, &["SWAPDB", "0", "1"]).await,
         Value::error("ERR SWAPDB is not allowed in cluster mode")
@@ -497,18 +489,18 @@ fn data(s: &str) -> redis::Value {
 #[tokio::test]
 async fn a_move_and_a_copy_read_their_own_write_in_the_target_database() {
     let net = Net::new();
-    let nodes = start_open(
-        &net,
-        3,
-        &[
-            "--databases",
-            "3",
-            "--replication-factor",
-            "2",
-            "--read-from-replicas",
-        ],
-    )
-    .await;
+    let nodes = net
+        .start_agreed(
+            3,
+            &[
+                "--databases",
+                "3",
+                "--replication-factor",
+                "2",
+                "--read-from-replicas",
+            ],
+        )
+        .await;
     let (k, src, dst) = (
         key_replicated_on(&nodes, 0, "mv"),
         key_on(&nodes, 1, "src"),
@@ -560,12 +552,9 @@ async fn a_move_and_a_copy_read_their_own_write_in_the_target_database() {
 #[tokio::test]
 async fn copy_reads_the_source_on_the_primary() {
     let net = Net::new();
-    let nodes = start_open(
-        &net,
-        3,
-        &["--replication-factor", "2", "--read-from-replicas"],
-    )
-    .await;
+    let nodes = net
+        .start_agreed(3, &["--replication-factor", "2", "--read-from-replicas"])
+        .await;
     let a = &nodes[0].node;
     let src = key_replicated_on(&nodes, 0, "src");
     let p = nodes
