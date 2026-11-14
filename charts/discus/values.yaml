@@ -64,8 +64,9 @@ clientTls:
   # With verifyClients: optional or required.
   clientAuth: optional
 
-# The flag --auth-policy, for example all:mtls or all:tls,oauth2. An empty value uses the node
-# default none: every client uses TLS and needs no credentials.
+# The flag --auth-policy, for example all:mtls or all:tls,oauth2. Required: the chart fails when
+# the value is empty, because a node without a policy refuses to start. The value none gives every
+# client that completes the TLS handshake read and write access, without credentials.
 authPolicy: ""
 authConfig:
   # A Secret with the key auth.toml, for the flag --auth-config. The file lists the trusted

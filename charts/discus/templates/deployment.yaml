@@ -124,9 +124,7 @@ spec:
             - --tls-client-auth={{ .clientAuth }}
             {{- end }}
             {{- end }}
-            {{- with .Values.authPolicy }}
-            - --auth-policy={{ . }}
-            {{- end }}
+            - --auth-policy={{ required "authPolicy is required. Set authPolicy=none for TLS without credentials, or a policy with mtls, oauth2, or shared_token, for example authPolicy=all:mtls" .Values.authPolicy }}
             {{- if .Values.authConfig.secretName }}
             - --auth-config=/auth/auth.toml
             {{- end }}

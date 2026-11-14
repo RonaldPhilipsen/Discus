@@ -273,8 +273,12 @@ cluster. Then install the chart:
 helm install <release> oci://ghcr.io/ronaldphilipsen/charts/discus \
   --version <version> \
   --namespace <namespace> \
-  --set cluster.tls.secretName=<secret>
+  --set cluster.tls.secretName=<secret> \
+  --set authPolicy=<policy>
 ```
+
+The chart refuses to install without `authPolicy`. The client values below tell which policy to
+set.
 
 The chart does not require a URI SAN by default. To require a SPIFFE identity, set
 `cluster.san.enabled=true`. The certificate must then carry the URI SAN
@@ -297,14 +301,16 @@ authentication for clients:
 | `clientTls.verifyClients=true` | The node asks for client certificates and verifies them against the key `ca.crt` of the Secret. |
 | `clientTls.clientAuth` | `optional` or `required`. The default is `optional`. |
 | `clientTls.clientCaSecretName` | A Secret with the key `ca.crt` for client certificates. The default is the Secret of `clientTls.secretName`. Use it with a public server certificate and a private CA for clients. |
-| `authPolicy` | The flag `--auth-policy`, for example `all:mtls`. |
+| `authPolicy` | The flag `--auth-policy`, for example `all:mtls`. Required. |
 | `authConfig.secretName` | A Secret with the key `auth.toml`, for the flag `--auth-config`. |
 
 The node reloads its certificates after the Secrets change, so a rotation needs no restart. See
 [Certificate rotation](security.md#certificate-rotation).
 
-Without `authPolicy`, the node uses the policy `none`. Each client then uses TLS and needs no
-credentials. For client certificates without tokens, set `authPolicy=all:mtls`. For OAuth 2.0
+The chart has no default for `authPolicy`, and it fails with a message when the value is empty.
+With `authPolicy=none`, each client uses TLS and needs no credentials. Every client that can
+reach the port then gets read and write access. For client certificates without tokens, set
+`authPolicy=all:mtls`. For OAuth 2.0
 tokens, set `authPolicy=all:tls,oauth2` and list the trusted issuers in the `auth.toml` file. See
 [Security](security.md) for the policies.
 

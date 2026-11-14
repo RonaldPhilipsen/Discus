@@ -114,8 +114,13 @@ impl Security {
             None if config.shared_token.is_some() => {
                 Policy::All(vec![Factor::Tls, Factor::SharedToken])
             }
-            // Every client uses TLS, so `none` means TLS without credentials.
-            None => Policy::None,
+            // An open node must be a choice of the operator, never a silent default.
+            None => {
+                return fail(
+                    "--auth-policy is not set. Choose a policy: --auth-policy none for TLS \
+                     without credentials, or a policy with mtls, oauth2, or shared_token",
+                )
+            }
         };
 
         let (Some(tls_cert), Some(tls_key)) = (&args.tls_cert, &args.tls_key) else {
@@ -175,6 +180,12 @@ impl Security {
             return fail("[admin] cert_identities needs --admin-tls and --tls-client-ca");
         }
         let server_tls = ArcSwap::from_pointee(tls_files.listener().map_err(|e| e.to_string())?);
+        if policy == Policy::None {
+            tracing::warn!(
+                "--auth-policy none: every client that completes a TLS handshake gets read and \
+                 write access"
+            );
+        }
 
         Ok(Security {
             mode: args.tls_mode,
@@ -620,8 +631,8 @@ pub(crate) mod tests {
         crate::command::lookup(name).unwrap()
     }
 
-    /// A `Security` with a self-signed client certificate and `args`.
-    pub(crate) fn security(args: &[&str]) -> Security {
+    /// The result of `Security::from_config` with a self-signed client certificate and `args`.
+    fn try_security(args: &[&str]) -> Result<Security, SecurityError> {
         let key = rcgen::KeyPair::generate().unwrap();
         let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
             .unwrap()
@@ -636,7 +647,40 @@ pub(crate) mod tests {
         argv.extend_from_slice(args);
         let config = Config::parse_from(argv).unwrap();
         let live_settings = Live::new(crate::settings::Reloadable::from_config(&config));
-        Security::from_config(&config, live_settings).unwrap()
+        Security::from_config(&config, live_settings)
+    }
+
+    /// A `Security` with a self-signed client certificate and `args`. Without a policy and
+    /// without a shared token in `args`, the policy is `none`.
+    pub(crate) fn security(args: &[&str]) -> Security {
+        let mut all = args.to_vec();
+        if !args.contains(&"--auth-policy") && !args.contains(&"--shared-token") {
+            all.extend(["--auth-policy", "none"]);
+        }
+        try_security(&all).unwrap()
+    }
+
+    #[test]
+    fn a_node_without_a_policy_refuses_to_start() {
+        let Err(e) = try_security(&[]) else {
+            panic!("the node started without a policy");
+        };
+        assert!(e.to_string().contains("--auth-policy"), "{e}");
+    }
+
+    #[test]
+    fn an_explicit_none_policy_starts() {
+        let s = try_security(&["--auth-policy", "none"]).unwrap();
+        assert_eq!(s.policy, Policy::None);
+    }
+
+    #[test]
+    fn a_shared_token_alone_gets_the_shared_token_policy() {
+        let s = try_security(&["--shared-token", "x"]).unwrap();
+        assert_eq!(
+            s.policy,
+            Policy::All(vec![Factor::Tls, Factor::SharedToken])
+        );
     }
 
     #[test]

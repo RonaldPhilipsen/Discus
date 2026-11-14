@@ -69,6 +69,22 @@ async fn a_node_without_a_client_certificate_refuses_to_start() {
     assert!(e.contains("--tls-cert"), "{e}");
 }
 
+#[tokio::test]
+async fn a_node_without_a_policy_refuses_to_start() {
+    // Naming the flag keeps the helper from adding the policy `none`.
+    let tls = common::client_tls::server_args(&["--auth-policy"]);
+    let args: Vec<&str> = tls.iter().map(String::as_str).collect();
+    let e = bind_error_without_tls(&args).await;
+    assert!(e.contains("--auth-policy none"), "{e}");
+}
+
+#[tokio::test]
+async fn an_explicit_none_policy_starts() {
+    common::try_start_full(&["--auth-policy", "none"])
+        .await
+        .expect("the node starts");
+}
+
 #[test]
 fn there_is_no_plaintext_tls_mode() {
     assert!(discus::Config::parse_from(["discus", "--tls-mode", "off"]).is_err());

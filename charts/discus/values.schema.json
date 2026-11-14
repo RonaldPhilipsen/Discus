@@ -3,6 +3,11 @@
   "type": "object",
   "properties": {
     "databases": { "type": "integer", "minimum": 1, "maximum": 65536 },
+    "authPolicy": {
+      "description": "The flag --auth-policy. The template fails with a message when the value is empty.",
+      "type": "string",
+      "pattern": "^$|^none$|^(any|all):.+$"
+    },
     "settings": {
       "type": "object",
       "properties": {
