@@ -9,39 +9,53 @@ pub struct Key {
     pub key: &'static str,
     /// The clap argument ID of the flag that this key replaces.
     pub flag: &'static str,
+    pub kind: Kind,
 }
 
-const fn key(section: Option<&'static str>, key: &'static str, flag: &'static str) -> Key {
-    Key { section, key, flag }
+/// The TOML type that a key takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Integer,
+    Boolean,
+}
+
+const fn integer(section: &'static str, key: &'static str, flag: &'static str) -> Key {
+    Key {
+        section: Some(section),
+        key,
+        flag,
+        kind: Kind::Integer,
+    }
+}
+
+const fn boolean(section: &'static str, key: &'static str, flag: &'static str) -> Key {
+    Key {
+        section: Some(section),
+        key,
+        flag,
+        kind: Kind::Boolean,
+    }
 }
 
 pub const KEYS: &[Key] = &[
-    key(Some("budget"), "forward-read-ms", "forward_read_timeout_ms"),
-    key(
-        Some("budget"),
-        "forward-write-ms",
-        "forward_write_timeout_ms",
-    ),
-    key(Some("budget"), "hold-ms", "hold_budget_ms"),
-    key(Some("budget"), "replication-ms", "replication_timeout_ms"),
-    key(Some("reads"), "from-replicas", "read_from_replicas"),
-    key(Some("handoff"), "rate-bytes", "handoff_rate_bytes"),
-    key(
-        Some("auth"),
+    integer("budget", "forward-read-ms", "forward_read_timeout_ms"),
+    integer("budget", "forward-write-ms", "forward_write_timeout_ms"),
+    integer("budget", "hold-ms", "hold_budget_ms"),
+    integer("budget", "replication-ms", "replication_timeout_ms"),
+    boolean("reads", "from-replicas", "read_from_replicas"),
+    integer("handoff", "rate-bytes", "handoff_rate_bytes"),
+    integer(
+        "auth",
         "max-failures-per-connection",
         "auth_max_failures_per_connection",
     ),
-    key(
-        Some("auth"),
+    integer(
+        "auth",
         "max-failures-per-source",
         "auth_max_failures_per_source",
     ),
-    key(
-        Some("auth"),
-        "failure-window-secs",
-        "auth_failure_window_secs",
-    ),
-    key(Some("tls"), "reload-secs", "tls_reload_secs"),
+    integer("auth", "failure-window-secs", "auth_failure_window_secs"),
+    integer("tls", "reload-secs", "tls_reload_secs"),
 ];
 
 #[derive(Debug)]

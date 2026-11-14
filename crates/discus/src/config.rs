@@ -8,7 +8,7 @@ use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use discus_placement::{ClusterId, NodeId};
 
-use crate::settings::{FileSettings, KEYS};
+use crate::settings::{FileSettings, Kind, KEYS};
 
 /// A peer: `<addr>` or `<node-id>@<addr>`, with an optional `/<client-addr>` after the address.
 /// With gossip it is a discovery seed, and the ID is only an expectation. With static membership
@@ -460,11 +460,11 @@ impl Config {
                 Some(section) => format!("{section}.{}", key.key),
                 None => key.key.to_string(),
             };
-            let text = match value {
-                toml::Value::String(s) => s.clone(),
-                toml::Value::Integer(i) => i.to_string(),
-                toml::Value::Boolean(b) => b.to_string(),
-                _ => return Err(format!("{path}: must be a number or a boolean")),
+            let text = match (key.kind, value) {
+                (Kind::Integer, toml::Value::Integer(i)) => i.to_string(),
+                (Kind::Boolean, toml::Value::Boolean(b)) => b.to_string(),
+                (Kind::Integer, _) => return Err(format!("{path}: must be an integer")),
+                (Kind::Boolean, _) => return Err(format!("{path}: must be a boolean")),
             };
             let argument = format!("--{}={text}", key.flag.replace('_', "-"));
             let parsed = command
@@ -1029,7 +1029,39 @@ mod tests {
     #[test]
     fn a_bad_file_stops_the_start() {
         let error = load_with_file("version = 1\n[budget]\nhold-ms = \"x\"", &[]).unwrap_err();
-        assert!(error.contains("budget.hold-ms"), "{error}");
+        assert_eq!(error, "budget.hold-ms: must be an integer");
+    }
+
+    #[test]
+    fn a_number_in_a_string_or_a_float_is_refused() {
+        for value in ["\"1500\"", "1500.0"] {
+            let text = format!("version = 1\n[budget]\nhold-ms = {value}");
+            let error = load_with_file(&text, &[]).unwrap_err();
+            assert_eq!(error, "budget.hold-ms: must be an integer", "{value}");
+        }
+    }
+
+    #[test]
+    fn a_boolean_key_takes_a_toml_boolean_only() {
+        for value in ["\"false\"", "0"] {
+            let text = format!("version = 1\n[reads]\nfrom-replicas = {value}");
+            let error = load_with_file(&text, &[]).unwrap_err();
+            assert_eq!(error, "reads.from-replicas: must be a boolean", "{value}");
+        }
+    }
+
+    #[test]
+    fn the_kind_of_every_key_matches_its_flag() {
+        let command = <Config as clap::CommandFactory>::command();
+        for key in crate::settings::KEYS {
+            let arg = command
+                .get_arguments()
+                .find(|a| a.get_id() == key.flag)
+                .unwrap();
+            let default = arg.get_default_values()[0].to_str().unwrap();
+            let boolean = default.parse::<bool>().is_ok();
+            assert_eq!(boolean, key.kind == Kind::Boolean, "--{}", key.flag);
+        }
     }
 
     #[test]
