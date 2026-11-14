@@ -24,6 +24,7 @@ use parking_lot::{Mutex, RwLock};
 use tracing::Span;
 
 use crate::command::{self, CommandError, CommandSpec};
+use crate::databases;
 use crate::node::{ConnState, Node};
 use crate::settings::Live;
 use crate::telemetry;
@@ -277,6 +278,10 @@ pub fn prepare(
     };
     if spec.route == Route::Connection {
         return Prepared::Done((spec.handler)(node, conn, &cmd).unwrap_or_else(|e| e.to_value()));
+    }
+    // The cluster count can drop below the database that a connection selected earlier.
+    if conn.db >= node.databases.cluster() {
+        return Prepared::Done(Value::error(databases::OUT_OF_RANGE));
     }
     Prepared::Data(Job {
         cmd,
@@ -624,6 +629,31 @@ mod tests {
     use super::*;
     use crate::settings::Reloadable;
     use crate::Config;
+
+    #[test]
+    fn a_data_command_in_a_database_above_the_cluster_count_is_refused() {
+        let config = Config::parse_from(["discus"]).unwrap();
+        let live = Live::new(Reloadable::from_config(&config));
+        let security = Arc::new(crate::security::tests::security(&[]));
+        let node = Node::new(config, security, live);
+        let mut conn = ConnState::new(
+            1,
+            crate::security::ConnAuth {
+                tls: true,
+                ..Default::default()
+            },
+        );
+        let get = |conn: &mut ConnState| {
+            let cmd = crate::counter::cmd(&["GET", "k"]);
+            prepare(&node, conn, command::lookup(&cmd[0]), cmd)
+        };
+        assert!(matches!(get(&mut conn), Prepared::Data(_)));
+        conn.db = 1;
+        let Prepared::Done(reply) = get(&mut conn) else {
+            panic!("GET in database 1 ran");
+        };
+        assert_eq!(reply, Value::error(databases::OUT_OF_RANGE));
+    }
 
     #[tokio::test]
     async fn the_link_reads_the_live_timeouts() {

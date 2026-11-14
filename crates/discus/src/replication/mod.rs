@@ -1146,7 +1146,7 @@ fn fill(store: &Store, q: &PeerQueue, keys: Vec<DbKey>) -> Vec<(DbKey, Entry)> {
 /// This node holds database `db`. Inbound entries, offers, fetches, and digests of any other
 /// database are dropped, so a peer with more databases cannot create maps here.
 fn holds_db(node: &Node, db: u32) -> bool {
-    db < node.local_databases()
+    db < node.databases.local()
 }
 
 fn ack(node: &Node, applied: u32, want: Vec<DbKey>) -> Message {

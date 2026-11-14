@@ -24,6 +24,7 @@ use crate::cluster::ClusterLink;
 use crate::command::CommandError;
 use crate::config::{client_host, default_client_addr};
 use crate::counter::Counters;
+use crate::databases::Databases;
 use crate::lag::LagProbe;
 use crate::membership::Membership;
 use crate::replication::Replicator;
@@ -73,6 +74,8 @@ pub struct Node {
     current_generation: AtomicU64,
     pub started_at: Instant,
     pub store: Arc<Store>,
+    /// The database counts of this node and of the cluster, and the `MULTI_DB` gate.
+    pub databases: Arc<Databases>,
     pub security: Arc<Security>,
     /// The reloadable settings, replaced as a whole on a reload of the `--config` file.
     pub live_settings: Arc<Live>,
@@ -256,6 +259,7 @@ impl Node {
             config.max_memory / 100 * config.write_set_memory_percent,
             Some(store.clone()),
         ));
+        let databases = Arc::new(Databases::new(config.databases, config.lower_databases));
         Node {
             config,
             id,
@@ -264,6 +268,7 @@ impl Node {
             current_generation: AtomicU64::new(next_generation()),
             epochs: Arc::new(RwLock::new(epochs)),
             started_at: Instant::now(),
+            databases,
             store,
             write_budget,
             security,
@@ -770,13 +775,6 @@ impl Node {
             }
         }
         result
-    }
-
-    /// The databases that this node holds: 0 up to this count, exclusive. Inbound replication
-    /// of any other database is dropped. Task 4 returns `Databases::local` here; until then
-    /// `--databases` does not exist and its default is 1.
-    pub fn local_databases(&self) -> u32 {
-        1
     }
 
     pub fn next_conn_id(&self) -> u64 {

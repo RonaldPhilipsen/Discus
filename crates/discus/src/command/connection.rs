@@ -132,11 +132,9 @@ fn hello(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     ]))
 }
 
-fn select(_: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    match parse_i64(&cmd[1])? {
-        0 => Ok(Value::ok()),
-        _ => Err(CommandError::Custom("ERR DB index is out of range".into())),
-    }
+fn select(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    conn.db = node.databases.check_select(parse_i64(&cmd[1])?)?;
+    Ok(Value::ok())
 }
 
 fn command(_: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
@@ -453,6 +451,41 @@ fn standalone_topology(node: &Node, conn: &ConnState, kind: TopologyCommand) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::security::ConnAuth;
+    use crate::settings::{Live, Reloadable};
+    use crate::Config;
+
+    fn select_reply(cmd: &[&str]) -> Reply {
+        let config = Config::parse_from(["discus"]).unwrap();
+        let live = Live::new(Reloadable::from_config(&config));
+        let security = Arc::new(crate::security::tests::security(&[]));
+        let node = Node::new(config, security, live);
+        let mut conn = ConnState::new(1, ConnAuth::default());
+        select(&node, &mut conn, &crate::counter::cmd(cmd))
+    }
+
+    #[test]
+    fn select_parses_like_valkey() {
+        assert_eq!(
+            select_reply(&["SELECT", "abc"]),
+            Err(CommandError::NotInteger)
+        );
+        assert_eq!(
+            CommandError::NotInteger.text(),
+            "ERR value is not an integer or out of range"
+        );
+    }
+
+    #[test]
+    fn a_default_node_serves_only_database_zero() {
+        assert_eq!(select_reply(&["SELECT", "0"]), Ok(Value::ok()));
+        assert_eq!(
+            select_reply(&["SELECT", "1"]),
+            Err(CommandError::Custom(crate::databases::OUT_OF_RANGE.into()))
+        );
+    }
 
     fn positions(entry: &Value) -> (i64, i64, i64) {
         let Value::Array(parts) = entry else {

@@ -132,6 +132,14 @@ pub struct Config {
     /// Number of owners per key: the primary plus its secondaries. At least 1.
     #[arg(long, default_value_t = discus_placement::DEFAULT_RF, value_parser = parse_rf)]
     pub replication_factor: usize,
+    /// The number of databases that clients can select, as `databases` in Valkey. Above 1 needs
+    /// gossip membership.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=65536))]
+    pub databases: u32,
+    /// Keep this node's `--databases` when it joins a cluster with more databases. The cluster
+    /// count then drops to this node's count.
+    #[arg(long)]
+    pub lower_databases: bool,
     /// Placement weight of this node. Finite and greater than zero.
     #[arg(long, default_value_t = 1.0, value_parser = parse_weight)]
     pub weight: f64,
@@ -536,6 +544,9 @@ impl Config {
                 missing.join(", ")
             ))
         };
+        if self.membership == MembershipMode::Static && self.databases > 1 {
+            return Err("--databases above 1 needs --membership gossip".into());
+        }
         if !(0..=19).contains(&self.data_nice) {
             return Err("--data-nice must be from 0 to 19".into());
         }
@@ -978,6 +989,34 @@ mod tests {
             let err = bad.unwrap_err();
             assert!(err.contains("--client-advertise"), "{err}");
         }
+    }
+
+    #[test]
+    fn static_membership_refuses_more_databases() {
+        let (a, b) = (NodeId::random(), NodeId::random());
+        let (pa, pb) = (format!("{a}@10.0.0.1:7379"), format!("{b}@10.0.0.2:7379"));
+        let peers = ["--peer", pa.as_str(), "--peer", pb.as_str()];
+        let check = |databases: &str| {
+            let mut argv = peers.to_vec();
+            argv.extend(["--databases", databases]);
+            Config::parse_from(static_args(&argv)).unwrap().validate()
+        };
+        check("1").unwrap();
+        assert_eq!(
+            check("2").unwrap_err(),
+            "--databases above 1 needs --membership gossip"
+        );
+        Config::parse_from(["discus", "--databases", "2"])
+            .unwrap()
+            .validate()
+            .unwrap();
+        for bad in ["0", "65537"] {
+            assert!(
+                Config::parse_from(["discus", "--databases", bad]).is_err(),
+                "{bad}"
+            );
+        }
+        assert_eq!(Config::parse_from(["discus"]).unwrap().databases, 1);
     }
 
     fn settings_file(text: &str) -> tempfile::NamedTempFile {

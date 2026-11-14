@@ -613,14 +613,15 @@ fn token_arg(cmd: &discus_resp::Command) -> Option<&[u8]> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn spec(name: &[u8]) -> &'static CommandSpec {
         crate::command::lookup(name).unwrap()
     }
 
-    fn security(args: &[&str]) -> Security {
+    /// A `Security` with a self-signed client certificate and `args`.
+    pub(crate) fn security(args: &[&str]) -> Security {
         let key = rcgen::KeyPair::generate().unwrap();
         let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
             .unwrap()
