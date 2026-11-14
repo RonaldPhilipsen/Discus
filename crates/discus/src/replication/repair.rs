@@ -57,7 +57,7 @@ pub async fn fetch(node: &Arc<Node>, key: &Bytes, sources: Vec<NodeId>) {
             })
         };
         let reply = node
-            .request(source, Lane::Command, build, link.read_timeout, false)
+            .request(source, Lane::Command, build, link.read_timeout(), false)
             .await;
         if let Ok(Message::Entries(batch)) = reply {
             let found = !batch.entries.is_empty();

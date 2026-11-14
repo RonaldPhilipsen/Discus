@@ -165,6 +165,8 @@ and 100.
 | `discus.local_health.evidence_dropped` | counter | none | Data-path evidence dropped while the local health was at or above the evidence cutoff (multiplier 1.5). |
 | `discus.tombstones` | gauge | none | Stored tombstones (delete markers). |
 | `discus.primary_read.delete_unacked` | counter | none | Deleted keys under `--primary-read-prefix` with no secondary acknowledgment in `--replication-timeout-ms`. The delete still returned success. Exported as `discus_primary_read_delete_unacked_total`. |
+| `discus.config.reloads` | counter | `outcome` | Reloads of the settings file, with `outcome` `applied` or `failed`. Exported as `discus_config_reloads_total`. |
+| `discus.config.pending` | gauge | none | 1 while a new value of a reloadable setting needs a restart. No setting of version 1 does this yet, so the gauge is 0 today. Exported as `discus_config_pending`. |
 | `discus.counter.roles` | gauge | `state` | Counter groups by the role of this node: `leader`, `follower`, `voter`, `learner`, or `idle`. |
 | `discus.counter.memory` | gauge (bytes) | none | Counter state that this node holds. |
 | `discus.counter.mode.switches` | counter | `state` | Mode switches of a counter group by the new mode, `raft` or `leader_follower`. |

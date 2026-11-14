@@ -59,8 +59,9 @@ fn delete_timeout(node: &Node, spec: &CommandSpec, cmd: &Command, write: bool) -
     if !write || super::acked_delete_keys(node, spec, cmd).is_empty() {
         return None;
     }
-    let wait = Duration::from_millis(node.config.replication_timeout_ms);
-    node.link().map(|link| link.write_timeout + wait)
+    let live_settings = node.live_settings.get();
+    node.link()
+        .map(|_| live_settings.forward_write_timeout + live_settings.replication_timeout)
 }
 
 /// Forward `cmd` to `target`. A failed read gives `None`, so the caller tries the next owner. A
@@ -95,7 +96,7 @@ pub async fn held(
     if !resendable(&cmd, first) {
         return Reply::try_again();
     }
-    let deadline = Instant::now() + node.config.hold_budget();
+    let deadline = Instant::now() + node.live_settings.get().hold_budget;
     let mut epochs = node.subscribe_epoch();
     epochs.mark_unchanged();
     let retry = Hop { held: true, ..hop };

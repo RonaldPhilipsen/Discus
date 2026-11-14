@@ -21,6 +21,7 @@ use crate::config::LeaseKind;
 use crate::control::ControlLane;
 use crate::membership::{discovery, Membership};
 use crate::security::Security;
+use crate::settings::{Live, Reloadable};
 use crate::{Config, Node, Phase};
 
 /// The HLC clock and the wall clock of one node.
@@ -106,8 +107,8 @@ async fn bind_transport(
 }
 
 mod connection;
+pub(crate) mod file_watch;
 mod order;
-mod tls_reload;
 
 /// Export the metrics of `transport`. Its events feed the peer error and QUIC failure metrics.
 /// The events task runs on the runtime of the caller.
@@ -137,21 +138,19 @@ fn cluster_tls_files(config: &Config) -> Vec<std::path::PathBuf> {
 fn watch_certificates(
     node: &Arc<Node>,
     transports: Vec<Transport>,
-    (client_seen, cluster_seen): (tls_reload::Snapshot, tls_reload::Snapshot),
+    (client_seen, cluster_seen): (file_watch::Snapshot, file_watch::Snapshot),
     stop: CancellationToken,
 ) {
     let config = &node.config;
-    if config.tls_reload_secs == 0 {
-        return;
-    }
-    let period = Duration::from_secs(config.tls_reload_secs);
+    let live_settings = node.live_settings.clone();
+    let period = move || live_settings.get().tls_reload;
     let security = node.security.clone();
     let files = Security::client_tls_files(&config.security);
-    tls_reload::watch(
-        "client",
+    file_watch::watch(
+        "client certificates",
         files,
         client_seen,
-        period,
+        period.clone(),
         stop.clone(),
         move || security.reload_client_tls(),
     );
@@ -167,15 +166,22 @@ fn watch_certificates(
     }
     let san = config.cluster_san.clone();
     let files = cluster_tls_files(config);
-    tls_reload::watch("cluster", files, cluster_seen, period, stop, move || {
-        let tls = TlsMaterial::from_files(&ca, &cert, &key, &san).map_err(io::Error::other)?;
-        // Check every endpoint before any of them changes, so they never disagree.
-        tls.check().map_err(io::Error::other)?;
-        for t in &transports {
-            t.reload_tls(&tls)?;
-        }
-        Ok(())
-    });
+    file_watch::watch(
+        "cluster certificates",
+        files,
+        cluster_seen,
+        period,
+        stop,
+        move || {
+            let tls = TlsMaterial::from_files(&ca, &cert, &key, &san).map_err(io::Error::other)?;
+            // Check every endpoint before any of them changes, so they never disagree.
+            tls.check().map_err(io::Error::other)?;
+            for t in &transports {
+                t.reload_tls(&tls)?;
+            }
+            Ok(())
+        },
+    );
 }
 
 /// Accept on `listener`, or wait forever without one.
@@ -196,7 +202,7 @@ pub struct Server {
     /// The QUIC endpoints, for a reload of the cluster certificates.
     transports: Vec<Transport>,
     /// The client and cluster certificate files before the node loaded them.
-    tls_seen: (tls_reload::Snapshot, tls_reload::Snapshot),
+    tls_seen: (file_watch::Snapshot, file_watch::Snapshot),
 }
 
 impl Server {
@@ -211,8 +217,8 @@ impl Server {
         let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidInput, msg);
         config.validate().map_err(invalid)?;
         let tls_seen = (
-            tls_reload::snapshot(&Security::client_tls_files(&config.security)),
-            tls_reload::snapshot(&cluster_tls_files(&config)),
+            file_watch::snapshot(&Security::client_tls_files(&config.security)),
+            file_watch::snapshot(&cluster_tls_files(&config)),
         );
         let tls = if config.cluster_enabled() {
             let (Some(ca), Some(cert), Some(key)) = (
@@ -238,8 +244,14 @@ impl Server {
         } else {
             None
         };
-        let security =
-            Arc::new(Security::from_config(&config).map_err(|e| invalid(e.to_string()))?);
+        let live_settings = Live::new(Reloadable::from_config(&config));
+        if let Some(version) = config.file_version {
+            live_settings.set_version(version);
+        }
+        let security = Arc::new(
+            Security::from_config(&config, live_settings.clone())
+                .map_err(|e| invalid(e.to_string()))?,
+        );
         let listener = TcpListener::bind(config.listen).await?;
         let redirect = match config.redirect_listen {
             Some(addr) => Some(TcpListener::bind(addr).await?),
@@ -259,8 +271,10 @@ impl Server {
             (false, _) => None,
         };
         let node = Arc::new(match opts.clocks {
-            Some((hlc_clock, wall)) => Node::with_clocks(config, security, wall, hlc_clock),
-            None => Node::new(config, security),
+            Some((hlc_clock, wall)) => {
+                Node::with_clocks(config, security, live_settings, wall, hlc_clock)
+            }
+            None => Node::new(config, security, live_settings),
         });
         let leases = match opts.counter_leases {
             Some(leases) => Some(leases),
@@ -313,7 +327,7 @@ impl Server {
                 None => bind_transport(tc, socket, service).await?,
             };
             transports.push(rpc.clone());
-            node.set_link(ClusterLink::new(rpc, &node.config));
+            node.set_link(ClusterLink::new(rpc, node.live_settings.clone()));
             node.set_replicator(crate::replication::Replicator::new(&node));
         }
         Ok(Server {
@@ -374,6 +388,7 @@ impl Server {
         } = self;
         let stop_background = CancellationToken::new();
         watch_certificates(&node, transports, tls_seen, stop_background.clone());
+        crate::settings::reload::spawn(&node, stop_background.clone());
         {
             let node = node.clone();
             discus_store::every(

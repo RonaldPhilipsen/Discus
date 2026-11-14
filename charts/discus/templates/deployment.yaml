@@ -130,6 +130,7 @@ spec:
             {{- if .Values.authConfig.secretName }}
             - --auth-config=/auth/auth.toml
             {{- end }}
+            - --config=/settings/discus.toml
             {{- with .Values.pyroscope.url }}
             - --pyroscope-url={{ . }}
             {{- end }}
@@ -181,6 +182,9 @@ spec:
               mountPath: /client-ca
               readOnly: true
             {{- end }}
+            - name: settings
+              mountPath: /settings
+              readOnly: true
             {{- if .Values.authConfig.secretName }}
             - name: auth-config
               mountPath: /auth
@@ -207,6 +211,9 @@ spec:
           secret:
             secretName: {{ .Values.clientTls.clientCaSecretName }}
         {{- end }}
+        - name: settings
+          configMap:
+            name: {{ include "discus.fullname" . }}-settings
         {{- with .Values.authConfig.secretName }}
         - name: auth-config
           secret:

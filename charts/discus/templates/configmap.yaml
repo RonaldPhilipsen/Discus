@@ -1,0 +1,54 @@
+{{- /*
+The file is the only place for the reloadable settings. A flag for one of them on the command line
+overrides the file and blocks reloads, so the chart never renders those flags.
+*/ -}}
+{{- $s := .Values.settings -}}
+{{- $keys := dict
+  "budget" (dict "forward-read-ms" $s.budget.forwardReadMs "forward-write-ms" $s.budget.forwardWriteMs "hold-ms" $s.budget.holdMs "replication-ms" $s.budget.replicationMs)
+  "reads" (dict "from-replicas" $s.reads.fromReplicas)
+  "handoff" (dict "rate-bytes" $s.handoff.rateBytes)
+  "auth" (dict "max-failures-per-connection" $s.auth.maxFailuresPerConnection "max-failures-per-source" $s.auth.maxFailuresPerSource "failure-window-secs" $s.auth.failureWindowSecs)
+  "tls" (dict "reload-secs" $s.tls.reloadSecs)
+-}}
+{{- $sections := dict -}}
+{{- range $section, $values := $keys -}}
+{{- $set := dict -}}
+{{- range $key, $value := $values -}}
+{{- if not (kindIs "invalid" $value) -}}
+{{- if kindIs "bool" $value -}}
+{{- $_ := set $set $key (toString $value) -}}
+{{- else -}}
+{{- $_ := set $set $key (toString (int64 $value)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $_ := set $sections $section $set -}}
+{{- end -}}
+{{- range $section, $values := ($s.extra | default dict) -}}
+{{- if not (kindIs "map" $values) -}}
+{{- fail (printf "settings.extra.%s must be a map of file keys to values" $section) -}}
+{{- end -}}
+{{- $set := get $sections $section | default dict -}}
+{{- range $key, $value := $values -}}
+{{- $_ := set $set $key (include "discus.tomlValue" (list (printf "settings.extra.%s.%s" $section $key) $value)) -}}
+{{- end -}}
+{{- $_ := set $sections $section $set -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "discus.fullname" . }}-settings
+  labels:
+    {{- include "discus.labels" . | nindent 4 }}
+data:
+  discus.toml: |
+    version = 1
+    {{- range $section, $set := $sections }}
+    {{- if $set }}
+
+    [{{ $section }}]
+    {{- range $key, $value := $set }}
+    {{ $key }} = {{ $value }}
+    {{- end }}
+    {{- end }}
+    {{- end }}

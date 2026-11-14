@@ -3,6 +3,7 @@
 mod common;
 
 use discus::security::Security;
+use discus::settings::{Live, Reloadable};
 use discus::{Config, Node};
 use discus_placement::{ClusterId, EpochId, MemberState};
 
@@ -10,8 +11,9 @@ fn node(args: &[&str]) -> Node {
     let mut argv = vec!["discus"];
     argv.extend_from_slice(args);
     let config = common::config(&argv);
-    let security = Security::from_config(&config).unwrap();
-    Node::new(config, std::sync::Arc::new(security))
+    let live_settings = Live::new(Reloadable::from_config(&config));
+    let security = Security::from_config(&config, live_settings.clone()).unwrap();
+    Node::new(config, std::sync::Arc::new(security), live_settings)
 }
 
 #[test]

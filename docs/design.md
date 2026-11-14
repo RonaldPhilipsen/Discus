@@ -1212,6 +1212,11 @@ provider or client secret.
 - The ServiceAccount needs `get`, `create`, and `update` on `leases` in its namespace. If the API
   server blocks anonymous discovery (§14.4), it also needs the
   `system:service-account-issuer-discovery` ClusterRole.
+- The flag `--config <path>` names a TOML file with the settings that a node can change at run
+  time. The node checks the file every `--config-reload-secs` seconds (default 10, `0` pauses the
+  reload). A flag on the command line wins over the file. A bad file stops the node at startup and
+  changes nothing at a reload. The chart mounts the file from a ConfigMap. See "Settings file" in
+  `docs/cluster.md`.
 - The configuration covers discovery, listen addresses, leases and fencing, `RF` and weight, memory
   and request limits, timeouts, TLS and authentication, trusted issuers and scope rules, hint and
   write-set limits, primary-read prefixes, counters, client addresses, and telemetry.

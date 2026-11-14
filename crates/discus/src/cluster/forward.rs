@@ -53,9 +53,9 @@ pub async fn send(
             }))
         };
         let timeout = timeout.unwrap_or(if write {
-            link.write_timeout
+            link.write_timeout()
         } else {
-            link.read_timeout
+            link.read_timeout()
         });
         let trace = telemetry::outbound(&hop.trace);
         let frame = link
