@@ -75,24 +75,31 @@ authConfig:
 # The settings that a node reloads while it runs. The chart writes them to a ConfigMap, mounts it
 # at /settings, and passes --config=/settings/discus.toml. A change reaches the pods after the
 # kubelet syncs the ConfigMap and the node polls the file, so it needs no restart.
-# A null value leaves the built-in default. Do not set these settings in extraArgs: a flag
-# overrides the file, and the node then ignores a reload of that setting.
+# A null value leaves a key out of the file, and the node then uses its built-in default. Do not set these settings in extraArgs: a
+# flag overrides the file, and the node then ignores a reload of that setting.
 settings:
   budget:
-    forwardReadMs: null
-    forwardWriteMs: null
-    holdMs: null
-    replicationMs: null
+    # A forwarded read waits this long, then tries the next owner.
+    forwardReadMs: 500
+    # A forwarded write waits this long.
+    forwardWriteMs: 2000
+    # A write to a failed primary waits this long for a new primary.
+    holdMs: 3000
+    # A peer acknowledges a replication batch within this time.
+    replicationMs: 1000
   reads:
-    fromReplicas: null
+    # Reads can go to a replica, not only to the primary.
+    fromReplicas: true
   handoff:
-    rateBytes: null
+    # The most bytes per second that one handoff scan sends.
+    rateBytes: 33554432
   auth:
-    maxFailuresPerConnection: null
-    maxFailuresPerSource: null
-    failureWindowSecs: null
+    maxFailuresPerConnection: 5
+    maxFailuresPerSource: 20
+    failureWindowSecs: 60
   tls:
-    reloadSecs: null
+    # Seconds between checks of the certificate files. 0 turns the checks off.
+    reloadSecs: 10
   # A map of section name to a map of keys. The chart merges it into the file, for settings that a
   # newer Discus adds, for example:
   #   extra:
