@@ -454,7 +454,7 @@ restarts no pod. The node applies it after the kubelet syncs the file and the ne
 | `settings.auth.maxFailuresPerSource` | `[auth] max-failures-per-source` |
 | `settings.auth.failureWindowSecs` | `[auth] failure-window-secs` |
 | `settings.tls.reloadSecs` | `[tls] reload-secs` |
-| `settings.extra` | A map of section to keys, for keys that a newer Discus adds. |
+| `settings.extra` | A map of section to keys, for keys that a newer Discus adds. A value is an integer, a boolean, a string, or an array of those. Other values stop the render. |
 
 A null value leaves the built-in default. Do not set these flags in `extraArgs`, because a flag
 wins over the file and blocks the reload of that setting. The flags `--log-rate-limit`,

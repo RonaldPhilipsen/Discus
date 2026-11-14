@@ -69,6 +69,15 @@ jobs:
       - run: >-
           ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
           --set settings.budget.holdMs=fast
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --set settings.budget.holMs=5
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --set settings.extra.misc.n=null
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --skip-schema-validation --set settings.extra.misc.n=null
 
   # redis-cli against a fresh node, for every supported and unsupported command.
   compat:

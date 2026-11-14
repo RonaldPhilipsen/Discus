@@ -12,19 +12,22 @@
             "forwardWriteMs": { "type": ["integer", "null"], "minimum": 0 },
             "holdMs": { "type": ["integer", "null"], "minimum": 0 },
             "replicationMs": { "type": ["integer", "null"], "minimum": 0 }
-          }
+          },
+          "additionalProperties": false
         },
         "reads": {
           "type": "object",
           "properties": {
             "fromReplicas": { "type": ["boolean", "null"] }
-          }
+          },
+          "additionalProperties": false
         },
         "handoff": {
           "type": "object",
           "properties": {
             "rateBytes": { "type": ["integer", "null"], "minimum": 0 }
-          }
+          },
+          "additionalProperties": false
         },
         "auth": {
           "type": "object",
@@ -32,16 +35,30 @@
             "maxFailuresPerConnection": { "type": ["integer", "null"], "minimum": 0 },
             "maxFailuresPerSource": { "type": ["integer", "null"], "minimum": 0 },
             "failureWindowSecs": { "type": ["integer", "null"], "minimum": 0 }
-          }
+          },
+          "additionalProperties": false
         },
         "tls": {
           "type": "object",
           "properties": {
             "reloadSecs": { "type": ["integer", "null"], "minimum": 0 }
-          }
+          },
+          "additionalProperties": false
         },
-        "extra": { "type": "object" }
-      }
+        "extra": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                { "type": ["integer", "boolean", "string"] },
+                { "type": "array", "items": { "type": ["integer", "boolean", "string"] } }
+              ]
+            }
+          }
+        }
+      },
+      "additionalProperties": false
     }
   }
 }
