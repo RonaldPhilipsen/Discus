@@ -344,10 +344,128 @@ the CPU limit of the container from the cgroup (the Linux resource control group
 | `500m` | 1 |
 | Not set | One for each host core |
 
+## Settings file
+
+A node reads its settings from flags. For the settings in the table below, it can also read them
+from a TOML file and apply a change of the file while it runs. A change needs no restart. If you
+pass no `--config`, the node uses flags only.
+
+Start the node with `--config <path>`. The file holds only the settings in the table. If the file
+has any other key, the file is wrong. If a key matches a flag that needs a restart, the error names
+the flag, for example `replication-factor needs a restart: pass it as --replication-factor`. A key
+that no flag matches gets an error too.
+
+The first key is `version`. It is an integer and the file must have it. The newest version is `1`.
+If the file has a newer version, the error names the newest version that the build knows.
+
+```toml
+version = 1
+
+# Time budgets of the request path, in milliseconds.
+[budget]
+forward-read-ms = 500          # a forwarded read waits this long, then tries the next owner
+forward-write-ms = 2000        # a forwarded write waits this long
+hold-ms = 1500                 # default 3000: a write to a failed primary waits for a new one
+replication-ms = 1000          # a peer acknowledges a replication batch within this time
+
+[reads]
+from-replicas = true
+
+[handoff]
+rate-bytes = 33554432          # bytes per second that one handoff scan sends at most
+
+# Client authentication limits.
+[auth]
+max-failures-per-connection = 5
+max-failures-per-source = 20
+failure-window-secs = 60
+
+[tls]
+reload-secs = 10               # seconds between checks of the certificate files, 0 turns it off
+```
+
+A real file holds only the keys that differ from the default. These are all the keys of version 1:
+
+| Section | Key | Flag |
+| --- | --- | --- |
+| `[budget]` | `forward-read-ms` | `--forward-read-timeout-ms` |
+| `[budget]` | `forward-write-ms` | `--forward-write-timeout-ms` |
+| `[budget]` | `hold-ms` | `--hold-budget-ms` |
+| `[budget]` | `replication-ms` | `--replication-timeout-ms` |
+| `[reads]` | `from-replicas` | `--read-from-replicas` |
+| `[handoff]` | `rate-bytes` | `--handoff-rate-bytes` |
+| `[auth]` | `max-failures-per-connection` | `--auth-max-failures-per-connection` |
+| `[auth]` | `max-failures-per-source` | `--auth-max-failures-per-source` |
+| `[auth]` | `failure-window-secs` | `--auth-failure-window-secs` |
+| `[tls]` | `reload-secs` | `--tls-reload-secs` |
+
+A node takes each setting from the first source that sets it: the command line, then the file, then
+the built-in default. A flag on the command line always wins over the file. A setting that you pass
+as a flag never changes at a reload. If you use the flag name as a top-level key, the error names
+the `[section]` and key to use instead.
+
+If you remove a key from the file, the setting returns to its default at the next reload.
+
+### Reload
+
+The node checks the file every `--config-reload-secs` seconds. The default is 10. The value `0`
+pauses the reload. A change of the reload period needs a restart.
+
+If the content of the file changed, the node reads the whole file and checks every value. If all
+checks pass, it applies all changes at once and logs one line with the new values. A file has no
+secrets, so the log shows the values.
+
+- If the file is wrong at startup, the node stops with a message.
+- If the file is wrong at a reload, the node changes nothing and logs a warning. It keeps the
+  settings that it has.
+
+The flag `--tls-reload-secs` reloads too. The value `0` pauses the certificate checks.
+
+### See the settings in effect
+
+The `discus` section of `INFO` shows these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `config_file` | The path of `--config`. Empty without the flag. |
+| `config_version` | The version of the file in effect. |
+| `config_generation` | The number of reloads that the node applied. |
+| `config_restart_pending` | The names of settings whose change needs a restart. Empty if none. |
+
+Two metrics count the reloads. `discus.config.reloads` has the attribute `outcome` with the value
+`applied` or `failed`. The gauge `discus.config.pending` is 1 while a change waits for a restart.
+See [Telemetry](telemetry.md).
+
+### Settings file in the chart
+
+The chart writes the settings to a ConfigMap `<release>-settings` with the key `discus.toml`. The
+pod mounts it at `/settings` and gets `--config=/settings/discus.toml`. A change of the ConfigMap
+restarts no pod. The node applies it after the kubelet syncs the file and the next check runs.
+
+| Value | Key in the file |
+| --- | --- |
+| `settings.budget.forwardReadMs` | `[budget] forward-read-ms` |
+| `settings.budget.forwardWriteMs` | `[budget] forward-write-ms` |
+| `settings.budget.holdMs` | `[budget] hold-ms` |
+| `settings.budget.replicationMs` | `[budget] replication-ms` |
+| `settings.reads.fromReplicas` | `[reads] from-replicas` |
+| `settings.handoff.rateBytes` | `[handoff] rate-bytes` |
+| `settings.auth.maxFailuresPerConnection` | `[auth] max-failures-per-connection` |
+| `settings.auth.maxFailuresPerSource` | `[auth] max-failures-per-source` |
+| `settings.auth.failureWindowSecs` | `[auth] failure-window-secs` |
+| `settings.tls.reloadSecs` | `[tls] reload-secs` |
+| `settings.extra` | A map of section to keys, for keys that a newer Discus adds. |
+
+A null value leaves the built-in default. Do not set these flags in `extraArgs`, because a flag
+wins over the file and blocks the reload of that setting. The flags `--log-rate-limit`,
+`--otel-sampling-ratio`, and `--primary-read-prefix` stay flags that need a restart.
+
 ## Flags
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
+| `--config` | none | The path of the TOML settings file. See [Settings file](#settings-file). |
+| `--config-reload-secs` | 10 | Seconds between checks of the settings file. `0` pauses the reload. A change of this value needs a restart. |
 | `--membership` | `gossip` | `gossip` finds members by itself. `static` uses the fixed `--peer` list with no failure detection. |
 | `--node-id` | random | This node's ID, 32 hex digits. Required with `--membership static`. |
 | `--cluster-id` | minted | The cluster ID, 32 hex digits. With `static`, every member uses the same value, and the flag is required. With `gossip`, it is the ID that this node gives a cluster it forms. |
@@ -379,7 +497,7 @@ the CPU limit of the container from the cgroup (the Linux resource control group
 | `--cluster-ca` | none | PEM file with the CA certificate. |
 | `--cluster-cert` | none | PEM file with this node's certificate chain. |
 | `--cluster-key` | none | PEM file with this node's private key. |
-| `--tls-reload-secs` | 10 | Seconds between checks of the certificate files. After a change, new connections use the new certificates. `0` turns the reload off. |
+| `--tls-reload-secs` | 10 | Seconds between checks of the certificate files. After a change, new connections use the new certificates. `0` turns the reload off. The node applies a change from the settings file. |
 | `--cluster-san` | `spiffe://cluster.local/ns/default/sa/discus` | The URI SAN that every peer must carry. If the value is empty, any certificate from the CA is accepted. |
 | `--forward-read-timeout-ms` | 500 | Time to wait for a forwarded read. |
 | `--forward-write-timeout-ms` | 2000 | Time to wait for a forwarded write. |
