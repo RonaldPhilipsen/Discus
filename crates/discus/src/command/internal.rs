@@ -56,9 +56,9 @@ fn decode(node: &Node, blob: &[u8]) -> Result<Entry, CommandError> {
 /// Remove the entry at `cmd[1]` and return it encoded. An entry too large for one forward stays.
 /// The encoding runs outside the shard lock, so a large collection does not stall the shard. The
 /// removal then checks the version, so a write that lands in between is not lost.
-fn take(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn take(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     let key = &cmd[1];
-    let Some(entry) = node.store.read(key, |e| e.cloned()) else {
+    let Some(entry) = node.store.read(conn.db, key, |e| e.cloned()) else {
         return Ok(Value::Null);
     };
     let seen = entry.version;
@@ -66,7 +66,7 @@ fn take(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     if blob.len() > node.config.max_value_bytes {
         return Err(CommandError::ValueTooLarge);
     }
-    node.write(key, node.stamp()?, |slot| match slot.as_ref() {
+    node.write(conn.db, key, node.stamp()?, |slot| match slot.as_ref() {
         None => Ok(Value::Null),
         Some(e) if e.version != seen => Err(CommandError::ClusterTryAgain),
         Some(_) => {
@@ -78,13 +78,13 @@ fn take(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 
 /// Write the entry that `DISCUS.TAKE` returned, with its deadline. The destination key takes a
 /// fresh version here.
-fn put(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn put(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     let entry = decode(node, &cmd[2])?;
     admit(
         node,
         estimate_size(&cmd[1], &entry).saturating_sub(ENTRY_OVERHEAD) as usize,
     )?;
-    node.write(&cmd[1], node.stamp()?, |slot| {
+    node.write(conn.db, &cmd[1], node.stamp()?, |slot| {
         slot.set(Some(Entry::new(entry.value, entry.expires_at_ms)));
     });
     Ok(Value::ok())

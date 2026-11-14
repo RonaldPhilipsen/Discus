@@ -161,7 +161,7 @@ pub async fn scan(
         crate::node::Faults::wait(&node.faults.hold_scan, &node.faults.scan_held).await;
         let (next, entries) = node
             .store
-            .scan_entries(cursor, STEP, |_, e| e.version.time() <= watermark);
+            .scan_entries(0, cursor, STEP, |_, e| e.version.time() <= watermark);
         for (k, e) in entries {
             if !changed.contains(range_of(slot(&k))) {
                 continue;
@@ -268,7 +268,7 @@ pub async fn drop_lost(
             stopped(node, "this node moved on to another epoch");
             return dropped;
         }
-        let (next, entries) = node.store.scan_entries(cursor, STEP, |k, e| {
+        let (next, entries) = node.store.scan_entries(0, cursor, STEP, |k, e| {
             lost[usize::from(range_of(slot(k)))] && e.version.time() <= watermark
         });
         let offered: Vec<(Bytes, Version, Owners)> = entries
@@ -317,7 +317,9 @@ pub async fn drop_lost(
             if !held || !replicator.settled(&k) {
                 continue;
             }
-            let removed = node.store.remove_if(&k, |e| e.version == v && !moved_on());
+            let removed = node
+                .store
+                .remove_if(0, &k, |e| e.version == v && !moved_on());
             dropped += usize::from(removed);
         }
         if next == 0 {
@@ -370,7 +372,7 @@ async fn confirm(
         let mut missing = BTreeSet::new();
         batch = Batch::new(epoch);
         for k in ack.want {
-            match node.store.entry(&k) {
+            match node.store.entry(0, &k) {
                 Some(e) => {
                     batch.offers.push((k.clone(), e.version));
                     batch.entries.push((k, e));
@@ -407,7 +409,7 @@ async fn flush(
     let mut batch = Batch::new(node.epoch_id());
     batch.entries = std::mem::take(&mut t.batch);
     for k in std::mem::take(&mut t.wanted) {
-        if let Some(e) = node.store.entry(&k) {
+        if let Some(e) = node.store.entry(0, &k) {
             batch.entries.push((k, e));
         }
     }

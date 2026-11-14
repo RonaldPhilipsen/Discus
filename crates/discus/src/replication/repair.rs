@@ -30,7 +30,7 @@ pub fn sources(node: &Node, key: &[u8], write: bool, owners: &[NodeId]) -> Vec<N
     if !replica_read && !replicator.handoff_pending() {
         return Vec::new();
     }
-    if node.store.version(key).is_some() {
+    if node.store.version(0, key).is_some() {
         return Vec::new();
     }
     let mut out = replicator.fallback_sources(node, key, owners);

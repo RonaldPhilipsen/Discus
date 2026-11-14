@@ -22,7 +22,7 @@ const OUTAGE: &[&str] = &[
 fn value_of(n: &ClusterNode, key: &str) -> Option<String> {
     n.node
         .store
-        .read(key.as_bytes(), |e| match e.map(|e| &e.value) {
+        .read(0, key.as_bytes(), |e| match e.map(|e| &e.value) {
             Some(Value::Str(b)) => Some(String::from_utf8_lossy(b).into_owned()),
             _ => None,
         })
@@ -56,7 +56,7 @@ async fn hints_replay_after_an_outage() {
                 && keys[..10].iter().all(|k| {
                     r.node
                         .store
-                        .entry(k.as_bytes())
+                        .entry(0, k.as_bytes())
                         .is_some_and(|e| e.tombstone)
                 })
         })
@@ -85,8 +85,8 @@ async fn hints_replay_after_a_lagging_queue_drains() {
         wait_until(Duration::from_secs(20), || keys.iter().all(|k| r
             .node
             .store
-            .version(k.as_bytes())
-            == p.node.store.version(k.as_bytes())))
+            .version(0, k.as_bytes())
+            == p.node.store.version(0, k.as_bytes())))
         .await
     );
 }
@@ -148,7 +148,7 @@ async fn a_discarded_bucket_refills_without_reads() {
         .collect();
     let mut client = p.redis().await;
     let same =
-        |k: &String| r.node.store.version(k.as_bytes()) == p.node.store.version(k.as_bytes());
+        |k: &String| r.node.store.version(0, k.as_bytes()) == p.node.store.version(0, k.as_bytes());
     for k in &keys {
         let _: () = client.set(k, "old").await.unwrap();
     }
@@ -182,7 +182,7 @@ async fn a_discarded_bucket_refills_without_reads() {
         assert!(
             r.node
                 .store
-                .entry(k.as_bytes())
+                .entry(0, k.as_bytes())
                 .is_some_and(|e| e.tombstone),
             "{k} lost its delete"
         );
@@ -201,7 +201,7 @@ async fn hints_written_during_a_refill_reach_the_replica() {
     let late: Vec<String> = (0..3).map(|i| c.key_on(0, &format!("late{i}"))).collect();
     let mut client = p.redis().await;
     let same =
-        |k: &String| r.node.store.version(k.as_bytes()) == p.node.store.version(k.as_bytes());
+        |k: &String| r.node.store.version(0, k.as_bytes()) == p.node.store.version(0, k.as_bytes());
     for k in &keys {
         let _: () = client.set(k, "old").await.unwrap();
     }
@@ -318,21 +318,21 @@ async fn a_promoted_primary_pulls_newer_entries() {
     let (p, x) = (by(owners[0]), by(owners[1]));
     let mut client = p.redis().await;
     let _: () = client.set(&key, "v2").await.unwrap();
-    let v2 = p.node.store.version(key.as_bytes()).unwrap();
+    let v2 = p.node.store.version(0, key.as_bytes()).unwrap();
     assert!(
         wait_until(Duration::from_secs(3), || nodes.iter().all(|n| n
             .node
             .store
-            .version(key.as_bytes())
+            .version(0, key.as_bytes())
             == Some(v2)))
         .await
     );
-    let mut old = x.node.store.entry(key.as_bytes()).unwrap();
+    let mut old = x.node.store.entry(0, key.as_bytes()).unwrap();
     old.value = Value::Str("v1".into());
     old.version =
         discus_placement::Version::new(discus_placement::NTP64(v2.time().0 - 1), v2.origin());
-    x.node.store.remove(key.as_bytes());
-    assert!(x.node.store.apply(key.as_bytes(), old));
+    x.node.store.remove(0, key.as_bytes());
+    assert!(x.node.store.apply(0, key.as_bytes(), old));
     p.kill();
     let rest: Vec<&GossipNode> = nodes.iter().filter(|n| n.id != p.id).collect();
     wait_agreed(&rest, Duration::from_secs(10)).await;
@@ -344,7 +344,7 @@ async fn a_promoted_primary_pulls_newer_entries() {
         wait_until(Duration::from_secs(5), || x
             .node
             .store
-            .version(key.as_bytes())
+            .version(0, key.as_bytes())
             == Some(v2))
         .await
     );

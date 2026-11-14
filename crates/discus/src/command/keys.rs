@@ -33,9 +33,9 @@ fn invalid(who: &str) -> CommandError {
 }
 
 /// Set an absolute deadline. A deadline that is not in the future deletes the key.
-fn set_deadline(node: &Node, key: &bytes::Bytes, deadline_ms: i128) -> Reply {
+fn set_deadline(node: &Node, db: u32, key: &bytes::Bytes, deadline_ms: i128) -> Reply {
     let now = node.store.now_ms() as i128;
-    node.write(key, node.stamp()?, |slot| {
+    node.write(db, key, node.stamp()?, |slot| {
         if slot.is_none() {
             return Ok(Value::Integer(0));
         }
@@ -58,22 +58,22 @@ pub(crate) fn span(arg: &[u8], unit_ms: i128, who: &str) -> Result<i128, Command
     Ok(ms)
 }
 
-fn expire(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn expire(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     let ms = span(&cmd[2], 1000, "expire")?;
-    set_deadline(node, &cmd[1], node.store.now_ms() as i128 + ms)
+    set_deadline(node, conn.db, &cmd[1], node.store.now_ms() as i128 + ms)
 }
 
-fn pexpire(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn pexpire(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     let ms = span(&cmd[2], 1, "pexpire")?;
-    set_deadline(node, &cmd[1], node.store.now_ms() as i128 + ms)
+    set_deadline(node, conn.db, &cmd[1], node.store.now_ms() as i128 + ms)
 }
 
-fn expireat(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    set_deadline(node, &cmd[1], span(&cmd[2], 1000, "expireat")?)
+fn expireat(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    set_deadline(node, conn.db, &cmd[1], span(&cmd[2], 1000, "expireat")?)
 }
 
-fn pexpireat(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    set_deadline(node, &cmd[1], span(&cmd[2], 1, "pexpireat")?)
+fn pexpireat(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    set_deadline(node, conn.db, &cmd[1], span(&cmd[2], 1, "pexpireat")?)
 }
 
 /// Remaining time of a key with `expires` (`None` for a missing key): -2 when missing, -1 when
@@ -90,22 +90,22 @@ pub(crate) fn ttl_value(
     })
 }
 
-fn remaining(node: &Node, key: &[u8], to_unit: impl Fn(u64) -> i64) -> Reply {
+fn remaining(node: &Node, db: u32, key: &[u8], to_unit: impl Fn(u64) -> i64) -> Reply {
     let now = node.store.now_ms();
-    let expires = node.store.read(key, |e| e.map(|e| e.expires_at_ms));
+    let expires = node.store.read(db, key, |e| e.map(|e| e.expires_at_ms));
     Ok(ttl_value(expires, now, to_unit))
 }
 
-fn ttl(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    remaining(node, &cmd[1], |ms| ((ms + 500) / 1000) as i64)
+fn ttl(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    remaining(node, conn.db, &cmd[1], |ms| ((ms + 500) / 1000) as i64)
 }
 
-fn pttl(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    remaining(node, &cmd[1], |ms| ms as i64)
+fn pttl(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    remaining(node, conn.db, &cmd[1], |ms| ms as i64)
 }
 
-fn persist(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    node.write(&cmd[1], node.stamp()?, |slot| {
+fn persist(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    node.write(conn.db, &cmd[1], node.stamp()?, |slot| {
         if !slot.as_ref().is_some_and(|e| e.expires_at_ms.is_some()) {
             return Ok(Value::Integer(0));
         }
@@ -118,10 +118,12 @@ fn persist(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 
 /// Move the entry of `cmd[1]` to `cmd[2]`, with its deadline. The take and the put are two
 /// writes, so the move is not atomic.
-fn rename(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn rename(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     let (from, to) = (&cmd[1], &cmd[2]);
     check_key(node, to)?;
-    let size = node.store.read(from, |e| e.map(|e| estimate_size(to, e)));
+    let size = node
+        .store
+        .read(conn.db, from, |e| e.map(|e| estimate_size(to, e)));
     let Some(size) = size else {
         return Err(CommandError::NoSuchKey);
     };
@@ -130,28 +132,28 @@ fn rename(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     }
     admit(node, size.saturating_sub(ENTRY_OVERHEAD) as usize)?;
     let stamp = node.stamp()?;
-    let Some(taken) = node.write(from, stamp, |slot| slot.take()) else {
+    let Some(taken) = node.write(conn.db, from, stamp, |slot| slot.take()) else {
         return Err(CommandError::NoSuchKey);
     };
-    node.write(to, stamp, |slot| {
+    node.write(conn.db, to, stamp, |slot| {
         slot.set(Some(Entry::new(taken.value, taken.expires_at_ms)));
     });
     Ok(Value::ok())
 }
 
-fn scan(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    scan_where(node, cmd, |_| true)
+fn scan(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    scan_where(node, conn.db, cmd, |_| true)
 }
 
 /// `SCAN` for a redirect connection: only the keys that this node is primary for, so a client
 /// that scans every node sees each key once.
-pub fn scan_primary(node: &Node, cmd: &Command) -> Value {
+pub fn scan_primary(node: &Node, db: u32, cmd: &Command) -> Value {
     let epoch = node.epochs().current().clone();
-    scan_where(node, cmd, |key| epoch.primary(key) == Some(node.id))
+    scan_where(node, db, cmd, |key| epoch.primary(key) == Some(node.id))
         .unwrap_or_else(|e| e.to_value())
 }
 
-fn scan_where(node: &Node, cmd: &Command, keep: impl Fn(&[u8]) -> bool) -> Reply {
+fn scan_where(node: &Node, db: u32, cmd: &Command, keep: impl Fn(&[u8]) -> bool) -> Reply {
     let cursor = std::str::from_utf8(&cmd[1])
         .ok()
         .and_then(|c| c.parse::<u64>().ok())
@@ -172,7 +174,7 @@ fn scan_where(node: &Node, cmd: &Command, keep: impl Fn(&[u8]) -> bool) -> Reply
         }
         i += 2;
     }
-    let (next, keys) = node.store.scan(cursor, count, pattern.as_deref());
+    let (next, keys) = node.store.scan(db, cursor, count, pattern.as_deref());
     Ok(Value::Array(vec![
         Value::bulk(next.to_string().into_bytes()),
         Value::Array(
@@ -184,8 +186,11 @@ fn scan_where(node: &Node, cmd: &Command, keep: impl Fn(&[u8]) -> bool) -> Reply
     ]))
 }
 
-fn randomkey(node: &Node, _: &mut ConnState, _: &Command) -> Reply {
-    Ok(node.store.random_key().map_or(Value::Null, Value::Bulk))
+fn randomkey(node: &Node, conn: &mut ConnState, _: &Command) -> Reply {
+    Ok(node
+        .store
+        .random_key(conn.db)
+        .map_or(Value::Null, Value::Bulk))
 }
 
 fn dbsize(node: &Node, _: &mut ConnState, _: &Command) -> Reply {

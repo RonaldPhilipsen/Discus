@@ -240,7 +240,7 @@ async fn growth_from_one_to_three_and_back() {
     let holders = |nodes: &[&GossipNode]| {
         nodes
             .iter()
-            .filter(|n| n.node.store.entry(b"plain").is_some())
+            .filter(|n| n.node.store.entry(0, b"plain").is_some())
             .count()
     };
 

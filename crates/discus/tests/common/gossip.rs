@@ -47,7 +47,7 @@ impl GossipNode {
 
     /// True when this node's store holds `key`.
     pub fn holds(&self, key: &[u8]) -> bool {
-        self.node.store.read(key, |e| e.is_some())
+        self.node.store.read(0, key, |e| e.is_some())
     }
 
     /// The primary of `key` in this node's current epoch.

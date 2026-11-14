@@ -40,7 +40,7 @@ fn missing(nodes: &[&GossipNode], key: &[u8]) -> Vec<String> {
     assert_eq!(owners.len(), nodes.len().min(RF));
     nodes
         .iter()
-        .filter(|n| owners.contains(&n.id) && n.node.store.entry(key).is_none())
+        .filter(|n| owners.contains(&n.id) && n.node.store.entry(0, key).is_none())
         .map(|n| n.addr.to_string())
         .collect()
 }

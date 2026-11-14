@@ -57,7 +57,7 @@ fn walk_moved(
     let mut cursor = 0;
     loop {
         let moved = |k: &Bytes, _: &Entry| old.primary(k).is_some_and(|p| gone.contains(&p));
-        let (next, entries) = store.scan_entries(cursor, SCAN_STEP, moved);
+        let (next, entries) = store.scan_entries(0, cursor, SCAN_STEP, moved);
         for (k, e) in &entries {
             let owners = new.owners(k, rf);
             if owners.first() == Some(&primary) {

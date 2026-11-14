@@ -29,7 +29,7 @@ async fn a_joining_node_receives_its_keys() {
     assert!(!mine.is_empty());
     for k in mine {
         assert!(
-            joiner.node.store.read(k.as_bytes(), |e| e.is_some()),
+            joiner.node.store.read(0, k.as_bytes(), |e| e.is_some()),
             "{k} missing"
         );
     }
@@ -46,7 +46,7 @@ async fn a_death_refills_the_new_replica() {
     assert!(
         wait_until(Duration::from_secs(10), || keys.iter().all(|k| {
             rest.iter()
-                .filter(|n| n.node.store.read(k.as_bytes(), |e| e.is_some()))
+                .filter(|n| n.node.store.read(0, k.as_bytes(), |e| e.is_some()))
                 .count()
                 == 2
         }))
@@ -219,15 +219,17 @@ async fn handoff_skips_unchanged_ranges() {
         .collect();
     assert!(!expected.is_empty());
     assert!(
-        wait_until(FORM, || expected
-            .iter()
-            .all(|k| joiner.node.store.read(k.as_bytes(), |e| e.is_some())))
+        wait_until(FORM, || expected.iter().all(|k| joiner.node.store.read(
+            0,
+            k.as_bytes(),
+            |e| e.is_some()
+        )))
         .await
     );
     assert!(wait_until(FORM, || !nodes[0].node.replicator().unwrap().scanning()).await);
     let moved: Vec<&String> = keys
         .iter()
-        .filter(|k| joiner.node.store.read(k.as_bytes(), |e| e.is_some()))
+        .filter(|k| joiner.node.store.read(0, k.as_bytes(), |e| e.is_some()))
         .collect();
     assert_eq!(moved, expected);
 }
@@ -250,7 +252,7 @@ async fn old_owners_drop_the_keys_they_handed_off() {
             n.node.replicator().is_some_and(|r| !r.scanning())
                 && keys.iter().all(|k| {
                     let owns = epoch.owners(k.as_bytes(), 3).contains(&n.id);
-                    n.node.store.read(k.as_bytes(), |e| e.is_some()) == owns
+                    n.node.store.read(0, k.as_bytes(), |e| e.is_some()) == owns
                 })
         })
     };
@@ -273,7 +275,7 @@ async fn a_write_behind_the_scan_reaches_the_owners_before_the_drop() {
     let everywhere = || {
         nodes.iter().all(|n| {
             keys.iter()
-                .all(|k| n.node.store.read(k.as_bytes(), |e| e.is_some()))
+                .all(|k| n.node.store.read(0, k.as_bytes(), |e| e.is_some()))
         })
     };
     assert!(wait_until(FORM, everywhere).await);
@@ -294,13 +296,13 @@ async fn a_write_behind_the_scan_reaches_the_owners_before_the_drop() {
         .unwrap();
     let mut late = discus_store::Entry::new(discus_store::Value::Str("late".into()), None);
     late.version = stamp;
-    assert!(old.node.store.apply(key.as_bytes(), late));
+    assert!(old.node.store.apply(0, key.as_bytes(), late));
 
     old.node.faults.hold_drop.store(false, Ordering::Relaxed);
     assert!(wait_until(Duration::from_secs(60), || !rep.scanning()).await);
     let all: Vec<&GossipNode> = nodes.iter().chain(std::iter::once(&joiner)).collect();
     for n in all {
-        let value = n.node.store.entry(key.as_bytes()).map(|e| e.value);
+        let value = n.node.store.entry(0, key.as_bytes()).map(|e| e.value);
         if epoch.owners(key.as_bytes(), 3).contains(&n.id) {
             assert_eq!(
                 value,
@@ -347,7 +349,7 @@ async fn a_write_queued_during_the_epoch_change_reaches_the_new_owners() {
         .hold_replication
         .store(true, Ordering::Relaxed);
     let value = discus_store::Value::Str("queued".into());
-    old.node.write(&key, old.node.stamp().unwrap(), |slot| {
+    old.node.write(0, &key, old.node.stamp().unwrap(), |slot| {
         slot.set(Some(discus_store::Entry::new(value.clone(), None)));
     });
     // The deferred work of the adoption runs after the write queued the key.
@@ -360,7 +362,7 @@ async fn a_write_queued_during_the_epoch_change_reaches_the_new_owners() {
     assert!(wait_until(FORM, || rep.settled(&key)).await);
     for n in &all {
         if new.owners(&key, 3).contains(&n.id) {
-            let got = n.node.store.entry(&key).map(|e| e.value);
+            let got = n.node.store.entry(0, &key).map(|e| e.value);
             assert_eq!(got, Some(value.clone()), "{}", n.id);
         }
     }
@@ -391,7 +393,7 @@ async fn held_drop_rf(net: &Net, prefix: &str, rf: usize) -> Held {
         keys.iter().all(|k| {
             let copies = nodes
                 .iter()
-                .filter(|n| n.node.store.read(k.as_bytes(), |e| e.is_some()));
+                .filter(|n| n.node.store.read(0, k.as_bytes(), |e| e.is_some()));
             copies.count() == rf
         })
     };
@@ -412,7 +414,7 @@ async fn held_drop_rf(net: &Net, prefix: &str, rf: usize) -> Held {
     let lost = keys
         .into_iter()
         .filter(|k| !epoch.owners(k.as_bytes(), rf).contains(&nodes[0].id))
-        .filter(|k| nodes[0].node.store.read(k.as_bytes(), |e| e.is_some()))
+        .filter(|k| nodes[0].node.store.read(0, k.as_bytes(), |e| e.is_some()))
         .collect();
     Held {
         nodes,
@@ -435,13 +437,13 @@ async fn the_drop_keeps_an_entry_newer_than_the_scan_start() {
     // Stamped after the scan started. `apply` queues nothing, so only the guard keeps it.
     let mut newer = discus_store::Entry::new(discus_store::Value::Str("newer".into()), None);
     newer.version = old.node.stamp().unwrap();
-    assert!(old.node.store.apply(lost[0].as_bytes(), newer));
+    assert!(old.node.store.apply(0, lost[0].as_bytes(), newer));
     old.node.faults.hold_drop.store(false, Ordering::Relaxed);
     let rep = old.node.replicator().unwrap();
     assert!(wait_until(Duration::from_secs(60), || !rep.scanning()).await);
     let held: Vec<&String> = lost
         .iter()
-        .filter(|k| old.node.store.read(k.as_bytes(), |e| e.is_some()))
+        .filter(|k| old.node.store.read(0, k.as_bytes(), |e| e.is_some()))
         .collect();
     assert_eq!(held, vec![&lost[0]]);
 }
@@ -468,7 +470,7 @@ async fn the_drop_keeps_every_key_after_a_batch_from_a_newer_epoch() {
     assert!(wait_until(Duration::from_secs(60), || !rep.scanning()).await);
     assert!(lost
         .iter()
-        .all(|k| old.node.store.read(k.as_bytes(), |e| e.is_some())));
+        .all(|k| old.node.store.read(0, k.as_bytes(), |e| e.is_some())));
 }
 
 /// Release the held drop of `old` and wait until its pass ended.
@@ -480,7 +482,7 @@ async fn release(old: &GossipNode) {
 
 fn held(n: &GossipNode, keys: &[String]) -> usize {
     keys.iter()
-        .filter(|k| n.node.store.read(k.as_bytes(), |e| e.is_some()))
+        .filter(|k| n.node.store.read(0, k.as_bytes(), |e| e.is_some()))
         .count()
 }
 
@@ -589,7 +591,7 @@ async fn the_drop_keeps_a_key_that_an_owner_refused() {
     let old = &nodes[0];
     let mut late = discus_store::Entry::new(discus_store::Value::Str("late".into()), None);
     late.version = early;
-    assert!(old.node.store.apply(lost[0].as_bytes(), late));
+    assert!(old.node.store.apply(0, lost[0].as_bytes(), late));
     let owners: Vec<&GossipNode> = nodes[1..].iter().chain(std::iter::once(&joiner)).collect();
     for n in &owners {
         n.node.faults.refuse_apply.store(true, Ordering::Relaxed);
@@ -599,7 +601,7 @@ async fn the_drop_keeps_a_key_that_an_owner_refused() {
         n.node.faults.refuse_apply.store(false, Ordering::Relaxed);
     }
     assert_eq!(held(old, &lost), 1);
-    assert!(old.node.store.read(lost[0].as_bytes(), |e| e.is_some()));
+    assert!(old.node.store.read(0, lost[0].as_bytes(), |e| e.is_some()));
 }
 
 /// An owner whose newer copy expired does not take the older copy of the old owner back.
@@ -622,16 +624,16 @@ async fn the_drop_never_brings_back_an_expired_key() {
                 discus_store::Entry::new(discus_store::Value::Str("newer".into()), None);
             newer.version = n.node.stamp().unwrap();
             newer.expires_at_ms = Some(n.node.store.now_ms() + 200);
-            if n.node.store.apply(key, newer) {
+            if n.node.store.apply(0, key, newer) {
                 break;
             }
         }
     }
-    let expired = || owners.iter().all(|n| n.node.store.entry(key).is_none());
+    let expired = || owners.iter().all(|n| n.node.store.entry(0, key).is_none());
     assert!(wait_until(Duration::from_secs(10), expired).await);
     release(old).await;
     for n in &owners {
-        assert!(n.node.store.entry(key).is_none(), "{}", n.id);
+        assert!(n.node.store.entry(0, key).is_none(), "{}", n.id);
     }
-    assert!(old.node.store.entry(key).is_none());
+    assert!(old.node.store.entry(0, key).is_none());
 }

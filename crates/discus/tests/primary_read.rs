@@ -161,7 +161,7 @@ fn any_tombstone(nodes: &[&ClusterNode], key: &str) -> bool {
     nodes.iter().any(|n| {
         n.node
             .store
-            .entry(key.as_bytes())
+            .entry(0, key.as_bytes())
             .is_some_and(|e| e.tombstone)
     })
 }

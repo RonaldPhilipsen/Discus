@@ -22,7 +22,7 @@ fn replicas<'a>(c: &'a Cluster, key: &str) -> Vec<&'a ClusterNode> {
 }
 
 fn version(n: &ClusterNode, key: &str) -> Option<Version> {
-    n.node.store.version(key.as_bytes())
+    n.node.store.version(0, key.as_bytes())
 }
 
 #[tokio::test]
@@ -59,7 +59,7 @@ async fn ttl_replicates_as_an_absolute_deadline() {
     let deadline = c.nodes[0]
         .node
         .store
-        .entry(key.as_bytes())
+        .entry(0, key.as_bytes())
         .unwrap()
         .expires_at_ms;
     assert!(deadline.is_some());
@@ -67,7 +67,7 @@ async fn ttl_replicates_as_an_absolute_deadline() {
         wait_until(Duration::from_secs(2), || c.nodes.iter().all(|n| n
             .node
             .store
-            .entry(key.as_bytes())
+            .entry(0, key.as_bytes())
             .is_some_and(|e| e.expires_at_ms == deadline)))
         .await
     );
@@ -120,7 +120,7 @@ async fn a_replica_miss_repairs_from_the_primary() {
     let _: () = client.set(&key, "v").await.unwrap();
     let replica = &c.nodes[1];
     assert!(wait_until(Duration::from_secs(2), || replica.holds(key.as_bytes())).await);
-    replica.node.store.remove(key.as_bytes());
+    replica.node.store.remove(0, key.as_bytes());
     let mut through = replica.redis().await;
     let v: Option<String> = through.get(&key).await.unwrap();
     assert_eq!(v.as_deref(), Some("v"));
@@ -143,7 +143,7 @@ async fn an_entry_too_far_ahead_is_dropped() {
         .handle(c.nodes[0].id, Message::Replicate(batch))
         .await;
     assert!(matches!(reply, Message::BatchAck(a) if a.applied == 0));
-    assert!(n.node.store.entry(b"far").is_none());
+    assert!(n.node.store.entry(0, b"far").is_none());
     assert!(n.node.hlc.current() < ahead);
 }
 

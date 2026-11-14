@@ -269,7 +269,7 @@ async fn one_slot_multi_key_moves_and_cross_slot_fans_out() {
         wait_until(Duration::from_secs(30), || {
             c.nodes.iter().all(|n| {
                 keys.iter().all(|k| {
-                    n.node.store.version(k.as_bytes()).is_some()
+                    n.node.store.version(0, k.as_bytes()).is_some()
                         || !n.node.owners(k.as_bytes()).contains(&n.id)
                 })
             })

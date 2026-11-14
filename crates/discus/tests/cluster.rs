@@ -68,7 +68,7 @@ async fn a_forwarded_write_returns_the_applied_hlc() {
     let version = c.nodes[1]
         .node
         .store
-        .read(key.as_bytes(), |e| e.unwrap().version);
+        .read(0, key.as_bytes(), |e| e.unwrap().version);
     assert_eq!(version.origin(), c.nodes[1].id);
     assert!(c.nodes[0].node.hlc.last() >= version.time());
 }

@@ -62,6 +62,7 @@ collection!(ZSet, ZSet, |z, m| z.score(m).is_some());
 /// member limit before `f` runs.
 pub fn mutate<'a, C: Collection, R>(
     node: &Node,
+    db: u32,
     key: &Bytes,
     grow_bytes: usize,
     adds: impl IntoIterator<Item = &'a Bytes>,
@@ -70,7 +71,7 @@ pub fn mutate<'a, C: Collection, R>(
     check_key(node, key)?;
     admit(node, key.len() + grow_bytes)?;
     let stamp = node.stamp()?;
-    node.write(key, stamp, |slot| {
+    node.write(db, key, stamp, |slot| {
         let mut entry = slot
             .untracked()
             .take()
@@ -92,13 +93,14 @@ pub fn mutate<'a, C: Collection, R>(
     })
 }
 
-/// Read the collection at `key`. A missing key gives `None`.
+/// Read the collection at `key` of database `db`. A missing key gives `None`.
 pub fn view<C: Collection, R>(
     node: &Node,
+    db: u32,
     key: &[u8],
     f: impl FnOnce(Option<&C>) -> R,
 ) -> Result<R, CommandError> {
-    node.store.read(key, |e| match e {
+    node.store.read(db, key, |e| match e {
         None => Ok(f(None)),
         Some(e) => C::from_ref(&e.value)
             .map(|c| f(Some(c)))

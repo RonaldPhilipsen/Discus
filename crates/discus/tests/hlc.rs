@@ -45,7 +45,7 @@ fn run(node: &Node, args: &[&str]) -> Value {
 
 fn version(node: &Node, key: &str) -> Version {
     node.store
-        .read(key.as_bytes(), |e| e.map(|e| e.version))
+        .read(0, key.as_bytes(), |e| e.map(|e| e.version))
         .unwrap()
 }
 
@@ -155,9 +155,9 @@ fn a_replicated_batch_drops_only_the_entries_too_far_ahead() {
         (Bytes::from_static(b"old"), entry(START - 10)),
     ];
     assert_eq!(replicator.apply_entries(&node, entries), 2);
-    assert!(node.store.entry(b"near").is_some());
-    assert!(node.store.entry(b"old").is_some());
-    assert!(node.store.entry(b"far").is_none());
+    assert!(node.store.entry(0, b"near").is_some());
+    assert!(node.store.entry(0, b"old").is_some());
+    assert!(node.store.entry(0, b"far").is_none());
     run(&node, &["SET", "k", "v"]);
     let stamped = version(&node, "k").time();
     assert!(stamped > ms(START + 10) && stamped < ms(START + 1_000));

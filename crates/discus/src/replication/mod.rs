@@ -433,7 +433,7 @@ impl Replicator {
 
     /// Record a hint for the peer of `q` with the current entry of `key`.
     fn hint(&self, q: &PeerQueue, key: Bytes) {
-        let Some(entry) = self.store.entry(&key) else {
+        let Some(entry) = self.store.entry(0, &key) else {
             return;
         };
         let evicted = self.hints.lock().record(q.peer, key, entry, Instant::now());
@@ -448,7 +448,7 @@ impl Replicator {
     fn hint_all(&self, q: &PeerQueue, keys: Vec<Bytes>) {
         let entries: Vec<(Bytes, Entry)> = keys
             .into_iter()
-            .filter_map(|k| self.store.entry(&k).map(|e| (k, e)))
+            .filter_map(|k| self.store.entry(0, &k).map(|e| (k, e)))
             .collect();
         if entries.is_empty() {
             return;
@@ -954,7 +954,11 @@ impl Replicator {
                 let want: Vec<Bytes> = b
                     .offers
                     .into_iter()
-                    .filter(|(k, v)| self.store.stored_version(k).is_none_or(|local| local < *v))
+                    .filter(|(k, v)| {
+                        self.store
+                            .stored_version(0, k)
+                            .is_none_or(|local| local < *v)
+                    })
                     .map(|(k, _)| k)
                     .collect();
                 if let Some((_, to)) = b.done {
@@ -969,7 +973,7 @@ impl Replicator {
             Message::Fetch { keys } => {
                 let mut out = Batch::new(node.epoch_id());
                 for k in keys {
-                    if let Some(e) = self.store.entry(&k) {
+                    if let Some(e) = self.store.entry(0, &k) {
                         out.entries.push((k, e));
                     }
                 }
@@ -1048,7 +1052,7 @@ impl Replicator {
                 tracing::warn!("dropped a replicated entry too far ahead of the local clock");
                 continue;
             }
-            if self.store.apply(&k, e) {
+            if self.store.apply(0, &k, e) {
                 applied += 1;
             }
         }
@@ -1075,7 +1079,7 @@ impl RefillPage {
         let mut out = Vec::new();
         let mut bytes = 0;
         loop {
-            let (next, entries) = store.scan_entries(cursor, self.keys, |k, _| {
+            let (next, entries) = store.scan_entries(0, cursor, self.keys, |k, _| {
                 if !self.wanted[usize::from(refill_bucket(k))] {
                     return false;
                 }
@@ -1101,7 +1105,7 @@ fn fill(store: &Store, q: &PeerQueue, keys: Vec<Bytes>) -> Vec<(Bytes, Entry)> {
     let mut bytes = 0;
     let mut keys = keys.into_iter();
     for k in keys.by_ref() {
-        if let Some(e) = store.entry(&k) {
+        if let Some(e) = store.entry(0, &k) {
             bytes += discus_store::estimate_size(&k, &e);
             entries.push((k, e));
         }
@@ -1143,7 +1147,7 @@ mod tests {
         let big = Bytes::from(vec![b'x'; 100 << 10]);
         let keys: Vec<Bytes> = (0..64).map(|i| Bytes::from(format!("k{i}"))).collect();
         for k in &keys {
-            store.write(k, Version::zero(), |slot| {
+            store.write(0, k, Version::zero(), |slot| {
                 slot.set(Some(Entry::new(Value::Str(big.clone()), None)));
             });
             q.push(k);

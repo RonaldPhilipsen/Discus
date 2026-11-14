@@ -57,7 +57,7 @@ fn members_reply(items: Vec<(&Bytes, f64)>, with_scores: bool, protocol: Protoco
     })
 }
 
-fn zadd(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn zadd(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     let (mut nx, mut xx, mut ch) = (false, false, false);
     let mut i = 2;
     while i < cmd.len() {
@@ -86,7 +86,7 @@ fn zadd(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         pairs.push((parse_f64(&p[0])?, p[1].clone()));
     }
     let adds = rest.iter().skip(1).step_by(2).filter(|_| !xx);
-    mutate(node, &cmd[1], grow, adds, |z: &mut ZSet| {
+    mutate(node, conn.db, &cmd[1], grow, adds, |z: &mut ZSet| {
         let (mut added, mut changed) = (0, 0);
         for (score, member) in pairs {
             match z.score(&member) {
@@ -107,15 +107,15 @@ fn zadd(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     })
 }
 
-fn zscore(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    view(node, &cmd[1], |z: Option<&ZSet>| {
+fn zscore(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    view(node, conn.db, &cmd[1], |z: Option<&ZSet>| {
         z.and_then(|z| z.score(&cmd[2]))
             .map_or(Value::Null, Value::Double)
     })
 }
 
-fn zmscore(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    view(node, &cmd[1], |z: Option<&ZSet>| {
+fn zmscore(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    view(node, conn.db, &cmd[1], |z: Option<&ZSet>| {
         Value::Array(
             cmd[2..]
                 .iter()
@@ -128,16 +128,16 @@ fn zmscore(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     })
 }
 
-fn zrem(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    mutate(node, &cmd[1], 0, [], |z: &mut ZSet| {
+fn zrem(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    mutate(node, conn.db, &cmd[1], 0, [], |z: &mut ZSet| {
         Ok(Value::Integer(
             cmd[2..].iter().filter(|m| z.remove(m)).count() as i64,
         ))
     })
 }
 
-fn zcard(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    view(node, &cmd[1], |z: Option<&ZSet>| {
+fn zcard(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    view(node, conn.db, &cmd[1], |z: Option<&ZSet>| {
         Value::Integer(z.map_or(0, |z| z.len()) as i64)
     })
 }
@@ -149,7 +149,7 @@ fn ranked(node: &Node, conn: &ConnState, cmd: &Command, reverse: bool) -> Reply 
         _ => return Err(CommandError::Syntax),
     };
     let (start, stop) = (parse_i64(&cmd[2])?, parse_i64(&cmd[3])?);
-    view(node, &cmd[1], |z: Option<&ZSet>| {
+    view(node, conn.db, &cmd[1], |z: Option<&ZSet>| {
         let items = z.map(|z| z.range(start, stop, reverse)).unwrap_or_default();
         members_reply(items, with_scores, conn.protocol)
     })
@@ -178,7 +178,7 @@ fn zrangebyscore(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
         }
         i += 1;
     }
-    view(node, &cmd[1], |z: Option<&ZSet>| {
+    view(node, conn.db, &cmd[1], |z: Option<&ZSet>| {
         let mut items = z.map(|z| z.range_by_score(min, max)).unwrap_or_default();
         if let Some((offset, count)) = limit {
             let offset = offset.max(0) as usize;
@@ -193,11 +193,12 @@ fn zrangebyscore(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     })
 }
 
-fn zincrby(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn zincrby(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     check_value(node, &cmd[3])?;
     let delta = parse_f64(&cmd[2])?;
     mutate(
         node,
+        conn.db,
         &cmd[1],
         cmd[3].len() + 8,
         [&cmd[3]],
@@ -214,9 +215,9 @@ fn zincrby(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     )
 }
 
-fn zcount(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn zcount(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     let (min, max) = (parse_bound(&cmd[2])?, parse_bound(&cmd[3])?);
-    view(node, &cmd[1], |z: Option<&ZSet>| {
+    view(node, conn.db, &cmd[1], |z: Option<&ZSet>| {
         Value::Integer(z.map_or(0, |z| z.count(min, max)) as i64)
     })
 }

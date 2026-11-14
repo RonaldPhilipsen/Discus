@@ -334,7 +334,7 @@ pub fn local_acked(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -
 /// Fill `observed` and `settled` of a read of `key` that ran here.
 fn track_here(node: &Node, key: &[u8], reply: &mut Reply) {
     if reply.observed.is_none() {
-        reply.observed = node.store.version(key);
+        reply.observed = node.store.version(0, key);
         reply.settled = node.replicator().is_some_and(|r| r.settled(key));
     }
 }
@@ -407,7 +407,7 @@ pub fn run_hop(
         }
         Route::Local if redirect::applies(job.redirect, &hop) && job.spec.name == "SCAN" => {
             drop(route);
-            Dispatch::Ready(Reply::value(command::keys::scan_primary(node, &job.cmd)))
+            Dispatch::Ready(Reply::value(command::keys::scan_primary(node, 0, &job.cmd)))
         }
         Route::Rename => {
             drop(route);
@@ -435,7 +435,7 @@ pub fn candidates(
     need: Option<Version>,
 ) -> Vec<NodeId> {
     if let Some(need) = need.filter(|_| !write) {
-        if owners.contains(&node.id) && node.store.version(key).is_some_and(|v| v >= need) {
+        if owners.contains(&node.id) && node.store.version(0, key).is_some_and(|v| v >= need) {
             return vec![node.id];
         }
         return owners.iter().take(1).copied().collect();

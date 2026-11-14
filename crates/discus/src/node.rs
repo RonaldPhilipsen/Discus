@@ -755,8 +755,14 @@ impl Node {
     /// Run a store write with `stamp`. A write that changed its key records `stamp` as the
     /// applied stamp of the command and queues the key for the other owners (spec section 8.2).
     /// A write that changed nothing leaves no trace.
-    pub fn write<R>(&self, key: &Bytes, stamp: Version, f: impl FnOnce(&mut Slot) -> R) -> R {
-        let (result, changed) = self.store.write_changed(key, stamp, f);
+    pub fn write<R>(
+        &self,
+        db: u32,
+        key: &Bytes,
+        stamp: Version,
+        f: impl FnOnce(&mut Slot) -> R,
+    ) -> R {
+        let (result, changed) = self.store.write_changed(db, key, stamp, f);
         if changed {
             APPLIED.with(|a| a.set(Some(stamp)));
             if let Some(replicator) = self.replicator() {
@@ -832,6 +838,8 @@ pub struct ConnState {
     pub readonly: bool,
     /// The local address of the client socket.
     pub local_addr: Option<SocketAddr>,
+    /// The database that `SELECT` chose. A new connection starts in database 0, as in Valkey.
+    pub db: u32,
 }
 
 impl ConnState {
@@ -846,6 +854,7 @@ impl ConnState {
             writes: None,
             redirect: false,
             readonly: false,
+            db: 0,
             local_addr: None,
         }
     }
