@@ -23,10 +23,10 @@ async fn the_pending_gauge_exports_before_the_first_reload() {
     let path = path.to_str().expect("UTF-8 path");
     let argv = ["discus", "--config", path, "--config-reload-secs", "0"];
     let config = common::config(&argv);
-    let live = Live::new(Reloadable::from_config(&config));
-    let security =
-        Security::from_config(&config, live.clone()).expect("valid security configuration");
-    let node = Arc::new(Node::new(config, Arc::new(security), live));
+    let live_settings = Live::new(Reloadable::from_config(&config));
+    let security = Security::from_config(&config, live_settings.clone())
+        .expect("valid security configuration");
+    let node = Arc::new(Node::new(config, Arc::new(security), live_settings));
     let stop = CancellationToken::new();
     discus::settings::reload::spawn(&node, stop.clone());
     let pending = h

@@ -11,15 +11,19 @@ use crate::server::file_watch;
 use crate::settings::{parse, Live, Reloadable};
 use crate::{Config, Node};
 
-/// Merges `text` over `base` and applies the result to `live`, and returns the names of the
+/// Merges `text` over `base` and applies the result to `live_settings`, and returns the names of the
 /// changed settings. `base` is the startup config, so its `cli_set` keeps every command-line value.
 /// An error changes nothing.
-pub fn reload(base: &Config, live: &Live, text: &str) -> Result<Vec<&'static str>, String> {
+pub fn reload(
+    base: &Config,
+    live_settings: &Live,
+    text: &str,
+) -> Result<Vec<&'static str>, String> {
     let file = parse(text, &restart_only)?;
     let merged = base.with_file(&file)?;
     merged.validate()?;
-    let applied = live.apply(Reloadable::from_config(&merged));
-    live.set_version(file.version);
+    let applied = live_settings.apply(Reloadable::from_config(&merged));
+    live_settings.set_version(file.version);
     Ok(applied)
 }
 
@@ -30,7 +34,7 @@ pub fn spawn(node: &Arc<Node>, stop: CancellationToken) {
         return;
     };
     let base = node.config.clone();
-    let live = node.live.clone();
+    let live_settings = node.live_settings.clone();
     let files = vec![path.clone()];
     let seen = file_watch::snapshot(&files);
     // The file can change between the startup load and this snapshot, so the snapshot applies
@@ -38,16 +42,16 @@ pub fn spawn(node: &Arc<Node>, stop: CancellationToken) {
     if let Some(content) = seen.as_ref().and_then(|s| s.first()) {
         match std::str::from_utf8(content)
             .map_err(|e| e.to_string())
-            .and_then(|text| reload(&base, &live, text))
+            .and_then(|text| reload(&base, &live_settings, text))
         {
-            Ok(applied) => log_applied(&live, &applied),
+            Ok(applied) => log_applied(&live_settings, &applied),
             Err(e) => {
                 tracing::warn!(error = %e, "the settings file does not load, so the node keeps its current settings")
             }
         }
     }
     // A gauge exports nothing until its first record, so a node that never reloads shows it too.
-    discus_telemetry::global().config_pending(!live.pending().is_empty());
+    discus_telemetry::global().config_pending(!live_settings.pending().is_empty());
     let period_secs = base.config_reload_secs;
     file_watch::watch(
         "settings",
@@ -58,13 +62,13 @@ pub fn spawn(node: &Arc<Node>, stop: CancellationToken) {
         move || {
             let result = std::fs::read_to_string(&path)
                 .map_err(|e| e.to_string())
-                .and_then(|text| reload(&base, &live, &text));
+                .and_then(|text| reload(&base, &live_settings, &text));
             let metrics = discus_telemetry::global();
-            metrics.config_pending(!live.pending().is_empty());
+            metrics.config_pending(!live_settings.pending().is_empty());
             match result {
                 Ok(applied) => {
                     metrics.config_reload(true);
-                    log_applied(&live, &applied);
+                    log_applied(&live_settings, &applied);
                     Ok(())
                 }
                 Err(e) => {
@@ -76,11 +80,11 @@ pub fn spawn(node: &Arc<Node>, stop: CancellationToken) {
     );
 }
 
-fn log_applied(live: &Live, applied: &[&'static str]) {
+fn log_applied(live_settings: &Live, applied: &[&'static str]) {
     if applied.is_empty() {
         return;
     }
-    let now = live.get();
+    let now = live_settings.get();
     let values = applied
         .iter()
         .map(|name| format!("{name}={}", value(&now, name)))
@@ -114,35 +118,45 @@ mod tests {
         let mut argv = vec!["discus"];
         argv.extend(args);
         let base = Config::load_from(argv).unwrap();
-        let live = Live::new(Reloadable::from_config(&base));
-        (base, live)
+        let live_settings = Live::new(Reloadable::from_config(&base));
+        (base, live_settings)
     }
 
     #[test]
     fn a_valid_change_applies() {
-        let (base, live) = start(&[]);
-        let applied = reload(&base, &live, "version = 1\n[budget]\nhold-ms = 1500").unwrap();
+        let (base, live_settings) = start(&[]);
+        let applied = reload(
+            &base,
+            &live_settings,
+            "version = 1\n[budget]\nhold-ms = 1500",
+        )
+        .unwrap();
         assert_eq!(applied, ["budget.hold-ms"]);
-        assert_eq!(live.get().hold_budget, Duration::from_millis(1500));
-        assert_eq!(live.version(), Some(1));
+        assert_eq!(live_settings.get().hold_budget, Duration::from_millis(1500));
+        assert_eq!(live_settings.version(), Some(1));
     }
 
     #[test]
     fn a_bad_value_changes_nothing() {
-        let (base, live) = start(&[]);
-        let before = live.get();
-        reload(&base, &live, "version = 1\n[budget]\nhold-ms = -1").unwrap_err();
-        assert_eq!(live.generation(), 0);
-        assert_eq!(*live.get(), *before);
-        assert_eq!(live.version(), None);
+        let (base, live_settings) = start(&[]);
+        let before = live_settings.get();
+        reload(&base, &live_settings, "version = 1\n[budget]\nhold-ms = -1").unwrap_err();
+        assert_eq!(live_settings.generation(), 0);
+        assert_eq!(*live_settings.get(), *before);
+        assert_eq!(live_settings.version(), None);
     }
 
     #[test]
     fn a_command_line_value_never_changes() {
-        let (base, live) = start(&["--hold-budget-ms", "2000"]);
-        let applied = reload(&base, &live, "version = 1\n[budget]\nhold-ms = 1500").unwrap();
+        let (base, live_settings) = start(&["--hold-budget-ms", "2000"]);
+        let applied = reload(
+            &base,
+            &live_settings,
+            "version = 1\n[budget]\nhold-ms = 1500",
+        )
+        .unwrap();
         assert!(applied.is_empty());
-        assert_eq!(live.get().hold_budget, Duration::from_millis(2000));
+        assert_eq!(live_settings.get().hold_budget, Duration::from_millis(2000));
     }
     #[test]
     fn every_changed_setting_has_a_logged_value() {

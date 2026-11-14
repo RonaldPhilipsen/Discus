@@ -142,8 +142,8 @@ fn watch_certificates(
     stop: CancellationToken,
 ) {
     let config = &node.config;
-    let live = node.live.clone();
-    let period = move || live.get().tls_reload;
+    let live_settings = node.live_settings.clone();
+    let period = move || live_settings.get().tls_reload;
     let security = node.security.clone();
     let files = Security::client_tls_files(&config.security);
     file_watch::watch(
@@ -244,12 +244,13 @@ impl Server {
         } else {
             None
         };
-        let live = Live::new(Reloadable::from_config(&config));
+        let live_settings = Live::new(Reloadable::from_config(&config));
         if let Some(version) = config.file_version {
-            live.set_version(version);
+            live_settings.set_version(version);
         }
         let security = Arc::new(
-            Security::from_config(&config, live.clone()).map_err(|e| invalid(e.to_string()))?,
+            Security::from_config(&config, live_settings.clone())
+                .map_err(|e| invalid(e.to_string()))?,
         );
         let listener = TcpListener::bind(config.listen).await?;
         let redirect = match config.redirect_listen {
@@ -270,8 +271,10 @@ impl Server {
             (false, _) => None,
         };
         let node = Arc::new(match opts.clocks {
-            Some((hlc_clock, wall)) => Node::with_clocks(config, security, live, wall, hlc_clock),
-            None => Node::new(config, security, live),
+            Some((hlc_clock, wall)) => {
+                Node::with_clocks(config, security, live_settings, wall, hlc_clock)
+            }
+            None => Node::new(config, security, live_settings),
         });
         let leases = match opts.counter_leases {
             Some(leases) => Some(leases),
@@ -324,7 +327,7 @@ impl Server {
                 None => bind_transport(tc, socket, service).await?,
             };
             transports.push(rpc.clone());
-            node.set_link(ClusterLink::new(rpc, node.live.clone()));
+            node.set_link(ClusterLink::new(rpc, node.live_settings.clone()));
             node.set_replicator(crate::replication::Replicator::new(&node));
         }
         Ok(Server {

@@ -88,7 +88,7 @@ pub struct Security {
     cert_rules: Vec<(String, Scopes)>,
     policy: Policy,
     shared_token: Option<String>,
-    live: Arc<Live>,
+    live_settings: Arc<Live>,
     limiter: FailureLimiter,
     admin_tls: Option<Arc<ArcSwap<rustls::ServerConfig>>>,
     admin_identities: Vec<String>,
@@ -99,7 +99,10 @@ pub struct Security {
 
 impl Security {
     /// Check the configuration and build the security state.
-    pub fn from_config(config: &Config, live: Arc<Live>) -> Result<Security, SecurityError> {
+    pub fn from_config(
+        config: &Config,
+        live_settings: Arc<Live>,
+    ) -> Result<Security, SecurityError> {
         let args = &config.security;
         tls::install_default();
         let file = match &args.auth_config {
@@ -182,8 +185,8 @@ impl Security {
             cert_rules,
             policy,
             shared_token: config.shared_token.clone(),
-            limiter: FailureLimiter::new(live.clone()),
-            live,
+            limiter: FailureLimiter::new(live_settings.clone()),
+            live_settings,
             admin_tls,
             admin_identities: file.admin.cert_identities.clone(),
             dev_insecure: args.dev_insecure_oauth2,
@@ -557,7 +560,13 @@ impl Security {
             self.limiter.record(ip);
         }
         tracing::debug!(conn = conn.id, reason, "authentication failed");
-        if conn.auth.failures >= self.live.get().auth_max_failures_per_connection.max(1) {
+        if conn.auth.failures
+            >= self
+                .live_settings
+                .get()
+                .auth_max_failures_per_connection
+                .max(1)
+        {
             tracing::debug!(
                 conn = conn.id,
                 "too many failed attempts, closing the connection"
@@ -625,8 +634,8 @@ mod tests {
         let mut argv = vec!["discus", "--tls-cert", cert_path, "--tls-key", key_path];
         argv.extend_from_slice(args);
         let config = Config::parse_from(argv).unwrap();
-        let live = Live::new(crate::settings::Reloadable::from_config(&config));
-        Security::from_config(&config, live).unwrap()
+        let live_settings = Live::new(crate::settings::Reloadable::from_config(&config));
+        Security::from_config(&config, live_settings).unwrap()
     }
 
     #[test]

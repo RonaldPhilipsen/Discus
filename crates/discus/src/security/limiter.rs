@@ -15,14 +15,14 @@ use crate::settings::Live;
 const MAX_SOURCES: usize = 65_536;
 
 pub struct FailureLimiter {
-    live: Arc<Live>,
+    live_settings: Arc<Live>,
     sources: Mutex<HashMap<IpAddr, (Instant, u32)>>,
 }
 
 impl FailureLimiter {
-    pub fn new(live: Arc<Live>) -> FailureLimiter {
+    pub fn new(live_settings: Arc<Live>) -> FailureLimiter {
         FailureLimiter {
-            live,
+            live_settings,
             sources: Mutex::new(HashMap::new()),
         }
     }
@@ -32,7 +32,7 @@ impl FailureLimiter {
         let Ok(map) = self.sources.lock() else {
             return true;
         };
-        let settings = self.live.get();
+        let settings = self.live_settings.get();
         let max = settings.auth_max_failures_per_source.max(1);
         match map.get(&ip) {
             Some((start, n)) => start.elapsed() < settings.auth_failure_window && *n >= max,
@@ -45,7 +45,7 @@ impl FailureLimiter {
         let Ok(mut map) = self.sources.lock() else {
             return;
         };
-        let window = self.live.get().auth_failure_window;
+        let window = self.live_settings.get().auth_failure_window;
         if map.len() >= MAX_SOURCES && !map.contains_key(&ip) {
             map.retain(|_, (start, _)| start.elapsed() < window);
             if map.len() >= MAX_SOURCES {
@@ -78,8 +78,8 @@ mod tests {
 
     #[test]
     fn a_source_is_blocked_at_the_limit_and_freed_after_the_window() {
-        let live = Live::new(settings(2, Duration::from_secs(600)));
-        let l = FailureLimiter::new(live.clone());
+        let live_settings = Live::new(settings(2, Duration::from_secs(600)));
+        let l = FailureLimiter::new(live_settings.clone());
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         l.record(ip);
         assert!(!l.blocked(ip));
@@ -87,21 +87,21 @@ mod tests {
         assert!(l.blocked(ip));
         assert!(!l.blocked("10.0.0.2".parse().unwrap()));
         // A zero window has ended for every attempt, without a wait on the clock.
-        live.apply(settings(2, Duration::ZERO));
+        live_settings.apply(settings(2, Duration::ZERO));
         assert!(!l.blocked(ip));
     }
 
     #[test]
     fn a_lower_limit_applies_at_once() {
         let window = Duration::from_secs(600);
-        let live = Live::new(settings(20, window));
-        let l = FailureLimiter::new(live.clone());
+        let live_settings = Live::new(settings(20, window));
+        let l = FailureLimiter::new(live_settings.clone());
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         for _ in 0..5 {
             l.record(ip);
         }
         assert!(!l.blocked(ip));
-        live.apply(settings(5, window));
+        live_settings.apply(settings(5, window));
         assert!(l.blocked(ip));
     }
 }

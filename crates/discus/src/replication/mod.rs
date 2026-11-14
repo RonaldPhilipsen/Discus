@@ -545,7 +545,7 @@ impl Replicator {
     /// Returns the number of keys without an acknowledgment. The caller replies anyway, because
     /// the queues and the hints go on delivering those keys.
     pub async fn unacked_after_wait(&self, node: &Node, keys: &[Bytes]) -> u64 {
-        let deadline = tokio::time::Instant::now() + node.live.get().replication_timeout;
+        let deadline = tokio::time::Instant::now() + node.live_settings.get().replication_timeout;
         loop {
             // Subscribed before the evaluation, so a batch that ends after it wakes the wait.
             let mut progress = self.progress.subscribe();
@@ -903,7 +903,7 @@ impl Replicator {
             link.saw_peer_epoch(peer, info.cluster_id, info.epoch);
             Ok(message)
         };
-        let timeout = node.live.get().replication_timeout;
+        let timeout = node.live_settings.get().replication_timeout;
         let reply = node.request(peer, Lane::Bulk, build, timeout, true).await?;
         // An answered bulk message shows the peer is up (spec "Target health").
         link.note_forward(peer, true);

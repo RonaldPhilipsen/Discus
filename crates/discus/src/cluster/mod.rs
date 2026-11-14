@@ -36,7 +36,7 @@ pub const MAX_HOPS: u8 = 2;
 /// The node-to-node side of a node: the transport and the forwarding settings.
 pub struct ClusterLink {
     pub transport: Transport,
-    live: Arc<Live>,
+    live_settings: Arc<Live>,
     /// The epoch that each peer last reported.
     peer_epochs: Mutex<HashMap<NodeId, EpochId>>,
     /// The peers whose last forward failed (spec "Target health").
@@ -44,25 +44,25 @@ pub struct ClusterLink {
 }
 
 impl ClusterLink {
-    pub fn new(transport: Transport, live: Arc<Live>) -> ClusterLink {
+    pub fn new(transport: Transport, live_settings: Arc<Live>) -> ClusterLink {
         ClusterLink {
             transport,
-            live,
+            live_settings,
             peer_epochs: Mutex::new(HashMap::new()),
             down: RwLock::default(),
         }
     }
 
     pub fn read_timeout(&self) -> Duration {
-        self.live.get().forward_read_timeout
+        self.live_settings.get().forward_read_timeout
     }
 
     pub fn write_timeout(&self) -> Duration {
-        self.live.get().forward_write_timeout
+        self.live_settings.get().forward_write_timeout
     }
 
     pub fn read_from_replicas(&self) -> bool {
-        self.live.get().read_from_replicas
+        self.live_settings.get().read_from_replicas
     }
 
     /// Record the result of a forward or a replication batch to `peer`. A timeout or a transport
@@ -622,7 +622,7 @@ mod tests {
     #[tokio::test]
     async fn the_link_reads_the_live_timeouts() {
         let base = Reloadable::from_config(&Config::parse_from(["discus"]).unwrap());
-        let live = Live::new(base.clone());
+        let live_settings = Live::new(base.clone());
         let ca = TestCa::new();
         let id = NodeId::random();
         let config = TransportConfig::new(
@@ -634,8 +634,8 @@ mod tests {
         let transport = Transport::bind(config, Arc::new(service::NodeService(Weak::new())))
             .await
             .unwrap();
-        let link = ClusterLink::new(transport, live.clone());
-        live.apply(Reloadable {
+        let link = ClusterLink::new(transport, live_settings.clone());
+        live_settings.apply(Reloadable {
             forward_read_timeout: Duration::from_millis(200),
             ..base
         });

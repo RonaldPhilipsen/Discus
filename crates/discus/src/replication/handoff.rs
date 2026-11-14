@@ -417,7 +417,7 @@ async fn flush(
     match send(node, replicator, target, &batch).await {
         Some(ack) => {
             t.wanted = ack.want;
-            let rate = node.live.get().handoff_rate_bytes;
+            let rate = node.live_settings.get().handoff_rate_bytes;
             pace(bytes, rate).await;
         }
         None => {

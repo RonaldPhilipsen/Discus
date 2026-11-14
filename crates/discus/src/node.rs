@@ -75,7 +75,7 @@ pub struct Node {
     pub store: Arc<Store>,
     pub security: Arc<Security>,
     /// The reloadable settings, replaced as a whole on a reload of the `--config` file.
-    pub live: Arc<Live>,
+    pub live_settings: Arc<Live>,
     next_conn_id: AtomicU64,
     connected: AtomicUsize,
     phase: AtomicU8,
@@ -198,11 +198,11 @@ impl Drop for EpochPin {
 }
 
 impl Node {
-    pub fn new(config: Config, security: Arc<Security>, live: Arc<Live>) -> Node {
+    pub fn new(config: Config, security: Arc<Security>, live_settings: Arc<Live>) -> Node {
         Node::with_clocks(
             config,
             security,
-            live,
+            live_settings,
             Arc::new(SystemClock),
             hlc::system_clock,
         )
@@ -213,7 +213,7 @@ impl Node {
     pub fn with_clocks(
         config: Config,
         security: Arc<Security>,
-        live: Arc<Live>,
+        live_settings: Arc<Live>,
         wall: Arc<dyn Clock>,
         hlc_clock: fn() -> NTP64,
     ) -> Node {
@@ -267,7 +267,7 @@ impl Node {
             store,
             write_budget,
             security,
-            live,
+            live_settings,
             next_conn_id: AtomicU64::new(1),
             connected: AtomicUsize::new(0),
             phase: AtomicU8::new(Phase::Starting as u8),

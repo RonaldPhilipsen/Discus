@@ -12,10 +12,10 @@ use discus::settings::{Live, Reloadable};
 
 /// A node with the security state of `config`.
 fn node(config: discus::Config) -> Node {
-    let live = Live::new(Reloadable::from_config(&config));
-    let security =
-        Security::from_config(&config, live.clone()).expect("valid security configuration");
-    Node::new(config, Arc::new(security), live)
+    let live_settings = Live::new(Reloadable::from_config(&config));
+    let security = Security::from_config(&config, live_settings.clone())
+        .expect("valid security configuration");
+    Node::new(config, Arc::new(security), live_settings)
 }
 
 /// Parse `discus --listen 127.0.0.1:0` followed by `extra`.

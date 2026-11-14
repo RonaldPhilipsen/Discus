@@ -154,35 +154,38 @@ mod tests {
     #[test]
     fn apply_returns_the_changed_keys_and_counts_one_generation() {
         let base = default_reloadable();
-        let live = Live::new(base.clone());
+        let live_settings = Live::new(base.clone());
         let next = Reloadable {
             hold_budget: Duration::from_millis(1500),
             read_from_replicas: !base.read_from_replicas,
             ..base
         };
-        assert_eq!(live.apply(next), ["budget.hold-ms", "reads.from-replicas"]);
-        assert_eq!(live.generation(), 1);
-        assert_eq!(live.get().hold_budget, Duration::from_millis(1500));
+        assert_eq!(
+            live_settings.apply(next),
+            ["budget.hold-ms", "reads.from-replicas"]
+        );
+        assert_eq!(live_settings.generation(), 1);
+        assert_eq!(live_settings.get().hold_budget, Duration::from_millis(1500));
     }
 
     #[test]
     fn apply_without_a_change_keeps_the_generation() {
         let base = default_reloadable();
-        let live = Live::new(base.clone());
-        assert!(live.apply(base).is_empty());
-        assert_eq!(live.generation(), 0);
+        let live_settings = Live::new(base.clone());
+        assert!(live_settings.apply(base).is_empty());
+        assert_eq!(live_settings.generation(), 0);
     }
 
     #[test]
     fn a_reader_keeps_its_snapshot() {
         let base = default_reloadable();
-        let live = Live::new(base.clone());
-        let before = live.get();
-        live.apply(Reloadable {
+        let live_settings = Live::new(base.clone());
+        let before = live_settings.get();
+        live_settings.apply(Reloadable {
             hold_budget: base.hold_budget + Duration::from_millis(1),
             ..base.clone()
         });
         assert_eq!(before.hold_budget, base.hold_budget);
-        assert_ne!(live.get().hold_budget, base.hold_budget);
+        assert_ne!(live_settings.get().hold_budget, base.hold_budget);
     }
 }

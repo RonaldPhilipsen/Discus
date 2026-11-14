@@ -283,10 +283,15 @@ fn info(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
             ),
             format!(
                 "config_version:{}",
-                node.live.version().map_or(String::new(), |v| v.to_string())
+                node.live_settings
+                    .version()
+                    .map_or(String::new(), |v| v.to_string())
             ),
-            format!("config_generation:{}", node.live.generation()),
-            format!("config_restart_pending:{}", node.live.pending().join(",")),
+            format!("config_generation:{}", node.live_settings.generation()),
+            format!(
+                "config_restart_pending:{}",
+                node.live_settings.pending().join(",")
+            ),
             format!("discus_build:{}", build::BUILD_ID),
             format!("discus_features:{}", build::FEATURES.join(",")),
             format!("discus_tls_backend:{}", build::TLS_BACKEND),

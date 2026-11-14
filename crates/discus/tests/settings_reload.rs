@@ -70,7 +70,10 @@ async fn a_running_node_applies_a_changed_hold_budget() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(node.live.get().hold_budget, Duration::from_millis(1500));
+    assert_eq!(
+        node.live_settings.get().hold_budget,
+        Duration::from_millis(1500)
+    );
 }
 
 #[tokio::test]
@@ -106,7 +109,10 @@ async fn a_file_broken_after_the_start_keeps_the_start_version() {
     let mut conn = client.get_multiplexed_async_connection().await.unwrap();
     let info = info_discus(&mut conn).await;
     assert!(info.contains("config_version:1\r\n"), "{info}");
-    assert_eq!(node.live.get().hold_budget, Duration::from_millis(1500));
+    assert_eq!(
+        node.live_settings.get().hold_budget,
+        Duration::from_millis(1500)
+    );
 }
 
 fn copy(from: &Path, to: &Path) {
@@ -159,7 +165,7 @@ async fn a_zero_tls_period_pauses_and_resumes() {
 
     write_settings(&path, "version = 1\n[tls]\nreload-secs = 0\n");
     eventually("the node did not pause the certificate reload", || async {
-        node.live.get().tls_reload.is_zero()
+        node.live_settings.get().tls_reload.is_zero()
     })
     .await;
     let next = new.server_cert();
@@ -220,7 +226,8 @@ async fn info_shows_the_settings_file() {
     assert!(info.contains("config_generation:0\r\n"), "{info}");
     assert!(info.contains("config_restart_pending:\r\n"), "{info}");
 
-    let reload = |text: &str| discus::settings::reload::reload(&node.config, &node.live, text);
+    let reload =
+        |text: &str| discus::settings::reload::reload(&node.config, &node.live_settings, text);
     let a = "version = 1\n[budget]\nhold-ms = 3000\n";
     let b = "version = 1\n[budget]\nhold-ms = 1500\n";
     reload(b).unwrap();
