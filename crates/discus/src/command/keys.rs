@@ -193,11 +193,11 @@ fn randomkey(node: &Node, conn: &mut ConnState, _: &Command) -> Reply {
         .map_or(Value::Null, Value::Bulk))
 }
 
-fn dbsize(node: &Node, _: &mut ConnState, _: &Command) -> Reply {
-    Ok(Value::Integer(node.store.len() as i64))
+fn dbsize(node: &Node, conn: &mut ConnState, _: &Command) -> Reply {
+    Ok(Value::Integer(node.store.db_len(conn.db) as i64))
 }
 
-fn flush(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn flush(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     if cmd.len() > 2
         || cmd
             .get(1)
@@ -206,10 +206,17 @@ fn flush(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         return Err(CommandError::Syntax);
     }
     // In-flight batches can still land after this point, so a flush is best-effort.
-    if let Some(r) = node.replicator() {
-        r.flush();
-        r.reset_handoffs();
+    if cmd[0].eq_ignore_ascii_case(b"FLUSHDB") {
+        if let Some(r) = node.replicator() {
+            r.flush_db(conn.db);
+        }
+        node.store.clear_db(conn.db);
+    } else {
+        if let Some(r) = node.replicator() {
+            r.flush();
+            r.reset_handoffs();
+        }
+        node.store.clear();
     }
-    node.store.clear();
     Ok(Value::ok())
 }

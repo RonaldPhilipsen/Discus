@@ -258,10 +258,15 @@ fn info(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
             format!("evicted_keys:{}", node.store.evictions()),
         ],
     );
-    section(
-        "keyspace",
-        &[format!("db0:keys={},expires=0,avg_ttl=0", node.store.len())],
-    );
+    let keyspace: Vec<String> = node
+        .store
+        .databases()
+        .into_iter()
+        .map(|db| (db, node.store.db_len(db)))
+        .filter(|(_, keys)| *keys > 0)
+        .map(|(db, keys)| format!("db{db}:keys={keys},expires=0,avg_ttl=0"))
+        .collect();
+    section("keyspace", &keyspace);
     section(
         "Cluster",
         &[format!(
@@ -290,6 +295,8 @@ fn info(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
                 "config_restart_pending:{}",
                 node.live_settings.pending().join(",")
             ),
+            format!("databases:{}", node.databases.local()),
+            format!("cluster_databases:{}", node.databases.cluster()),
             format!("discus_build:{}", build::BUILD_ID),
             format!("discus_features:{}", build::FEATURES.join(",")),
             format!("discus_tls_backend:{}", build::TLS_BACKEND),
@@ -357,7 +364,7 @@ fn config(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     }
     let known = [
         ("maxmemory", node.config.max_memory.to_string()),
-        ("databases", "1".to_string()),
+        ("databases", node.databases.cluster().to_string()),
         ("maxclients", "10000".to_string()),
     ];
     let pattern = cmd[2].to_ascii_lowercase();
@@ -484,6 +491,23 @@ mod tests {
         assert_eq!(
             select_reply(&["SELECT", "1"]),
             Err(CommandError::Custom(crate::databases::OUT_OF_RANGE.into()))
+        );
+    }
+
+    #[test]
+    fn config_get_databases_reports_the_cluster_count() {
+        let parsed = Config::parse_from(["discus", "--databases", "3"]).unwrap();
+        let live = Live::new(Reloadable::from_config(&parsed));
+        let security = Arc::new(crate::security::tests::security(&[]));
+        let node = Node::new(parsed, security, live);
+        let mut conn = ConnState::new(1, ConnAuth::default());
+        let cmd = crate::counter::cmd(&["CONFIG", "GET", "databases"]);
+        assert_eq!(
+            config(&node, &mut conn, &cmd),
+            Ok(Value::Map(vec![(
+                Value::bulk(b"databases".to_vec()),
+                Value::bulk(b"3".to_vec())
+            )]))
         );
     }
 

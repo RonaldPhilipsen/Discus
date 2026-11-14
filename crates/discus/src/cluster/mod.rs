@@ -411,7 +411,7 @@ pub fn run_hop(
     }
     if job.spec.route == Route::Broadcast && hop.hops == 0 && node.counters().is_some() {
         drop(route);
-        return crate::counter::route::broadcast(node, job.spec, job.cmd);
+        return crate::counter::route::broadcast(node, job.spec, job.db, job.cmd);
     }
     if node.link().is_none() {
         drop(route);
@@ -426,16 +426,24 @@ pub fn run_hop(
         // owner, so the route span ends at once.
         Route::Fanout if redirect::applies(job.redirect, &hop) && job.spec.name == "DBSIZE" => {
             drop(route);
-            let count = node.store.len() as i64 / multi::copies(node);
+            let count = node.store.db_len(job.db) as i64 / multi::copies(node);
             Dispatch::Ready(Reply::value(Value::Integer(count)))
         }
         Route::Fanout if hop.hops == 0 => {
             drop(route);
-            multi::dbsize(node, job.spec, job.cmd)
+            multi::dbsize(node, job.spec, job.db, job.cmd)
         }
         Route::Local if redirect::applies(job.redirect, &hop) && job.spec.name == "SCAN" => {
             drop(route);
-            Dispatch::Ready(Reply::value(command::keys::scan_primary(node, 0, &job.cmd)))
+            Dispatch::Ready(Reply::value(command::keys::scan_primary(
+                node, job.db, &job.cmd,
+            )))
+        }
+        // Only the counter part of a flush reaches here: the cache broadcast uses LOCAL mode. It
+        // must not clear this node's store. TODO(Task 7): run the counter flush of the group here.
+        Route::Broadcast if hop.hops > 0 => {
+            drop(route);
+            Dispatch::Ready(Reply::value(Value::ok()))
         }
         Route::Rename => {
             drop(route);

@@ -262,14 +262,15 @@ pub fn multi(
     }))
 }
 
-/// Send a `LOCAL` copy of `cmd` to every other member, and run it here too.
+/// Send a `LOCAL` copy of `cmd` in database `db` to every other member, and run it here too.
 async fn everywhere(
     node: &Arc<Node>,
     spec: &CommandSpec,
+    db: u32,
     cmd: &Command,
     write: bool,
 ) -> (Reply, Vec<Result<Reply, NodeId>>) {
-    let here = local(node, spec, 0, cmd);
+    let here = local(node, spec, db, cmd);
     let others: Vec<NodeId> = node
         .epochs()
         .current()
@@ -282,7 +283,7 @@ async fn everywhere(
     let results = join_all(others.iter().map(|id| {
         let hop = &hop;
         async move {
-            forward::send(node, *id, 0, cmd, hop, ForwardMode::Local, write, None)
+            forward::send(node, *id, db, cmd, hop, ForwardMode::Local, write, None)
                 .await
                 .map_err(|_| *id)
         }
@@ -293,10 +294,10 @@ async fn everywhere(
 
 /// `DBSIZE`: the sum of the members that answer, divided by the owners per key. Every key lives
 /// on up to `RF` members, so this is an estimate (spec section 7.3).
-pub fn dbsize(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> Dispatch {
+pub fn dbsize(node: &Arc<Node>, spec: &'static CommandSpec, db: u32, cmd: Command) -> Dispatch {
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
-        let (here, others) = everywhere(&node, spec, &cmd, false).await;
+        let (here, others) = everywhere(&node, spec, db, &cmd, false).await;
         let mut sum = match here.value {
             Value::Integer(n) => n,
             other => return Reply::value(other),
@@ -316,11 +317,11 @@ pub(crate) fn copies(node: &Node) -> i64 {
     node.config.replication_factor.min(normal).max(1) as i64
 }
 
-/// `FLUSHDB` and `FLUSHALL`: every member, best-effort.
-pub fn flush(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> Dispatch {
+/// `FLUSHDB` in database `db` and `FLUSHALL`: every member, best-effort.
+pub fn flush(node: &Arc<Node>, spec: &'static CommandSpec, db: u32, cmd: Command) -> Dispatch {
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
-        let (here, others) = everywhere(&node, spec, &cmd, true).await;
+        let (here, others) = everywhere(&node, spec, db, &cmd, true).await;
         if matches!(here.value, Value::Error(_)) {
             return here;
         }

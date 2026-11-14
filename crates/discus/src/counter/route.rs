@@ -204,10 +204,10 @@ pub async fn run(
 /// `FLUSHALL` and `FLUSHDB` on the entry node: the cache broadcast, then every counter group
 /// (spec section 12.1). A group without a leader or a quorum keeps its counters, and the reply
 /// says how many groups were cleared.
-pub fn broadcast(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> Dispatch {
+pub fn broadcast(node: &Arc<Node>, spec: &'static CommandSpec, db: u32, cmd: Command) -> Dispatch {
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
-        let cache = crate::cluster::multi::flush(&node, spec, cmd.clone())
+        let cache = crate::cluster::multi::flush(&node, spec, db, cmd.clone())
             .finish()
             .await;
         let Some(counters) = node.counters().cloned() else {
