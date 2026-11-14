@@ -430,11 +430,11 @@ The `discus` section of `INFO` shows these fields:
 | `config_file` | The path of `--config`. Empty without the flag. |
 | `config_version` | The version of the file in effect. |
 | `config_generation` | The number of reloads that the node applied. |
-| `config_restart_pending` | The names of settings whose change needs a restart. Empty if none. |
+| `config_restart_pending` | The names of reloadable settings whose new value the node cannot apply at run time. Each one needs a restart. No setting of version 1 does this yet, so the field is empty today. |
 
 Two metrics count the reloads. `discus.config.reloads` has the attribute `outcome` with the value
-`applied` or `failed`. The gauge `discus.config.pending` is 1 while a change waits for a restart.
-See [Telemetry](telemetry.md).
+`applied` or `failed`. The gauge `discus.config.pending` is 1 while a new value waits for a restart.
+No setting of version 1 does this yet, so the gauge is 0 today. See [Telemetry](telemetry.md).
 
 ### Settings file in the chart
 
