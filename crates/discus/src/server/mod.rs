@@ -106,8 +106,8 @@ async fn bind_transport(
 }
 
 mod connection;
+mod file_watch;
 mod order;
-mod tls_reload;
 
 /// Export the metrics of `transport`. Its events feed the peer error and QUIC failure metrics.
 /// The events task runs on the runtime of the caller.
@@ -137,18 +137,16 @@ fn cluster_tls_files(config: &Config) -> Vec<std::path::PathBuf> {
 fn watch_certificates(
     node: &Arc<Node>,
     transports: Vec<Transport>,
-    (client_seen, cluster_seen): (tls_reload::Snapshot, tls_reload::Snapshot),
+    (client_seen, cluster_seen): (file_watch::Snapshot, file_watch::Snapshot),
     stop: CancellationToken,
 ) {
     let config = &node.config;
-    if config.tls_reload_secs == 0 {
-        return;
-    }
-    let period = Duration::from_secs(config.tls_reload_secs);
+    let tls_reload_secs = config.tls_reload_secs;
+    let period = move || Duration::from_secs(tls_reload_secs);
     let security = node.security.clone();
     let files = Security::client_tls_files(&config.security);
-    tls_reload::watch(
-        "client",
+    file_watch::watch(
+        "client certificates",
         files,
         client_seen,
         period,
@@ -167,15 +165,22 @@ fn watch_certificates(
     }
     let san = config.cluster_san.clone();
     let files = cluster_tls_files(config);
-    tls_reload::watch("cluster", files, cluster_seen, period, stop, move || {
-        let tls = TlsMaterial::from_files(&ca, &cert, &key, &san).map_err(io::Error::other)?;
-        // Check every endpoint before any of them changes, so they never disagree.
-        tls.check().map_err(io::Error::other)?;
-        for t in &transports {
-            t.reload_tls(&tls)?;
-        }
-        Ok(())
-    });
+    file_watch::watch(
+        "cluster certificates",
+        files,
+        cluster_seen,
+        period,
+        stop,
+        move || {
+            let tls = TlsMaterial::from_files(&ca, &cert, &key, &san).map_err(io::Error::other)?;
+            // Check every endpoint before any of them changes, so they never disagree.
+            tls.check().map_err(io::Error::other)?;
+            for t in &transports {
+                t.reload_tls(&tls)?;
+            }
+            Ok(())
+        },
+    );
 }
 
 /// Accept on `listener`, or wait forever without one.
@@ -196,7 +201,7 @@ pub struct Server {
     /// The QUIC endpoints, for a reload of the cluster certificates.
     transports: Vec<Transport>,
     /// The client and cluster certificate files before the node loaded them.
-    tls_seen: (tls_reload::Snapshot, tls_reload::Snapshot),
+    tls_seen: (file_watch::Snapshot, file_watch::Snapshot),
 }
 
 impl Server {
@@ -211,8 +216,8 @@ impl Server {
         let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidInput, msg);
         config.validate().map_err(invalid)?;
         let tls_seen = (
-            tls_reload::snapshot(&Security::client_tls_files(&config.security)),
-            tls_reload::snapshot(&cluster_tls_files(&config)),
+            file_watch::snapshot(&Security::client_tls_files(&config.security)),
+            file_watch::snapshot(&cluster_tls_files(&config)),
         );
         let tls = if config.cluster_enabled() {
             let (Some(ca), Some(cert), Some(key)) = (
