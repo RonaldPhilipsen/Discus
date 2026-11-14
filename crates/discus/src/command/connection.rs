@@ -167,11 +167,15 @@ fn command_entry(spec: &CommandSpec) -> Value {
     } else {
         "readonly"
     };
+    let mut flags = vec![Value::simple(flag)];
+    if spec.fast {
+        flags.push(Value::simple("fast"));
+    }
     let (first, last, step) = spec.route.key_spec();
     Value::Array(vec![
         Value::bulk(spec.name.to_lowercase().into_bytes()),
         Value::Integer(i64::from(spec.arity)),
-        Value::Array(vec![Value::simple(flag)]),
+        Value::Array(flags),
         Value::Integer(first),
         Value::Integer(last),
         Value::Integer(step),
@@ -554,5 +558,9 @@ mod tests {
         };
         assert_eq!(flags("GET"), Value::Array(vec![Value::simple("readonly")]));
         assert_eq!(flags("SET"), Value::Array(vec![Value::simple("write")]));
+        assert_eq!(
+            flags("SWAPDB"),
+            Value::Array(vec![Value::simple("write"), Value::simple("fast")])
+        );
     }
 }

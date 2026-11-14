@@ -32,6 +32,8 @@ pub struct CommandSpec {
     pub handler: Handler,
     pub access: Access,
     pub route: Route,
+    /// The `fast` flag of `COMMAND`, as Valkey sets it.
+    pub fast: bool,
 }
 
 impl CommandSpec {
@@ -43,6 +45,7 @@ impl CommandSpec {
             handler,
             access: Access::Connection,
             route: Route::Connection,
+            fast: false,
         }
     }
 
@@ -54,6 +57,7 @@ impl CommandSpec {
             handler,
             access: Access::Read,
             route: Route::Single { write: false },
+            fast: false,
         }
     }
 
@@ -65,6 +69,7 @@ impl CommandSpec {
             handler,
             access: Access::Write,
             route: Route::Single { write: true },
+            fast: false,
         }
     }
 
@@ -74,6 +79,10 @@ impl CommandSpec {
 
     pub const fn with_route(self, route: Route) -> CommandSpec {
         CommandSpec { route, ..self }
+    }
+
+    pub const fn with_fast(self) -> CommandSpec {
+        CommandSpec { fast: true, ..self }
     }
 }
 

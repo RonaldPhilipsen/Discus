@@ -432,3 +432,105 @@ async fn swapdb_is_refused() {
         Value::error("ERR SWAPDB is not allowed in cluster mode")
     );
 }
+
+/// A key whose primary is another node and whose second owner is `nodes[entry]`.
+fn key_replicated_on(nodes: &[GossipNode], entry: usize, prefix: &str) -> String {
+    (0..)
+        .map(|i| format!("{prefix}{i}"))
+        .find(|k| {
+            let owners = nodes[0].node.owners(k.as_bytes());
+            owners.len() == 2 && owners[1] == nodes[entry].id
+        })
+        .unwrap()
+}
+
+/// Put `value` at `key` in database `db` of `n` only, with the lowest version: what a replica
+/// holds when it missed every later write.
+fn plant_stale(n: &GossipNode, db: u32, key: &str, value: &str) {
+    n.node.store.write(
+        db,
+        key.as_bytes(),
+        discus_placement::Version::zero(),
+        |slot| {
+            slot.set(Some(discus_store::Entry::new(
+                discus_store::Value::Str(bytes::Bytes::copy_from_slice(value.as_bytes())),
+                None,
+            )))
+        },
+    );
+}
+
+async fn query(conn: &mut redis::aio::MultiplexedConnection, args: &[&str]) -> redis::Value {
+    let mut cmd = redis::cmd(args[0]);
+    for a in &args[1..] {
+        cmd.arg(*a);
+    }
+    cmd.query_async(conn).await.unwrap()
+}
+
+fn data(s: &str) -> redis::Value {
+    redis::Value::BulkString(s.as_bytes().to_vec())
+}
+
+/// The entry node is the replica of both keys and holds a stale copy of each in the target
+/// database, and replication is held. So only the write set of the connection sends the read to
+/// the primary, which has the new value.
+#[tokio::test]
+async fn a_move_and_a_copy_read_their_own_write_in_the_target_database() {
+    let net = Net::new();
+    let nodes = start_open(
+        &net,
+        3,
+        &[
+            "--databases",
+            "3",
+            "--replication-factor",
+            "2",
+            "--read-from-replicas",
+        ],
+    )
+    .await;
+    let (k, src, dst) = (
+        key_replicated_on(&nodes, 0, "mv"),
+        key_on(&nodes, 1, "src"),
+        key_replicated_on(&nodes, 0, "dst"),
+    );
+    let mut conn = nodes[0].redis().await;
+    assert_eq!(
+        query(&mut conn, &["SET", &k, "moved"]).await,
+        redis::Value::Okay
+    );
+    assert_eq!(
+        query(&mut conn, &["SET", &src, "copied"]).await,
+        redis::Value::Okay
+    );
+    for n in &nodes {
+        n.node
+            .faults
+            .hold_replication
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    plant_stale(&nodes[0], 2, &k, "stale");
+    plant_stale(&nodes[0], 1, &dst, "stale");
+
+    assert_eq!(
+        query(&mut conn, &["MOVE", &k, "2"]).await,
+        redis::Value::Int(1)
+    );
+    assert_eq!(query(&mut conn, &["SELECT", "2"]).await, redis::Value::Okay);
+    assert_eq!(query(&mut conn, &["GET", &k]).await, data("moved"));
+
+    assert_eq!(query(&mut conn, &["SELECT", "0"]).await, redis::Value::Okay);
+    assert_eq!(
+        query(&mut conn, &["COPY", &src, &dst, "DB", "1"]).await,
+        redis::Value::Int(1)
+    );
+    assert_eq!(query(&mut conn, &["SELECT", "1"]).await, redis::Value::Okay);
+    assert_eq!(query(&mut conn, &["GET", &dst]).await, data("copied"));
+    for n in &nodes {
+        n.node
+            .faults
+            .hold_replication
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}

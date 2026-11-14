@@ -570,6 +570,7 @@ fn single(
     };
     // Only a write, or a read that must see an earlier write, changes the write set.
     let key = (tracked && (write || need.is_some())).then(|| SetKey::of(job.db, &job.cmd[1]));
+    let target = tracked.then(|| move_target(&job)).flatten();
     let dispatch = single_planned(node, job, owners, hop, write, need, route);
     let (Some(writes), Some(key)) = (writes, key) else {
         return dispatch;
@@ -579,12 +580,28 @@ fn single(
         let mut w = writes.lock();
         match (write, reply.applied) {
             (true, Some(v)) if !matches!(reply.value, Value::Error(_)) => {
-                w.record(key, v, std::time::Instant::now())
+                let now = std::time::Instant::now();
+                w.record(key, v, now);
+                if let Some(target) = target {
+                    w.record(target, v, now);
+                }
             }
             (false, _) if need.is_some() => w.observed(key, reply.observed, reply.settled),
             _ => {}
         }
     })
+}
+
+/// The key in the target database of a `MOVE`, which writes its key in two databases. A `COPY`
+/// needs no such key: its put records the destination as a write of its own.
+fn move_target(job: &Job) -> Option<SetKey> {
+    if job.spec.name != "MOVE" {
+        return None;
+    }
+    let db = command::util::parse_i64(&job.cmd[2])
+        .ok()
+        .and_then(|n| u32::try_from(n).ok())?;
+    Some(SetKey::of(db, &job.cmd[1]))
 }
 
 fn single_planned(

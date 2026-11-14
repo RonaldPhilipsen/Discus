@@ -3,11 +3,12 @@
 use discus_resp::{Command, Value};
 
 use super::error::CommandError;
-use super::table::CommandSpec;
+use super::table::{Access, CommandSpec};
 use super::util::{admit, check_key, parse_i64, upper};
 use crate::cluster::route::Route;
 use crate::databases;
 use crate::node::{ConnState, Node};
+use discus_placement::Version;
 use discus_store::entry::{estimate_size, ENTRY_OVERHEAD};
 use discus_store::Entry;
 
@@ -22,7 +23,11 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::write("RENAME", 3, rename).with_route(Route::Rename),
     CommandSpec::write("MOVE", 3, move_key),
     CommandSpec::write("COPY", -3, copy).with_route(Route::Copy),
-    CommandSpec::connection("SWAPDB", 3, swapdb),
+    // The flags of Valkey for `COMMAND`. The connection route still answers at the entry node, so
+    // it never routes as a write.
+    CommandSpec::connection("SWAPDB", 3, swapdb)
+        .with_access(Access::Write)
+        .with_fast(),
     CommandSpec::read("SCAN", -2, scan).with_route(Route::Local),
     CommandSpec::read("RANDOMKEY", 1, randomkey).with_route(Route::Local),
     CommandSpec::read("DBSIZE", 1, dbsize).with_route(Route::Fanout),
@@ -158,20 +163,21 @@ fn target_db(node: &Node, n: i64) -> Result<u32, CommandError> {
     Ok(n as u32)
 }
 
-/// Write `entry` at `key` in `db` with a fresh version. Without `replace`, a live entry stays.
-/// True if it wrote.
+/// Write `entry` at `key` in `db` with the version `stamp`. Without `replace`, a live entry
+/// stays. True if it wrote.
 fn place(
     node: &Node,
     db: u32,
     key: &bytes::Bytes,
     entry: Entry,
     replace: bool,
+    stamp: Version,
 ) -> Result<bool, CommandError> {
     admit(
         node,
         estimate_size(key, &entry).saturating_sub(ENTRY_OVERHEAD) as usize,
     )?;
-    Ok(node.write(db, key, node.stamp()?, |slot| {
+    Ok(node.write(db, key, stamp, |slot| {
         if !replace && slot.is_some() {
             return false;
         }
@@ -195,11 +201,14 @@ fn move_key(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
         return Ok(Value::Integer(0));
     };
     let seen = entry.version;
-    if !place(node, db, key, entry, false)? {
+    // Both writes take one stamp, so the stamp that the reply reports covers the destination too,
+    // and the write set of the connection can record it.
+    let stamp = node.stamp()?;
+    if !place(node, db, key, entry, false, stamp)? {
         return Ok(Value::Integer(0));
     }
     // A write that landed on the source after the read keeps it.
-    node.write(conn.db, key, node.stamp()?, |slot| {
+    node.write(conn.db, key, stamp, |slot| {
         if slot.as_ref().is_some_and(|e| e.version == seen) {
             slot.set(None);
         }
@@ -244,7 +253,14 @@ fn copy(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     let Some(entry) = node.store.read(conn.db, &cmd[1], |e| e.cloned()) else {
         return Ok(Value::Integer(0));
     };
-    let copied = place(node, target.db, &cmd[2], entry, target.replace)?;
+    let copied = place(
+        node,
+        target.db,
+        &cmd[2],
+        entry,
+        target.replace,
+        node.stamp()?,
+    )?;
     Ok(Value::Integer(i64::from(copied)))
 }
 
