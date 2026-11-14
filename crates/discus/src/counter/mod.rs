@@ -456,7 +456,8 @@ impl Counters {
             while s.run_until_cancelled(every.tick()).await.is_some() {
                 me.purge().await;
                 if let Some(node) = me.node() {
-                    me.drop_databases_from(&node, node.databases.local()).await;
+                    me.drop_databases_from(&node, node.databases.cluster())
+                        .await;
                 }
             }
         });
@@ -642,8 +643,10 @@ impl Counters {
     /// Remove the counters of every database from `count` up in each group that `node` leads:
     /// one `DISCUS.FLUSHDB` log entry for each such database, so the followers drop them too. A
     /// group led elsewhere drops them on its own leader. A drop can fail or miss a group whose
-    /// leader moves, so the purge tick calls this again with the local count of this node, and a
-    /// later leader finishes the drop.
+    /// leader moves, so the purge tick calls this again with the cluster count, and a later
+    /// leader finishes the drop. The tick never uses the local count: a joiner can hold fewer
+    /// databases than the cluster serves, and clients still reach the ones below the cluster
+    /// count.
     pub async fn drop_databases_from(self: &Arc<Self>, node: &Arc<Node>, count: u32) {
         let flush: Command = vec![bytes::Bytes::from_static(state::FLUSH_ONE_DB)];
         for group in &self.groups {

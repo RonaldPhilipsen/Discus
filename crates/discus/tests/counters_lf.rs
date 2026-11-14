@@ -414,3 +414,36 @@ async fn a_later_leader_removes_the_counters_of_a_dropped_database() {
         "the new leader kept the counters of database 5"
     );
 }
+
+/// A leader with fewer local databases than the cluster count keeps the counters below the
+/// cluster count, because clients still reach them. It drops only those at or above it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_purge_tick_drops_only_databases_above_the_cluster_count() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (nodes, _gates) = two(&net, &leases, &["--databases", "2"]).await;
+    for n in &nodes {
+        n.node.databases.set_view(4, false);
+        assert!(n.node.databases.local() < n.node.databases.cluster());
+    }
+    let leader = leader_of(&refs(&nodes), 0).unwrap();
+    let key = key_of_group(leader, 0);
+    let counters = leader.node.counters().unwrap();
+    let incr = vec![Bytes::from_static(b"INCR"), Bytes::from(key.clone())];
+    for db in [3, 5] {
+        assert_eq!(
+            counters.execute(0, db, Kind::Incr, &incr).await,
+            Ok(Value::Integer(1))
+        );
+    }
+    // One tick drops the databases of a group in ascending order, so database 3 goes before 5.
+    assert!(
+        wait_until(Duration::from_secs(60), || nodes
+            .iter()
+            .all(|n| held_in(n, 5, &key).is_none()))
+        .await,
+        "database 5 is above the cluster count but kept its counters"
+    );
+    for n in &nodes {
+        assert_eq!(held_in(n, 3, &key).as_deref(), Some("1"));
+    }
+}
