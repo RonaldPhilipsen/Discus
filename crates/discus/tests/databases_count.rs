@@ -203,8 +203,18 @@ async fn a_restart_with_the_old_flag_keeps_the_raised_count() {
     wait_agreed(&refs(&nodes), LONG).await;
     let seeds: Vec<_> = nodes.iter().map(|n| n.cluster_addr).collect();
     let fresh = net.start(&seeds, &["--databases", "1"]).await;
+    // The node takes the larger count from the join reply. It must hold that count before it
+    // advertises it, so this checks without a pause.
+    let membership = fresh.node.membership().unwrap().clone();
+    let deadline = tokio::time::Instant::now() + LONG;
+    while !fresh.is_normal() && tokio::time::Instant::now() < deadline {
+        let advertised = membership.local().databases;
+        let held = fresh.node.databases.local();
+        assert!(held >= advertised, "advertised {advertised}, holds {held}");
+        tokio::task::yield_now().await;
+    }
     assert!(
-        wait_until(LONG, || fresh.is_normal()).await,
+        fresh.is_normal(),
         "the restarted node did not become NORMAL"
     );
     assert_eq!(fresh.node.databases.local(), 3);

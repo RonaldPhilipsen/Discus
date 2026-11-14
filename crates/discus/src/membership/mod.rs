@@ -216,20 +216,18 @@ impl Membership {
             max: node.config.max_memory,
         };
         let now = self.now();
-        let (actions, mine, served, multi_db) = self.drive(|swim, host| {
+        let (actions, served, multi_db) = self.drive(|swim, host| {
             swim.set_capacity(capacity);
             swim.observe_lag(node.lag().lag_ms());
             let actions = swim.tick(now, host);
             let epoch = host.epoch();
             (
                 actions,
-                swim.me().databases,
                 swim.served_databases(now, &epoch),
                 swim.all_multi_db(&epoch),
             )
         });
         self.dispatch(actions);
-        node.databases.raise_local(mine);
         if let Some(n) = node.databases.set_view(served, multi_db) {
             node.drop_databases_from(n);
         }
@@ -353,10 +351,16 @@ impl Membership {
 
     /// Run `f` on the SWIM state under the lock, then publish the events that it raised.
     fn drive<R>(self: &Arc<Self>, f: impl FnOnce(&mut Swim, &mut NodeHost) -> R) -> R {
+        let node = self.node.upgrade();
         let (r, events) = {
             let mut guard = self.inner.lock();
             let Inner { swim, host } = &mut *guard;
             let r = f(swim, host);
+            // A join reply can raise the own count. The node holds it before the lock ends, so
+            // no gossip message advertises a count that the node cannot serve yet.
+            if let Some(node) = &node {
+                node.databases.raise_local(swim.me().databases);
+            }
             (r, swim.take_events())
         };
         self.publish(events);
