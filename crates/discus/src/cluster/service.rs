@@ -143,6 +143,10 @@ async fn forwarded(
         tracing::debug!(path = ?f.path, "forwarding loop");
         return Reply::try_again();
     }
+    // The sender checked the database against the cluster count, but this node can hold fewer.
+    if !node.databases.holds(f.db) {
+        return Reply::value(Value::error(crate::databases::OUT_OF_RANGE));
+    }
     let cmd = match parse(node, &f.command) {
         Ok(cmd) => cmd,
         Err(value) => return Reply::value(value),
@@ -156,10 +160,10 @@ async fn forwarded(
         Err(e) => return Reply::error(e),
     };
     if spec.route == Route::Connection {
-        return local(node, spec, &cmd);
+        return local(node, spec, f.db, &cmd);
     }
     if f.mode == ForwardMode::Local {
-        return local_acked(node, spec, cmd).finish().await;
+        return local_acked(node, spec, f.db, cmd).finish().await;
     }
     // The hop keeps the inbound context. A further forward sends the context of its own span
     // with `otel`, else this context unchanged.
@@ -172,7 +176,7 @@ async fn forwarded(
     };
     run_hop(
         node,
-        Job::plain(cmd, spec),
+        Job::plain(cmd, spec, f.db),
         hop,
         None,
         telemetry::route_span(),

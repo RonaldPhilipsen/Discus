@@ -7,14 +7,13 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use common::{config, epoch, raw, TestService};
 use discus_placement::{ClusterId, EpochId, NodeId};
 use discus_transport::testing::TestCa;
 use discus_transport::{
     frame, Inbound, PeerEventKind, Service, Transport, TransportError, RESET_BAD_FRAME,
 };
-use discus_wire::{decode_frame, encode_frame, Frame, Limits, Message, TraceContext};
+use discus_wire::{decode_frame, encode_frame, DbKey, Frame, Limits, Message, TraceContext};
 use futures::future::BoxFuture;
 
 /// Answers `Ping` with `Pong` after `nonce` milliseconds, so replies can come back out of order.
@@ -35,13 +34,13 @@ impl Service for Delay {
                     Message::Pong { nonce }
                 }
                 Message::Fetch { keys } => {
-                    let size = std::str::from_utf8(&keys[0])
+                    let size = std::str::from_utf8(&keys[0].key)
                         .ok()
                         .and_then(|k| k.strip_prefix("size:"))
                         .and_then(|n| n.parse().ok());
                     match size {
                         Some(n) => Message::Fetch {
-                            keys: vec![Bytes::from(vec![7u8; n])],
+                            keys: vec![DbKey::new(0, vec![7u8; n])],
                         },
                         None => Message::Unsupported { message_type: 0 },
                     }
@@ -119,10 +118,10 @@ impl Pair {
     /// Ask for a reply with a key of `size` bytes and return the size that came back.
     async fn sized(&self, size: usize, write: bool) -> Result<usize, TransportError> {
         let ask = Message::Fetch {
-            keys: vec![Bytes::from(format!("size:{size}"))],
+            keys: vec![DbKey::new(0, format!("size:{size}"))],
         };
         match self.send(ask, LONG, write).await?.message {
-            Message::Fetch { keys } => Ok(keys[0].len()),
+            Message::Fetch { keys } => Ok(keys[0].key.len()),
             other => panic!("expected FETCH, got {other:?}"),
         }
     }
@@ -155,7 +154,7 @@ async fn large_requests_take_their_own_streams() {
     let big = Message::Ping { nonce: 0 };
     assert!(p.send(big, LONG, true).await.is_ok());
     let big = Message::Fetch {
-        keys: vec![Bytes::from(vec![7u8; 100_000])],
+        keys: vec![DbKey::new(0, vec![7u8; 100_000])],
     };
     // The test service does not know this message. The reply still shows which stream it took.
     let err = p.send(big, LONG, false).await.unwrap_err();

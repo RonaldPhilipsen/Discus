@@ -130,16 +130,22 @@ fn membership_of(m: Option<fb::RaftMembership<'_>>) -> Result<RaftMembership, De
 }
 
 fn entry_to<'a>(fbb: &mut FlatBufferBuilder<'a>, e: &RaftEntry) -> WIPOffset<fb::RaftEntry<'a>> {
-    let (kind, stamp_ms, command, membership) = match &e.payload {
-        RaftPayload::Blank => (fb::RaftEntryKind::BLANK, 0, None, None),
-        RaftPayload::Command { stamp_ms, command } => (
+    let (kind, stamp_ms, db, command, membership) = match &e.payload {
+        RaftPayload::Blank => (fb::RaftEntryKind::BLANK, 0, 0, None, None),
+        RaftPayload::Command {
+            stamp_ms,
+            db,
+            command,
+        } => (
             fb::RaftEntryKind::COMMAND,
             *stamp_ms,
+            *db,
             Some(fbb.create_vector(command)),
             None,
         ),
         RaftPayload::Membership(m) => (
             fb::RaftEntryKind::MEMBERSHIP,
+            0,
             0,
             None,
             Some(membership_to(fbb, m)),
@@ -153,6 +159,7 @@ fn entry_to<'a>(fbb: &mut FlatBufferBuilder<'a>, e: &RaftEntry) -> WIPOffset<fb:
             stamp_ms,
             command,
             membership,
+            db,
         },
     )
 }
@@ -166,6 +173,7 @@ fn entry_of(e: fb::RaftEntry<'_>) -> Result<RaftEntry, DecodeError> {
         fb::RaftEntryKind::BLANK => RaftPayload::Blank,
         fb::RaftEntryKind::COMMAND => RaftPayload::Command {
             stamp_ms: e.stamp_ms(),
+            db: e.db(),
             command: e
                 .command()
                 .map(|c| Bytes::copy_from_slice(c.bytes()))
@@ -251,19 +259,19 @@ pub fn decode_hints(bytes: &[u8]) -> Result<Vec<GroupHint>, DecodeError> {
     hints_of(t.groups())
 }
 
-/// The entries of a counter snapshot: key, value, and deadline (0 for none).
-pub type SnapshotEntries = Vec<(Bytes, Bytes, u64)>;
+/// The entries of a counter snapshot: database, key, value, and deadline (0 for none).
+pub type SnapshotEntries = Vec<(u32, Bytes, Bytes, u64)>;
 
-/// Encode a counter state as a snapshot: the clock and every `(key, value, deadline)`, with
-/// deadline 0 for no expiry.
+/// Encode a counter state as a snapshot: the clock and every `(database, key, value, deadline)`,
+/// with deadline 0 for no expiry.
 pub fn encode_counter_snapshot<'a>(
     clock_ms: u64,
-    entries: impl IntoIterator<Item = (&'a [u8], &'a [u8], u64)>,
+    entries: impl IntoIterator<Item = (u32, &'a [u8], &'a [u8], u64)>,
 ) -> Vec<u8> {
     let mut fbb = FlatBufferBuilder::new();
     let items: Vec<_> = entries
         .into_iter()
-        .map(|(k, v, t)| {
+        .map(|(db, k, v, t)| {
             let key = fbb.create_vector(k);
             let value = fbb.create_vector(v);
             fb::CounterEntry::create(
@@ -272,6 +280,7 @@ pub fn encode_counter_snapshot<'a>(
                     key: Some(key),
                     value: Some(value),
                     expires_at_ms: t,
+                    db,
                 },
             )
         })
@@ -307,6 +316,7 @@ pub fn decode_counter_snapshot(bytes: &[u8]) -> Result<(u64, SnapshotEntries), D
                 .ok_or_else(|| invalid("counter entry without a key"))?;
             let value = e.value().map(|v| v.bytes()).unwrap_or_default();
             Ok((
+                e.db(),
                 Bytes::copy_from_slice(key.bytes()),
                 Bytes::copy_from_slice(value),
                 e.expires_at_ms(),
@@ -407,13 +417,14 @@ pub(crate) fn encode(fbb: &mut FlatBufferBuilder<'_>, message: &Message) -> bool
             let ops: Vec<_> = s
                 .ops
                 .iter()
-                .map(|(stamp_ms, command)| {
-                    let command = fbb.create_vector(command);
+                .map(|op| {
+                    let command = fbb.create_vector(&op.command);
                     fb::CounterOp::create(
                         fbb,
                         &fb::CounterOpArgs {
-                            stamp_ms: *stamp_ms,
+                            stamp_ms: op.stamp_ms,
                             command: Some(command),
+                            db: op.db,
                         },
                     )
                 })
@@ -541,7 +552,11 @@ pub(crate) fn decode_known(
                         let command = op
                             .command()
                             .ok_or_else(|| invalid("counter op without a command"))?;
-                        Ok((op.stamp_ms(), Bytes::copy_from_slice(command.bytes())))
+                        Ok(CounterOp {
+                            stamp_ms: op.stamp_ms(),
+                            db: op.db(),
+                            command: Bytes::copy_from_slice(command.bytes()),
+                        })
                     })
                     .collect::<Result<_, DecodeError>>()?,
                 snapshot: s.has_snapshot().then(|| bytes_of(s.snapshot())),

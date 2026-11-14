@@ -50,7 +50,11 @@ async fn info_select_config_and_cluster() {
     let info = common::roundtrip(addr, b"*1\r\n$4\r\nINFO\r\n").await;
     assert!(info.contains("redis_version:7.2.0"), "{info:?}");
     assert!(info.contains("# discus"), "{info:?}");
-    assert!(info.contains("db0:keys=0"), "{info:?}");
+    assert!(info.contains("# keyspace\r\n"), "{info:?}");
+    assert!(
+        !info.contains("db0:"),
+        "an empty database is not listed: {info:?}"
+    );
     let sel = common::roundtrip(addr, b"*2\r\n$6\r\nSELECT\r\n$1\r\n1\r\n").await;
     assert!(sel.starts_with("-ERR DB index is out of range"), "{sel:?}");
     let sel0 = common::roundtrip(addr, b"*2\r\n$6\r\nSELECT\r\n$1\r\n0\r\n").await;

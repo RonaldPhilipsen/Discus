@@ -28,7 +28,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::read("HVALS", 2, hvals),
 ];
 
-fn hset(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn hset(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     if !cmd.len().is_multiple_of(2) {
         return Err(CommandError::WrongArity("HSET".into()));
     }
@@ -39,7 +39,7 @@ fn hset(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
         grow += pair[0].len() + pair[1].len();
     }
     let fields = cmd[2..].iter().step_by(2);
-    mutate(node, &cmd[1], grow, fields, |h: &mut Hash| {
+    mutate(node, conn.db, &cmd[1], grow, fields, |h: &mut Hash| {
         let before = h.len();
         for pair in cmd[2..].chunks(2) {
             h.insert(pair[0].clone(), pair[1].clone());
@@ -48,11 +48,11 @@ fn hset(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     })
 }
 
-fn hsetnx(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn hsetnx(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     check_key(node, &cmd[2])?;
     check_value(node, &cmd[3])?;
     let grow = cmd[2].len() + cmd[3].len();
-    mutate(node, &cmd[1], grow, [&cmd[2]], |h: &mut Hash| {
+    mutate(node, conn.db, &cmd[1], grow, [&cmd[2]], |h: &mut Hash| {
         if h.contains_key(&cmd[2]) {
             return Ok(Value::Integer(0));
         }
@@ -61,15 +61,15 @@ fn hsetnx(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     })
 }
 
-fn hget(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    view(node, &cmd[1], |h: Option<&Hash>| {
+fn hget(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    view(node, conn.db, &cmd[1], |h: Option<&Hash>| {
         h.and_then(|h| h.get(&cmd[2]))
             .map_or(Value::Null, |v| Value::Bulk(v.clone()))
     })
 }
 
-fn hmget(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    view(node, &cmd[1], |h: Option<&Hash>| {
+fn hmget(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    view(node, conn.db, &cmd[1], |h: Option<&Hash>| {
         Value::Array(
             cmd[2..]
                 .iter()
@@ -82,8 +82,8 @@ fn hmget(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     })
 }
 
-fn hgetall(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    view(node, &cmd[1], |h: Option<&Hash>| {
+fn hgetall(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    view(node, conn.db, &cmd[1], |h: Option<&Hash>| {
         Value::Map(
             h.into_iter()
                 .flatten()
@@ -93,31 +93,32 @@ fn hgetall(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     })
 }
 
-fn hdel(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    mutate(node, &cmd[1], 0, [], |h: &mut Hash| {
+fn hdel(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    mutate(node, conn.db, &cmd[1], 0, [], |h: &mut Hash| {
         Ok(Value::Integer(
             cmd[2..].iter().filter(|f| h.remove(*f).is_some()).count() as i64,
         ))
     })
 }
 
-fn hexists(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    view(node, &cmd[1], |h: Option<&Hash>| {
+fn hexists(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    view(node, conn.db, &cmd[1], |h: Option<&Hash>| {
         Value::Integer(h.is_some_and(|h| h.contains_key(&cmd[2])) as i64)
     })
 }
 
-fn hlen(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    view(node, &cmd[1], |h: Option<&Hash>| {
+fn hlen(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    view(node, conn.db, &cmd[1], |h: Option<&Hash>| {
         Value::Integer(h.map_or(0, |h| h.len()) as i64)
     })
 }
 
-fn hincrby(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn hincrby(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     check_key(node, &cmd[2])?;
     let delta = parse_i64(&cmd[3])?;
     mutate(
         node,
+        conn.db,
         &cmd[1],
         cmd[2].len() + 20,
         [&cmd[2]],
@@ -134,8 +135,8 @@ fn hincrby(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     )
 }
 
-fn hkeys(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    view(node, &cmd[1], |h: Option<&Hash>| {
+fn hkeys(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    view(node, conn.db, &cmd[1], |h: Option<&Hash>| {
         Value::Array(
             h.into_iter()
                 .flatten()
@@ -145,8 +146,8 @@ fn hkeys(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     })
 }
 
-fn hvals(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    view(node, &cmd[1], |h: Option<&Hash>| {
+fn hvals(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    view(node, conn.db, &cmd[1], |h: Option<&Hash>| {
         Value::Array(
             h.into_iter()
                 .flatten()

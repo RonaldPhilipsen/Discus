@@ -11,7 +11,7 @@ use discus::settings::{Live, Reloadable};
 use discus::Node;
 use discus_placement::mock::MockClock;
 use discus_resp::Value;
-use discus_store::{Version, NTP64};
+use discus_store::{DbKey, Version, NTP64};
 
 const START: u64 = 1_700_000_000_000;
 
@@ -40,12 +40,12 @@ fn run(node: &Node, args: &[&str]) -> Value {
         .iter()
         .map(|a| Bytes::copy_from_slice(a.as_bytes()))
         .collect();
-    execute_local(node, check(lookup(&cmd[0]), &cmd).unwrap(), &cmd)
+    execute_local(node, check(lookup(&cmd[0]), &cmd).unwrap(), 0, &cmd)
 }
 
 fn version(node: &Node, key: &str) -> Version {
     node.store
-        .read(key.as_bytes(), |e| e.map(|e| e.version))
+        .read(0, key.as_bytes(), |e| e.map(|e| e.version))
         .unwrap()
 }
 
@@ -150,14 +150,14 @@ fn a_replicated_batch_drops_only_the_entries_too_far_ahead() {
         ..discus_store::Entry::new(discus_store::Value::Str(Bytes::from_static(b"v")), None)
     };
     let entries = vec![
-        (Bytes::from_static(b"near"), entry(START + 10)),
-        (Bytes::from_static(b"far"), entry(START + 5_000)),
-        (Bytes::from_static(b"old"), entry(START - 10)),
+        (DbKey::new(0, &b"near"[..]), entry(START + 10)),
+        (DbKey::new(0, &b"far"[..]), entry(START + 5_000)),
+        (DbKey::new(0, &b"old"[..]), entry(START - 10)),
     ];
     assert_eq!(replicator.apply_entries(&node, entries), 2);
-    assert!(node.store.entry(b"near").is_some());
-    assert!(node.store.entry(b"old").is_some());
-    assert!(node.store.entry(b"far").is_none());
+    assert!(node.store.entry(0, b"near").is_some());
+    assert!(node.store.entry(0, b"old").is_some());
+    assert!(node.store.entry(0, b"far").is_none());
     run(&node, &["SET", "k", "v"]);
     let stamped = version(&node, "k").time();
     assert!(stamped > ms(START + 10) && stamped < ms(START + 1_000));

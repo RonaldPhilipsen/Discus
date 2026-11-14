@@ -15,7 +15,7 @@ fn sweep_removes_a_share_of_expired_entries_without_touching_live_ones() {
     for i in 0..400 {
         let key = format!("k{i}");
         let expires = if i % 2 == 0 { Some(10) } else { None };
-        s.write(key.as_bytes(), Version::zero(), |slot| {
+        s.write(0, key.as_bytes(), Version::zero(), |slot| {
             slot.set(Some(Entry::new(Value::Str("v".into()), expires)));
         });
     }
@@ -24,7 +24,7 @@ fn sweep_removes_a_share_of_expired_entries_without_touching_live_ones() {
     assert!(removed > 0 && removed <= 200);
     assert_eq!(s.len(), 400 - removed);
     for i in (1..400).step_by(2) {
-        assert!(s.read(format!("k{i}").as_bytes(), |e| e.is_some()));
+        assert!(s.read(0, format!("k{i}").as_bytes(), |e| e.is_some()));
     }
 }
 
@@ -38,7 +38,7 @@ fn repeated_sweeps_eventually_cover_every_expired_entry() {
     };
     let s = Store::new(cfg, clock.clone());
     for i in 0..300 {
-        s.write(format!("k{i}").as_bytes(), Version::zero(), |slot| {
+        s.write(0, format!("k{i}").as_bytes(), Version::zero(), |slot| {
             slot.set(Some(Entry::new(Value::Str("v".into()), Some(5))));
         });
     }

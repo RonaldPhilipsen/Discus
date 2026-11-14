@@ -127,12 +127,12 @@ async fn the_write_set_lets_go_once_replicas_catch_up() {
     let _: () = conn.set(&k, "v1").await.unwrap();
     assert!(entry.node.write_set_bytes() > 0);
     let primary = c.by_id(c.nodes[0].primary(k.as_bytes()));
-    let want = primary.node.store.version(k.as_bytes());
+    let want = primary.node.store.version(0, k.as_bytes());
     assert!(
         wait_until(Duration::from_secs(3), || c
             .nodes
             .iter()
-            .filter(|n| n.node.store.version(k.as_bytes()) == want)
+            .filter(|n| n.node.store.version(0, k.as_bytes()) == want)
             .count()
             == 3)
         .await
@@ -142,7 +142,7 @@ async fn the_write_set_lets_go_once_replicas_catch_up() {
             .node
             .replicator()
             .unwrap()
-            .settled(k.as_bytes()))
+            .settled(0, k.as_bytes()))
         .await
     );
     let v: String = conn.get(&k).await.unwrap();

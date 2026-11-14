@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use discus_placement::Version;
 use discus_store::Store;
 use hashlink::LinkedHashMap;
-use xxhash_rust::xxh3::xxh3_64;
+use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 /// The bookkeeping cost of one recorded key on top of the key bytes.
 const KEY_OVERHEAD: usize = 48;
@@ -86,7 +86,9 @@ struct Recorded {
 }
 
 /// A key as the write set tracks it: the xxh3 hash and the length of the key. The set stores no
-/// key bytes, so recording a key copies nothing. Two keys with one hash share an entry.
+/// key bytes, so recording a key copies nothing. Two keys with one hash share an entry. The
+/// database is the hash seed, so one key in two databases has two entries, and database 0 keeps
+/// the plain xxh3 hash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetKey {
     hash: u64,
@@ -94,9 +96,9 @@ pub struct SetKey {
 }
 
 impl SetKey {
-    pub fn of(key: &[u8]) -> SetKey {
+    pub fn of(db: u32, key: &[u8]) -> SetKey {
         SetKey {
-            hash: xxh3_64(key),
+            hash: xxh3_64_with_seed(key, u64::from(db)),
             len: key.len(),
         }
     }
@@ -281,7 +283,7 @@ mod tests {
     }
 
     fn k(s: &str) -> SetKey {
-        SetKey::of(s.as_bytes())
+        SetKey::of(0, s.as_bytes())
     }
 
     #[test]
@@ -348,6 +350,15 @@ mod tests {
         assert!(w.is_empty());
     }
 
+    #[test]
+    fn the_write_set_separates_databases() {
+        let (mut w, _) = set(10, 1 << 20, u64::MAX);
+        let now = Instant::now();
+        w.record(SetKey::of(1, b"k"), v(1), now);
+        assert_eq!(w.required(SetKey::of(0, b"k"), || now), None);
+        assert_eq!(w.required(SetKey::of(1, b"k"), || now), Some(v(1)));
+    }
+
     proptest::proptest! {
         #[test]
         fn the_node_budget_matches_the_recorded_keys(
@@ -360,7 +371,7 @@ mod tests {
             let mut two = WriteSet::new(limits(keys, 600), budget.clone());
             let now = Instant::now();
             for (i, (id, len, first)) in ops.into_iter().enumerate() {
-                let key = SetKey::of(&vec![id; len % 8 + id as usize % 3 + 1]);
+                let key = SetKey::of(0, &vec![id; len % 8 + id as usize % 3 + 1]);
                 let w = if first { &mut one } else { &mut two };
                 w.record(key, v(i as u64 + 1), now);
                 if len % 7 == 0 {

@@ -8,7 +8,6 @@ use discus_resp::{Command, Value};
 use super::error::CommandError;
 use crate::cluster::route::Route;
 use crate::node::{ConnState, Node};
-use crate::security::ConnAuth;
 
 /// What a command needs from the scopes of a connection (spec §14.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +32,8 @@ pub struct CommandSpec {
     pub handler: Handler,
     pub access: Access,
     pub route: Route,
+    /// The `fast` flag of `COMMAND`, as Valkey sets it.
+    pub fast: bool,
 }
 
 impl CommandSpec {
@@ -44,6 +45,7 @@ impl CommandSpec {
             handler,
             access: Access::Connection,
             route: Route::Connection,
+            fast: false,
         }
     }
 
@@ -55,6 +57,7 @@ impl CommandSpec {
             handler,
             access: Access::Read,
             route: Route::Single { write: false },
+            fast: false,
         }
     }
 
@@ -66,6 +69,7 @@ impl CommandSpec {
             handler,
             access: Access::Write,
             route: Route::Single { write: true },
+            fast: false,
         }
     }
 
@@ -75,6 +79,10 @@ impl CommandSpec {
 
     pub const fn with_route(self, route: Route) -> CommandSpec {
         CommandSpec { route, ..self }
+    }
+
+    pub const fn with_fast(self) -> CommandSpec {
+        CommandSpec { fast: true, ..self }
     }
 }
 
@@ -159,8 +167,8 @@ pub fn is_unsupported(upper: &str) -> bool {
 
 /// Run a checked data command on this node with no authorization check. The entry node checked
 /// it, or the command arrived over mTLS from another node.
-pub fn execute_local(node: &Node, spec: &CommandSpec, cmd: &Command) -> Value {
-    let mut internal = ConnState::new(0, ConnAuth::default());
+pub fn execute_local(node: &Node, spec: &CommandSpec, db: u32, cmd: &Command) -> Value {
+    let mut internal = ConnState::internal(db);
     (spec.handler)(node, &mut internal, cmd).unwrap_or_else(|e| e.to_value())
 }
 

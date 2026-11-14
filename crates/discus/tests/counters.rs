@@ -187,3 +187,15 @@ async fn every_entry_node_reaches_the_leader() {
         assert_eq!(n, i as i64 + 1);
     }
 }
+
+#[tokio::test]
+async fn move_and_copy_on_a_counter_key_are_refused() {
+    let net = common::gossip::Net::new();
+    let nodes = net.start_agreed(1, &["--databases", "2"]).await;
+    let a = &nodes[0].node;
+    let refused =
+        discus_resp::Value::error("ERR counter keys accept only string and expiry commands");
+    for args in [&["MOVE", "cnt:x", "1"], &["COPY", "cnt:x", "cnt:y"]] {
+        assert_eq!(common::run_in(a, 0, args).await, refused, "{args:?}");
+    }
+}

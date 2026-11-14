@@ -115,3 +115,19 @@ pub async fn wait_status(admin: SocketAddr, path: &str, want: u16, timeout: Dura
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+/// Run `args` on `node` in database `db`, as a command that passed the entry checks. Tests use
+/// it for databases above 0 while `SELECT` keeps them closed to clients.
+pub async fn run_in(
+    node: &std::sync::Arc<discus::Node>,
+    db: u32,
+    args: &[&str],
+) -> discus_resp::Value {
+    let cmd = cmd(args);
+    let spec = discus::command::check(discus::command::lookup(&cmd[0]), &cmd).unwrap();
+    let job = discus::cluster::Job::plain(cmd, spec, db);
+    discus::cluster::run(node, job, None, tracing::Span::none())
+        .finish()
+        .await
+        .value
+}

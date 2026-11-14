@@ -19,13 +19,13 @@ fn reserve_evicts_oldest_first_and_stays_under_budget() {
     for i in 0..8u64 {
         // Each write stamps the access time with the clock, so k0 is oldest and k7 is newest.
         clock.advance(1);
-        s.write(format!("k{i}").as_bytes(), Version::zero(), |slot| {
+        s.write(0, format!("k{i}").as_bytes(), Version::zero(), |slot| {
             slot.set(Some(entry(1_000)))
         });
     }
     assert_eq!(s.reserve(3_000), Admit::Ok);
     assert!(s.used_memory() + 3_000 <= 10_000);
-    assert!(s.read(b"k7", |e| e.is_some()));
+    assert!(s.read(0, b"k7", |e| e.is_some()));
     assert!(s.evictions() >= 2);
 }
 
@@ -38,9 +38,11 @@ fn a_value_larger_than_maxmemory_is_rejected_not_evicted_for() {
         ..StoreConfig::default()
     };
     let s = Store::new(cfg, clock.clone());
-    s.write(b"keep", Version::zero(), |slot| slot.set(Some(entry(100))));
+    s.write(0, b"keep", Version::zero(), |slot| {
+        slot.set(Some(entry(100)))
+    });
     assert_eq!(s.reserve(20_000), Admit::TooLarge);
-    assert!(s.read(b"keep", |e| e.is_some()));
+    assert!(s.read(0, b"keep", |e| e.is_some()));
     assert_eq!(s.evictions(), 0);
 }
 

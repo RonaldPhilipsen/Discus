@@ -19,6 +19,8 @@ pub enum Route {
     MultiWrite { pairs: bool },
     /// `RENAME`: a source at argument 1 and a destination at argument 2.
     Rename,
+    /// `COPY`: a source at argument 1 and a destination at argument 2, maybe in another database.
+    Copy,
     /// `SCAN` and `RANDOMKEY`: the entry node only.
     Local,
     /// `DBSIZE`: a sum over every member.
@@ -35,7 +37,7 @@ impl Route {
             Route::Single { .. } => (1, 1, 1),
             Route::MultiRead { .. } | Route::MultiWrite { pairs: false } => (1, -1, 1),
             Route::MultiWrite { pairs: true } => (1, -1, 2),
-            Route::Rename => (1, 2, 1),
+            Route::Rename | Route::Copy => (1, 2, 1),
             Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => (0, 0, 0),
         }
     }

@@ -35,13 +35,15 @@ impl Keys {
             Route::Connection => Keys::None,
             Route::Local | Route::Fanout | Route::Broadcast => Keys::Barrier,
             Route::Single { .. } => Keys::One(xxh3_64(&cmd[1])),
-            Route::MultiRead { .. } | Route::MultiWrite { .. } | Route::Rename => Keys::Many(
-                key_args(route, cmd)
-                    .into_iter()
-                    .flatten()
-                    .map(|k| xxh3_64(k))
-                    .collect(),
-            ),
+            Route::MultiRead { .. } | Route::MultiWrite { .. } | Route::Rename | Route::Copy => {
+                Keys::Many(
+                    key_args(route, cmd)
+                        .into_iter()
+                        .flatten()
+                        .map(|k| xxh3_64(k))
+                        .collect(),
+                )
+            }
         }
     }
 }

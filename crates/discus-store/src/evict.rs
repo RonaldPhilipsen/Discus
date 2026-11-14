@@ -44,7 +44,8 @@ impl Store {
         Admit::Ok
     }
 
-    /// Evict the oldest of a small sample of live entries from the next shard that has one.
+    /// Evict the oldest of a small sample of live entries, of any database, from the next shard
+    /// that has one.
     /// Tombstones are never sampled. Returns false when the store holds no live entry.
     pub fn evict_one(&self) -> bool {
         let n = self.shards.len();
@@ -52,23 +53,22 @@ impl Store {
         for offset in 0..n {
             let shard = &self.shards[(first + offset) % n];
             let mut guard = shard.inner.write();
-            let len = guard.map.len();
-            if len == guard.tombs.len() {
+            let len = guard.map_len();
+            if len == guard.tomb_len() {
                 continue;
             }
             let start = shard.cursor.fetch_add(EVICTION_SAMPLES, Ordering::Relaxed) % len;
-            let victim: Option<Bytes> = guard
-                .map
-                .iter()
+            let victim: Option<(u32, Bytes)> = guard
+                .entries()
                 .skip(start)
-                .chain(guard.map.iter())
+                .chain(guard.entries())
                 .take(len)
-                .filter(|(_, e)| !e.tombstone)
+                .filter(|(_, _, e)| !e.tombstone)
                 .take(EVICTION_SAMPLES)
-                .min_by_key(|(_, e)| e.last_access_ms)
-                .map(|(k, _)| k.clone());
-            if let Some(k) = victim {
-                if self.take(&mut guard, &k).is_some() {
+                .min_by_key(|(_, _, e)| e.last_access_ms)
+                .map(|(db, k, _)| (db, k.clone()));
+            if let Some((db, k)) = victim {
+                if self.take(&mut guard, db, &k).is_some() {
                     self.evicted.fetch_add(1, Ordering::Relaxed);
                     return true;
                 }

@@ -7,9 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::counters::{
-    all_hold, all_raft, dump, flags, group_of, incr_once, incr_or_show, incr_until, is_refused,
-    is_try_again, join_to, key_in, leader_of, purge_reaches_every_replica, raft_cluster, role,
-    start, status, targeted, targets, voters_of, Leases, GROUPS, RAFT, SLOW_DEATH,
+    all_hold, all_raft, dump, flags, group_of, held_in, incr_once, incr_or_show, incr_until,
+    is_refused, is_try_again, join_to, key_in, leader_of, purge_reaches_every_replica,
+    raft_cluster, role, start, status, targeted, targets, voters_of, Leases, GROUPS, RAFT,
+    SLOW_DEATH,
 };
 use common::gossip::{heal, partition, refs, wait_agreed, wait_until, GossipNode, Net};
 use discus::counter::group_key;
@@ -468,4 +469,35 @@ async fn a_purge_removes_expired_keys_from_every_voter() {
     let (net, leases) = (Net::new(), Leases::new());
     let nodes = raft_cluster(&net, &leases, 3, &[]).await;
     purge_reaches_every_replica(&refs(&nodes)).await;
+}
+
+/// A connection to `n` that selects database `db` in its URL.
+async fn in_database(n: &GossipNode, db: u32) -> redis::aio::MultiplexedConnection {
+    let client = common::client_tls::redis_client(&format!("rediss://{}/{db}", n.addr));
+    client.get_multiplexed_async_connection().await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn counter_keys_in_two_databases() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let nodes = raft_cluster(&net, &leases, 3, &["--databases", "3"]).await;
+    let mut zero = in_database(&nodes[0], 0).await;
+    let mut one = in_database(&nodes[0], 1).await;
+    assert_eq!(incr_once(&mut zero, "cnt:a").await, 1);
+    assert_eq!(incr_once(&mut zero, "cnt:a").await, 2);
+    assert_eq!(incr_once(&mut one, "cnt:a").await, 1);
+    for (db, want) in [(0, "2"), (1, "1")] {
+        let held = wait_until(Duration::from_secs(10), || {
+            nodes
+                .iter()
+                .all(|n| held_in(n, db, "cnt:a").as_deref() == Some(want))
+        })
+        .await;
+        assert!(held, "a node does not hold {want} in database {db}");
+        for n in &nodes {
+            let mut c = in_database(n, db).await;
+            let got: String = c.get("cnt:a").await.unwrap();
+            assert_eq!(got, want, "database {db}");
+        }
+    }
 }

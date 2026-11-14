@@ -1147,6 +1147,7 @@ dependencies = [
  "fastrand",
  "hashbrown 0.17.1",
  "parking_lot 0.13.0",
+ "smallvec",
  "tokio",
  "tokio-util",
  "xxhash-rust",

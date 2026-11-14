@@ -32,6 +32,8 @@ table MemberInfo {
   rpc_addr: string (id: 10);
   client_addr: string (id: 11);
   client_host: string (id: 12);
+  /// The number of databases that the member serves. A member from an older build serves one.
+  databases: uint = 1 (id: 13);
 }
 
 /// One member update with its liveness. A suspect rumor names the accuser.

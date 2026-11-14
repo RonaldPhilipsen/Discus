@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use discus_placement::{ClusterId, Epoch, EpochId, Member, MemberState, NodeId};
-use discus_wire::{Capacity, Gossip, GossipKind, Liveness, MemberInfo, Rumor};
+use discus_wire::{caps, Capacity, Gossip, GossipKind, Liveness, MemberInfo, Rumor};
 
 use crate::health::LocalHealth;
 use crate::lease::{LeaseError, LeaseState};
@@ -39,6 +39,23 @@ const EPOCH_FALLBACK_PERIODS: Millis = 3;
 
 /// Members that receive the final `LEAVE`.
 const LEAVE_FANOUT: usize = 3;
+
+/// A joiner without `MULTI_DB` asks again after this long, while the cluster serves more than one
+/// database.
+const MULTI_DB_RETRY_MS: u32 = 5_000;
+
+/// A lower cluster database count must hold this long before the node serves it. The drop that
+/// follows deletes data, so a count that dips for a moment, such as a member that joins with
+/// fewer databases and leaves again, must not cause it.
+pub const DATABASES_DWELL_MS: Millis = 10_000;
+
+/// A lower database count that waits for [`DATABASES_DWELL_MS`].
+#[derive(Debug, Clone, Copy)]
+struct Lowering {
+    since: Millis,
+    /// The highest count seen since `since`: the count to serve when the dwell ends.
+    count: u32,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Action {
@@ -139,6 +156,14 @@ pub struct Swim {
     evidence_dropped: u64,
     /// Whether the multiplier was at or above the evidence cutoff at the last change.
     shedding: bool,
+    /// The database count that this node serves, from [`Swim::served_databases`]. It starts at
+    /// 1, not at the own count: a higher count applies at once, so the first known view raises
+    /// it, and the dwell then only keeps a count that the cluster really served. Starting at the
+    /// own count would serve databases for the dwell that the cluster then deletes.
+    served: u32,
+    /// A view has known the count of every member at least once, so `served` is a real count.
+    known: bool,
+    lowering: Option<Lowering>,
 }
 
 impl Swim {
@@ -177,6 +202,9 @@ impl Swim {
             last_epoch: None,
             limiter: JoinLimiter::default(),
             detector_n: 1,
+            served: 1,
+            known: false,
+            lowering: None,
         }
     }
 
@@ -275,6 +303,72 @@ impl Swim {
     /// Capacity hints travel in the sender part of every message, without a new incarnation.
     pub fn set_capacity(&mut self, capacity: Capacity) {
         self.me.capacity = capacity;
+    }
+
+    /// Keep the larger of the own database count and `n`. A larger count spreads with a new
+    /// incarnation.
+    pub fn set_databases(&mut self, n: u32) {
+        if n > self.me.databases {
+            self.me.databases = n;
+            self.bump();
+        }
+    }
+
+    /// The smallest database count of the `NORMAL` members of `epoch`, at least 1. `None` while
+    /// a member of `epoch` has no record or no member is `NORMAL`: the count is unknown then,
+    /// and a guess could delete databases that clients still reach.
+    pub fn cluster_databases(&self, epoch: &Epoch) -> Option<u32> {
+        let mut lowest: Option<u32> = None;
+        for m in epoch.members() {
+            let databases = if m.id == self.me.id {
+                self.me.databases
+            } else {
+                self.members.get(&m.id)?.info.databases
+            };
+            if m.state == MemberState::Normal {
+                lowest = Some(lowest.map_or(databases, |l| l.min(databases)));
+            }
+        }
+        lowest.map(|n| n.max(1))
+    }
+
+    /// The database count that this node serves at `now`, from the view of `epoch`. A higher
+    /// count applies at once. A lower one applies once the counts seen stayed below the served
+    /// count for [`DATABASES_DWELL_MS`]. An unknown count keeps the served count and restarts the
+    /// dwell. `None` until a view first knows the count of every member. Call it on every tick.
+    pub fn served_databases(&mut self, now: Millis, epoch: &Epoch) -> Option<u32> {
+        match self.cluster_databases(epoch) {
+            None => self.lowering = None,
+            Some(n) if n >= self.served => {
+                self.known = true;
+                self.served = n;
+                self.lowering = None;
+            }
+            Some(n) => {
+                let lowering = self.lowering.get_or_insert(Lowering {
+                    since: now,
+                    count: n,
+                });
+                lowering.count = lowering.count.max(n);
+                if now.saturating_sub(lowering.since) >= DATABASES_DWELL_MS {
+                    self.served = lowering.count;
+                    self.lowering = None;
+                }
+            }
+        }
+        self.known.then_some(self.served)
+    }
+
+    /// Every member of `epoch` advertises `MULTI_DB`. A member without a record does not.
+    pub fn all_multi_db(&self, epoch: &Epoch) -> bool {
+        epoch.members().iter().all(|m| {
+            let capabilities = if m.id == self.me.id {
+                Some(self.me.capabilities)
+            } else {
+                self.members.get(&m.id).map(|r| r.info.capabilities)
+            };
+            capabilities.is_some_and(|c| c & caps::MULTI_DB != 0)
+        })
     }
 
     fn bump(&mut self) {
@@ -1177,6 +1271,21 @@ impl Swim {
             return;
         }
         self.absorb(now, &g, host);
+        if !self.cfg.lower_databases {
+            let cluster = std::iter::once(&g.from)
+                .chain(
+                    g.rumors
+                        .iter()
+                        .filter(|r| r.liveness != Liveness::Dead)
+                        .map(|r| &r.info),
+                )
+                .filter(|info| info.id != self.me.id && info.state == MemberState::Normal)
+                .map(|info| info.databases)
+                .min();
+            if let Some(n) = cluster {
+                self.me.databases = self.me.databases.max(n);
+            }
+        }
         self.set_state(now, MemberState::Normal, Phase::Member);
     }
 
@@ -1291,6 +1400,17 @@ impl Swim {
         }
         if msg.cluster_id != ClusterId::NIL && msg.cluster_id != self.cluster_id {
             return self.bare(GossipKind::JoinReply, host);
+        }
+        let multi = self.served > 1 || self.cluster_databases(&host.epoch()).is_some_and(|n| n > 1);
+        if msg.from.capabilities & caps::MULTI_DB == 0 && multi {
+            tracing::warn!(
+                joiner = %msg.from.id,
+                addr = %src,
+                "refused a joiner without multiple databases: the cluster serves more than one"
+            );
+            let mut g = self.bare(GossipKind::JoinReply, host);
+            g.retry_after_ms = MULTI_DB_RETRY_MS;
+            return g;
         }
         if let Err(wait) = self.limiter.admit(src.ip(), now) {
             let mut g = self.bare(GossipKind::JoinReply, host);

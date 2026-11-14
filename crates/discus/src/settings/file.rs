@@ -37,6 +37,15 @@ const fn boolean(section: &'static str, key: &'static str, flag: &'static str) -
     }
 }
 
+const fn top_level_integer(key: &'static str, flag: &'static str) -> Key {
+    Key {
+        section: None,
+        key,
+        flag,
+        kind: Kind::Integer,
+    }
+}
+
 pub const KEYS: &[Key] = &[
     integer("budget", "forward-read-ms", "forward_read_timeout_ms"),
     integer("budget", "forward-write-ms", "forward_write_timeout_ms"),
@@ -56,6 +65,7 @@ pub const KEYS: &[Key] = &[
     ),
     integer("auth", "failure-window-secs", "auth_failure_window_secs"),
     integer("tls", "reload-secs", "tls_reload_secs"),
+    top_level_integer("databases", "databases"),
 ];
 
 #[derive(Debug)]
@@ -200,6 +210,12 @@ mod tests {
     }
 
     #[test]
+    fn databases_is_a_top_level_key() {
+        let settings = parse_text("version = 1\ndatabases = 3").unwrap();
+        assert_eq!(settings.values["databases"], toml::Value::Integer(3));
+    }
+
+    #[test]
     fn the_key_table_matches_the_spec() {
         let expected = [
             (Some("budget"), "forward-read-ms"),
@@ -212,8 +228,9 @@ mod tests {
             (Some("auth"), "max-failures-per-source"),
             (Some("auth"), "failure-window-secs"),
             (Some("tls"), "reload-secs"),
+            (None, "databases"),
         ];
-        assert_eq!(KEYS.len(), 10);
+        assert_eq!(KEYS.len(), 11);
         for (key, (section, name)) in KEYS.iter().zip(expected) {
             assert_eq!((key.section, key.key), (section, name));
         }

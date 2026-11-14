@@ -455,6 +455,12 @@ impl Counters {
             every.tick().await;
             while s.run_until_cancelled(every.tick()).await.is_some() {
                 me.purge().await;
+                // Before the view is known, the cluster count is a guess of 1, and a drop from
+                // it would delete counters that clients still reach.
+                if let Some(node) = me.node().filter(|n| n.databases.view_known()) {
+                    me.drop_databases_from(&node, node.databases.cluster())
+                        .await;
+                }
             }
         });
         let Some(membership) = self.node().and_then(|n| n.membership().cloned()) else {
@@ -585,8 +591,15 @@ impl Counters {
         self.group(g).leader(node.id, &epoch)
     }
 
-    /// Execute a counter command on this node, which believes it leads group `g`.
-    pub async fn execute(&self, g: u16, kind: Kind, cmd: &Command) -> Result<Value, Refusal> {
+    /// Execute a counter command in database `db` on this node, which believes it leads group
+    /// `g`.
+    pub async fn execute(
+        &self,
+        g: u16,
+        db: u32,
+        kind: Kind,
+        cmd: &Command,
+    ) -> Result<Value, Refusal> {
         if !kind.is_read() && !kind.is_shrinking() && self.budget.full() {
             return Ok(Value::error(
                 "OOM command not allowed when the counter reserve is full",
@@ -597,6 +610,7 @@ impl Counters {
             Role::Leader(l) => {
                 l.execute(
                     kind,
+                    db,
                     cmd,
                     now_ms,
                     &self.settings.limits,
@@ -604,7 +618,10 @@ impl Counters {
                 )
                 .await
             }
-            Role::Raft(r) if r.leads() => r.execute(kind, cmd, now_ms, self.settings.timeout).await,
+            Role::Raft(r) if r.leads() => {
+                r.execute(kind, db, cmd, now_ms, self.settings.timeout)
+                    .await
+            }
             Role::Idle | Role::Follower(_) | Role::Raft(_) => Err(Refusal::NotLeader),
         }
     }
@@ -619,8 +636,37 @@ impl Counters {
                 continue;
             }
             let g = g as u16;
-            if let Err(refusal) = self.execute(g, Kind::Purge, &purge).await {
+            if let Err(refusal) = self.execute(g, 0, Kind::Purge, &purge).await {
                 tracing::debug!(group = g, ?refusal, "the purge did not apply");
+            }
+        }
+    }
+
+    /// Remove the counters of every database from `count` up in each group that `node` leads:
+    /// one `DISCUS.FLUSHDB` log entry for each such database, so the followers drop them too. A
+    /// group led elsewhere drops them on its own leader. A drop can fail or miss a group whose
+    /// leader moves, so the purge tick calls this again with the cluster count, and a later
+    /// leader finishes the drop. The tick never uses the local count: a joiner can hold fewer
+    /// databases than the cluster serves, and clients still reach the ones below the cluster
+    /// count.
+    pub async fn drop_databases_from(self: &Arc<Self>, node: &Arc<Node>, count: u32) {
+        let flush: Command = vec![bytes::Bytes::from_static(state::FLUSH_ONE_DB)];
+        for group in &self.groups {
+            if self.leader(group.g) != Some(node.id) {
+                continue;
+            }
+            for db in group.role().led_databases() {
+                if db < count {
+                    continue;
+                }
+                if let Err(refusal) = self.execute(group.g, db, Kind::FlushOneDb, &flush).await {
+                    tracing::warn!(
+                        group = group.g,
+                        db,
+                        ?refusal,
+                        "the counters of a dropped database stay until the next try"
+                    );
+                }
             }
         }
     }

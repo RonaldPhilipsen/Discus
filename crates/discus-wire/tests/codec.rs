@@ -10,6 +10,7 @@ use discus_placement::{
     ClusterId, Epoch, EpochId, Member, MemberState, NodeId, Version, Weight, NTP64,
 };
 use discus_resp::Value;
+use discus_store::DbKey;
 use discus_wire::fb;
 use discus_wire::{
     decode_frame, encode_envelope, encode_frame, DecodeError, Forward, ForwardMode, ForwardReply,
@@ -100,6 +101,7 @@ fn every_message_round_trips() {
             path: vec![id(1), id(2)],
             mode: ForwardMode::Route,
             track: false,
+            db: 0,
         }),
         Message::Forward(Forward {
             command: Bytes::from_static(b"*1\r\n$6\r\nDBSIZE\r\n"),
@@ -109,6 +111,7 @@ fn every_message_round_trips() {
             path: vec![],
             mode: ForwardMode::Local,
             track: false,
+            db: 0,
         }),
         Message::ForwardReply(ForwardReply {
             value: all_kinds(),
@@ -226,6 +229,7 @@ fn a_frame_over_the_size_limit_fails() {
             path: vec![],
             mode: ForwardMode::Route,
             track: false,
+            db: 0,
         }),
     };
     let small = Limits { max_frame: 1000 };
@@ -334,7 +338,7 @@ fn a_reused_builder_gives_the_same_bytes() {
         trace: TraceContext::default(),
         message: Message::Fetch {
             keys: (0..2_000u32)
-                .map(|i| Bytes::from(format!("a long key name {i:>40}")))
+                .map(|i| DbKey::new(0, format!("a long key name {i:>40}")))
                 .collect(),
         },
     };
@@ -365,6 +369,80 @@ fn an_epoch_round_trips_client_addresses() {
         path: vec![],
         mode: ForwardMode::Route,
         track: false,
+        db: 0,
     });
     assert_eq!(round_trip(m.clone()), m);
+}
+
+fn forward(db: u32) -> Forward {
+    Forward {
+        command: Bytes::from_static(b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\n"),
+        epoch: epoch_id(2, 1),
+        epoch_body: None,
+        hops: 1,
+        path: vec![id(1)],
+        mode: ForwardMode::Route,
+        track: false,
+        db,
+    }
+}
+
+fn forward_payload(frame: &[u8]) -> Vec<u8> {
+    let env = flatbuffers::root::<fb::Envelope>(frame).unwrap();
+    env.payload().unwrap().bytes().to_vec()
+}
+
+#[test]
+fn a_database_zero_forward_has_no_db_field() {
+    let frame = encode_frame(&Frame {
+        request_id: 1,
+        trace: TraceContext::default(),
+        message: Message::Forward(forward(0)),
+    });
+    let payload = forward_payload(&frame);
+    let f = flatbuffers::root::<fb::Forward>(&payload).unwrap();
+    // SAFETY: the verifier checked the table, and slot VT_DB holds a u32 when present.
+    let raw = unsafe { f._tab.get::<u32>(fb::Forward::VT_DB, None) };
+    assert_eq!(raw, None);
+}
+
+#[test]
+fn a_forward_without_db_decodes_to_database_zero() {
+    let f = forward(0);
+    let mut fbb = flatbuffers::FlatBufferBuilder::new();
+    let command = fbb.create_vector(&f.command);
+    let path = fbb.create_vector(&[fb::Id128::new(&f.path[0].to_be_bytes())]);
+    let start = fbb.start_table();
+    fbb.push_slot_always(fb::Forward::VT_COMMAND, command);
+    fbb.push_slot_always(
+        fb::Forward::VT_EPOCH,
+        fb::EpochId::new(
+            f.epoch.generation,
+            &fb::Id128::new(&f.epoch.origin.to_be_bytes()),
+        ),
+    );
+    fbb.push_slot::<u8>(fb::Forward::VT_HOPS, f.hops, 0);
+    fbb.push_slot_always(fb::Forward::VT_PATH, path);
+    let table = fbb.end_table(start);
+    fbb.finish_minimal(table);
+    let bytes = encode_envelope(
+        fb::MessageType::FORWARD.0,
+        3,
+        &TraceContext::default(),
+        fbb.finished_data(),
+    );
+    let decoded = decode_frame(&bytes, &limits()).unwrap();
+    assert_eq!(decoded.message, Message::Forward(f));
+}
+
+#[test]
+fn forward_round_trips_its_database() {
+    let m = Message::Forward(forward(2));
+    assert_eq!(round_trip(m.clone()), m);
+}
+
+#[test]
+fn known_capabilities_include_multi_db() {
+    assert_eq!(discus_wire::caps::MULTI_DB, 128);
+    assert_ne!(discus_wire::caps::KNOWN & discus_wire::caps::MULTI_DB, 0);
 }

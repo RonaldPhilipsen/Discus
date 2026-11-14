@@ -25,28 +25,28 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::read("SRANDMEMBER", -2, srandmember),
 ];
 
-fn sadd(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn sadd(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     for m in &cmd[2..] {
         check_value(node, m)?;
     }
     let grow = cmd[2..].iter().map(|m| m.len()).sum();
-    mutate(node, &cmd[1], grow, &cmd[2..], |s: &mut Set| {
+    mutate(node, conn.db, &cmd[1], grow, &cmd[2..], |s: &mut Set| {
         let before = s.len();
         s.extend(cmd[2..].iter().cloned());
         Ok(Value::Integer((s.len() - before) as i64))
     })
 }
 
-fn srem(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    mutate(node, &cmd[1], 0, [], |s: &mut Set| {
+fn srem(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    mutate(node, conn.db, &cmd[1], 0, [], |s: &mut Set| {
         Ok(Value::Integer(
             cmd[2..].iter().filter(|m| s.remove(*m)).count() as i64,
         ))
     })
 }
 
-fn smembers(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    view(node, &cmd[1], |s: Option<&Set>| {
+fn smembers(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    view(node, conn.db, &cmd[1], |s: Option<&Set>| {
         Value::Array(
             s.into_iter()
                 .flatten()
@@ -56,14 +56,14 @@ fn smembers(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     })
 }
 
-fn sismember(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    view(node, &cmd[1], |s: Option<&Set>| {
+fn sismember(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    view(node, conn.db, &cmd[1], |s: Option<&Set>| {
         Value::Integer(s.is_some_and(|s| s.contains(&cmd[2])) as i64)
     })
 }
 
-fn smismember(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    view(node, &cmd[1], |s: Option<&Set>| {
+fn smismember(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    view(node, conn.db, &cmd[1], |s: Option<&Set>| {
         Value::Array(
             cmd[2..]
                 .iter()
@@ -73,8 +73,8 @@ fn smismember(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     })
 }
 
-fn scard(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    view(node, &cmd[1], |s: Option<&Set>| {
+fn scard(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    view(node, conn.db, &cmd[1], |s: Option<&Set>| {
         Value::Integer(s.map_or(0, |s| s.len()) as i64)
     })
 }
@@ -98,14 +98,14 @@ fn pick_distinct(s: &Set, n: usize) -> Vec<Bytes> {
     all[..n].iter().map(|m| (*m).clone()).collect()
 }
 
-fn spop(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn spop(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     let count = parse_count(cmd)?;
     if count.is_some_and(|c| c < 0) {
         return Err(CommandError::Custom(
             "ERR value is out of range, must be positive".into(),
         ));
     }
-    mutate(node, &cmd[1], 0, [], |s: &mut Set| {
+    mutate(node, conn.db, &cmd[1], 0, [], |s: &mut Set| {
         let popped = pick_distinct(s, count.unwrap_or(1) as usize);
         for m in &popped {
             s.remove(m);
@@ -117,7 +117,7 @@ fn spop(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     })
 }
 
-fn srandmember(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn srandmember(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     let count = parse_count(cmd)?;
     // A negative count repeats members, so cap it: the reply size follows the client's number.
     if count
@@ -125,7 +125,7 @@ fn srandmember(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     {
         return Err(CommandError::Custom("ERR count is too large".into()));
     }
-    view(node, &cmd[1], |s: Option<&Set>| {
+    view(node, conn.db, &cmd[1], |s: Option<&Set>| {
         let empty = Set::new();
         let s = s.unwrap_or(&empty);
         match count {

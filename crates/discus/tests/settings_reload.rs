@@ -227,11 +227,47 @@ async fn info_shows_the_settings_file() {
     assert!(info.contains("config_restart_pending:\r\n"), "{info}");
 
     let reload =
-        |text: &str| discus::settings::reload::reload(&node.config, &node.live_settings, text);
+        |text: &str| discus::settings::reload::reload(&node.config, &node.live_settings, text, 1);
     let a = "version = 1\n[budget]\nhold-ms = 3000\n";
     let b = "version = 1\n[budget]\nhold-ms = 1500\n";
     reload(b).unwrap();
     reload(a).unwrap();
     let info = info_discus(&mut conn).await;
     assert!(info.contains("config_generation:2\r\n"), "{info}");
+}
+
+#[tokio::test]
+async fn a_running_node_raises_its_count() {
+    let net = common::gossip::Net::new();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("discus.toml");
+    write_settings(&path, "version = 1\ndatabases = 1\n");
+    let path_arg = path.to_str().unwrap().to_string();
+    let node = net
+        .start(
+            &[],
+            &["--config", path_arg.as_str(), "--config-reload-secs", "1"],
+        )
+        .await;
+    let mut conn = node.redis().await;
+    let local = || node.node.databases.local();
+    let announced = || node.node.membership().unwrap().local().databases;
+
+    write_settings(&path, "version = 1\ndatabases = 3\n");
+    let raised =
+        common::gossip::wait_until(Duration::from_secs(30), || local() == 3 && announced() == 3)
+            .await;
+    assert!(raised, "the node did not raise its count to 3 within 30 s");
+    let info = info_discus(&mut conn).await;
+    assert!(info.contains("config_restart_pending:\r\n"), "{info}");
+
+    write_settings(&path, "version = 1\ndatabases = 2\n");
+    eventually("the node did not name databases as pending", || async {
+        info_discus(&mut conn.clone())
+            .await
+            .contains("config_restart_pending:databases\r\n")
+    })
+    .await;
+    assert_eq!(local(), 3);
+    node.shutdown.cancel();
 }

@@ -14,13 +14,15 @@ use discus_resp::{Command, Value};
 use discus_wire::ForwardMode;
 use futures::future::join_all;
 
-use super::state::Kind;
+use super::state::{Kind, FLUSH_ONE_DB};
 use super::{Counters, Refusal};
 use crate::cluster::multi::{split, Merge};
 use crate::cluster::route::key_args;
 use crate::cluster::{forward, Dispatch, Hop, Job, Reply, MAX_HOPS};
-use crate::command::util::{check_key, check_mset, check_value};
+use crate::command::internal::COUNTER_FLUSH;
+use crate::command::util::{check_key, check_mset, check_value, parse_i64};
 use crate::command::{CommandError, CommandSpec};
+use crate::databases::Databases;
 use crate::Node;
 
 /// The leader refused before it applied anything. The entry node tries again.
@@ -47,8 +49,12 @@ fn is_error(v: &Value, text: &str) -> bool {
 /// Take a command with counter keys. `None` for any other command.
 pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
     let counters = node.counters()?;
+    let Some(args) = key_args(job.spec.route, &job.cmd) else {
+        return (job.spec.name == COUNTER_FLUSH.name)
+            .then(|| group_flush(node, counters, job, hop));
+    };
     let (mut keys, mut strong) = (0, 0);
-    for key in key_args(job.spec.route, &job.cmd)? {
+    for key in args {
         keys += 1;
         strong += usize::from(node.is_counter_key(key));
     }
@@ -65,16 +71,51 @@ pub fn intercept(node: &Arc<Node>, job: &Job, hop: &Hop) -> Option<Dispatch> {
         return Some(Dispatch::Ready(Reply::error(e)));
     }
     let (node, counters, cmd, hop) = (node.clone(), counters.clone(), job.cmd.clone(), hop.clone());
-    let route = job.spec.route;
+    let (route, db) = (job.spec.route, job.db);
     Some(Dispatch::Pending(Box::pin(async move {
         match Merge::of(route) {
-            Some((merge, width)) => fan_out(&node, &counters, kind, cmd, hop, merge, width).await,
+            Some((merge, width)) => {
+                fan_out(&node, &counters, db, kind, cmd, hop, merge, width).await
+            }
             None => {
                 let g = counters.group_of(&cmd[1]);
-                run(&node, &counters, g, kind, cmd, hop).await
+                run(&node, &counters, g, db, kind, cmd, hop).await
             }
         }
     })))
+}
+
+/// The flushes of a counter group. They name no key.
+fn is_group_flush(kind: Kind) -> bool {
+    matches!(kind, Kind::FlushAll | Kind::FlushOneDb)
+}
+
+/// A flush names no key, so its forward to a group leader names the group:
+/// `DISCUS.COUNTERFLUSH <group> <flush>`.
+fn group_flush_command(g: u16, cmd: &Command) -> Command {
+    let mut wrapped = Vec::with_capacity(cmd.len() + 2);
+    wrapped.push(Bytes::from_static(COUNTER_FLUSH.name.as_bytes()));
+    wrapped.push(Bytes::from(g.to_string()));
+    wrapped.extend(cmd.iter().cloned());
+    wrapped
+}
+
+/// Run `DISCUS.COUNTERFLUSH <group> <flush>` that an entry node forwarded.
+fn group_flush(node: &Arc<Node>, counters: &Arc<Counters>, job: &Job, hop: &Hop) -> Dispatch {
+    let groups = counters.settings.groups;
+    let g = parse_i64(&job.cmd[1])
+        .ok()
+        .and_then(|g| u16::try_from(g).ok())
+        .filter(|g| *g < groups);
+    let flush: Command = job.cmd[2..].to_vec();
+    let kind = Kind::of(&flush[0]).filter(|k| is_group_flush(*k));
+    let (Some(g), Some(kind)) = (g, kind) else {
+        return Dispatch::Ready(error("ERR malformed DISCUS.COUNTERFLUSH"));
+    };
+    let (node, counters, hop, db) = (node.clone(), counters.clone(), hop.clone(), job.db);
+    Dispatch::Pending(Box::pin(async move {
+        run(&node, &counters, g, db, kind, flush, hop).await
+    }))
 }
 
 fn check_sizes(node: &Node, kind: Kind, cmd: &Command) -> Result<(), CommandError> {
@@ -109,9 +150,11 @@ fn failed(parts: &[Reply]) -> Option<Reply> {
 }
 
 /// Split by group and merge like a normal multi-key command (spec section 7.3).
+#[allow(clippy::too_many_arguments)]
 async fn fan_out(
     node: &Arc<Node>,
     counters: &Arc<Counters>,
+    db: u32,
     kind: Kind,
     cmd: Command,
     hop: Hop,
@@ -122,13 +165,14 @@ async fn fan_out(
         return Reply::try_again();
     };
     if groups.len() == 1 {
-        return run(node, counters, groups[0].target, kind, cmd, hop).await;
+        return run(node, counters, groups[0].target, db, kind, cmd, hop).await;
     }
     let parts = join_all(groups.iter_mut().map(|g| {
         run(
             node,
             counters,
             g.target,
+            db,
             kind,
             mem::take(&mut g.cmd),
             hop.clone(),
@@ -145,13 +189,14 @@ async fn fan_out(
     }
 }
 
-/// Run one command of group `g` on its leader. The entry node waits up to the counter timeout
-/// for a leader and tries again after a refusal that applied nothing. A forwarded copy tries
-/// once, so the entry node keeps the only retry loop.
+/// Run one command of group `g` in database `db` on its leader. The entry node waits up to the
+/// counter timeout for a leader and tries again after a refusal that applied nothing. A
+/// forwarded copy tries once, so the entry node keeps the only retry loop.
 pub async fn run(
     node: &Arc<Node>,
     counters: &Arc<Counters>,
     g: u16,
+    db: u32,
     kind: Kind,
     cmd: Command,
     hop: Hop,
@@ -163,16 +208,34 @@ pub async fn run(
     loop {
         let changed = group.changed.notified();
         match counters.leader(g) {
-            Some(leader) if leader == node.id => match counters.execute(g, kind, &cmd).await {
+            Some(leader) if leader == node.id => match counters.execute(g, db, kind, &cmd).await {
                 Ok(v) => return Reply::value(v),
                 Err(Refusal::InDoubt) => return error(IN_DOUBT),
                 Err(Refusal::NotLeader) => {}
             },
             Some(leader) if hop.hops < MAX_HOPS && !hop.path.contains(&leader) => {
                 let timeout = Some(counters.settings.timeout + FORWARD_SLACK);
-                let sent =
-                    forward::send(node, leader, &cmd, &hop, ForwardMode::Route, true, timeout)
-                        .await;
+                // An older leader does not know `DISCUS.COUNTERFLUSH` and answers it with an
+                // error, so the group form waits for the gate. Without it, the flush goes out as
+                // before, and a leader of this build answers it without clearing anything.
+                let wrapped;
+                let sent = if is_group_flush(kind) && node.databases.multi_db() {
+                    wrapped = group_flush_command(g, &cmd);
+                    &wrapped
+                } else {
+                    &cmd
+                };
+                let sent = forward::send(
+                    node,
+                    leader,
+                    db,
+                    sent,
+                    &hop,
+                    ForwardMode::Route,
+                    true,
+                    timeout,
+                )
+                .await;
                 match sent {
                     Ok(reply) if is_error(&reply.value, NO_LEADER) => group.distrust(leader),
                     Ok(reply) => return reply,
@@ -196,10 +259,10 @@ pub async fn run(
 /// `FLUSHALL` and `FLUSHDB` on the entry node: the cache broadcast, then every counter group
 /// (spec section 12.1). A group without a leader or a quorum keeps its counters, and the reply
 /// says how many groups were cleared.
-pub fn broadcast(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> Dispatch {
+pub fn broadcast(node: &Arc<Node>, spec: &'static CommandSpec, db: u32, cmd: Command) -> Dispatch {
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
-        let cache = crate::cluster::multi::flush(&node, spec, cmd.clone())
+        let cache = crate::cluster::multi::flush(&node, spec, db, cmd.clone())
             .finish()
             .await;
         let Some(counters) = node.counters().cloned() else {
@@ -208,18 +271,16 @@ pub fn broadcast(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> 
         if matches!(cache.value, Value::Error(_)) {
             return cache;
         }
-        let flush: Command = vec![Bytes::from_static(b"FLUSHALL")];
         let groups = counters.settings.groups;
-        let parts = join_all((0..groups).map(|g| {
-            run(
-                &node,
-                &counters,
-                g,
-                Kind::FlushAll,
-                flush.clone(),
-                Hop::default(),
-            )
-        }))
+        let Some((kind, name)) = counter_flush(&node.databases, spec.name) else {
+            return error(&format!(
+                "TRYAGAIN FLUSHALL cleared the cache and 0 of {groups} counter groups"
+            ));
+        };
+        let flush: Command = vec![Bytes::from_static(name)];
+        let parts = join_all(
+            (0..groups).map(|g| run(&node, &counters, g, db, kind, flush.clone(), Hop::default())),
+        )
         .await;
         let cleared = parts
             .iter()
@@ -234,9 +295,50 @@ pub fn broadcast(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> 
     }))
 }
 
+/// The counter flush of `FLUSHALL` or `FLUSHDB`. `FLUSHDB` clears the counters of its database
+/// only, but `DISCUS.FLUSHDB` goes into a counter log only while the gate is open and the cluster
+/// serves more than one database: a replica of an older build, whose log decoder does not know
+/// it, can join a cluster with one database. There, only database 0 holds keys, so `FLUSHALL`
+/// clears the same counters. `None` for `FLUSHDB` before the view is known: the count of 1 is a
+/// guess then, and `FLUSHALL` would clear databases that clients still reach.
+fn counter_flush(dbs: &Databases, name: &str) -> Option<(Kind, &'static [u8])> {
+    if name != "FLUSHDB" {
+        Some((Kind::FlushAll, b"FLUSHALL"))
+    } else if !dbs.view_known() {
+        None
+    } else if dbs.multi_db() && dbs.cluster() > 1 {
+        Some((Kind::FlushOneDb, FLUSH_ONE_DB))
+    } else {
+        Some((Kind::FlushAll, b"FLUSHALL"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flushdb_logs_its_database_only_with_more_than_one() {
+        let one = Databases::new(1, false);
+        one.set_view(1, true);
+        assert!(one.multi_db());
+        assert_eq!(counter_flush(&one, "FLUSHDB").unwrap().1, b"FLUSHALL");
+        let three = Databases::new(3, false);
+        three.set_view(3, true);
+        assert_eq!(counter_flush(&three, "FLUSHDB").unwrap().1, FLUSH_ONE_DB);
+        assert_eq!(counter_flush(&three, "FLUSHALL").unwrap().1, b"FLUSHALL");
+        three.set_view(3, false);
+        assert_eq!(counter_flush(&three, "FLUSHDB").unwrap().1, b"FLUSHALL");
+    }
+
+    #[test]
+    fn flushdb_waits_for_a_known_view() {
+        let dbs = Databases::awaiting_view(3, false);
+        assert_eq!(counter_flush(&dbs, "FLUSHDB"), None);
+        assert_eq!(counter_flush(&dbs, "FLUSHALL").unwrap().1, b"FLUSHALL");
+        dbs.set_view(1, true);
+        assert_eq!(counter_flush(&dbs, "FLUSHDB").unwrap().1, b"FLUSHALL");
+    }
 
     fn ok() -> Reply {
         Reply::value(Value::Integer(1))

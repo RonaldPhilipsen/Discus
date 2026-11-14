@@ -268,14 +268,14 @@ async fn late_epoch_work_keeps_the_queue_of_a_peer_that_joined_later() {
     assert!(a.node.faults.epoch_work_threads.lock().is_empty());
     let key = bytes::Bytes::from_static(b"late");
     let replicator = a.node.replicator().unwrap().clone();
-    replicator.written(&a.node, &key);
-    assert!(!replicator.settled(&key));
+    replicator.written(&a.node, 0, &key);
+    assert!(!replicator.settled(0, &key));
     assert!(
         wait_until(FORM, || a.node.faults.epoch_work_threads.lock().len() == 2).await,
         "the epoch work did not run"
     );
     assert!(
-        !replicator.settled(&key),
+        !replicator.settled(0, &key),
         "the work of the first adoption dropped the queue of P"
     );
 }

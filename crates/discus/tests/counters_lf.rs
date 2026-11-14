@@ -8,14 +8,16 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use common::counters::{
-    all_hold, group_of, incr_until, leader_of, purge_reaches_every_replica, role, start, status,
-    Leases, FAST, GROUPS,
+    all_hold, group_of, held_in, incr_until, join, join_to, leader_of, purge_reaches_every_replica,
+    role, start, status, Leases, FAST, GROUPS,
 };
 use common::gossip::{refs, socket, wait_agreed, wait_until, GossipNode, Net, Opts};
+use common::run_in;
 use discus::counter::state::Kind;
 use discus::counter::Refusal;
 use discus_placement::mock::MockClock;
 use discus_placement::{Clock, SystemClock};
+use discus_resp::Value;
 use redis::AsyncCommands;
 
 /// Every group has one leader and a synced follower among `nodes`.
@@ -134,13 +136,13 @@ async fn a_leader_stops_at_the_lease_margin() {
     let early = stop.saturating_duration_since(Instant::now());
     if early > Duration::from_millis(100) {
         assert!(
-            counters.execute(g, Kind::Incr, &cmd).await.is_ok(),
+            counters.execute(g, 0, Kind::Incr, &cmd).await.is_ok(),
             "stopped before the margin"
         );
     }
     tokio::time::sleep_until((stop + Duration::from_millis(50)).into()).await;
     assert_eq!(
-        counters.execute(g, Kind::Incr, &cmd).await,
+        counters.execute(g, 0, Kind::Incr, &cmd).await,
         Err(Refusal::NotLeader)
     );
     assert!(
@@ -260,7 +262,7 @@ async fn expiry_is_identical_under_clock_skew() {
         let deadline = |n: &GossipNode| {
             let c = n.node.counters().unwrap();
             c.held_state(g)
-                .and_then(|s| s.get(key.as_bytes()).and_then(|e| e.expires_at_ms))
+                .and_then(|s| s.get(0, key.as_bytes()).and_then(|e| e.expires_at_ms))
         };
         assert!(
             wait_until(Duration::from_secs(3), || deadline(&na).is_some()
@@ -282,4 +284,337 @@ async fn a_purge_removes_expired_keys_from_leader_and_follower() {
     let (net, leases) = (Net::new(), Leases::new());
     let (nodes, _gates) = two(&net, &leases, &[]).await;
     purge_reaches_every_replica(&refs(&nodes)).await;
+}
+
+/// A counter key of group `g`.
+fn key_of_group(n: &GossipNode, g: u16) -> String {
+    (0..)
+        .map(|i| format!("cnt:flush{i}"))
+        .find(|k| group_of(n, k) == g)
+        .unwrap()
+}
+
+/// Every node holds `want` for `key` of database `db`.
+async fn all_hold_in(nodes: &[GossipNode], db: u32, key: &str, want: Option<&str>) -> bool {
+    wait_until(Duration::from_secs(10), || {
+        nodes.iter().all(|n| held_in(n, db, key).as_deref() == want)
+    })
+    .await
+}
+
+const DB2: &[&str] = &["--databases", "2"];
+
+/// Two nodes with 2 databases, a counter key of group 0 in databases 0 and 1, and the entry node
+/// that does not lead group 0. The first node forms the cluster alone with `first` and its flags
+/// of 2 databases, so it can stand in for an older build: a joiner without `MULTI_DB` is refused.
+async fn counters_in_two_databases(
+    net: &Net,
+    leases: &Leases,
+    first: &[&str],
+) -> (Vec<GossipNode>, usize, String) {
+    let flags: Vec<&str> = DB2.iter().chain(first).copied().collect();
+    let (a, _) = join(net, leases, socket().0, &[], &flags).await;
+    assert!(wait_until(Duration::from_secs(10), || a.is_normal()).await);
+    let (b, _) = join_to(net, leases, &[&a], DB2).await;
+    let nodes = vec![a, b];
+    let refs = refs(&nodes);
+    wait_agreed(&refs, Duration::from_secs(10)).await;
+    assert!(
+        wait_until(Duration::from_secs(10), || settled(&refs)).await,
+        "the groups did not settle"
+    );
+    let leader = leader_of(&refs, 0).unwrap().id;
+    let entry = nodes.iter().position(|n| n.id != leader).unwrap();
+    let key = key_of_group(&nodes[entry], 0);
+    for db in [0, 1] {
+        assert_eq!(
+            run_in(&nodes[entry].node, db, &["INCR", &key]).await,
+            Value::Integer(1)
+        );
+        assert!(all_hold_in(&nodes, db, &key, Some("1")).await);
+    }
+    (nodes, entry, key)
+}
+
+/// The counter part of a flush reaches a leader that is not the entry node, and that leader
+/// clears the counters of its group: `FLUSHDB` in one database, `FLUSHALL` in every one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flush_clears_the_counters_of_a_remote_leader() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (nodes, entry, key) = counters_in_two_databases(&net, &leases, &[]).await;
+    assert!(
+        wait_until(Duration::from_secs(10), || nodes
+            .iter()
+            .all(|n| n.node.databases.multi_db()))
+        .await
+    );
+    let a = &nodes[entry].node;
+    assert_eq!(run_in(a, 1, &["FLUSHDB"]).await, Value::ok());
+    assert!(
+        all_hold_in(&nodes, 1, &key, None).await,
+        "FLUSHDB in database 1 left the counter"
+    );
+    assert!(
+        all_hold_in(&nodes, 0, &key, Some("1")).await,
+        "FLUSHDB in database 1 cleared database 0"
+    );
+    assert_eq!(run_in(a, 1, &["INCR", &key]).await, Value::Integer(1));
+    assert_eq!(run_in(a, 1, &["FLUSHALL"]).await, Value::ok());
+    for db in [0, 1] {
+        assert!(
+            all_hold_in(&nodes, db, &key, None).await,
+            "FLUSHALL left the counter of database {db}"
+        );
+    }
+}
+
+/// Without the gate, the counter part of a flush goes out as before. A leader of this build
+/// answers it without touching its cache.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flush_without_the_gate_keeps_the_cache_of_a_remote_leader() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (nodes, entry, _key) =
+        counters_in_two_databases(&net, &leases, &["--test-without-multi-db"]).await;
+    assert!(
+        wait_until(Duration::from_secs(10), || nodes
+            .iter()
+            .all(|n| !n.node.databases.multi_db()))
+        .await
+    );
+    let a = &nodes[entry].node;
+    for i in 0..20 {
+        let k = format!("plain{i}");
+        assert_eq!(run_in(a, 0, &["SET", &k, "v"]).await, Value::ok());
+    }
+    let before: Vec<usize> = nodes.iter().map(|n| n.node.store.db_len(0)).collect();
+    assert!(before.iter().all(|n| *n > 0), "{before:?}");
+    assert_eq!(run_in(a, 1, &["FLUSHDB"]).await, Value::ok());
+    let after: Vec<usize> = nodes.iter().map(|n| n.node.store.db_len(0)).collect();
+    assert_eq!(after, before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropped_databases_lose_their_counters() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (nodes, _entry, key) = counters_in_two_databases(&net, &leases, &[]).await;
+    for n in &nodes {
+        n.node
+            .counters()
+            .unwrap()
+            .drop_databases_from(&n.node, 1)
+            .await;
+    }
+    assert!(all_hold_in(&nodes, 1, &key, None).await);
+    assert!(all_hold_in(&nodes, 0, &key, Some("1")).await);
+}
+
+/// A leader drops the counters of a database above the cluster count at once, even while a
+/// follower without `MULTI_DB` replicates the group. An old follower ignores `DISCUS.FLUSHDB`,
+/// but its snapshot decoder puts every database into one map, so a snapshot must not carry the
+/// dropped database: its keys would overwrite database 0 there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drop_leaves_database_zero_on_a_follower_without_multi_db() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let old_flags: Vec<&str> = DB2
+        .iter()
+        .chain(&["--test-without-multi-db"])
+        .copied()
+        .collect();
+    let (old, old_gate) = join(&net, &leases, socket().0, &[], &old_flags).await;
+    assert!(wait_until(Duration::from_secs(10), || old.is_normal()).await);
+    let (new, _) = join_to(&net, &leases, &[&old], DB2).await;
+    let both = [&old, &new];
+    wait_agreed(&both, Duration::from_secs(10)).await;
+    assert!(
+        wait_until(Duration::from_secs(10), || settled(&both)).await,
+        "the groups did not settle"
+    );
+    // The leader must be the node of this build, so the old node holds the log as a follower.
+    if role(&old, 0) == "leader" {
+        old_gate.store(false, Ordering::Relaxed);
+    }
+    assert!(
+        wait_until(Duration::from_secs(30), || role(&new, 0) == "leader"
+            && status(&new, 0).follower == Some(old.id)
+            && status(&old, 0).synced)
+        .await,
+        "the node of this build did not lead group 0 with the old node as its follower"
+    );
+    let key = key_of_group(&new, 0);
+    let counters = new.node.counters().unwrap();
+    let incr = vec![Bytes::from_static(b"INCR"), Bytes::from(key.clone())];
+    for (db, times) in [(0, 1), (1, 5)] {
+        for _ in 0..times {
+            assert!(counters.execute(0, db, Kind::Incr, &incr).await.is_ok());
+        }
+    }
+    let synced = wait_until(Duration::from_secs(10), || {
+        held_in(&old, 0, &key).as_deref() == Some("1")
+            && held_in(&old, 1, &key).as_deref() == Some("5")
+    })
+    .await;
+    assert!(synced, "the follower did not get both counters");
+    counters.drop_databases_from(&new.node, 1).await;
+    assert_eq!(held_in(&new, 1, &key), None);
+    // A follower of an older build would ignore the entry. This one applies it, which shows that
+    // the entry reached it.
+    assert!(
+        wait_until(Duration::from_secs(10), || held_in(&old, 1, &key).is_none()).await,
+        "the drop did not reach the follower"
+    );
+    for n in both {
+        assert_eq!(held_in(n, 0, &key).as_deref(), Some("1"), "{}", n.id);
+    }
+    // A snapshot to the follower comes from this state.
+    let held = counters.held_state(0).unwrap();
+    assert_eq!(held.databases(), [0]);
+}
+
+/// Counters of a database above the local count stay on a group whose leader missed the drop.
+/// The next leader removes them on its purge tick.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_later_leader_removes_the_counters_of_a_dropped_database() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (nodes, _gates) = two(&net, &leases, &["--databases", "2"]).await;
+    let leader = leader_of(&refs(&nodes), 0).unwrap();
+    let survivor = nodes.iter().find(|n| n.id != leader.id).unwrap();
+    let key = key_of_group(leader, 0);
+    // A write of database 5 that the range check would refuse: as if the count dropped from 6 to
+    // 2 and the leader never ran the drop.
+    let counters = leader.node.counters().unwrap();
+    let incr = vec![Bytes::from_static(b"INCR"), Bytes::from(key.clone())];
+    assert_eq!(
+        counters.execute(0, 5, Kind::Incr, &incr).await,
+        Ok(Value::Integer(1))
+    );
+    assert!(
+        wait_until(Duration::from_secs(10), || held_in(survivor, 5, &key)
+            .as_deref()
+            == Some("1"))
+        .await,
+        "the follower did not get the counter of database 5"
+    );
+    leader.kill();
+    assert!(
+        wait_until(Duration::from_secs(60), || {
+            role(survivor, 0) == "leader" && held_in(survivor, 5, &key).is_none()
+        })
+        .await,
+        "the new leader kept the counters of database 5"
+    );
+}
+
+/// A leader with fewer local databases than the cluster count keeps the counters below the
+/// cluster count, because clients still reach them. It drops only those at or above it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_purge_tick_drops_only_databases_above_the_cluster_count() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (nodes, _gates) = two(&net, &leases, &["--databases", "2"]).await;
+    for n in &nodes {
+        n.node.databases.pin_cluster(4);
+        assert!(n.node.databases.local() < n.node.databases.cluster());
+    }
+    let leader = leader_of(&refs(&nodes), 0).unwrap();
+    let key = key_of_group(leader, 0);
+    let counters = leader.node.counters().unwrap();
+    let incr = vec![Bytes::from_static(b"INCR"), Bytes::from(key.clone())];
+    for db in [3, 5] {
+        assert_eq!(
+            counters.execute(0, db, Kind::Incr, &incr).await,
+            Ok(Value::Integer(1))
+        );
+    }
+    // One tick drops the databases of a group in ascending order, so database 3 goes before 5.
+    assert!(
+        wait_until(Duration::from_secs(60), || nodes
+            .iter()
+            .all(|n| held_in(n, 5, &key).is_none()))
+        .await,
+        "database 5 is above the cluster count but kept its counters"
+    );
+    for n in &nodes {
+        assert_eq!(held_in(n, 3, &key).as_deref(), Some("1"));
+    }
+}
+
+/// A node whose membership view is not known yet cannot tell the cluster count. Its purge tick
+/// keeps the counters above database 0, and `FLUSHDB` does not widen to every database, neither
+/// for the counters nor for the cache. Once the view is known again, the purge tick drops only
+/// what a real lower count removes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_without_a_known_view_keeps_every_database() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (nodes, _gates) = two(&net, &leases, &["--databases", "3"]).await;
+    assert!(
+        wait_until(Duration::from_secs(10), || nodes.iter().all(|n| n
+            .node
+            .databases
+            .cluster()
+            == 3))
+        .await,
+        "the cluster count did not reach 3"
+    );
+    let leader = leader_of(&refs(&nodes), 0).unwrap();
+    let key = key_of_group(leader, 0);
+    let counters = leader.node.counters().unwrap();
+    let incr = vec![Bytes::from_static(b"INCR"), Bytes::from(key.clone())];
+    for db in [0, 2] {
+        assert_eq!(
+            counters.execute(0, db, Kind::Incr, &incr).await,
+            Ok(Value::Integer(1))
+        );
+        assert!(all_hold_in(&nodes, db, &key, Some("1")).await);
+    }
+    let plain = discus_store::Entry::new(discus_store::Value::Str("v".into()), None);
+    assert!(leader.node.store.apply(2, b"plain", plain));
+    for n in &nodes {
+        n.node.faults.withhold_view.store(true, Ordering::Relaxed);
+        n.node.databases.forget_view();
+    }
+
+    let flushed = run_in(&leader.node, 0, &["FLUSHDB"]).await;
+    assert!(
+        matches!(&flushed, Value::Error(e) if e.starts_with(b"TRYAGAIN")),
+        "{flushed:?}"
+    );
+    assert!(
+        leader.node.store.read(2, b"plain", |e| e.is_some()),
+        "FLUSHDB in database 0 cleared database 2 of the cache"
+    );
+    // Two purge ticks.
+    tokio::time::sleep(Duration::from_secs(25)).await;
+    for n in &nodes {
+        assert_eq!(held_in(n, 2, &key).as_deref(), Some("1"), "{}", n.id);
+    }
+
+    for n in &nodes {
+        n.node.faults.withhold_view.store(false, Ordering::Relaxed);
+    }
+    assert!(
+        wait_until(Duration::from_secs(10), || nodes.iter().all(|n| n
+            .node
+            .databases
+            .cluster()
+            == 3))
+        .await,
+        "the view did not come back"
+    );
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    for n in &nodes {
+        assert_eq!(held_in(n, 2, &key).as_deref(), Some("1"), "{}", n.id);
+    }
+
+    for n in &nodes {
+        n.node.databases.pin_cluster(1);
+    }
+    assert!(
+        wait_until(Duration::from_secs(60), || nodes
+            .iter()
+            .all(|n| held_in(n, 2, &key).is_none()))
+        .await,
+        "the purge tick kept the counters of database 2 after the count dropped"
+    );
+    for n in &nodes {
+        assert_eq!(held_in(n, 0, &key).as_deref(), Some("1"), "{}", n.id);
+    }
 }

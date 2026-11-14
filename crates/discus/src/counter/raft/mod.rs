@@ -40,10 +40,11 @@ pub type LogId = openraft::type_config::alias::LogIdOf<TypeConfig>;
 pub type Vote = openraft::type_config::alias::VoteOf<TypeConfig>;
 pub type Peers = Membership<u64, Peer>;
 
-/// One log entry: the leader stamp and the command (spec section 10.4).
+/// One log entry: the leader stamp, the database, and the command (spec section 10.4).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Op {
     pub stamp_ms: u64,
+    pub db: u32,
     pub command: Command,
 }
 
@@ -53,9 +54,10 @@ impl fmt::Display for Op {
         let name = self.command.first().map(|n| String::from_utf8_lossy(n));
         write!(
             f,
-            "{} ({} args) @{}",
+            "{} ({} args) db{} @{}",
             name.as_deref().unwrap_or(""),
             self.command.len().saturating_sub(1),
+            self.db,
             self.stamp_ms
         )
     }
@@ -163,6 +165,7 @@ impl Replica {
             wait,
             self.raft.client_write(Op {
                 stamp_ms,
+                db: 0,
                 command: restore,
             }),
         )
@@ -294,6 +297,10 @@ impl Replica {
         self.sm.lock().state.get().expired_keys(now_ms)
     }
 
+    pub fn databases(&self) -> Vec<u32> {
+        self.sm.lock().state.get().databases()
+    }
+
     pub async fn shutdown(&self) {
         let _ = self.raft.shutdown().await;
     }
@@ -395,7 +402,7 @@ mod tests {
     async fn wait_applied(r: &Replica, key: &str, want: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            let got = r.state().get(key.as_bytes()).map(|e| e.value.clone());
+            let got = r.state().get(0, key.as_bytes()).map(|e| e.value.clone());
             if got.as_deref() == Some(want.as_bytes()) {
                 return;
             }
@@ -426,7 +433,7 @@ mod tests {
         let c = replica(&link, 3, 50, &budget).await;
         let mut initial = CounterState::new();
         for i in 0..10 {
-            initial.apply(1, &cmd(&["SET", &format!("k{i}"), "v"]), &LIMITS);
+            initial.apply(1, 0, &cmd(&["SET", &format!("k{i}"), "v"]), &LIMITS);
         }
         a.bootstrap(NodeId::from_u128(1), &initial, 5, Duration::from_secs(5))
             .await
@@ -452,6 +459,7 @@ mod tests {
             a.raft
                 .client_write(Op {
                     stamp_ms: 10,
+                    db: 0,
                     command: cmd(&["INCR", "cnt:x"]),
                 })
                 .await
@@ -509,6 +517,7 @@ mod tests {
                             .raft
                             .client_write(Op {
                                 stamp_ms: 10,
+                                db: 0,
                                 command: cmd(&["INCR", "cnt:x"]),
                             })
                             .await
@@ -536,7 +545,7 @@ mod tests {
             for w in writers {
                 ok += w.await.unwrap();
             }
-            let value: i64 = state.get(b"cnt:x").map_or(0, |e| {
+            let value: i64 = state.get(0, b"cnt:x").map_or(0, |e| {
                 std::str::from_utf8(&e.value).unwrap().parse().unwrap()
             });
             assert!(ok > 0, "no write succeeded");

@@ -7,10 +7,10 @@ use common::round_trip;
 use discus_placement::NodeId;
 use discus_wire::{
     caps, decode_counter_snapshot, decode_frame, decode_hints, encode_counter_snapshot,
-    encode_envelope, encode_hints, fb, CounterAck, CounterMode, CounterSync, DecodeError,
-    GroupHint, Limits, Message, RaftAppend, RaftConfig, RaftEntry, RaftHeader, RaftLogId,
-    RaftMembership, RaftOutcome, RaftPayload, RaftReply, RaftSnapshot, RaftVote, RaftVoteReq,
-    Regime, TraceContext,
+    encode_envelope, encode_hints, fb, CounterAck, CounterMode, CounterOp, CounterSync,
+    DecodeError, GroupHint, Limits, Message, RaftAppend, RaftConfig, RaftEntry, RaftHeader,
+    RaftLogId, RaftMembership, RaftOutcome, RaftPayload, RaftReply, RaftSnapshot, RaftVote,
+    RaftVoteReq, Regime, TraceContext,
 };
 
 fn n(x: u128) -> NodeId {
@@ -52,6 +52,14 @@ fn membership() -> RaftMembership {
     RaftMembership {
         configs: vec![vec![1, 2], vec![1, 2, 3]],
         nodes: vec![(1, n(10)), (2, n(20)), (3, n(30))],
+    }
+}
+
+fn op(stamp_ms: u64, db: u32, command: &'static [u8]) -> CounterOp {
+    CounterOp {
+        stamp_ms,
+        db,
+        command: Bytes::from_static(command),
     }
 }
 
@@ -102,6 +110,7 @@ fn every_counter_message_round_trips() {
                     log_id: log(3),
                     payload: RaftPayload::Command {
                         stamp_ms: 1_700_000_000_000,
+                        db: 0,
                         command: Bytes::from_static(b"*2\r\n$4\r\nINCR\r\n$5\r\ncnt:a\r\n"),
                     },
                 },
@@ -141,10 +150,7 @@ fn every_counter_message_round_trips() {
             group: 3,
             regime: regime(),
             seq: 12,
-            ops: vec![
-                (5, Bytes::from_static(b"op1")),
-                (6, Bytes::from_static(b"op2")),
-            ],
+            ops: vec![op(5, 0, b"op1"), op(6, 0, b"op2")],
             snapshot: None,
         }),
         Message::CounterSync(CounterSync {
@@ -176,16 +182,20 @@ fn hints_round_trip_and_reject_garbage() {
 
 #[test]
 fn a_snapshot_round_trips() {
-    let entries: Vec<(Bytes, Bytes, u64)> = (0..1000u64)
+    let entries: Vec<(u32, Bytes, Bytes, u64)> = (0..1000u64)
         .map(|i| {
             (
+                0,
                 Bytes::from(format!("cnt:{i}")),
                 Bytes::from(i.to_string()),
                 if i % 3 == 0 { 0 } else { 5000 + i },
             )
         })
         .collect();
-    let bytes = encode_counter_snapshot(77, entries.iter().map(|(k, v, t)| (&k[..], &v[..], *t)));
+    let bytes = encode_counter_snapshot(
+        77,
+        entries.iter().map(|(d, k, v, t)| (*d, &k[..], &v[..], *t)),
+    );
     assert_eq!(decode_counter_snapshot(&bytes).unwrap(), (77, entries));
     assert!(decode_counter_snapshot(b"garbage").is_err());
 }
@@ -253,4 +263,64 @@ fn a_raft_entry_without_a_payload_is_invalid() {
         decode_frame(&frame, &Limits::default()),
         Err(DecodeError::Invalid(_))
     ));
+}
+
+#[test]
+fn ops_raft_entries_and_snapshots_keep_their_databases() {
+    for m in [
+        Message::CounterSync(CounterSync {
+            group: 3,
+            regime: regime(),
+            seq: 12,
+            ops: vec![op(5, 0, b"op1"), op(6, 2, b"op2")],
+            snapshot: None,
+        }),
+        Message::RaftAppend(RaftAppend {
+            header: header(),
+            vote: vote(),
+            prev: Some(log(1)),
+            entries: vec![RaftEntry {
+                log_id: log(2),
+                payload: RaftPayload::Command {
+                    stamp_ms: 9,
+                    db: 2,
+                    command: Bytes::from_static(b"cmd"),
+                },
+            }],
+            committed: None,
+        }),
+    ] {
+        assert_eq!(round_trip(m.clone()), m);
+    }
+
+    let entries = vec![
+        (0, Bytes::from("a"), Bytes::from("1"), 0),
+        (1, Bytes::from("a"), Bytes::from("2"), 5000),
+    ];
+    let bytes = encode_counter_snapshot(
+        3,
+        entries.iter().map(|(d, k, v, t)| (*d, &k[..], &v[..], *t)),
+    );
+    assert_eq!(decode_counter_snapshot(&bytes).unwrap(), (3, entries));
+
+    let mut fbb = flatbuffers::FlatBufferBuilder::new();
+    let key = fbb.create_vector(b"k");
+    let value = fbb.create_vector(b"7");
+    let start = fbb.start_table();
+    fbb.push_slot_always(fb::CounterEntry::VT_KEY, key);
+    fbb.push_slot_always(fb::CounterEntry::VT_VALUE, value);
+    let e = flatbuffers::WIPOffset::<fb::CounterEntry>::new(fbb.end_table(start).value());
+    let items = fbb.create_vector(&[e]);
+    let t = fb::CounterSnapshot::create(
+        &mut fbb,
+        &fb::CounterSnapshotArgs {
+            clock_ms: 1,
+            entries: Some(items),
+        },
+    );
+    fbb.finish_minimal(t);
+    assert_eq!(
+        decode_counter_snapshot(fbb.finished_data()).unwrap(),
+        (1, vec![(0, Bytes::from("k"), Bytes::from("7"), 0)])
+    );
 }

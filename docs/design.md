@@ -944,8 +944,8 @@ steps in reverse.
 
 Supported commands:
 
-- Connection: `PING`, `ECHO`, `QUIT`, `AUTH`, `HELLO` (RESP2/RESP3), `SELECT` (database 0 only),
-  `COMMAND` (§12.2), `CLIENT` (`SETNAME`, `GETNAME`, `ID`), `INFO`, `CONFIG GET` (subset),
+- Connection: `PING`, `ECHO`, `QUIT`, `AUTH`, `HELLO` (RESP2/RESP3), `SELECT` (every database,
+  §12.3), `COMMAND` (§12.2), `CLIENT` (`SETNAME`, `GETNAME`, `ID`), `INFO`, `CONFIG GET` (subset),
   `READONLY`, `READWRITE`, and `ASKING`.
 - Cluster: the `CLUSTER` subcommands in §12.2.
 - Strings: `GET`, `SET` (`EX`, `PX`, `EXAT`, `PXAT`, `NX`, `XX`, `KEEPTTL`, `GET`), `GETDEL`,
@@ -956,8 +956,8 @@ Supported commands:
 - Sets: `SADD`, `SREM`, `SMEMBERS`, `SISMEMBER`, `SMISMEMBER`, `SCARD`, `SPOP`, and `SRANDMEMBER`.
 - Sorted sets: `ZADD`, `ZSCORE`, `ZMSCORE`, `ZREM`, `ZCARD`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE`,
   `ZINCRBY`, and `ZCOUNT`.
-- Keys: `RENAME` (§19.1), `SCAN`, `RANDOMKEY`, `DBSIZE`, `FLUSHDB`, and `FLUSHALL`, with the limits
-  in §7.3.
+- Keys: `RENAME` (§19.1), `MOVE`, `COPY`, `SCAN`, `RANDOMKEY`, `DBSIZE`, `FLUSHDB`, and `FLUSHALL`,
+  with the limits in §7.3. `SWAPDB` returns `-ERR SWAPDB is not allowed in cluster mode`.
 - Strong counter keys accept the string and expiry commands above.
 
 `INFO` reports `redis_version:7.2.0`, and the `HELLO` reply carries `version` `7.2.0`, because
@@ -990,6 +990,9 @@ Each deviation is explained in the section in parentheses.
   cold restart (§10).
 - `RENAME` is not atomic, and a failure can lose the value (§19.1).
 - Discus never sends `-ASK`, has no slot management, and `CLUSTER NODES` shows no replicas (§12.2).
+- `MOVE` and `COPY` are not atomic across a failover (§12.3).
+- `SCAN` and `RANDOMKEY` stay local, and `DBSIZE` stays an estimate, for each database (§12.3).
+- The node refuses `SWAPDB`, as a Valkey cluster does (§12.3).
 
 ### 12.2 Cluster and COMMAND replies
 
@@ -1051,6 +1054,33 @@ tips, key specifications, and subcommands are empty arrays.
 
 `COMMAND INFO <name> ...` returns the same entries. `COMMAND GETKEYS` returns the keys from
 `keys_of`. `COMMAND DOCS` is empty.
+
+### 12.3 Numbered databases
+
+A node serves the databases from 0 to the count of the cluster minus 1. The flag `--databases`
+sets the count of a node. It takes a value from 1 to 65536, and the default is 1. A connection
+starts in database 0. Database 0 is a database like every other one: it has the same store
+structure, the same code paths, and the same wire fields. A key name has the same slot and the
+same owners in every database.
+
+- The store keeps one key space for each database. `FLUSHDB`, `DBSIZE`, `SCAN`, and `RANDOMKEY`
+  work on the selected database. `INFO keyspace` shows one line for each database that holds keys.
+- Every message that carries a key on the data path has a field `db`. The default is 0, so a
+  message for database 0 has the same bytes as before.
+- Strong counters are kept for each database. `MOVE` and `COPY` refuse a counter key.
+- `COPY` reads its source on the primary.
+- A gossip record carries the count of its node. The count of the cluster is the smallest count of
+  the `NORMAL` members. A raise applies at once. A lower count applies only after it holds for 10
+  seconds, and never while a member has no gossip record. Then each node deletes the data of the
+  removed databases. After that, a node refuses replicated data for a removed database until the
+  count rises again. The metric `discus.databases.dropped` counts the refused entries.
+- A joining node takes the larger count, unless it runs `--lower-databases`.
+- The capability bit `MULTI_DB` gates the feature (§13.3). A node without it cannot join a cluster
+  with more than one database. In such a cluster, while any member lacks it, `SELECT` above 0,
+  `MOVE`, and `COPY` return `-ERR multiple databases need every node to support them`.
+- `--membership static` refuses `--databases` above 1, because static nodes do not gossip.
+
+`docs/cluster.md` has the operator steps.
 
 ## 13. Transport and wire format
 
@@ -1217,6 +1247,8 @@ provider or client secret.
   reload). A flag on the command line wins over the file. A bad file stops the node at startup and
   changes nothing at a reload. The chart mounts the file from a ConfigMap. See "Settings file" in
   `docs/cluster.md`.
+- The flag `--databases` sets the number of databases. The flag `--lower-databases` lets a joining
+  node keep a lower count than the cluster. See §12.3.
 - The configuration covers discovery, listen addresses, leases and fencing, `RF` and weight, memory
   and request limits, timeouts, TLS and authentication, trusted issuers and scope rules, hint and
   write-set limits, primary-read prefixes, counters, client addresses, and telemetry.
@@ -1234,6 +1266,13 @@ and `-MOVED` carry it. A member without one is never the target of a `-MOVED`.
 The default client address is the IP of `--cluster-advertise` with the port of `--redirect-listen`,
 or of `--listen` without a redirect listener. With `--membership static`, `--peer` takes an
 optional client address after a slash: `<node-id>@<ip>:<port>/<client-ip>:<client-port>`.
+
+Database flags:
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--databases` | 1 | The number of databases, from 1 to 65536 (§12.3). |
+| `--lower-databases` | off | A joining node keeps its own lower count (§12.3). |
 
 The Helm chart in `charts/discus` has `clusterClients.enabled` (default `true`),
 `clusterClients.port` (default 6380), and `clusterClients.hostname` (default empty). With

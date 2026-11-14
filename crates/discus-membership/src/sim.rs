@@ -118,6 +118,10 @@ pub struct SimNode {
     /// The cluster ID that this node mints if it wins the lease.
     candidate: ClusterId,
     next_renew: Millis,
+    /// The database count from [`Swim::served_databases`] after the last tick.
+    served: u32,
+    /// When the served count went down, and to what: each one is a drop of databases.
+    database_drops: Vec<(Millis, u32)>,
 }
 
 enum SimLease {
@@ -237,10 +241,15 @@ impl Sim {
 
     /// Add a node that is not in a cluster yet. It starts `JOINING`.
     pub fn add_node(&mut self) -> NodeId {
+        self.add_node_with(|_, _| {})
+    }
+
+    /// [`Sim::add_node`] with the member info and the settings that `f` changes.
+    pub fn add_node_with(&mut self, f: impl FnOnce(&mut MemberInfo, &mut SwimConfig)) -> NodeId {
         let id = NodeId::from_u128(self.rng.u128(1..));
         let n = self.by_addr.len() as u32 + 1;
         let addr = SocketAddr::from(([10, 0, (n >> 8) as u8, n as u8], 7379));
-        let info = MemberInfo {
+        let mut info = MemberInfo {
             id,
             addr,
             rpc_addr: addr,
@@ -253,11 +262,14 @@ impl Sim {
             capabilities: discus_wire::caps::KNOWN,
             capacity: Capacity::default(),
             leader_hints: Bytes::new(),
+            databases: 1,
         };
-        let cfg = SwimConfig {
+        let mut cfg = SwimConfig {
             seed: self.rng.u64(..),
             ..self.cfg.clone()
         };
+        f(&mut info, &mut cfg);
+        let served = 1;
         let node = SimNode {
             swim: Swim::new(cfg, info),
             host: SimHost::new(id),
@@ -273,6 +285,8 @@ impl Sim {
             lease_requests: 0,
             candidate: ClusterId::from_u128(self.rng.u128(1..)),
             next_renew: 0,
+            served,
+            database_drops: Vec::new(),
         };
         self.by_addr.insert(addr, id);
         self.nodes.insert(id, node);
@@ -282,7 +296,18 @@ impl Sim {
     /// `n` nodes that already form one cluster: one epoch of generation 1 with every node
     /// `NORMAL`, and a full view on every node.
     pub fn cluster(&mut self, n: usize) -> Vec<NodeId> {
-        let ids: Vec<NodeId> = (0..n).map(|_| self.add_node()).collect();
+        self.cluster_with(n, |_, _, _| {})
+    }
+
+    /// [`Sim::cluster`] with the member info and the settings that `f` changes for node `i`.
+    pub fn cluster_with(
+        &mut self,
+        n: usize,
+        mut f: impl FnMut(usize, &mut MemberInfo, &mut SwimConfig),
+    ) -> Vec<NodeId> {
+        let ids: Vec<NodeId> = (0..n)
+            .map(|i| self.add_node_with(|info, cfg| f(i, info, cfg)))
+            .collect();
         let cluster = ClusterId::from_u128(self.rng.u128(1..));
         let members: Vec<Member> = ids
             .iter()
@@ -406,6 +431,30 @@ impl Sim {
         self.node_mut(id).swim.set_leader_hints(hints);
     }
 
+    pub fn set_databases(&mut self, id: NodeId, n: u32) {
+        self.node_mut(id).swim.set_databases(n);
+    }
+
+    /// The database count that `id` served after its last tick.
+    pub fn served_databases(&self, id: NodeId) -> u32 {
+        self.nodes[&id].served
+    }
+
+    /// When the served count of `id` went down, and to what.
+    pub fn database_drops(&self, id: NodeId) -> &[(Millis, u32)] {
+        &self.nodes[&id].database_drops
+    }
+
+    pub fn cluster_databases(&self, id: NodeId) -> Option<u32> {
+        let n = &self.nodes[&id];
+        n.swim.cluster_databases(&n.host.epoch())
+    }
+
+    pub fn all_multi_db(&self, id: NodeId) -> bool {
+        let n = &self.nodes[&id];
+        n.swim.all_multi_db(&n.host.epoch())
+    }
+
     pub fn epoch(&self, id: NodeId) -> Arc<Epoch> {
         self.nodes[&id].host.epoch()
     }
@@ -500,6 +549,14 @@ impl Sim {
                 node.host.now = now;
                 node.swim.observe_lag(node.lag_ms);
                 let actions = node.swim.tick(now, &mut node.host);
+                let served = node
+                    .swim
+                    .served_databases(now, &node.host.epoch())
+                    .unwrap_or(node.served);
+                if served < node.served {
+                    node.database_drops.push((now, served));
+                }
+                node.served = served;
                 self.send(id, actions);
             }
             self.after_tick();

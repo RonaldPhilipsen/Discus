@@ -67,6 +67,9 @@ pub struct SwimConfig {
     pub health_evidence_cutoff: f64,
     /// The seed of the random source. Production uses a random seed.
     pub seed: u64,
+    /// `--lower-databases`: a joiner keeps its own database count instead of taking the larger
+    /// count of the cluster.
+    pub lower_databases: bool,
 }
 
 impl Default for SwimConfig {
@@ -100,6 +103,7 @@ impl Default for SwimConfig {
             health_max_multiplier: 9.0,
             health_evidence_cutoff: 1.5,
             seed: fastrand::u64(..),
+            lower_databases: false,
         }
     }
 }

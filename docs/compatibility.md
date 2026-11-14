@@ -11,12 +11,38 @@ features from that value.
 
 | Family | Commands |
 | --- | --- |
-| Connection | `PING`, `ECHO`, `QUIT`, `AUTH`, `HELLO` (RESP2 and RESP3), `SELECT` (database 0 only), `COMMAND` (`COUNT`, `INFO`, `GETKEYS`, and the full list), `READONLY`, `READWRITE`, `ASKING`, `CLUSTER` (see below), `CLIENT` (`SETNAME`, `GETNAME`, `ID`, `SETINFO`), `INFO`, `CONFIG GET` (`maxmemory`, `databases`, `maxclients`) |
+| Connection | `PING`, `ECHO`, `QUIT`, `AUTH`, `HELLO` (RESP2 and RESP3), `SELECT` (every database), `COMMAND` (`COUNT`, `INFO`, `GETKEYS`, and the full list), `READONLY`, `READWRITE`, `ASKING`, `CLUSTER` (see below), `CLIENT` (`SETNAME`, `GETNAME`, `ID`, `SETINFO`), `INFO`, `CONFIG GET` (`maxmemory`, `databases`, `maxclients`) |
 | Strings | `GET`, `SET` (`EX`, `PX`, `EXAT`, `PXAT`, `NX`, `XX`, `KEEPTTL`, `GET`), `GETDEL`, `GETEX`, `MGET`, `MSET`, `INCR`, `DECR`, `INCRBY`, `DECRBY`, `INCRBYFLOAT`, `APPEND`, `STRLEN` |
-| Keys and expiry | `DEL`, `EXISTS`, `TYPE`, `RENAME`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `SCAN` (`MATCH`, `COUNT`), `RANDOMKEY`, `DBSIZE`, `FLUSHDB`, `FLUSHALL` |
+| Keys and expiry | `DEL`, `EXISTS`, `TYPE`, `RENAME`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `MOVE`, `COPY` (`DB`, `REPLACE`), `SCAN` (`MATCH`, `COUNT`), `RANDOMKEY`, `DBSIZE`, `FLUSHDB`, `FLUSHALL` |
 | Hashes | `HSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HINCRBY`, `HKEYS`, `HVALS` |
 | Sets | `SADD`, `SREM`, `SMEMBERS`, `SISMEMBER`, `SMISMEMBER`, `SCARD`, `SPOP`, `SRANDMEMBER` |
 | Sorted sets | `ZADD` (`NX`, `XX`, `CH`), `ZSCORE`, `ZMSCORE`, `ZREM`, `ZCARD`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE` (`WITHSCORES`, `LIMIT`), `ZINCRBY`, `ZCOUNT` |
+
+`SWAPDB` returns `-ERR SWAPDB is not allowed in cluster mode`, as a Valkey cluster does.
+
+## Numbered databases
+
+A node serves the databases from 0 to the cluster count minus 1. The default count is 1. The flag
+`--databases` and the chart value `databases` set a higher count. See
+[Databases](cluster.md#databases). A connection starts in database 0.
+
+| Command | Behavior |
+| --- | --- |
+| `SELECT <db>` | Selects a database. A number outside the count returns `-ERR DB index is out of range`. |
+| `MOVE <key> <db>` | Moves a key to another database. A destination that holds the key gives 0. |
+| `COPY <source> <destination> [DB <db>] [REPLACE]` | Copies a key, also into another database. |
+| `FLUSHDB` | Clears the selected database only. |
+| `FLUSHALL` | Clears every database. |
+| `DBSIZE`, `SCAN`, `RANDOMKEY` | See the selected database only. |
+| `INFO keyspace` | Shows one `db<n>` line for each database that holds keys. |
+| `CONFIG GET databases` | Returns the count of the cluster. |
+
+Take a cluster with more than one database. If a member lacks support for numbered databases, then
+`SELECT` above 0, `MOVE`, and `COPY` return
+`-ERR multiple databases need every node to support them`.
+
+`MOVE` and `COPY` refuse counter keys. A `COPY` onto the same key in the same database returns
+`-ERR source and destination objects are the same`.
 
 ## Unsupported commands
 
@@ -110,6 +136,7 @@ behave differently from Redis:
 - `FLUSHDB` and `FLUSHALL` clear every member that answers. This is best-effort. A write that is on
   its way during the flush can survive it. If a counter group has no leader or no quorum, the
   command returns `-TRYAGAIN FLUSHALL cleared the cache and <n> of <G> counter groups`.
+- `MOVE` and `COPY` are not atomic across a failover. `COPY` reads its source on the primary.
 
 If another node serves the slot of a command on a redirect connection, the command gets `-MOVED`.
 This applies to a command on keys of one slot. Discus never returns `-CROSSSLOT`. It serves a
@@ -203,7 +230,10 @@ Run `mise run build-matrix` to check every supported combination.
 - `COMMAND` returns command names only. `COMMAND DOCS` and `COMMAND INFO` return empty arrays.
 - `CONFIG GET` answers three names. Other names return an empty array, so `redis-benchmark` prints
   `Could not fetch server CONFIG` and continues.
-- `FLUSHDB` and `FLUSHALL` behave the same. Both accept `ASYNC` or `SYNC` and ignore it.
+- `FLUSHDB` and `FLUSHALL` accept `ASYNC` or `SYNC` and ignore it.
+- `SWAPDB` is refused, as in a Valkey cluster.
+- `MOVE` and `COPY` are not atomic across a failover. In a cluster, `SCAN` and `RANDOMKEY` stay
+  local, and `DBSIZE` stays an estimate, for each database.
 - Collections keep the whole value under one lock. Every write to a very large collection costs
   time in proportion to its size, so keep collections far below the member limit.
 - There is no persistence. A restart starts with an empty cache.

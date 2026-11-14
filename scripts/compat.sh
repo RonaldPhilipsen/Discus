@@ -9,6 +9,7 @@
 # The node of the script also has a redirect listener on COMPAT_REDIRECT_PORT (default 16380) for
 # the cluster client check. For a node that you name, set COMPAT_REDIRECT=host:port to run it.
 # FLUSHDB and FLUSHALL run only when COMPAT_ALLOW_FLUSH=1, because they delete data.
+# The database checks need a node with 3 databases whose database 2 holds no other keys.
 set -u
 cd "$(dirname "$0")/.."
 
@@ -32,7 +33,7 @@ else
   cargo build -q -p discus || exit 1
   "${CARGO_TARGET_DIR:-target}/debug/discus" --listen "127.0.0.1:$port" --redirect-listen "127.0.0.1:$redirect_port" \
     --admin-listen "127.0.0.1:$((port + 1000))" --tls-cert "$certs/cert.pem" \
-    --tls-key "$certs/key.pem" --auth-policy none >/dev/null 2>&1 &
+    --tls-key "$certs/key.pem" --auth-policy none --databases 3 >/dev/null 2>&1 &
   node_pid=$!
   target="127.0.0.1:$port"
   export COMPAT_ALLOW_FLUSH=1
@@ -90,7 +91,6 @@ unsupported() {
 # Connection
 ok PING '^PONG$' PING
 ok ECHO '^hi$' ECHO hi
-ok SELECT '^OK$' SELECT 0
 ok HELLO 'proto' HELLO 3
 ok "CLIENT ID" '^[0-9]+$' CLIENT ID
 ok "CLIENT SETNAME" '^OK$' CLIENT SETNAME compat
@@ -194,6 +194,28 @@ absent "SCAN skips counters" "$c" SCAN 0 MATCH "$c:*" COUNT 1000
 ok "HSET counter" 'only string and expiry' HSET "$c:h" f v
 ok "MGET mixed" 'cannot be mixed' MGET "$c:n" "$p:s"
 ok "DEL counter" '^2$' DEL "$c:n" "$c:w"
+
+# Databases
+d="$p:db"
+ok "SELECT 2" '^OK$' SELECT 2
+ok "SELECT 3" 'out of range' SELECT 3
+ok "SET in database 1" '^OK$' -n 1 SET "$d" one
+ok "GET in database 0" '^$|nil' -n 0 GET "$d"
+ok "MOVE to database 2" '^1$' -n 1 MOVE "$d" 2
+ok "COPY to database 1" '^1$' -n 2 COPY "$d" "$d" DB 1
+ok "SWAPDB" 'not allowed in cluster mode' SWAPDB 0 1
+ok "DBSIZE in database 2" '^1$' -n 2 DBSIZE
+ok "SCAN in database 2" "^$d\$" -n 2 SCAN 0 MATCH "$p:*" COUNT 1000
+absent "SCAN in database 2 skips database 0" "$p:s" -n 2 SCAN 0 MATCH "$p:*" COUNT 1000
+ok "RANDOMKEY in database 2" "^$d\$" -n 2 RANDOMKEY
+ok "INFO keyspace" 'db2:keys=' INFO keyspace
+if [ "${COMPAT_ALLOW_FLUSH:-0}" = 1 ]; then
+  ok "FLUSHDB in database 2" '^OK$' -n 2 FLUSHDB
+  ok "FLUSHDB keeps database 1" '^one$' -n 1 GET "$d"
+  ok "DBSIZE after FLUSHDB" '^0$' -n 2 DBSIZE
+fi
+cli -n 1 DEL "$d" >/dev/null
+cli -n 2 DEL "$d" >/dev/null
 
 # Keys
 ok SCAN "$p" SCAN 0 MATCH "$p:*" COUNT 1000

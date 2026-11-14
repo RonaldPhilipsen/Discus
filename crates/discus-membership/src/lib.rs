@@ -25,5 +25,5 @@ pub use lease::MemoryLease;
 pub use lease::{LeaseError, LeaseHolder, LeaseProvider, LeaseState, NoneLease};
 pub use swim::{
     gained_owners, normal_count, provisional_epoch, suspicion_timeout, Action, Handled, Outcome,
-    Phase, Swim,
+    Phase, Swim, DATABASES_DWELL_MS,
 };

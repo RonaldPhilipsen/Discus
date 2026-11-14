@@ -59,12 +59,13 @@ pub(crate) fn split<T: PartialEq>(
 async fn run_group(
     node: &Arc<Node>,
     spec: &'static CommandSpec,
+    db: u32,
     g: &Group<NodeId>,
     hop: &Hop,
     write: bool,
 ) -> Option<Reply> {
     if g.target == node.id {
-        return Some(local_acked(node, spec, g.cmd.clone()).finish().await);
+        return Some(local_acked(node, spec, db, g.cmd.clone()).finish().await);
     }
     if allowed(node, hop, vec![g.target]).is_empty() {
         let Some(keys) = key_args(spec.route, &g.cmd) else {
@@ -72,12 +73,12 @@ async fn run_group(
         };
         let keys: Vec<&[u8]> = keys.map(|k| &k[..]).collect();
         return Some(
-            spent(node, spec, g.cmd.clone(), &keys, write)
+            spent(node, spec, db, g.cmd.clone(), &keys, write)
                 .finish()
                 .await,
         );
     }
-    hold::send_or_hold(node, spec, g.target, &g.cmd, hop, write).await
+    hold::send_or_hold(node, spec, db, g.target, &g.cmd, hop, write).await
 }
 
 /// The newest applied stamp of the parts.
@@ -161,10 +162,11 @@ pub fn multi(
         rr,
         redirect,
         readonly,
+        db,
     } = job;
     let Some((merge, width)) = Merge::of(spec.route) else {
         drop(route);
-        return Dispatch::Ready(local(node, spec, &cmd));
+        return Dispatch::Ready(local(node, spec, db, &cmd));
     };
     let write = matches!(spec.route, Route::MultiWrite { .. });
     if width == 2 {
@@ -174,7 +176,7 @@ pub fn multi(
     }
     let now = Instant::now();
     let need = |key: &[u8]| match writes {
-        Some(w) if !write => w.lock().required(SetKey::of(key), || now),
+        Some(w) if !write => w.lock().required(SetKey::of(db, key), || now),
         _ => None,
     };
     if super::redirect::applies(redirect, &hop) {
@@ -184,7 +186,7 @@ pub fn multi(
             .map(|k| &k[..])
             .collect();
         let moved =
-            route.in_scope(|| super::redirect::multi_moved(node, &keys, write, need, readonly));
+            route.in_scope(|| super::redirect::multi_moved(node, db, &keys, write, need, readonly));
         if let Some(moved) = moved {
             return Dispatch::Ready(Reply::error(moved));
         }
@@ -192,7 +194,7 @@ pub fn multi(
     let groups = route.in_scope(|| {
         split(&cmd, width, |key| {
             let owners = node.owners(key);
-            candidates(node, key, &owners, write, rr, need(key))
+            candidates(node, db, key, &owners, write, rr, need(key))
                 .first()
                 .copied()
         })
@@ -212,13 +214,13 @@ pub fn multi(
                     .flatten()
                     .filter(|k| !node.is_primary_read_key(k))
                 {
-                    w.record(SetKey::of(k), v, Instant::now());
+                    w.record(SetKey::of(db, k), v, Instant::now());
                 }
             }
         }
     };
     if groups.iter().all(|g| g.target == node.id) {
-        return local_acked(node, spec, cmd.clone())
+        return local_acked(node, spec, db, cmd.clone())
             .then(node, move |node, reply| note(node, &cmd, reply));
     }
     let node = node.clone();
@@ -227,7 +229,7 @@ pub fn multi(
         let parts = join_all(
             groups
                 .iter()
-                .map(|g| run_group(&node, spec, g, &hop, write)),
+                .map(|g| run_group(&node, spec, db, g, &hop, write)),
         )
         .await;
         for (g, part) in groups.iter().zip(&parts) {
@@ -260,14 +262,15 @@ pub fn multi(
     }))
 }
 
-/// Send a `LOCAL` copy of `cmd` to every other member, and run it here too.
+/// Send a `LOCAL` copy of `cmd` in database `db` to every other member, and run it here too.
 async fn everywhere(
     node: &Arc<Node>,
     spec: &CommandSpec,
+    db: u32,
     cmd: &Command,
     write: bool,
 ) -> (Reply, Vec<Result<Reply, NodeId>>) {
-    let here = local(node, spec, cmd);
+    let here = local(node, spec, db, cmd);
     let others: Vec<NodeId> = node
         .epochs()
         .current()
@@ -280,7 +283,7 @@ async fn everywhere(
     let results = join_all(others.iter().map(|id| {
         let hop = &hop;
         async move {
-            forward::send(node, *id, cmd, hop, ForwardMode::Local, write, None)
+            forward::send(node, *id, db, cmd, hop, ForwardMode::Local, write, None)
                 .await
                 .map_err(|_| *id)
         }
@@ -291,10 +294,10 @@ async fn everywhere(
 
 /// `DBSIZE`: the sum of the members that answer, divided by the owners per key. Every key lives
 /// on up to `RF` members, so this is an estimate (spec section 7.3).
-pub fn dbsize(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> Dispatch {
+pub fn dbsize(node: &Arc<Node>, spec: &'static CommandSpec, db: u32, cmd: Command) -> Dispatch {
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
-        let (here, others) = everywhere(&node, spec, &cmd, false).await;
+        let (here, others) = everywhere(&node, spec, db, &cmd, false).await;
         let mut sum = match here.value {
             Value::Integer(n) => n,
             other => return Reply::value(other),
@@ -314,11 +317,11 @@ pub(crate) fn copies(node: &Node) -> i64 {
     node.config.replication_factor.min(normal).max(1) as i64
 }
 
-/// `FLUSHDB` and `FLUSHALL`: every member, best-effort.
-pub fn flush(node: &Arc<Node>, spec: &'static CommandSpec, cmd: Command) -> Dispatch {
+/// `FLUSHDB` in database `db` and `FLUSHALL`: every member, best-effort.
+pub fn flush(node: &Arc<Node>, spec: &'static CommandSpec, db: u32, cmd: Command) -> Dispatch {
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
-        let (here, others) = everywhere(&node, spec, &cmd, true).await;
+        let (here, others) = everywhere(&node, spec, db, &cmd, true).await;
         if matches!(here.value, Value::Error(_)) {
             return here;
         }

@@ -78,6 +78,16 @@ jobs:
       - run: >-
           ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
           --skip-schema-validation --set settings.extra.misc.n=null
+      - run: >-
+          helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --set databases=3 --set settings.budget.holdMs=1500
+          | grep -A3 'discus.toml' | grep -q '^ *databases = 3'
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --set databases=3 | grep -q -- '--databases'
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --set databases=0
 
   # redis-cli against a fresh node, for every supported and unsupported command.
   compat:

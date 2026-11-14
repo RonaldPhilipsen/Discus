@@ -82,8 +82,8 @@ impl Tracked {
         &self.state
     }
 
-    pub fn apply(&mut self, stamp_ms: u64, cmd: &Command, limits: &Limits) -> Value {
-        let reply = self.state.apply(stamp_ms, cmd, limits);
+    pub fn apply(&mut self, stamp_ms: u64, db: u32, cmd: &Command, limits: &Limits) -> Value {
+        let reply = self.state.apply(stamp_ms, db, cmd, limits);
         self.sync();
         reply
     }
@@ -122,7 +122,7 @@ mod tests {
         };
         let cmd = crate::counter::cmd(&["SET", "k", "v"]);
         let mut t = Tracked::new(CounterState::new(), budget.clone());
-        t.apply(1, &cmd, &limits);
+        t.apply(1, 0, &cmd, &limits);
         assert_eq!(budget.used(), t.get().bytes());
         let other = Tracked::new(t.get().clone(), budget.clone());
         assert_eq!(budget.used(), 2 * t.get().bytes());

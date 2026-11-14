@@ -87,6 +87,8 @@ table RaftEntry {
   stamp_ms: ulong (id: 2);
   command: [ubyte] (id: 3);
   membership: RaftMembership (id: 4);
+  /// COMMAND: the database of the command.
+  db: uint (id: 5);
 }
 
 /// The group, the regime, and the replica ID that a Raft message is for.
@@ -140,10 +142,11 @@ table RaftReply {
   last: RaftLogId (id: 3);
 }
 
-/// One leader-follower op: the leader stamp and the raw RESP command.
+/// One leader-follower op: the leader stamp, the raw RESP command, and its database.
 table CounterOp {
   stamp_ms: ulong (id: 0);
   command: [ubyte] (id: 1);
+  db: uint (id: 2);
 }
 
 /// COUNTER_SYNC: ops from the leader to the follower. `seq` numbers the first op, or the state of
@@ -170,6 +173,7 @@ table CounterEntry {
   value: [ubyte] (id: 1);
   /// The absolute deadline in Unix milliseconds. Zero means no expiry.
   expires_at_ms: ulong (id: 2);
+  db: uint (id: 3);
 }
 
 /// The snapshot format of a counter group: the clock of the state and every entry.

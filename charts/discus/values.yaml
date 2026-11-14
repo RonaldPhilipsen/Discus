@@ -72,6 +72,11 @@ authConfig:
   # issuers and the client certificate rules. See docs/security.md.
   secretName: ""
 
+# The number of databases that SELECT accepts. A higher value reaches the nodes through the
+# settings file, so it needs no restart. A lower value applies nothing: see docs/cluster.md for the
+# steps that lower the count and delete the data of the removed databases.
+databases: 1
+
 # The settings that a node reloads while it runs. The chart writes them to a ConfigMap, mounts it
 # at /settings, and passes --config=/settings/discus.toml. A change reaches the pods after the
 # kubelet syncs the ConfigMap and the node polls the file, so it needs no restart.

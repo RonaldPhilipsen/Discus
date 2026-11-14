@@ -24,6 +24,11 @@ pub const ENTRY_OVERHEAD: u64 = 64;
 /// The internal command that drops every key expired by its stamp.
 pub const PURGE: &[u8] = b"PURGE";
 
+/// The internal command that removes the keys of the database of its log entry only. `FLUSHDB`
+/// itself clears every database, as it did before numbered databases, so that a replica of an
+/// older build applies an old log the same way.
+pub const FLUSH_ONE_DB: &[u8] = b"DISCUS.FLUSHDB";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CounterEntry {
     pub value: Bytes,
@@ -42,11 +47,21 @@ pub struct Limits {
     pub max_value_bytes: usize,
 }
 
+type Keys = BTreeMap<Bytes, CounterEntry>;
+
+/// The entries of every database. A database without keys has no map, so two replicas with the
+/// same keys compare equal.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CounterState {
-    map: BTreeMap<Bytes, CounterEntry>,
+    dbs: BTreeMap<u32, Keys>,
     clock_ms: u64,
     bytes: u64,
+}
+
+/// The keys of one database and the byte count of the whole state.
+struct Space<'a> {
+    map: &'a mut Keys,
+    bytes: &'a mut u64,
 }
 
 fn cost(key: &[u8], value: &[u8]) -> u64 {
@@ -82,14 +97,15 @@ pub enum Kind {
     Persist,
     FlushAll,
     FlushDb,
+    FlushOneDb,
     Purge,
 }
 
 impl Kind {
     /// The kind of the command named `name`, in any case. `None` for any other command.
     pub fn of(name: &[u8]) -> Option<Kind> {
-        // Long enough for the longest name, INCRBYFLOAT.
-        let mut buf = [0u8; 11];
+        // Long enough for the longest name, DISCUS.FLUSHDB.
+        let mut buf = [0u8; 14];
         let upper = buf.get_mut(..name.len())?;
         upper.copy_from_slice(name);
         upper.make_ascii_uppercase();
@@ -120,6 +136,7 @@ impl Kind {
             b"FLUSHALL" => Kind::FlushAll,
             b"FLUSHDB" => Kind::FlushDb,
             b"PURGE" => Kind::Purge,
+            b"DISCUS.FLUSHDB" => Kind::FlushOneDb,
             _ => return None,
         })
     }
@@ -143,6 +160,7 @@ impl Kind {
                 | PExpireAt
                 | FlushAll
                 | FlushDb
+                | FlushOneDb
                 | Purge
         )
     }
@@ -171,25 +189,25 @@ impl CounterState {
 
     /// The state as a counter snapshot.
     pub fn encode(&self) -> Vec<u8> {
-        let entries = self
-            .map
-            .iter()
-            .map(|(k, e)| (&k[..], &e.value[..], e.expires_at_ms.unwrap_or(0)));
+        let entries = self.dbs.iter().flat_map(|(db, map)| {
+            map.iter()
+                .map(|(k, e)| (*db, &k[..], &e.value[..], e.expires_at_ms.unwrap_or(0)))
+        });
         discus_wire::encode_counter_snapshot(self.clock_ms, entries)
     }
 
-    /// A state from a counter snapshot. `None` when the snapshot is invalid.
+    /// A state from a counter snapshot. `None` when the snapshot is invalid. An entry of an older
+    /// build carries no database, and the wire reads it as database 0.
     pub fn decode(bytes: &[u8]) -> Option<CounterState> {
         let (clock_ms, entries) = discus_wire::decode_counter_snapshot(bytes).ok()?;
         let mut state = CounterState {
             clock_ms,
             ..CounterState::default()
         };
-        for (key, value, t) in entries {
-            state.bytes += cost(&key, &value);
+        for (db, key, value, t) in entries {
             let expires_at_ms = (t != 0).then_some(t);
-            state.map.insert(
-                key,
+            state.space(db).put(
+                &key,
                 CounterEntry {
                     value,
                     expires_at_ms,
@@ -207,34 +225,135 @@ impl CounterState {
         self.bytes
     }
 
+    /// The number of keys in every database.
     pub fn len(&self) -> usize {
-        self.map.len()
+        self.dbs.values().map(BTreeMap::len).sum()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        self.dbs.is_empty()
     }
 
-    pub fn get(&self, key: &[u8]) -> Option<&CounterEntry> {
-        self.map.get(key)
+    pub fn get(&self, db: u32, key: &[u8]) -> Option<&CounterEntry> {
+        self.dbs.get(&db)?.get(key)
+    }
+
+    /// The databases that hold keys, in ascending order.
+    pub fn databases(&self) -> Vec<u32> {
+        self.dbs.keys().copied().collect()
     }
 
     /// True when some key expired by the clock of the state but is still held.
     pub fn expired_keys(&self, now_ms: u64) -> bool {
         let now = now_ms.max(self.clock_ms);
-        self.map.values().any(|e| !e.alive(now))
+        self.dbs
+            .values()
+            .flat_map(BTreeMap::values)
+            .any(|e| !e.alive(now))
     }
 
+    fn space(&mut self, db: u32) -> Space<'_> {
+        Space {
+            map: self.dbs.entry(db).or_default(),
+            bytes: &mut self.bytes,
+        }
+    }
+
+    fn peek(&self, db: u32, key: &[u8], now: u64) -> Option<&CounterEntry> {
+        self.get(db, key).filter(|e| e.alive(now))
+    }
+
+    /// Apply one write in database `db` at `max(clock, stamp_ms)` and return its reply. `PURGE`,
+    /// `FLUSHALL`, and `FLUSHDB` cover every database.
+    pub fn apply(&mut self, stamp_ms: u64, db: u32, cmd: &Command, limits: &Limits) -> Value {
+        self.clock_ms = self.clock_ms.max(stamp_ms);
+        let now = self.clock_ms;
+        match Kind::of(&cmd[0]) {
+            Some(kind) if kind.is_read() => self.read_at(now, db, kind, cmd),
+            Some(Kind::FlushAll | Kind::FlushDb) => {
+                self.dbs.clear();
+                self.bytes = 0;
+                Ok(Value::ok())
+            }
+            Some(Kind::FlushOneDb) => {
+                if let Some(map) = self.dbs.remove(&db) {
+                    self.bytes -= map.iter().map(|(k, e)| cost(k, &e.value)).sum::<u64>();
+                }
+                Ok(Value::ok())
+            }
+            Some(Kind::Purge) => Ok(Value::Integer(self.purge(now))),
+            Some(kind) => {
+                let reply = self.space(db).write(now, kind, cmd, limits);
+                if self.dbs.get(&db).is_some_and(BTreeMap::is_empty) {
+                    self.dbs.remove(&db);
+                }
+                reply
+            }
+            None => Err(unknown(cmd)),
+        }
+        .unwrap_or_else(|e| e.to_value())
+    }
+
+    /// Drop every key expired at `now`. Returns how many it dropped.
+    fn purge(&mut self, now: u64) -> i64 {
+        let CounterState { dbs, bytes, .. } = self;
+        let mut removed = 0;
+        for map in dbs.values_mut() {
+            map.retain(|k, e| {
+                let alive = e.alive(now);
+                if !alive {
+                    *bytes -= cost(k, &e.value);
+                    removed += 1;
+                }
+                alive
+            });
+        }
+        dbs.retain(|_, map| !map.is_empty());
+        removed
+    }
+
+    /// Answer a read of `kind` in database `db` at `max(clock, now_ms)` without changing the
+    /// state.
+    pub fn read(&self, now_ms: u64, db: u32, kind: Kind, cmd: &Command) -> Value {
+        let now = now_ms.max(self.clock_ms);
+        self.read_at(now, db, kind, cmd)
+            .unwrap_or_else(|e| e.to_value())
+    }
+
+    fn read_at(&self, now: u64, db: u32, kind: Kind, cmd: &Command) -> Reply {
+        let peek = |key: &[u8]| self.peek(db, key, now);
+        let bulk = |key: &[u8]| peek(key).map_or(Value::Null, |e| Value::Bulk(e.value.clone()));
+        let expires = |key: &[u8]| peek(key).map(|e| e.expires_at_ms);
+        Ok(match kind {
+            Kind::Get => bulk(&cmd[1]),
+            Kind::MGet => Value::Array(cmd[1..].iter().map(|k| bulk(k)).collect()),
+            Kind::StrLen => Value::Integer(peek(&cmd[1]).map_or(0, |e| e.value.len() as i64)),
+            Kind::Exists => {
+                Value::Integer(cmd[1..].iter().filter(|k| peek(k).is_some()).count() as i64)
+            }
+            Kind::Type => Value::simple(if peek(&cmd[1]).is_some() {
+                "string"
+            } else {
+                "none"
+            }),
+            Kind::Ttl => ttl_value(expires(&cmd[1]), now, |ms| ((ms + 500) / 1000) as i64),
+            Kind::PTtl => ttl_value(expires(&cmd[1]), now, |ms| ms as i64),
+            _ => return Err(unknown(cmd)),
+        })
+    }
+}
+
+impl Space<'_> {
     fn put(&mut self, key: &Bytes, entry: CounterEntry) {
-        self.bytes += cost(key, &entry.value);
+        *self.bytes += cost(key, &entry.value);
         if let Some(old) = self.map.insert(key.clone(), entry) {
-            self.bytes -= cost(key, &old.value);
+            *self.bytes -= cost(key, &old.value);
         }
     }
 
     fn take(&mut self, key: &[u8]) -> Option<CounterEntry> {
         let old = self.map.remove(key)?;
-        self.bytes -= cost(key, &old.value);
+        *self.bytes -= cost(key, &old.value);
         Some(old)
     }
 
@@ -246,58 +365,7 @@ impl CounterState {
         self.map.get_mut(key)
     }
 
-    fn peek(&self, key: &[u8], now: u64) -> Option<&CounterEntry> {
-        self.map.get(key).filter(|e| e.alive(now))
-    }
-
-    /// Apply one write at `max(clock, stamp_ms)` and return its reply.
-    pub fn apply(&mut self, stamp_ms: u64, cmd: &Command, limits: &Limits) -> Value {
-        self.clock_ms = self.clock_ms.max(stamp_ms);
-        let now = self.clock_ms;
-        match Kind::of(&cmd[0]) {
-            Some(kind) if kind.is_read() => self.read_at(now, kind, cmd),
-            Some(kind) => self.write(now, kind, cmd, limits),
-            None => Err(unknown(cmd)),
-        }
-        .unwrap_or_else(|e| e.to_value())
-    }
-
-    /// Answer a read of `kind` at `max(clock, now_ms)` without changing the state.
-    pub fn read(&self, now_ms: u64, kind: Kind, cmd: &Command) -> Value {
-        let now = now_ms.max(self.clock_ms);
-        self.read_at(now, kind, cmd)
-            .unwrap_or_else(|e| e.to_value())
-    }
-
-    fn read_at(&self, now: u64, kind: Kind, cmd: &Command) -> Reply {
-        let bulk = |key: &[u8]| {
-            self.peek(key, now)
-                .map_or(Value::Null, |e| Value::Bulk(e.value.clone()))
-        };
-        let expires = |key: &[u8]| self.peek(key, now).map(|e| e.expires_at_ms);
-        Ok(match kind {
-            Kind::Get => bulk(&cmd[1]),
-            Kind::MGet => Value::Array(cmd[1..].iter().map(|k| bulk(k)).collect()),
-            Kind::StrLen => {
-                Value::Integer(self.peek(&cmd[1], now).map_or(0, |e| e.value.len() as i64))
-            }
-            Kind::Exists => Value::Integer(
-                cmd[1..]
-                    .iter()
-                    .filter(|k| self.peek(k, now).is_some())
-                    .count() as i64,
-            ),
-            Kind::Type => Value::simple(if self.peek(&cmd[1], now).is_some() {
-                "string"
-            } else {
-                "none"
-            }),
-            Kind::Ttl => ttl_value(expires(&cmd[1]), now, |ms| ((ms + 500) / 1000) as i64),
-            Kind::PTtl => ttl_value(expires(&cmd[1]), now, |ms| ms as i64),
-            _ => return Err(unknown(cmd)),
-        })
-    }
-
+    /// A write of `kind` other than the flushes and `PURGE`, which cover every database.
     fn write(&mut self, now: u64, kind: Kind, cmd: &Command, limits: &Limits) -> Reply {
         match kind {
             Kind::Set => self.set(now, cmd),
@@ -366,23 +434,6 @@ impl CounterState {
                 }
                 _ => 0,
             })),
-            Kind::FlushAll | Kind::FlushDb => {
-                self.map.clear();
-                self.bytes = 0;
-                Ok(Value::ok())
-            }
-            Kind::Purge => {
-                let expired: Vec<Bytes> = self
-                    .map
-                    .iter()
-                    .filter(|(_, e)| !e.alive(now))
-                    .map(|(k, _)| k.clone())
-                    .collect();
-                for k in &expired {
-                    self.take(k);
-                }
-                Ok(Value::Integer(expired.len() as i64))
-            }
             _ => Err(unknown(cmd)),
         }
     }
@@ -526,7 +577,11 @@ mod tests {
     use crate::counter::cmd;
 
     fn run(s: &mut CounterState, at: u64, parts: &[&str]) -> Value {
-        s.apply(at, &cmd(parts), &LIMITS)
+        s.apply(at, 0, &cmd(parts), &LIMITS)
+    }
+
+    fn run_in(s: &mut CounterState, db: u32, parts: &[&str]) -> Value {
+        s.apply(1, db, &cmd(parts), &LIMITS)
     }
 
     fn int(v: i64) -> Value {
@@ -548,7 +603,7 @@ mod tests {
         assert_eq!(run(&mut s, 3, &["INCRBY", "k", "5"]), int(7));
         assert_eq!(run(&mut s, 4, &["DECRBY", "k", "2"]), int(5));
         assert_eq!(run(&mut s, 5, &["DECR", "k"]), int(4));
-        assert_eq!(s.get(b"k").and_then(|e| e.expires_at_ms), Some(1001));
+        assert_eq!(s.get(0, b"k").and_then(|e| e.expires_at_ms), Some(1001));
         assert_eq!(run(&mut s, 6, &["SET", "s", "abc"]), Value::ok());
         assert!(matches!(run(&mut s, 7, &["INCR", "s"]), Value::Error(_)));
         assert_eq!(
@@ -566,23 +621,23 @@ mod tests {
         assert_eq!(run(&mut s, 10, &["SET", "x", "b", "XX"]), Value::Null);
         assert_eq!(run(&mut s, 10, &["SET", "k", "c", "XX", "GET"]), bulk("a"));
         assert_eq!(run(&mut s, 10, &["SET", "k", "d", "EX", "5"]), Value::ok());
-        assert_eq!(s.get(b"k").and_then(|e| e.expires_at_ms), Some(5010));
+        assert_eq!(s.get(0, b"k").and_then(|e| e.expires_at_ms), Some(5010));
         assert_eq!(run(&mut s, 10, &["SET", "k", "e", "KEEPTTL"]), Value::ok());
-        assert_eq!(s.get(b"k").and_then(|e| e.expires_at_ms), Some(5010));
+        assert_eq!(s.get(0, b"k").and_then(|e| e.expires_at_ms), Some(5010));
         assert_eq!(run(&mut s, 10, &["SET", "k", "f", "PX", "7"]), Value::ok());
-        assert_eq!(s.get(b"k").and_then(|e| e.expires_at_ms), Some(17));
+        assert_eq!(s.get(0, b"k").and_then(|e| e.expires_at_ms), Some(17));
         assert_eq!(
             run(&mut s, 10, &["SET", "k", "g", "EXAT", "100"]),
             Value::ok()
         );
-        assert_eq!(s.get(b"k").and_then(|e| e.expires_at_ms), Some(100_000));
+        assert_eq!(s.get(0, b"k").and_then(|e| e.expires_at_ms), Some(100_000));
         assert_eq!(
             run(&mut s, 10, &["SET", "k", "h", "PXAT", "900"]),
             Value::ok()
         );
-        assert_eq!(s.get(b"k").and_then(|e| e.expires_at_ms), Some(900));
+        assert_eq!(s.get(0, b"k").and_then(|e| e.expires_at_ms), Some(900));
         assert_eq!(run(&mut s, 10, &["SET", "k", "i"]), Value::ok());
-        assert_eq!(s.get(b"k").and_then(|e| e.expires_at_ms), None);
+        assert_eq!(s.get(0, b"k").and_then(|e| e.expires_at_ms), None);
         assert!(matches!(
             run(&mut s, 10, &["SET", "k", "v", "NX", "XX"]),
             Value::Error(_)
@@ -604,9 +659,9 @@ mod tests {
         assert_eq!(run(&mut s, 1, &["APPEND", "k", "cd"]), int(4));
         assert_eq!(run(&mut s, 1, &["STRLEN", "k"]), int(4));
         assert_eq!(run(&mut s, 1, &["GETEX", "k", "PX", "50"]), bulk("abcd"));
-        assert_eq!(s.get(b"k").and_then(|e| e.expires_at_ms), Some(51));
+        assert_eq!(s.get(0, b"k").and_then(|e| e.expires_at_ms), Some(51));
         assert_eq!(run(&mut s, 1, &["GETEX", "k", "PERSIST"]), bulk("abcd"));
-        assert_eq!(s.get(b"k").and_then(|e| e.expires_at_ms), None);
+        assert_eq!(s.get(0, b"k").and_then(|e| e.expires_at_ms), None);
         assert_eq!(run(&mut s, 1, &["GETDEL", "k"]), bulk("abcd"));
         assert_eq!(run(&mut s, 1, &["GETDEL", "k"]), Value::Null);
         assert_eq!(run(&mut s, 1, &["INCRBYFLOAT", "f", "1.5"]), bulk("1.5"));
@@ -615,7 +670,7 @@ mod tests {
         assert_eq!(run(&mut s, 1, &["INCRBYFLOAT", "g", "0.2"]), bulk("0.3"));
         let small = Limits { max_value_bytes: 3 };
         assert!(matches!(
-            s.apply(1, &cmd(&["APPEND", "z", "abcd"]), &small),
+            s.apply(1, 0, &cmd(&["APPEND", "z", "abcd"]), &small),
             Value::Error(_)
         ));
     }
@@ -653,21 +708,21 @@ mod tests {
     fn incr_ex_sets_the_deadline_only_once() {
         let mut s = CounterState::new();
         assert_eq!(run(&mut s, 1000, &["INCR", "k", "EX", "10"]), int(1));
-        assert_eq!(s.get(b"k").and_then(|e| e.expires_at_ms), Some(11_000));
+        assert_eq!(s.get(0, b"k").and_then(|e| e.expires_at_ms), Some(11_000));
         assert_eq!(run(&mut s, 5000, &["INCR", "k", "EX", "10"]), int(2));
-        assert_eq!(s.get(b"k").and_then(|e| e.expires_at_ms), Some(11_000));
+        assert_eq!(s.get(0, b"k").and_then(|e| e.expires_at_ms), Some(11_000));
         assert_eq!(
             run(&mut s, 5000, &["INCRBY", "j", "5", "PX", "100"]),
             int(5)
         );
-        assert_eq!(s.get(b"j").and_then(|e| e.expires_at_ms), Some(5100));
+        assert_eq!(s.get(0, b"j").and_then(|e| e.expires_at_ms), Some(5100));
         assert_eq!(run(&mut s, 5000, &["DECR", "d", "PXAT", "9000"]), int(-1));
-        assert_eq!(s.get(b"d").and_then(|e| e.expires_at_ms), Some(9000));
+        assert_eq!(s.get(0, b"d").and_then(|e| e.expires_at_ms), Some(9000));
         assert_eq!(
             run(&mut s, 5000, &["DECRBY", "e", "2", "EXAT", "9"]),
             int(-2)
         );
-        assert_eq!(s.get(b"e").and_then(|e| e.expires_at_ms), Some(9000));
+        assert_eq!(s.get(0, b"e").and_then(|e| e.expires_at_ms), Some(9000));
         assert!(matches!(
             run(&mut s, 5000, &["INCR", "k", "EX"]),
             Value::Error(_)
@@ -678,7 +733,7 @@ mod tests {
         ));
         // The window ends, and the next increment opens a new one.
         assert_eq!(run(&mut s, 11_000, &["INCR", "k", "EX", "10"]), int(1));
-        assert_eq!(s.get(b"k").and_then(|e| e.expires_at_ms), Some(21_000));
+        assert_eq!(s.get(0, b"k").and_then(|e| e.expires_at_ms), Some(21_000));
     }
 
     #[test]
@@ -704,8 +759,8 @@ mod tests {
         let mut s = CounterState::new();
         run(&mut s, 0, &["SET", "k", "5", "PXAT", "2000"]);
         let (len, bytes) = (s.len(), s.bytes());
-        assert_eq!(s.read(5000, Kind::Get, &cmd(&["GET", "k"])), Value::Null);
-        assert_eq!(s.read(5000, Kind::Ttl, &cmd(&["TTL", "k"])), int(-2));
+        assert_eq!(s.read(5000, 0, Kind::Get, &cmd(&["GET", "k"])), Value::Null);
+        assert_eq!(s.read(5000, 0, Kind::Ttl, &cmd(&["TTL", "k"])), int(-2));
         assert_eq!((s.len(), s.bytes()), (len, bytes));
         assert_eq!(run(&mut s, 1500, &["INCR", "k"]), int(6));
     }
@@ -733,10 +788,10 @@ mod tests {
             .collect();
         let (mut a, mut b) = (CounterState::new(), CounterState::new());
         for (stamp, c) in &log {
-            a.apply(*stamp, c, &LIMITS);
+            a.apply(*stamp, 0, c, &LIMITS);
         }
         for (stamp, c) in &log {
-            b.apply(*stamp, c, &LIMITS);
+            b.apply(*stamp, 0, c, &LIMITS);
         }
         assert_eq!(a, b);
     }
@@ -788,8 +843,83 @@ mod tests {
             CommandError::UnknownCommand("hset".into()).to_value()
         );
         assert_eq!(
-            s.read(1, Kind::Set, &cmd(&["Set", "k", "v"])),
+            s.read(1, 0, Kind::Set, &cmd(&["Set", "k", "v"])),
             CommandError::UnknownCommand("set".into()).to_value()
         );
+    }
+
+    #[test]
+    fn counters_of_two_databases_are_separate() {
+        let mut s = CounterState::new();
+        run_in(&mut s, 0, &["INCR", "cnt:a"]);
+        run_in(&mut s, 0, &["INCR", "cnt:a"]);
+        assert_eq!(run_in(&mut s, 2, &["INCR", "cnt:a"]), int(1));
+        assert_eq!(s.get(0, b"cnt:a").map(|e| &e.value[..]), Some(&b"2"[..]));
+        assert_eq!(s.get(2, b"cnt:a").map(|e| &e.value[..]), Some(&b"1"[..]));
+        assert_eq!(s.get(1, b"cnt:a"), None);
+        assert_eq!(s.read(1, 2, Kind::Get, &cmd(&["GET", "cnt:a"])), bulk("1"));
+        assert_eq!(s.databases(), [0, 2]);
+        assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn flush_one_db_keeps_the_other_databases() {
+        let mut s = CounterState::new();
+        run_in(&mut s, 0, &["SET", "a", "1"]);
+        run_in(&mut s, 1, &["SET", "b", "22"]);
+        run_in(&mut s, 1, &["SET", "c", "3"]);
+        let flush = std::str::from_utf8(FLUSH_ONE_DB).unwrap();
+        assert_eq!(Kind::of(FLUSH_ONE_DB), Some(Kind::FlushOneDb));
+        assert!(Kind::FlushOneDb.is_shrinking());
+        assert_eq!(run_in(&mut s, 1, &[flush]), Value::ok());
+        assert_eq!(s.databases(), [0]);
+        assert_eq!(s.bytes(), 1 + 1 + ENTRY_OVERHEAD);
+        run_in(&mut s, 3, &["SET", "d", "4"]);
+        assert_eq!(run_in(&mut s, 5, &["FLUSHALL"]), Value::ok());
+        assert!(s.is_empty() && s.databases().is_empty());
+        assert_eq!(s.bytes(), 0);
+    }
+
+    #[test]
+    fn a_database_without_keys_is_removed() {
+        let mut s = CounterState::new();
+        run_in(&mut s, 4, &["SET", "a", "1"]);
+        run_in(&mut s, 4, &["DEL", "missing"]);
+        assert_eq!(s.databases(), [4]);
+        run_in(&mut s, 4, &["DEL", "a"]);
+        assert!(s.databases().is_empty());
+        assert!(matches!(
+            run_in(&mut s, 5, &["INCRBY", "k", "x"]),
+            Value::Error(_)
+        ));
+        assert!(s.databases().is_empty());
+        run_in(&mut s, 6, &["SET", "z", "x", "PXAT", "100"]);
+        run_in(&mut s, 7, &["SET", "y", "x", "PXAT", "100"]);
+        run_in(&mut s, 7, &["INCR", "n"]);
+        assert_eq!(s.apply(200, 0, &cmd(&["PURGE"]), &LIMITS), int(2));
+        assert_eq!(s.databases(), [7]);
+        assert_eq!(s.bytes(), 1 + 1 + ENTRY_OVERHEAD);
+    }
+
+    #[test]
+    fn a_snapshot_keeps_the_databases() {
+        let mut s = CounterState::new();
+        run_in(&mut s, 0, &["SET", "k", "a"]);
+        run_in(&mut s, 3, &["SET", "k", "b", "PXAT", "9000"]);
+        run_in(&mut s, 3, &["INCR", "n"]);
+        assert_eq!(CounterState::decode(&s.encode()), Some(s));
+    }
+
+    #[test]
+    fn a_snapshot_entry_without_db_is_in_database_zero() {
+        let bytes = discus_wire::encode_counter_snapshot(
+            7,
+            [(0, &b"k"[..], &b"v"[..], 0), (0, &b"t"[..], &b"w"[..], 50)],
+        );
+        let s = CounterState::decode(&bytes).unwrap();
+        assert_eq!(s.databases(), [0]);
+        assert_eq!(s.clock_ms(), 7);
+        assert_eq!(s.get(0, b"k").map(|e| &e.value[..]), Some(&b"v"[..]));
+        assert_eq!(s.get(0, b"t").and_then(|e| e.expires_at_ms), Some(50));
     }
 }

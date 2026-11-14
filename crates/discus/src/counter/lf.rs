@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use discus_placement::NodeId;
 use discus_resp::{Command, Value};
-use discus_wire::{encode_command, CounterAck, CounterSync, Message, Regime};
+use discus_wire::{encode_command, CounterAck, CounterOp, CounterSync, Message, Regime};
 use parking_lot::Mutex;
 use tokio::sync::{watch, Notify};
 use tokio_util::sync::CancellationToken;
@@ -30,14 +30,21 @@ const SYNC_TIMEOUT: Duration = Duration::from_secs(2);
 /// The pause after a failed sync.
 const SYNC_RETRY: Duration = Duration::from_millis(100);
 
+struct Pending {
+    seq: u64,
+    stamp_ms: u64,
+    db: u32,
+    command: Bytes,
+}
+
 struct Core {
     state: Tracked,
     /// The largest stamp so far. Stamps never run backwards within one regime.
     last_stamp: u64,
     /// The number of the last op.
     seq: u64,
-    /// Ops that the follower has not acknowledged: number, stamp, and raw command.
-    pending: VecDeque<(u64, u64, Bytes)>,
+    /// Ops that the follower has not acknowledged.
+    pending: VecDeque<Pending>,
 }
 
 /// The leader of one group in leader-follower mode.
@@ -128,6 +135,10 @@ impl LfLeader {
         self.core.lock().state.get().expired_keys(now_ms)
     }
 
+    pub fn databases(&self) -> Vec<u32> {
+        self.core.lock().state.get().databases()
+    }
+
     pub fn follower(&self) -> Option<NodeId> {
         *self.follower.lock()
     }
@@ -142,11 +153,12 @@ impl LfLeader {
         }
     }
 
-    /// Run one command. A read runs at `now_ms` without a stamp. A write takes the next stamp,
-    /// and with a follower it waits up to `wait` for the ack (spec section 10.1).
+    /// Run one command in database `db`. A read runs at `now_ms` without a stamp. A write takes
+    /// the next stamp, and with a follower it waits up to `wait` for the ack (spec section 10.1).
     pub async fn execute(
         &self,
         kind: Kind,
+        db: u32,
         cmd: &Command,
         now_ms: u64,
         limits: &Limits,
@@ -156,7 +168,7 @@ impl LfLeader {
             return Err(Refusal::NotLeader);
         }
         if kind.is_read() {
-            return Ok(self.core.lock().state.get().read(now_ms, kind, cmd));
+            return Ok(self.core.lock().state.get().read(now_ms, db, kind, cmd));
         }
         let follower = self.follower().is_some();
         let raw = follower.then(|| encode_command(cmd));
@@ -166,9 +178,14 @@ impl LfLeader {
             core.last_stamp = stamp;
             core.seq += 1;
             let seq = core.seq;
-            let reply = core.state.apply(stamp, cmd, limits);
-            if let Some(raw) = raw {
-                core.pending.push_back((seq, stamp, raw));
+            let reply = core.state.apply(stamp, db, cmd, limits);
+            if let Some(command) = raw {
+                core.pending.push_back(Pending {
+                    seq,
+                    stamp_ms: stamp,
+                    db,
+                    command,
+                });
             }
             (reply, seq)
         };
@@ -193,7 +210,7 @@ impl LfLeader {
             }
             newer
         });
-        self.core.lock().pending.retain(|(s, _, _)| *s > seq);
+        self.core.lock().pending.retain(|p| p.seq > seq);
     }
 
     /// Stream ops and heartbeats to the follower until the leader stops. A heartbeat goes out
@@ -228,16 +245,22 @@ impl LfLeader {
                 }
             } else {
                 let core = self.core.lock();
-                let ops: Vec<(u64, u64, Bytes)> =
-                    core.pending.iter().take(SYNC_OPS).cloned().collect();
+                let pending = core.pending.iter().take(SYNC_OPS);
+                let ops: Vec<CounterOp> = pending
+                    .map(|p| CounterOp {
+                        stamp_ms: p.stamp_ms,
+                        db: p.db,
+                        command: p.command.clone(),
+                    })
+                    .collect();
                 if ops.is_empty() && !self.serving() {
                     continue;
                 }
                 CounterSync {
                     group,
                     regime: self.regime,
-                    seq: ops.first().map_or(core.seq + 1, |o| o.0),
-                    ops: ops.into_iter().map(|(_, stamp, c)| (stamp, c)).collect(),
+                    seq: core.pending.front().map_or(core.seq + 1, |p| p.seq),
+                    ops,
                     snapshot: None,
                 }
             };
@@ -329,10 +352,10 @@ impl Follower {
         } else if !s.ops.is_empty() {
             let last = s.seq + s.ops.len() as u64 - 1;
             if core.synced && s.seq == core.seq + 1 {
-                for (stamp, raw) in &s.ops {
-                    match parse_command(raw) {
+                for op in &s.ops {
+                    match parse_command(&op.command) {
                         Some(cmd) => {
-                            core.state.apply(*stamp, &cmd, limits);
+                            core.state.apply(op.stamp_ms, op.db, &cmd, limits);
                         }
                         None => {
                             need_snapshot = true;

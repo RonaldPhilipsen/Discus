@@ -17,7 +17,7 @@ fn key(i: u64) -> Vec<u8> {
 }
 
 fn put(store: &Store, key: &[u8], value: &Bytes) {
-    store.write(key, Version::zero(), |slot| {
+    store.write(0, key, Version::zero(), |slot| {
         slot.set(Some(Entry::new(Value::Str(value.clone()), None)));
     });
 }
@@ -73,7 +73,7 @@ fn store(c: &mut Criterion) {
     group.bench_function("read_hit", |b| {
         b.iter(|| {
             i += 1;
-            store.read(&key(spread(i)), |entry| {
+            store.read(0, &key(spread(i)), |entry| {
                 black_box(entry.is_some());
             })
         });
@@ -88,7 +88,7 @@ fn store(c: &mut Criterion) {
         b.iter_custom(|iters| {
             let store = store.clone();
             contended(iters, move |t, i| {
-                store.read(&key(spread(i + (t << 40))), |entry| {
+                store.read(0, &key(spread(i + (t << 40))), |entry| {
                     black_box(entry.is_some());
                 });
             })

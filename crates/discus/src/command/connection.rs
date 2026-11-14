@@ -132,11 +132,9 @@ fn hello(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     ]))
 }
 
-fn select(_: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    match parse_i64(&cmd[1])? {
-        0 => Ok(Value::ok()),
-        _ => Err(CommandError::Custom("ERR DB index is out of range".into())),
-    }
+fn select(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    conn.db = node.databases.check_select(parse_i64(&cmd[1])?)?;
+    Ok(Value::ok())
 }
 
 fn command(_: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
@@ -169,11 +167,15 @@ fn command_entry(spec: &CommandSpec) -> Value {
     } else {
         "readonly"
     };
+    let mut flags = vec![Value::simple(flag)];
+    if spec.fast {
+        flags.push(Value::simple("fast"));
+    }
     let (first, last, step) = spec.route.key_spec();
     Value::Array(vec![
         Value::bulk(spec.name.to_lowercase().into_bytes()),
         Value::Integer(i64::from(spec.arity)),
-        Value::Array(vec![Value::simple(flag)]),
+        Value::Array(flags),
         Value::Integer(first),
         Value::Integer(last),
         Value::Integer(step),
@@ -260,10 +262,15 @@ fn info(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
             format!("evicted_keys:{}", node.store.evictions()),
         ],
     );
-    section(
-        "keyspace",
-        &[format!("db0:keys={},expires=0,avg_ttl=0", node.store.len())],
-    );
+    let keyspace: Vec<String> = node
+        .store
+        .databases()
+        .into_iter()
+        .map(|db| (db, node.store.db_len(db)))
+        .filter(|(_, keys)| *keys > 0)
+        .map(|(db, keys)| format!("db{db}:keys={keys},expires=0,avg_ttl=0"))
+        .collect();
+    section("keyspace", &keyspace);
     section(
         "Cluster",
         &[format!(
@@ -292,6 +299,8 @@ fn info(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
                 "config_restart_pending:{}",
                 node.live_settings.pending().join(",")
             ),
+            format!("databases:{}", node.databases.local()),
+            format!("cluster_databases:{}", node.databases.cluster()),
             format!("discus_build:{}", build::BUILD_ID),
             format!("discus_features:{}", build::FEATURES.join(",")),
             format!("discus_tls_backend:{}", build::TLS_BACKEND),
@@ -359,7 +368,7 @@ fn config(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     }
     let known = [
         ("maxmemory", node.config.max_memory.to_string()),
-        ("databases", "1".to_string()),
+        ("databases", node.databases.cluster().to_string()),
         ("maxclients", "10000".to_string()),
     ];
     let pattern = cmd[2].to_ascii_lowercase();
@@ -453,6 +462,58 @@ fn standalone_topology(node: &Node, conn: &ConnState, kind: TopologyCommand) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::security::ConnAuth;
+    use crate::settings::{Live, Reloadable};
+    use crate::Config;
+
+    fn select_reply(cmd: &[&str]) -> Reply {
+        let config = Config::parse_from(["discus"]).unwrap();
+        let live = Live::new(Reloadable::from_config(&config));
+        let security = Arc::new(crate::security::tests::security(&[]));
+        let node = Node::new(config, security, live);
+        let mut conn = ConnState::new(1, ConnAuth::default());
+        select(&node, &mut conn, &crate::counter::cmd(cmd))
+    }
+
+    #[test]
+    fn select_parses_like_valkey() {
+        assert_eq!(
+            select_reply(&["SELECT", "abc"]),
+            Err(CommandError::NotInteger)
+        );
+        assert_eq!(
+            CommandError::NotInteger.text(),
+            "ERR value is not an integer or out of range"
+        );
+    }
+
+    #[test]
+    fn a_default_node_serves_only_database_zero() {
+        assert_eq!(select_reply(&["SELECT", "0"]), Ok(Value::ok()));
+        assert_eq!(
+            select_reply(&["SELECT", "1"]),
+            Err(CommandError::Custom(crate::databases::OUT_OF_RANGE.into()))
+        );
+    }
+
+    #[test]
+    fn config_get_databases_reports_the_cluster_count() {
+        let parsed = Config::parse_from(["discus", "--databases", "3"]).unwrap();
+        let live = Live::new(Reloadable::from_config(&parsed));
+        let security = Arc::new(crate::security::tests::security(&[]));
+        let node = Node::new(parsed, security, live);
+        let mut conn = ConnState::new(1, ConnAuth::default());
+        let cmd = crate::counter::cmd(&["CONFIG", "GET", "databases"]);
+        assert_eq!(
+            config(&node, &mut conn, &cmd),
+            Ok(Value::Map(vec![(
+                Value::bulk(b"databases".to_vec()),
+                Value::bulk(b"3".to_vec())
+            )]))
+        );
+    }
 
     fn positions(entry: &Value) -> (i64, i64, i64) {
         let Value::Array(parts) = entry else {
@@ -497,5 +558,9 @@ mod tests {
         };
         assert_eq!(flags("GET"), Value::Array(vec![Value::simple("readonly")]));
         assert_eq!(flags("SET"), Value::Array(vec![Value::simple("write")]));
+        assert_eq!(
+            flags("SWAPDB"),
+            Value::Array(vec![Value::simple("write"), Value::simple("fast")])
+        );
     }
 }

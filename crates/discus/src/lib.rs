@@ -7,6 +7,7 @@ pub mod command;
 pub mod config;
 pub mod control;
 pub mod counter;
+pub mod databases;
 pub mod lag;
 pub mod membership;
 pub mod node;

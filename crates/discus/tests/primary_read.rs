@@ -139,7 +139,7 @@ async fn settled(c: &Cluster, key: &str) {
             .node
             .replicator()
             .unwrap()
-            .settled(key.as_bytes()))
+            .settled(0, key.as_bytes()))
         .await
     );
 }
@@ -161,7 +161,7 @@ fn any_tombstone(nodes: &[&ClusterNode], key: &str) -> bool {
     nodes.iter().any(|n| {
         n.node
             .store
-            .entry(key.as_bytes())
+            .entry(0, key.as_bytes())
             .is_some_and(|e| e.tombstone)
     })
 }
@@ -291,7 +291,7 @@ async fn run_spent(node: &ClusterNode, parts: &[&str]) -> Value {
         .map(|p| Bytes::copy_from_slice(p.as_bytes()))
         .collect();
     let spec = discus::command::lookup(&cmd[0]).unwrap();
-    let job = Job::plain(cmd, spec);
+    let job = Job::plain(cmd, spec, 0);
     let hop = Hop {
         hops: MAX_HOPS,
         ..Hop::default()
@@ -323,7 +323,7 @@ async fn a_former_primary_waits_for_a_secondary_on_a_spent_delete() {
         let replicator = former.node.replicator().unwrap();
         assert!(
             wait_until(Duration::from_secs(10), || replicator
-                .settled(key.as_bytes()))
+                .settled(0, key.as_bytes()))
             .await
         );
         stall(&others, SLOW_MS);

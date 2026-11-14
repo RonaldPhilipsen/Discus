@@ -16,16 +16,18 @@ use crate::command::{self, CommandError, CommandSpec};
 use crate::node::Node;
 use crate::telemetry;
 
-/// What each step of one `RENAME` shares.
-struct Steps {
-    node: Arc<Node>,
-    rr: u64,
-    writes: Option<Writes>,
-    hop: Hop,
+/// What each step of one `RENAME` or `COPY` shares.
+pub(super) struct Steps {
+    pub(super) node: Arc<Node>,
+    pub(super) rr: u64,
+    /// The database of the command. Each step of a `RENAME` runs in it.
+    pub(super) db: u32,
+    pub(super) writes: Option<Writes>,
+    pub(super) hop: Hop,
 }
 
 impl Steps {
-    async fn run(&self, spec: &'static CommandSpec, cmd: Command) -> Reply {
+    pub(super) async fn run(&self, spec: &'static CommandSpec, db: u32, cmd: Command) -> Reply {
         let job = Job {
             cmd,
             spec,
@@ -33,6 +35,7 @@ impl Steps {
             // The take and the put are internal steps, so they forward and never return `-MOVED`.
             redirect: false,
             readonly: false,
+            db,
         };
         let hop = Hop {
             trace: self.hop.trace.clone(),
@@ -57,7 +60,7 @@ async fn same_key(steps: &Steps, key: Bytes) -> Reply {
         return Reply::try_again();
     };
     let reply = steps
-        .run(spec, vec![Bytes::from_static(b"TYPE"), key])
+        .run(spec, steps.db, vec![Bytes::from_static(b"TYPE"), key])
         .await;
     match reply.value {
         Value::Error(_) => reply,
@@ -70,7 +73,7 @@ async fn same_key(steps: &Steps, key: Bytes) -> Reply {
 
 async fn move_entry(steps: &Steps, from: Bytes, to: Bytes) -> Reply {
     let name = Bytes::from_static(TAKE.name.as_bytes());
-    let taken = steps.run(TAKE, vec![name, from]).await;
+    let taken = steps.run(TAKE, steps.db, vec![name, from]).await;
     let blob = match taken.value {
         Value::Null => return Reply::error(CommandError::NoSuchKey),
         Value::Bulk(ref blob) => blob.clone(),
@@ -78,7 +81,7 @@ async fn move_entry(steps: &Steps, from: Bytes, to: Bytes) -> Reply {
         _ => return taken,
     };
     let name = Bytes::from_static(PUT.name.as_bytes());
-    let put = steps.run(PUT, vec![name, to, blob]).await;
+    let put = steps.run(PUT, steps.db, vec![name, to, blob]).await;
     if matches!(put.value, Value::Error(_)) || put.failed.is_some() {
         return Reply::try_again();
     }
@@ -95,6 +98,7 @@ pub fn run(node: &Arc<Node>, job: Job, hop: Hop, writes: Option<&Writes>) -> Dis
     let steps = Steps {
         node: node.clone(),
         rr: job.rr,
+        db: job.db,
         writes: writes.cloned(),
         hop,
     };

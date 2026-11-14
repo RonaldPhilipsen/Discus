@@ -6,7 +6,7 @@ use bytes::Bytes;
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 use crate::glob::glob_match;
-use crate::{Entry, Store, HASH_SEED};
+use crate::{DbKey, Entry, EntryCursor, Store, HASH_SEED};
 
 const ORDER_BITS: u32 = 48;
 const ORDER_MAX: u64 = (1 << ORDER_BITS) - 1;
@@ -22,8 +22,10 @@ impl Store {
         xxh3_64_with_seed(key, HASH_SEED) >> (64 - ORDER_BITS)
     }
 
-    /// Walk the map with a cursor and give `f` every entry that is not expired. `count` is the
-    /// number of entries to examine, as in Redis.
+    /// Walk the map of database `db` with a cursor and give `f` every entry that is not expired.
+    /// `count` is the number of entries to examine, as in Redis. Returns the next cursor and the
+    /// number of entries examined. Only the map of `db` is read, so a large database does not
+    /// slow down the walk of another.
     ///
     /// The cursor holds a shard index in its high 16 bits and, in its low 48 bits, the lowest
     /// walk order that is still to come in that shard. A returned cursor of 0 means the walk is
@@ -36,7 +38,13 @@ impl Store {
     /// per call, and no memory per entry. The position cursor that this replaced cost O(position)
     /// per call and skipped keys when the map changed. An ordered index per shard would make a
     /// call O(count) but costs memory and work on every insert and delete.
-    fn walk(&self, cursor: u64, count: usize, mut f: impl FnMut(&Bytes, &Entry)) -> u64 {
+    fn walk(
+        &self,
+        db: u32,
+        cursor: u64,
+        count: usize,
+        mut f: impl FnMut(&Bytes, &Entry),
+    ) -> (u64, usize) {
         let now = self.clock.now_ms();
         let count = count.max(1);
         let mut shard_idx = (cursor >> ORDER_BITS) as usize;
@@ -44,15 +52,20 @@ impl Store {
         let mut examined = 0;
         while shard_idx < self.shards.len() {
             if examined >= count {
-                return encode(shard_idx, from);
+                return (encode(shard_idx, from), examined);
             }
             let want = count - examined;
             let guard = self.shards[shard_idx].inner.read();
+            let Some(d) = guard.get(db) else {
+                shard_idx += 1;
+                from = 0;
+                continue;
+            };
             // A max-heap of the `want` lowest orders so far. `picked` holds every entry at or
             // below its top, ties included, and is trimmed when it grows.
             let mut lowest: BinaryHeap<u64> = BinaryHeap::with_capacity(want + 1);
             let mut picked: Vec<(u64, &Bytes, &Entry)> = Vec::new();
-            for (k, e) in guard.map.iter() {
+            for (k, e) in d.map.iter() {
                 let o = self.order(k);
                 if o < from {
                     continue;
@@ -90,13 +103,20 @@ impl Store {
                 from = 0;
             }
         }
-        0
+        (0, examined)
     }
 
-    /// Walk the live keys with a cursor, as `SCAN` does. Tombstones and expired keys are skipped.
-    pub fn scan(&self, cursor: u64, count: usize, pattern: Option<&[u8]>) -> (u64, Vec<Bytes>) {
+    /// Walk the live keys of database `db` with a cursor, as `SCAN` does. Tombstones and
+    /// expired keys are skipped.
+    pub fn scan(
+        &self,
+        db: u32,
+        cursor: u64,
+        count: usize,
+        pattern: Option<&[u8]>,
+    ) -> (u64, Vec<Bytes>) {
         let mut out = Vec::new();
-        let next = self.walk(cursor, count, |k, e| {
+        let (next, _) = self.walk(db, cursor, count, |k, e| {
             if !e.tombstone && pattern.is_none_or(|p| glob_match(p, k)) {
                 out.push(k.clone());
             }
@@ -104,16 +124,18 @@ impl Store {
         (next, out)
     }
 
-    /// Walk the entries with a cursor, tombstones included, for handoff and reconciliation. Only
-    /// the entries that `keep` accepts are cloned. It runs under the shard lock.
+    /// Walk the entries of database `db` with a cursor, tombstones included, for handoff and
+    /// reconciliation. Only the entries that `keep` accepts are cloned. It runs under the shard
+    /// lock.
     pub fn scan_entries(
         &self,
+        db: u32,
         cursor: u64,
         count: usize,
         mut keep: impl FnMut(&Bytes, &Entry) -> bool,
     ) -> (u64, Vec<(Bytes, Entry)>) {
         let mut out = Vec::new();
-        let next = self.walk(cursor, count, |k, e| {
+        let (next, _) = self.walk(db, cursor, count, |k, e| {
             if keep(k, e) {
                 out.push((k.clone(), e.clone()));
             }
@@ -121,23 +143,57 @@ impl Store {
         (next, out)
     }
 
-    /// A random live key, or `None` when the store is empty.
-    pub fn random_key(&self) -> Option<Bytes> {
+    /// [`Store::scan_entries`] over every database in ascending order. `keep` gets the database
+    /// too. Returns `None` as the next cursor when the walk is complete. At the end of a
+    /// database, the cursor names the next one, so a database that appears during the walk is
+    /// seen when its number is still to come.
+    pub fn scan_all_entries(
+        &self,
+        cursor: EntryCursor,
+        count: usize,
+        mut keep: impl FnMut(u32, &Bytes, &Entry) -> bool,
+    ) -> (Option<EntryCursor>, Vec<(DbKey, Entry)>) {
+        let mut out = Vec::new();
+        let mut cur = cursor;
+        let mut left = count.max(1);
+        loop {
+            let db = cur.db;
+            let (next, examined) = self.walk(db, cur.pos, left, |k, e| {
+                if keep(db, k, e) {
+                    out.push((DbKey::new(db, k.clone()), e.clone()));
+                }
+            });
+            if next != 0 {
+                return (Some(EntryCursor { db, pos: next }), out);
+            }
+            let Some(db) = self.next_database(db) else {
+                return (None, out);
+            };
+            cur = EntryCursor { db, pos: 0 };
+            left = left.saturating_sub(examined);
+            if left == 0 {
+                return (Some(cur), out);
+            }
+        }
+    }
+
+    /// A random live key of database `db`, or `None` when the database is empty.
+    pub fn random_key(&self, db: u32) -> Option<Bytes> {
         let now = self.clock.now_ms();
         let n = self.shards.len();
         let first = fastrand::usize(..n);
         for offset in 0..n {
             let guard = self.shards[(first + offset) % n].inner.read();
-            let len = guard.map.len();
-            if len == 0 {
+            let Some(d) = guard.get(db).filter(|d| d.live > 0) else {
                 continue;
-            }
+            };
+            let len = d.map.len();
             let start = fastrand::usize(..len);
-            let live = guard
+            let live = d
                 .map
                 .iter()
                 .skip(start)
-                .chain(guard.map.iter())
+                .chain(d.map.iter())
                 .take(len)
                 .find(|(_, e)| !e.tombstone && !e.is_expired(now));
             if let Some((k, _)) = live {
@@ -147,7 +203,7 @@ impl Store {
         None
     }
 
-    /// Drop every entry and tombstone, and every refill mark.
+    /// Drop every entry and tombstone of every database, and every refill mark.
     pub fn clear(&self) {
         for i in 0..self.shards.len() {
             self.clear_shard(i);

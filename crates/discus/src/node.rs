@@ -24,6 +24,7 @@ use crate::cluster::ClusterLink;
 use crate::command::CommandError;
 use crate::config::{client_host, default_client_addr};
 use crate::counter::Counters;
+use crate::databases::Databases;
 use crate::lag::LagProbe;
 use crate::membership::Membership;
 use crate::replication::Replicator;
@@ -73,6 +74,8 @@ pub struct Node {
     current_generation: AtomicU64,
     pub started_at: Instant,
     pub store: Arc<Store>,
+    /// The database counts of this node and of the cluster, and the `MULTI_DB` gate.
+    pub databases: Arc<Databases>,
     pub security: Arc<Security>,
     /// The reloadable settings, replaced as a whole on a reload of the `--config` file.
     pub live_settings: Arc<Live>,
@@ -141,6 +144,9 @@ pub struct Faults {
     pub drop_stopped: parking_lot::Mutex<Option<&'static str>>,
     /// The sweep of expired entries skips its runs while this is set.
     pub hold_sweep: std::sync::atomic::AtomicBool,
+    /// The membership tick passes no view to `Databases` while this is set, as while a member of
+    /// the epoch has no gossip record.
+    pub withhold_view: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "testing")]
@@ -256,6 +262,11 @@ impl Node {
             config.max_memory / 100 * config.write_set_memory_percent,
             Some(store.clone()),
         ));
+        let databases = Arc::new(if config.gossip_enabled() {
+            Databases::awaiting_view(config.databases, config.lower_databases)
+        } else {
+            Databases::new(config.databases, config.lower_databases)
+        });
         Node {
             config,
             id,
@@ -264,6 +275,7 @@ impl Node {
             current_generation: AtomicU64::new(next_generation()),
             epochs: Arc::new(RwLock::new(epochs)),
             started_at: Instant::now(),
+            databases,
             store,
             write_budget,
             security,
@@ -458,6 +470,49 @@ impl Node {
     /// Attach the replicator. Only the first call has an effect.
     pub fn set_replicator(&self, replicator: Arc<Replicator>) {
         let _ = self.replicator.set(replicator);
+    }
+
+    /// Drop every database from `count` up: its entries, its queued keys and hints, and the
+    /// counters of the groups that this node leads. The cluster count dropped to `count`, so
+    /// clients can no longer reach them. `Databases::set_view` already set the floor, so no
+    /// inbound entry lands in them between the drop and a later raise.
+    pub fn drop_databases_from(self: &Arc<Self>, count: u32) {
+        let node = self.clone();
+        tokio::spawn(async move {
+            let store = node.store.clone();
+            let removed = tokio::task::spawn_blocking(move || {
+                let removed: Vec<u32> = store
+                    .databases()
+                    .into_iter()
+                    .filter(|db| *db >= count)
+                    .collect();
+                store.drop_databases_from(count);
+                removed
+            })
+            .await
+            .unwrap_or_default();
+            if let Some(r) = node.replicator() {
+                r.flush_databases_from(count);
+            }
+            if !removed.is_empty() {
+                tracing::info!(
+                    count,
+                    ?removed,
+                    "dropped the databases above the cluster count"
+                );
+            }
+            if let Some(counters) = node.counters().cloned() {
+                counters.drop_databases_from(&node, count).await;
+            }
+        });
+    }
+
+    /// Hold at least `n` databases, and advertise them to the cluster when membership runs.
+    pub fn raise_databases(self: &Arc<Self>, n: u32) {
+        self.databases.raise_local(n);
+        if let Some(m) = self.membership() {
+            m.set_databases(n);
+        }
     }
 
     /// The counter tier. Every node that `Server` binds has one, also without a transport.
@@ -755,12 +810,18 @@ impl Node {
     /// Run a store write with `stamp`. A write that changed its key records `stamp` as the
     /// applied stamp of the command and queues the key for the other owners (spec section 8.2).
     /// A write that changed nothing leaves no trace.
-    pub fn write<R>(&self, key: &Bytes, stamp: Version, f: impl FnOnce(&mut Slot) -> R) -> R {
-        let (result, changed) = self.store.write_changed(key, stamp, f);
+    pub fn write<R>(
+        &self,
+        db: u32,
+        key: &Bytes,
+        stamp: Version,
+        f: impl FnOnce(&mut Slot) -> R,
+    ) -> R {
+        let (result, changed) = self.store.write_changed(db, key, stamp, f);
         if changed {
             APPLIED.with(|a| a.set(Some(stamp)));
             if let Some(replicator) = self.replicator() {
-                replicator.written(self, key);
+                replicator.written(self, db, key);
             }
         }
         result
@@ -832,6 +893,8 @@ pub struct ConnState {
     pub readonly: bool,
     /// The local address of the client socket.
     pub local_addr: Option<SocketAddr>,
+    /// The database that `SELECT` chose. A new connection starts in database 0, as in Valkey.
+    pub db: u32,
 }
 
 impl ConnState {
@@ -846,7 +909,17 @@ impl ConnState {
             writes: None,
             redirect: false,
             readonly: false,
+            db: 0,
             local_addr: None,
+        }
+    }
+
+    /// The state of a command that runs on this node without a client connection, in database
+    /// `db`.
+    pub fn internal(db: u32) -> ConnState {
+        ConnState {
+            db,
+            ..ConnState::new(0, ConnAuth::default())
         }
     }
 

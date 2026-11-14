@@ -52,8 +52,9 @@ fn bulk_or_null(b: Option<&Bytes>) -> Value {
     b.map_or(Value::Null, |b| Value::Bulk(b.clone()))
 }
 
-fn get(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    node.store.read(&cmd[1], |e| Ok(bulk_or_null(str_of(e)?)))
+fn get(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    node.store
+        .read(conn.db, &cmd[1], |e| Ok(bulk_or_null(str_of(e)?)))
 }
 
 /// An expiry option such as `EX 10`, as an absolute deadline.
@@ -138,13 +139,13 @@ pub fn set_options(cmd: &Command, now_ms: u64) -> Result<SetOptions, CommandErro
     Ok(o)
 }
 
-fn set(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn set(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     check_key(node, &cmd[1])?;
     check_value(node, &cmd[2])?;
     let o = set_options(cmd, node.store.now_ms())?;
     admit(node, cmd[1].len() + cmd[2].len())?;
     let value = cmd[2].clone();
-    node.write(&cmd[1], node.stamp()?, |slot| {
+    node.write(conn.db, &cmd[1], node.stamp()?, |slot| {
         let old = match str_of(slot.as_ref()) {
             Err(e) if o.get => return Err(e),
             old => old.ok().flatten().cloned(),
@@ -169,8 +170,8 @@ fn set(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     })
 }
 
-fn getdel(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    node.write(&cmd[1], node.stamp()?, |slot| {
+fn getdel(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    node.write(conn.db, &cmd[1], node.stamp()?, |slot| {
         let Some(b) = str_of(slot.as_ref())?.cloned() else {
             return Ok(Value::Null);
         };
@@ -179,14 +180,14 @@ fn getdel(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     })
 }
 
-fn getex(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn getex(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     let expiry = getex_expiry(cmd, node.store.now_ms())?;
     let deadline = match expiry {
         Some(Expiry::At(t)) => Some(Some(t)),
         Some(Expiry::Persist) => Some(None),
         _ => None,
     };
-    node.write(&cmd[1], node.stamp()?, |slot| {
+    node.write(conn.db, &cmd[1], node.stamp()?, |slot| {
         let Some(b) = str_of(slot.as_ref())? else {
             return Ok(Value::Null);
         };
@@ -202,24 +203,24 @@ fn getex(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     })
 }
 
-fn mget(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn mget(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     let values = cmd[1..]
         .iter()
         .map(|key| {
             node.store
-                .read(key, |e| bulk_or_null(str_of(e).ok().flatten()))
+                .read(conn.db, key, |e| bulk_or_null(str_of(e).ok().flatten()))
         })
         .collect();
     Ok(Value::Array(values))
 }
 
-fn mset(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn mset(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     check_mset(node, cmd)?;
     // One stamp for the whole command. Each key still has its own version.
     let stamp = node.stamp()?;
     for pair in cmd[1..].chunks(2) {
         admit(node, pair[0].len() + pair[1].len())?;
-        node.write(&pair[0], stamp, |slot| {
+        node.write(conn.db, &pair[0], stamp, |slot| {
             slot.set(Some(new_entry(pair[1].clone(), None)))
         });
     }
@@ -227,10 +228,10 @@ fn mset(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 }
 
 /// Add `delta` to the integer at `key`. A missing key counts as zero. The TTL is kept.
-fn add_integer(node: &Node, key: &Bytes, delta: i64) -> Reply {
+fn add_integer(node: &Node, db: u32, key: &Bytes, delta: i64) -> Reply {
     check_key(node, key)?;
     admit(node, key.len() + 20)?;
-    node.write(key, node.stamp()?, |slot| {
+    node.write(db, key, node.stamp()?, |slot| {
         let current = str_of(slot.as_ref())?.map_or(Ok(0), |b| parse_i64(b))?;
         let next = current.checked_add(delta).ok_or(CommandError::Overflow)?;
         let expires = slot.as_ref().and_then(|e| e.expires_at_ms);
@@ -248,34 +249,34 @@ fn exact_arity(cmd: &Command, arity: usize) -> Result<(), CommandError> {
     Ok(())
 }
 
-fn incr(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn incr(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     exact_arity(cmd, 2)?;
-    add_integer(node, &cmd[1], 1)
+    add_integer(node, conn.db, &cmd[1], 1)
 }
 
-fn decr(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn decr(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     exact_arity(cmd, 2)?;
-    add_integer(node, &cmd[1], -1)
+    add_integer(node, conn.db, &cmd[1], -1)
 }
 
-fn incrby(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn incrby(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     exact_arity(cmd, 3)?;
-    add_integer(node, &cmd[1], parse_i64(&cmd[2])?)
+    add_integer(node, conn.db, &cmd[1], parse_i64(&cmd[2])?)
 }
 
-fn decrby(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn decrby(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     exact_arity(cmd, 3)?;
     let delta = parse_i64(&cmd[2])?
         .checked_neg()
         .ok_or(CommandError::Overflow)?;
-    add_integer(node, &cmd[1], delta)
+    add_integer(node, conn.db, &cmd[1], delta)
 }
 
-fn incrbyfloat(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn incrbyfloat(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     check_key(node, &cmd[1])?;
     admit(node, cmd[1].len() + 32)?;
     let delta = parse_float_delta(&cmd[2])?;
-    node.write(&cmd[1], node.stamp()?, |slot| {
+    node.write(conn.db, &cmd[1], node.stamp()?, |slot| {
         let text = incr_by_float(str_of(slot.as_ref())?.map(|b| &b[..]), delta)?;
         let expires = slot.as_ref().and_then(|e| e.expires_at_ms);
         slot.set(Some(new_entry(text.clone(), expires)));
@@ -283,10 +284,10 @@ fn incrbyfloat(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     })
 }
 
-fn append(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn append(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     check_key(node, &cmd[1])?;
     admit(node, cmd[2].len())?;
-    node.write(&cmd[1], node.stamp()?, |slot| {
+    node.write(conn.db, &cmd[1], node.stamp()?, |slot| {
         let mut bytes = str_of(slot.as_ref())?.map_or_else(Vec::new, |b| b.to_vec());
         let expires = slot.as_ref().and_then(|e| e.expires_at_ms);
         bytes.extend_from_slice(&cmd[2]);
@@ -297,32 +298,32 @@ fn append(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     })
 }
 
-fn strlen(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    node.store.read(&cmd[1], |e| {
+fn strlen(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    node.store.read(conn.db, &cmd[1], |e| {
         Ok(Value::Integer(str_of(e)?.map_or(0, |b| b.len() as i64)))
     })
 }
 
-fn del(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn del(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     // A stamped write, not `Store::remove`, so the delete leaves a tombstone.
     let stamp = node.stamp()?;
     let removed = cmd[1..]
         .iter()
-        .filter(|k| node.write(k, stamp, |slot| slot.take().is_some()))
+        .filter(|k| node.write(conn.db, k, stamp, |slot| slot.take().is_some()))
         .count();
     Ok(Value::Integer(removed as i64))
 }
 
-fn exists(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+fn exists(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     let found = cmd[1..]
         .iter()
-        .filter(|k| node.store.read(k, |e| e.is_some()))
+        .filter(|k| node.store.read(conn.db, k, |e| e.is_some()))
         .count();
     Ok(Value::Integer(found as i64))
 }
 
-fn type_(node: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
-    Ok(node.store.read(&cmd[1], |e| match e {
+fn type_(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    Ok(node.store.read(conn.db, &cmd[1], |e| match e {
         None => Value::simple("none"),
         Some(e) => Value::simple(e.value.kind()),
     }))

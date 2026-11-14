@@ -110,7 +110,7 @@ async fn the_bootstrap_node_starts_from_the_wall_clock() {
     assert!(wait_until(FORM, || node.is_normal()).await);
     let mut c = node.redis().await;
     let _: () = c.set("k", "v").await.unwrap();
-    let stamp = node.node.store.read(b"k", |e| e.unwrap().version.time());
+    let stamp = node.node.store.read(0, b"k", |e| e.unwrap().version.time());
     let wall = (clock.hlc_clock())();
     let diff = stamp.to_duration().abs_diff(wall.to_duration());
     assert!(diff < Duration::from_millis(5), "{diff:?}");
@@ -212,7 +212,7 @@ async fn two_clusters_merge_into_one() {
     lone.node.membership().unwrap().add_seed(b_addr);
     wait_agreed(&[&lone, &b, &c], Duration::from_secs(20)).await;
     assert_eq!(lone.node.cluster_id(), b.node.cluster_id());
-    assert!(!lone.node.store.read(b"lost", |e| e.is_some()));
+    assert!(!lone.node.store.read(0, b"lost", |e| e.is_some()));
 }
 
 #[tokio::test]

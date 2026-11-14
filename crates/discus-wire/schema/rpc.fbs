@@ -53,6 +53,8 @@ table Forward {
   mode: ForwardMode (id: 5);
   /// The sender keeps the key in a write set. The reply reports `observed` and `settled`.
   track: bool (id: 6);
+  /// The database of the command.
+  db: uint (id: 7);
 }
 
 enum RespKind: ubyte {

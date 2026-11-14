@@ -13,16 +13,34 @@ use crate::{Config, Node};
 
 /// Merges `text` over `base` and applies the result to `live_settings`, and returns the names of the
 /// changed settings. `base` is the startup config, so its `cli_set` keeps every command-line value.
-/// An error changes nothing.
+/// An error changes nothing. The database count only grows: a count below `databases_floor` keeps
+/// the current value and stays pending, because dropping databases needs a node replacement.
 pub fn reload(
     base: &Config,
     live_settings: &Live,
     text: &str,
+    databases_floor: u32,
 ) -> Result<Vec<&'static str>, String> {
     let file = parse(text, &restart_only)?;
     let merged = base.with_file(&file)?;
     merged.validate()?;
-    let applied = live_settings.apply(Reloadable::from_config(&merged));
+    let mut next = Reloadable::from_config(&merged);
+    let from_file = merged.file_set.contains("databases") && !base.cli_set.contains("databases");
+    let lowered = from_file && next.databases < databases_floor;
+    if lowered {
+        tracing::warn!(
+            "a lower databases count needs a node replacement: start new nodes with --databases <n> --lower-databases"
+        );
+    }
+    if lowered || !from_file {
+        next.databases = live_settings.get().databases;
+    }
+    live_settings.set_pending(if lowered {
+        vec!["databases"]
+    } else {
+        Vec::new()
+    });
+    let applied = live_settings.apply(next);
     live_settings.set_version(file.version);
     Ok(applied)
 }
@@ -42,9 +60,9 @@ pub fn spawn(node: &Arc<Node>, stop: CancellationToken) {
     if let Some(content) = seen.as_ref().and_then(|s| s.first()) {
         match std::str::from_utf8(content)
             .map_err(|e| e.to_string())
-            .and_then(|text| reload(&base, &live_settings, text))
+            .and_then(|text| reload(&base, &live_settings, text, node.databases.local()))
         {
-            Ok(applied) => log_applied(&live_settings, &applied),
+            Ok(applied) => log_applied(node, &applied),
             Err(e) => {
                 tracing::warn!(error = %e, "the settings file does not load, so the node keeps its current settings")
             }
@@ -52,6 +70,7 @@ pub fn spawn(node: &Arc<Node>, stop: CancellationToken) {
     }
     // A gauge exports nothing until its first record, so a node that never reloads shows it too.
     discus_telemetry::global().config_pending(!live_settings.pending().is_empty());
+    let node = node.clone();
     let period_secs = base.config_reload_secs;
     file_watch::watch(
         "settings",
@@ -62,13 +81,13 @@ pub fn spawn(node: &Arc<Node>, stop: CancellationToken) {
         move || {
             let result = std::fs::read_to_string(&path)
                 .map_err(|e| e.to_string())
-                .and_then(|text| reload(&base, &live_settings, &text));
+                .and_then(|text| reload(&base, &live_settings, &text, node.databases.local()));
             let metrics = discus_telemetry::global();
             metrics.config_pending(!live_settings.pending().is_empty());
             match result {
                 Ok(applied) => {
                     metrics.config_reload(true);
-                    log_applied(&live_settings, &applied);
+                    log_applied(&node, &applied);
                     Ok(())
                 }
                 Err(e) => {
@@ -80,16 +99,22 @@ pub fn spawn(node: &Arc<Node>, stop: CancellationToken) {
     );
 }
 
-fn log_applied(live_settings: &Live, applied: &[&'static str]) {
+fn log_applied(node: &Arc<Node>, applied: &[&'static str]) {
     if applied.is_empty() {
         return;
     }
-    let now = live_settings.get();
-    let values = applied
-        .iter()
-        .map(|name| format!("{name}={}", value(&now, name)))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let (values, databases) = {
+        let now = node.live_settings.get();
+        let values = applied
+            .iter()
+            .map(|name| format!("{name}={}", value(&now, name)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        (values, now.databases)
+    };
+    if applied.contains(&"databases") {
+        node.raise_databases(databases);
+    }
     tracing::info!(settings = %values, "applied settings from the settings file");
 }
 
@@ -106,6 +131,7 @@ fn value(r: &Reloadable, name: &str) -> String {
         "auth.max-failures-per-source" => r.auth_max_failures_per_source.to_string(),
         "auth.failure-window-secs" => r.auth_failure_window.as_secs().to_string(),
         "tls.reload-secs" => r.tls_reload.as_secs().to_string(),
+        "databases" => r.databases.to_string(),
         _ => unreachable!("Reloadable::changed names {name}, which value does not know"),
     }
 }
@@ -129,6 +155,7 @@ mod tests {
             &base,
             &live_settings,
             "version = 1\n[budget]\nhold-ms = 1500",
+            1,
         )
         .unwrap();
         assert_eq!(applied, ["budget.hold-ms"]);
@@ -140,7 +167,13 @@ mod tests {
     fn a_bad_value_changes_nothing() {
         let (base, live_settings) = start(&[]);
         let before = live_settings.get();
-        reload(&base, &live_settings, "version = 1\n[budget]\nhold-ms = -1").unwrap_err();
+        reload(
+            &base,
+            &live_settings,
+            "version = 1\n[budget]\nhold-ms = -1",
+            1,
+        )
+        .unwrap_err();
         assert_eq!(live_settings.generation(), 0);
         assert_eq!(*live_settings.get(), *before);
         assert_eq!(live_settings.version(), None);
@@ -153,11 +186,70 @@ mod tests {
             &base,
             &live_settings,
             "version = 1\n[budget]\nhold-ms = 1500",
+            1,
         )
         .unwrap();
         assert!(applied.is_empty());
         assert_eq!(live_settings.get().hold_budget, Duration::from_millis(2000));
     }
+
+    #[test]
+    fn a_higher_count_applies() {
+        let (base, live_settings) = start(&[]);
+        let applied = reload(&base, &live_settings, "version = 1\ndatabases = 3", 1).unwrap();
+        assert_eq!(applied, ["databases"]);
+        assert_eq!(live_settings.get().databases, 3);
+        assert!(live_settings.pending().is_empty());
+    }
+
+    #[test]
+    fn a_lower_count_goes_to_pending() {
+        let (base, live_settings) = start(&[]);
+        let applied = reload(&base, &live_settings, "version = 1\ndatabases = 1", 3).unwrap();
+        assert!(applied.is_empty());
+        assert_eq!(live_settings.get().databases, 1);
+        assert_eq!(live_settings.pending(), ["databases"]);
+        reload(&base, &live_settings, "version = 1\ndatabases = 3", 3).unwrap();
+        assert!(live_settings.pending().is_empty());
+        assert_eq!(live_settings.get().databases, 3);
+    }
+
+    #[test]
+    fn a_lower_count_keeps_the_raised_value() {
+        let (base, live_settings) = start(&[]);
+        reload(&base, &live_settings, "version = 1\ndatabases = 4", 1).unwrap();
+        let applied = reload(&base, &live_settings, "version = 1\ndatabases = 2", 4).unwrap();
+        assert!(applied.is_empty());
+        assert_eq!(live_settings.get().databases, 4);
+        assert_eq!(live_settings.pending(), ["databases"]);
+    }
+
+    #[test]
+    fn a_command_line_count_ignores_the_file() {
+        let (base, live_settings) = start(&["--databases", "2"]);
+        let applied = reload(&base, &live_settings, "version = 1\ndatabases = 5", 1).unwrap();
+        assert!(applied.is_empty());
+        assert_eq!(live_settings.get().databases, 2);
+    }
+
+    #[test]
+    fn a_command_line_count_below_the_floor_is_not_pending() {
+        let (base, live_settings) = start(&["--databases", "2"]);
+        let applied = reload(&base, &live_settings, "version = 1\ndatabases = 5", 3).unwrap();
+        assert!(applied.is_empty());
+        assert!(live_settings.pending().is_empty());
+        assert_eq!(live_settings.get().databases, 2);
+    }
+
+    #[test]
+    fn an_absent_count_below_the_floor_is_not_pending() {
+        let (base, live_settings) = start(&[]);
+        let applied = reload(&base, &live_settings, "version = 1", 3).unwrap();
+        assert!(applied.is_empty());
+        assert!(live_settings.pending().is_empty());
+        assert_eq!(live_settings.get().databases, 1);
+    }
+
     #[test]
     fn every_changed_setting_has_a_logged_value() {
         let (base, _) = start(&[]);
@@ -173,6 +265,7 @@ mod tests {
             auth_max_failures_per_source: a.auth_max_failures_per_source + 1,
             auth_failure_window: a.auth_failure_window + Duration::from_secs(1),
             tls_reload: a.tls_reload + Duration::from_secs(1),
+            databases: a.databases + 1,
         };
         let changed = a.changed(&b);
         assert_eq!(changed.len(), crate::settings::KEYS.len());

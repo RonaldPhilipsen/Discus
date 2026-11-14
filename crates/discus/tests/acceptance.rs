@@ -24,7 +24,7 @@ async fn a_node_loss_causes_no_read_errors() {
         wait_until(Duration::from_secs(5), || keys.iter().all(|k| {
             nodes
                 .iter()
-                .filter(|n| n.node.store.read(k.as_bytes(), |e| e.is_some()))
+                .filter(|n| n.node.store.read(0, k.as_bytes(), |e| e.is_some()))
                 .count()
                 == owners(k)
         }))
