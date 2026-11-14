@@ -236,6 +236,16 @@ fn telemetry_counters_are_exported() {
 }
 
 #[test]
+fn dropped_database_entries_export() {
+    let h = MetricHarness::new();
+    h.metrics.database_dropped(1);
+    h.metrics.database_dropped(2);
+    let points = h.points();
+    let dropped = find(&points, "discus.databases.dropped", None).unwrap();
+    assert_eq!(dropped.value, 3.0);
+}
+
+#[test]
 fn counter_metrics_export() {
     let h = MetricHarness::new();
     let m = &h.metrics;

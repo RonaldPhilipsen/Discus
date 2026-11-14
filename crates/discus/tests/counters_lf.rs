@@ -422,7 +422,7 @@ async fn the_purge_tick_drops_only_databases_above_the_cluster_count() {
     let (net, leases) = (Net::new(), Leases::new());
     let (nodes, _gates) = two(&net, &leases, &["--databases", "2"]).await;
     for n in &nodes {
-        n.node.databases.set_view(4, false);
+        n.node.databases.pin_cluster(4);
         assert!(n.node.databases.local() < n.node.databases.cluster());
     }
     let leader = leader_of(&refs(&nodes), 0).unwrap();

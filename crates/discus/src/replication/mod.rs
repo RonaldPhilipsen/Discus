@@ -1068,6 +1068,14 @@ impl Replicator {
         let mut applied = 0;
         for (k, e) in entries {
             if !holds_db(node, k.db) {
+                discus_telemetry::global().database_dropped(1);
+                if node.databases.first_drop(k.db) {
+                    tracing::warn!(
+                        db = k.db,
+                        local = node.databases.local(),
+                        "dropped replicated entries of a database that this node does not hold"
+                    );
+                }
                 continue;
             }
             if !checked && node.hlc.observe(e.version).is_err() {
@@ -1185,6 +1193,30 @@ mod tests {
             state: MemberState::Normal,
             weight: Weight::default(),
         }
+    }
+
+    #[test]
+    fn entries_above_the_local_count_are_dropped() {
+        let config = crate::Config::parse_from(["discus", "--databases", "2"]).unwrap();
+        let live = crate::settings::Live::new(crate::settings::Reloadable::from_config(&config));
+        let security = Arc::new(crate::security::tests::security(&[]));
+        let node = Arc::new(Node::new(config, security, live));
+        let r = Replicator::new(&node);
+        let entry = Entry {
+            version: node.stamp().unwrap(),
+            ..Entry::new(Value::Str("v".into()), None)
+        };
+        let entries = vec![
+            (DbKey::new(1, &b"k"[..]), entry.clone()),
+            (DbKey::new(4, &b"k"[..]), entry),
+        ];
+        assert_eq!(r.apply_entries(&node, entries), 1);
+        assert_eq!(node.store.db_len(1), 1);
+        assert_eq!(node.store.db_len(4), 0);
+        assert!(
+            !node.databases.first_drop(4),
+            "the drop of database 4 was not recorded"
+        );
     }
 
     #[test]

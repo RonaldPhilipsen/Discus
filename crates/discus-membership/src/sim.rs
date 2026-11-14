@@ -237,10 +237,15 @@ impl Sim {
 
     /// Add a node that is not in a cluster yet. It starts `JOINING`.
     pub fn add_node(&mut self) -> NodeId {
+        self.add_node_with(|_, _| {})
+    }
+
+    /// [`Sim::add_node`] with the member info and the settings that `f` changes.
+    pub fn add_node_with(&mut self, f: impl FnOnce(&mut MemberInfo, &mut SwimConfig)) -> NodeId {
         let id = NodeId::from_u128(self.rng.u128(1..));
         let n = self.by_addr.len() as u32 + 1;
         let addr = SocketAddr::from(([10, 0, (n >> 8) as u8, n as u8], 7379));
-        let info = MemberInfo {
+        let mut info = MemberInfo {
             id,
             addr,
             rpc_addr: addr,
@@ -255,10 +260,11 @@ impl Sim {
             leader_hints: Bytes::new(),
             databases: 1,
         };
-        let cfg = SwimConfig {
+        let mut cfg = SwimConfig {
             seed: self.rng.u64(..),
             ..self.cfg.clone()
         };
+        f(&mut info, &mut cfg);
         let node = SimNode {
             swim: Swim::new(cfg, info),
             host: SimHost::new(id),
@@ -283,7 +289,18 @@ impl Sim {
     /// `n` nodes that already form one cluster: one epoch of generation 1 with every node
     /// `NORMAL`, and a full view on every node.
     pub fn cluster(&mut self, n: usize) -> Vec<NodeId> {
-        let ids: Vec<NodeId> = (0..n).map(|_| self.add_node()).collect();
+        self.cluster_with(n, |_, _, _| {})
+    }
+
+    /// [`Sim::cluster`] with the member info and the settings that `f` changes for node `i`.
+    pub fn cluster_with(
+        &mut self,
+        n: usize,
+        mut f: impl FnMut(usize, &mut MemberInfo, &mut SwimConfig),
+    ) -> Vec<NodeId> {
+        let ids: Vec<NodeId> = (0..n)
+            .map(|i| self.add_node_with(|info, cfg| f(i, info, cfg)))
+            .collect();
         let cluster = ClusterId::from_u128(self.rng.u128(1..));
         let members: Vec<Member> = ids
             .iter()
@@ -405,6 +422,20 @@ impl Sim {
 
     pub fn set_leader_hints(&mut self, id: NodeId, hints: Bytes) {
         self.node_mut(id).swim.set_leader_hints(hints);
+    }
+
+    pub fn set_databases(&mut self, id: NodeId, n: u32) {
+        self.node_mut(id).swim.set_databases(n);
+    }
+
+    pub fn cluster_databases(&self, id: NodeId) -> u32 {
+        let n = &self.nodes[&id];
+        n.swim.cluster_databases(&n.host.epoch())
+    }
+
+    pub fn all_multi_db(&self, id: NodeId) -> bool {
+        let n = &self.nodes[&id];
+        n.swim.all_multi_db(&n.host.epoch())
     }
 
     pub fn epoch(&self, id: NodeId) -> Arc<Epoch> {

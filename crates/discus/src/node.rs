@@ -465,6 +465,50 @@ impl Node {
         let _ = self.replicator.set(replicator);
     }
 
+    /// Drop every database from `count` up: its entries, its queued keys and hints, and the
+    /// counters of the groups that this node leads. The cluster count dropped to `count`, so
+    /// clients can no longer reach them.
+    pub fn drop_databases_from(self: &Arc<Self>, count: u32) {
+        let node = self.clone();
+        tokio::spawn(async move {
+            let store = node.store.clone();
+            let removed = tokio::task::spawn_blocking(move || {
+                let removed: Vec<u32> = store
+                    .databases()
+                    .into_iter()
+                    .filter(|db| *db >= count)
+                    .collect();
+                store.drop_databases_from(count);
+                removed
+            })
+            .await
+            .unwrap_or_default();
+            if let Some(r) = node.replicator() {
+                for db in &removed {
+                    r.flush_db(*db);
+                }
+            }
+            if !removed.is_empty() {
+                tracing::info!(
+                    count,
+                    ?removed,
+                    "dropped the databases above the cluster count"
+                );
+            }
+            if let Some(counters) = node.counters().cloned() {
+                counters.drop_databases_from(&node, count).await;
+            }
+        });
+    }
+
+    /// Hold at least `n` databases, and advertise them to the cluster when membership runs.
+    pub fn raise_databases(self: &Arc<Self>, n: u32) {
+        self.databases.raise_local(n);
+        if let Some(m) = self.membership() {
+            m.set_databases(n);
+        }
+    }
+
     /// The counter tier. Every node that `Server` binds has one, also without a transport.
     pub fn counters(&self) -> Option<&Arc<Counters>> {
         self.counters.get()

@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use discus_membership::{
-    normal_count, Action, Event, LeaseHolder, LeaseProvider, LeaseState, Millis, Outcome, Phase,
-    Swim,
+    normal_count, Action, Event, Host, LeaseHolder, LeaseProvider, LeaseState, Millis, Outcome,
+    Phase, Swim,
 };
 use discus_placement::{ClusterId, MemberState, NodeId, Weight};
 use discus_store::{every, on_events};
@@ -74,6 +74,17 @@ impl Membership {
         rpc_advertise: SocketAddr,
     ) -> Arc<Membership> {
         let config = &node.config;
+        // Test builds advertise `MULTI_DB` before release builds know it, so a cluster of them
+        // admits joiners while it serves more than one database. `Databases::set_view` still
+        // keeps the gate closed until `KNOWN` has it.
+        #[cfg(feature = "testing")]
+        let capabilities = if config.test_without_multi_db {
+            discus_wire::caps::KNOWN & !discus_wire::caps::MULTI_DB
+        } else {
+            discus_wire::caps::KNOWN | discus_wire::caps::MULTI_DB
+        };
+        #[cfg(not(feature = "testing"))]
+        let capabilities = discus_wire::caps::KNOWN;
         let client_addr = node.resolve_client_addr(advertise.ip());
         let me = MemberInfo {
             id: node.id,
@@ -85,10 +96,10 @@ impl Membership {
             incarnation: 0,
             weight: Weight::new(config.weight).unwrap_or_default(),
             epoch: node.epoch_id(),
-            capabilities: discus_wire::caps::KNOWN,
+            capabilities,
             capacity: Capacity::default(),
             leader_hints: Bytes::new(),
-            databases: 1,
+            databases: node.databases.local(),
         };
         let static_seeds = discovery::static_seeds(config);
         let mut swim = Swim::new(config.swim(), me);
@@ -209,12 +220,23 @@ impl Membership {
             max: node.config.max_memory,
         };
         let now = self.now();
-        let actions = self.drive(|swim, host| {
+        let (actions, mine, cluster, multi_db) = self.drive(|swim, host| {
             swim.set_capacity(capacity);
             swim.observe_lag(node.lag().lag_ms());
-            swim.tick(now, host)
+            let actions = swim.tick(now, host);
+            let epoch = host.epoch();
+            (
+                actions,
+                swim.me().databases,
+                swim.cluster_databases(&epoch),
+                swim.all_multi_db(&epoch),
+            )
         });
         self.dispatch(actions);
+        node.databases.raise_local(mine);
+        if let Some(n) = node.databases.set_view(cluster, multi_db) {
+            node.drop_databases_from(n);
+        }
         let count = normal_count(node.epochs().current());
         let mut normal = self.normal.lock();
         if normal.0 != count {
@@ -424,6 +446,12 @@ impl Membership {
     /// incarnation.
     pub fn set_leader_hints(&self, hints: Vec<u8>) {
         self.inner.lock().swim.set_leader_hints(Bytes::from(hints));
+    }
+
+    /// Advertise `n` databases, if that is more than before. A larger count spreads with a new
+    /// incarnation.
+    pub fn set_databases(&self, n: u32) {
+        self.inner.lock().swim.set_databases(n);
     }
 
     /// The `NORMAL` count of the current epoch, and when it last changed. The counter tier

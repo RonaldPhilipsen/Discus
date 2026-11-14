@@ -153,6 +153,7 @@ struct Instruments {
     counter_memory: Gauge<u64>,
     counter_mode_switches: Counter<u64>,
     counter_failovers: Counter<u64>,
+    databases_dropped: Counter<u64>,
     raft_single_voter_groups: Gauge<u64>,
     config_reloads: Counter<u64>,
     config_pending: Gauge<u64>,
@@ -433,6 +434,10 @@ impl Metrics {
                 "discus.counter.failovers",
                 "Leader-follower groups that this node took over from another leader",
             ),
+            databases_dropped: counter(
+                "discus.databases.dropped",
+                "Replicated entries dropped because their database is above the local count",
+            ),
             raft_single_voter_groups: gauge(
                 "discus.raft.single_voter_groups",
                 "Raft groups led by this node that have one voter",
@@ -698,6 +703,12 @@ impl Metrics {
     pub fn counter_failover(&self) {
         #[cfg(feature = "otel")]
         self.with(|i| i.counter_failovers.add(1, &[]));
+    }
+
+    #[inline]
+    pub fn database_dropped(&self, n: u64) {
+        #[cfg(feature = "otel")]
+        self.with(|i| i.databases_dropped.add(n, &[]));
     }
 
     #[inline]

@@ -3,7 +3,8 @@
 use bytes::Bytes;
 use discus_membership::sim::Sim;
 use discus_membership::SwimConfig;
-use discus_wire::Liveness;
+use discus_placement::NodeId;
+use discus_wire::{caps, Gossip, GossipKind, Liveness, MemberInfo};
 
 #[test]
 fn a_dead_node_is_detected() {
@@ -151,4 +152,133 @@ fn a_direct_rumor_at_the_same_incarnation_refreshes_the_rpc_address() {
     swim.learn(10, rumor(info(2, 9000)), true);
     let peer = swim.member(NodeId::from_u128(2)).unwrap();
     assert_eq!(peer.rpc_addr, "10.0.0.1:9000".parse().unwrap());
+}
+
+fn multi_db(databases: u32) -> impl FnMut(usize, &mut MemberInfo, &mut SwimConfig) {
+    move |_, info, _| {
+        info.databases = databases;
+        info.capabilities = caps::KNOWN | caps::MULTI_DB;
+    }
+}
+
+/// Every node of `ids` lists `j` as `NORMAL` in its epoch.
+fn placed(sim: &Sim, ids: &[NodeId], j: NodeId) -> bool {
+    ids.iter().all(|&o| sim.epoch(o).is_normal(j))
+}
+
+#[test]
+fn the_cluster_count_is_the_smallest_normal_count() {
+    let mut sim = Sim::new(7, SwimConfig::fast());
+    let counts = [3, 3, 1];
+    let ids = sim.cluster_with(3, |i, info, _| {
+        info.databases = counts[i];
+        info.capabilities = caps::KNOWN | caps::MULTI_DB;
+    });
+    sim.run_ms(1_000);
+    for &o in &ids {
+        assert_eq!(sim.cluster_databases(o), 1, "{o}");
+    }
+    sim.set_databases(ids[2], 3);
+    assert_eq!(sim.node(ids[2]).swim.me().databases, 3);
+    sim.run_until(10_000, |s| ids.iter().all(|&o| s.cluster_databases(o) == 3));
+}
+
+#[test]
+fn a_joiner_takes_the_larger_count() {
+    let mut sim = Sim::new(8, SwimConfig::fast());
+    let ids = sim.cluster_with(3, multi_db(3));
+    sim.run_ms(1_000);
+    let j = sim.add_node_with(|info, cfg| multi_db(1)(0, info, cfg));
+    sim.start(j, &[ids[1]]);
+    let mut lowest = u32::MAX;
+    sim.run_until(30_000, |s| {
+        lowest = ids
+            .iter()
+            .map(|&o| s.cluster_databases(o))
+            .fold(lowest, u32::min);
+        s.is_normal(j) && placed(s, &ids, j)
+    });
+    assert_eq!(sim.node(j).swim.me().databases, 3);
+    assert_eq!(lowest, 3, "the cluster count dropped during the join");
+    for &o in ids.iter().chain([&j]) {
+        assert_eq!(sim.cluster_databases(o), 3, "{o}");
+    }
+}
+
+#[test]
+fn a_lower_databases_joiner_keeps_its_count() {
+    let mut sim = Sim::new(9, SwimConfig::fast());
+    let ids = sim.cluster_with(3, multi_db(3));
+    sim.run_ms(1_000);
+    let j = sim.add_node_with(|info, cfg| {
+        multi_db(1)(0, info, cfg);
+        cfg.lower_databases = true;
+    });
+    sim.start(j, &[ids[1]]);
+    sim.run_until(30_000, |s| s.is_normal(j) && placed(s, &ids, j));
+    assert_eq!(sim.node(j).swim.me().databases, 1);
+    sim.run_until(10_000, |s| {
+        ids.iter().chain([&j]).all(|&o| s.cluster_databases(o) == 1)
+    });
+}
+
+/// Ask `member` to admit `j` with one `JOIN`, as the joiner would.
+fn join_reply(sim: &mut Sim, member: NodeId, j: NodeId) -> Gossip {
+    let from = sim.node(j).swim.me().clone();
+    let src = from.addr;
+    let now = sim.now();
+    let node = sim.node_mut(member);
+    let handled = node.swim.handle(
+        now,
+        src,
+        Gossip::new(GossipKind::Join, from),
+        &mut node.host,
+    );
+    handled.reply
+}
+
+#[test]
+fn a_node_without_multi_db_cannot_join_a_multi_database_cluster() {
+    let mut sim = Sim::new(10, SwimConfig::fast());
+    let ids = sim.cluster_with(3, multi_db(3));
+    sim.run_ms(1_000);
+    let j = sim.add_node();
+    assert_eq!(sim.node(j).swim.me().capabilities & caps::MULTI_DB, 0);
+    assert!(join_reply(&mut sim, ids[0], j).retry_after_ms > 0);
+    sim.start(j, &[ids[1]]);
+    sim.run_ms(20_000);
+    assert!(!sim.is_normal(j));
+    for &o in &ids {
+        assert!(sim.epoch(o).member(j).is_none(), "{o} placed the joiner");
+        assert_eq!(sim.cluster_databases(o), 3);
+    }
+
+    let mut sim = Sim::new(11, SwimConfig::fast());
+    let ids = sim.cluster_with(3, multi_db(1));
+    sim.run_ms(1_000);
+    let j = sim.add_node();
+    sim.start(j, &[ids[1]]);
+    sim.run_until(30_000, |s| s.is_normal(j) && placed(s, &ids, j));
+}
+
+#[test]
+fn all_multi_db_needs_every_member() {
+    let mut sim = Sim::new(12, SwimConfig::fast());
+    let ids = sim.cluster_with(3, multi_db(1));
+    sim.run_ms(1_000);
+    for &o in &ids {
+        assert!(sim.all_multi_db(o), "{o}");
+    }
+
+    let mut sim = Sim::new(13, SwimConfig::fast());
+    let ids = sim.cluster_with(3, |i, info, cfg| {
+        multi_db(1)(i, info, cfg);
+        if i == 2 {
+            info.capabilities = caps::KNOWN & !caps::MULTI_DB;
+        }
+    });
+    sim.run_ms(1_000);
+    for &o in &ids {
+        assert!(!sim.all_multi_db(o), "{o}");
+    }
 }

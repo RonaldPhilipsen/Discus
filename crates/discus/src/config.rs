@@ -361,6 +361,10 @@ pub struct Config {
     #[cfg(feature = "testing")]
     #[arg(long, hide = true, default_value_t = true, action = clap::ArgAction::Set)]
     pub handoff: bool,
+    /// Advertise no `MULTI_DB` in gossip, as a build without numbered databases would.
+    #[cfg(feature = "testing")]
+    #[arg(long, hide = true)]
+    pub test_without_multi_db: bool,
     /// Hints held for one unreachable peer, at most.
     #[arg(long, default_value_t = 262_144)]
     pub hint_max_entries: usize,
@@ -523,6 +527,7 @@ impl Config {
             suspicion_min_ms: self.suspicion_min_ms,
             suspicion_max_ms: self.suspicion_max_ms,
             bootstrap_deadline_ms: self.bootstrap_deadline_ms,
+            lower_databases: self.lower_databases,
             ..discus_membership::SwimConfig::default()
         }
     }

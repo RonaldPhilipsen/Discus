@@ -29,6 +29,9 @@ pub struct Databases {
     /// Set by [`Databases::open_gate`]: the gate stays open whatever the membership view says.
     #[cfg(feature = "testing")]
     pinned: AtomicBool,
+    /// Set by [`Databases::pin_cluster`]: the cluster count that every view takes, 0 for none.
+    #[cfg(feature = "testing")]
+    pinned_cluster: AtomicU32,
 }
 
 impl Databases {
@@ -41,6 +44,8 @@ impl Databases {
             dropped: Mutex::default(),
             #[cfg(feature = "testing")]
             pinned: AtomicBool::new(false),
+            #[cfg(feature = "testing")]
+            pinned_cluster: AtomicU32::new(0),
         }
     }
 
@@ -69,6 +74,11 @@ impl Databases {
     /// if this build knows `MULTI_DB` too. The count stays at least 1, so database 0 always
     /// serves.
     pub fn set_view(&self, cluster: u32, multi_db: bool) -> Option<u32> {
+        #[cfg(feature = "testing")]
+        let cluster = match self.pinned_cluster.load(Ordering::Relaxed) {
+            0 => cluster,
+            pinned => pinned,
+        };
         let cluster = cluster.max(1);
         // A reader can see the new gate with the old count for a moment. That is harmless:
         // `prepare` checks the count again on every data command, so a database above the new
@@ -99,6 +109,14 @@ impl Databases {
     pub fn open_gate(&self) {
         self.pinned.store(true, Ordering::Relaxed);
         self.multi_db.store(true, Ordering::Relaxed);
+    }
+
+    /// Fix the cluster count at `n` whatever the membership view says, so tests reach counts
+    /// that gossip would not report.
+    #[cfg(feature = "testing")]
+    pub fn pin_cluster(&self, n: u32) {
+        self.pinned_cluster.store(n, Ordering::Relaxed);
+        self.cluster.store(n.max(1), Ordering::Relaxed);
     }
 
     pub fn check_gate(&self) -> Result<(), CommandError> {
@@ -143,6 +161,15 @@ mod tests {
         dbs.set_view(3, false);
         assert!(dbs.multi_db());
         assert_eq!(dbs.check_gate(), Ok(()));
+    }
+
+    #[cfg(feature = "testing")]
+    #[test]
+    fn a_view_cannot_change_a_pinned_count() {
+        let dbs = Databases::new(2, false);
+        dbs.pin_cluster(4);
+        assert_eq!(dbs.set_view(2, false), None);
+        assert_eq!(dbs.cluster(), 4);
     }
 
     #[test]

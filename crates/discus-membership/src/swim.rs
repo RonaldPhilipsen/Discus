@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use discus_placement::{ClusterId, Epoch, EpochId, Member, MemberState, NodeId};
-use discus_wire::{Capacity, Gossip, GossipKind, Liveness, MemberInfo, Rumor};
+use discus_wire::{caps, Capacity, Gossip, GossipKind, Liveness, MemberInfo, Rumor};
 
 use crate::health::LocalHealth;
 use crate::lease::{LeaseError, LeaseState};
@@ -39,6 +39,10 @@ const EPOCH_FALLBACK_PERIODS: Millis = 3;
 
 /// Members that receive the final `LEAVE`.
 const LEAVE_FANOUT: usize = 3;
+
+/// A joiner without `MULTI_DB` asks again after this long, while the cluster serves more than one
+/// database.
+const MULTI_DB_RETRY_MS: u32 = 5_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Action {
@@ -275,6 +279,46 @@ impl Swim {
     /// Capacity hints travel in the sender part of every message, without a new incarnation.
     pub fn set_capacity(&mut self, capacity: Capacity) {
         self.me.capacity = capacity;
+    }
+
+    /// Keep the larger of the own database count and `n`. A larger count spreads with a new
+    /// incarnation.
+    pub fn set_databases(&mut self, n: u32) {
+        if n > self.me.databases {
+            self.me.databases = n;
+            self.bump();
+        }
+    }
+
+    /// The databases that the cluster serves: the smallest count of the `NORMAL` members of
+    /// `epoch`. A member without a record counts as 1, as a build without databases would. With
+    /// no `NORMAL` member, the node serves its own count.
+    pub fn cluster_databases(&self, epoch: &Epoch) -> u32 {
+        epoch
+            .normal()
+            .map(|m| self.databases_of(m.id))
+            .min()
+            .unwrap_or(self.me.databases)
+            .max(1)
+    }
+
+    fn databases_of(&self, id: NodeId) -> u32 {
+        if id == self.me.id {
+            return self.me.databases;
+        }
+        self.members.get(&id).map_or(1, |r| r.info.databases)
+    }
+
+    /// Every member of `epoch` advertises `MULTI_DB`. A member without a record does not.
+    pub fn all_multi_db(&self, epoch: &Epoch) -> bool {
+        epoch.members().iter().all(|m| {
+            let capabilities = if m.id == self.me.id {
+                Some(self.me.capabilities)
+            } else {
+                self.members.get(&m.id).map(|r| r.info.capabilities)
+            };
+            capabilities.is_some_and(|c| c & caps::MULTI_DB != 0)
+        })
     }
 
     fn bump(&mut self) {
@@ -1177,6 +1221,21 @@ impl Swim {
             return;
         }
         self.absorb(now, &g, host);
+        if !self.cfg.lower_databases {
+            let cluster = std::iter::once(&g.from)
+                .chain(
+                    g.rumors
+                        .iter()
+                        .filter(|r| r.liveness != Liveness::Dead)
+                        .map(|r| &r.info),
+                )
+                .filter(|info| info.id != self.me.id && info.state == MemberState::Normal)
+                .map(|info| info.databases)
+                .min();
+            if let Some(n) = cluster {
+                self.me.databases = self.me.databases.max(n);
+            }
+        }
         self.set_state(now, MemberState::Normal, Phase::Member);
     }
 
@@ -1291,6 +1350,17 @@ impl Swim {
         }
         if msg.cluster_id != ClusterId::NIL && msg.cluster_id != self.cluster_id {
             return self.bare(GossipKind::JoinReply, host);
+        }
+        if msg.from.capabilities & caps::MULTI_DB == 0 && self.cluster_databases(&host.epoch()) > 1
+        {
+            tracing::warn!(
+                joiner = %msg.from.id,
+                addr = %src,
+                "refused a joiner without multiple databases: the cluster serves more than one"
+            );
+            let mut g = self.bare(GossipKind::JoinReply, host);
+            g.retry_after_ms = MULTI_DB_RETRY_MS;
+            return g;
         }
         if let Err(wait) = self.limiter.admit(src.ip(), now) {
             let mut g = self.bare(GossipKind::JoinReply, host);
