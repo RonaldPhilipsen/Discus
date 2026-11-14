@@ -549,7 +549,10 @@ impl Sim {
                 node.host.now = now;
                 node.swim.observe_lag(node.lag_ms);
                 let actions = node.swim.tick(now, &mut node.host);
-                let served = node.swim.served_databases(now, &node.host.epoch());
+                let served = node
+                    .swim
+                    .served_databases(now, &node.host.epoch())
+                    .unwrap_or(node.served);
                 if served < node.served {
                     node.database_drops.push((now, served));
                 }

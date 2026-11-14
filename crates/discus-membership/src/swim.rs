@@ -161,6 +161,8 @@ pub struct Swim {
     /// it, and the dwell then only keeps a count that the cluster really served. Starting at the
     /// own count would serve databases for the dwell that the cluster then deletes.
     served: u32,
+    /// A view has known the count of every member at least once, so `served` is a real count.
+    known: bool,
     lowering: Option<Lowering>,
 }
 
@@ -201,6 +203,7 @@ impl Swim {
             limiter: JoinLimiter::default(),
             detector_n: 1,
             served: 1,
+            known: false,
             lowering: None,
         }
     }
@@ -332,11 +335,12 @@ impl Swim {
     /// The database count that this node serves at `now`, from the view of `epoch`. A higher
     /// count applies at once. A lower one applies once the counts seen stayed below the served
     /// count for [`DATABASES_DWELL_MS`]. An unknown count keeps the served count and restarts the
-    /// dwell. Call it on every tick.
-    pub fn served_databases(&mut self, now: Millis, epoch: &Epoch) -> u32 {
+    /// dwell. `None` until a view first knows the count of every member. Call it on every tick.
+    pub fn served_databases(&mut self, now: Millis, epoch: &Epoch) -> Option<u32> {
         match self.cluster_databases(epoch) {
             None => self.lowering = None,
             Some(n) if n >= self.served => {
+                self.known = true;
                 self.served = n;
                 self.lowering = None;
             }
@@ -352,7 +356,7 @@ impl Swim {
                 }
             }
         }
-        self.served
+        self.known.then_some(self.served)
     }
 
     /// Every member of `epoch` advertises `MULTI_DB`. A member without a record does not.

@@ -455,7 +455,9 @@ impl Counters {
             every.tick().await;
             while s.run_until_cancelled(every.tick()).await.is_some() {
                 me.purge().await;
-                if let Some(node) = me.node() {
+                // Before the view is known, the cluster count is a guess of 1, and a drop from
+                // it would delete counters that clients still reach.
+                if let Some(node) = me.node().filter(|n| n.databases.view_known()) {
                     me.drop_databases_from(&node, node.databases.cluster())
                         .await;
                 }

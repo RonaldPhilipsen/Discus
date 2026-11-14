@@ -27,6 +27,10 @@ pub struct Databases {
     /// peer that still serves the old count can send entries that nobody could read here. A
     /// later raise moves it up to the new count, and a count that reaches `local` clears it.
     floor: AtomicU32,
+    /// `cluster` comes from a view that knew the count of every member, or the node has no
+    /// membership. Until then, `cluster` is a guess of 1, and nothing may treat it as a lower
+    /// count.
+    view_known: AtomicBool,
     /// `--lower-databases`: a joiner keeps its own count instead of the larger cluster count.
     lower: bool,
     dropped: Mutex<HashSet<u32>>,
@@ -42,6 +46,7 @@ impl Databases {
             cluster: AtomicU32::new(local),
             multi_db: AtomicBool::new(true),
             floor: AtomicU32::new(u32::MAX),
+            view_known: AtomicBool::new(true),
             lower,
             dropped: Mutex::default(),
             #[cfg(feature = "testing")]
@@ -56,7 +61,12 @@ impl Databases {
         let dbs = Databases::new(local, lower);
         dbs.cluster.store(1, Ordering::Relaxed);
         dbs.multi_db.store(false, Ordering::Relaxed);
+        dbs.view_known.store(false, Ordering::Relaxed);
         dbs
+    }
+
+    pub fn view_known(&self) -> bool {
+        self.view_known.load(Ordering::Relaxed)
     }
 
     pub fn local(&self) -> u32 {
@@ -85,9 +95,9 @@ impl Databases {
         self.local.fetch_max(n, Ordering::Relaxed) < n
     }
 
-    /// Take the membership view. `Some(cluster)` if the cluster count dropped: the floor then
-    /// refuses inbound data at or above it before the caller drops the databases. The count stays
-    /// at least 1, so database 0 always serves.
+    /// Take a membership view that knows the count of every member. `Some(cluster)` if the
+    /// cluster count dropped: the floor then refuses inbound data at or above it before the
+    /// caller drops the databases. The count stays at least 1, so database 0 always serves.
     pub fn set_view(&self, cluster: u32, multi_db: bool) -> Option<u32> {
         #[cfg(feature = "testing")]
         let cluster = match self.pinned_cluster.load(Ordering::Relaxed) {
@@ -100,6 +110,7 @@ impl Databases {
         // count is refused once the count store lands.
         self.multi_db.store(multi_db, Ordering::Relaxed);
         let old = self.cluster.swap(cluster, Ordering::Relaxed);
+        self.view_known.store(true, Ordering::Relaxed);
         if cluster < old {
             self.floor.fetch_min(cluster, Ordering::Relaxed);
             return Some(cluster);
@@ -135,6 +146,15 @@ impl Databases {
     pub fn pin_cluster(&self, n: u32) {
         self.pinned_cluster.store(n, Ordering::Relaxed);
         self.cluster.store(n.max(1), Ordering::Relaxed);
+    }
+
+    /// Return to the state of [`Databases::awaiting_view`], as for a node that restarted while
+    /// its view is unknown. With `Faults::withhold_view` set, the next tick does not undo it.
+    #[cfg(feature = "testing")]
+    pub fn forget_view(&self) {
+        self.view_known.store(false, Ordering::Relaxed);
+        self.cluster.store(1, Ordering::Relaxed);
+        self.multi_db.store(false, Ordering::Relaxed);
     }
 
     pub fn check_gate(&self) -> Result<(), CommandError> {
@@ -247,9 +267,12 @@ mod tests {
         assert_eq!(dbs.local(), 3);
         assert_eq!(dbs.cluster(), 1);
         assert!(!dbs.multi_db());
+        assert!(!dbs.view_known());
+        assert!(Databases::new(1, false).view_known());
         assert_eq!(dbs.check_select(2), err(OUT_OF_RANGE));
         assert!(dbs.holds(2));
         assert_eq!(dbs.set_view(3, true), None);
+        assert!(dbs.view_known());
         assert_eq!(dbs.check_select(2), Ok(2));
     }
 

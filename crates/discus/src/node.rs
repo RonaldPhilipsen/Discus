@@ -144,6 +144,9 @@ pub struct Faults {
     pub drop_stopped: parking_lot::Mutex<Option<&'static str>>,
     /// The sweep of expired entries skips its runs while this is set.
     pub hold_sweep: std::sync::atomic::AtomicBool,
+    /// The membership tick passes no view to `Databases` while this is set, as while a member of
+    /// the epoch has no gossip record.
+    pub withhold_view: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "testing")]

@@ -536,3 +536,85 @@ async fn the_purge_tick_drops_only_databases_above_the_cluster_count() {
         assert_eq!(held_in(n, 3, &key).as_deref(), Some("1"));
     }
 }
+
+/// A node whose membership view is not known yet cannot tell the cluster count. Its purge tick
+/// keeps the counters above database 0, and `FLUSHDB` does not widen to every database, neither
+/// for the counters nor for the cache. Once the view is known again, the purge tick drops only
+/// what a real lower count removes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_without_a_known_view_keeps_every_database() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (nodes, _gates) = two(&net, &leases, &["--databases", "3"]).await;
+    assert!(
+        wait_until(Duration::from_secs(10), || nodes.iter().all(|n| n
+            .node
+            .databases
+            .cluster()
+            == 3))
+        .await,
+        "the cluster count did not reach 3"
+    );
+    let leader = leader_of(&refs(&nodes), 0).unwrap();
+    let key = key_of_group(leader, 0);
+    let counters = leader.node.counters().unwrap();
+    let incr = vec![Bytes::from_static(b"INCR"), Bytes::from(key.clone())];
+    for db in [0, 2] {
+        assert_eq!(
+            counters.execute(0, db, Kind::Incr, &incr).await,
+            Ok(Value::Integer(1))
+        );
+        assert!(all_hold_in(&nodes, db, &key, Some("1")).await);
+    }
+    let plain = discus_store::Entry::new(discus_store::Value::Str("v".into()), None);
+    assert!(leader.node.store.apply(2, b"plain", plain));
+    for n in &nodes {
+        n.node.faults.withhold_view.store(true, Ordering::Relaxed);
+        n.node.databases.forget_view();
+    }
+
+    let flushed = run_in(&leader.node, 0, &["FLUSHDB"]).await;
+    assert!(
+        matches!(&flushed, Value::Error(e) if e.starts_with(b"TRYAGAIN")),
+        "{flushed:?}"
+    );
+    assert!(
+        leader.node.store.read(2, b"plain", |e| e.is_some()),
+        "FLUSHDB in database 0 cleared database 2 of the cache"
+    );
+    // Two purge ticks.
+    tokio::time::sleep(Duration::from_secs(25)).await;
+    for n in &nodes {
+        assert_eq!(held_in(n, 2, &key).as_deref(), Some("1"), "{}", n.id);
+    }
+
+    for n in &nodes {
+        n.node.faults.withhold_view.store(false, Ordering::Relaxed);
+    }
+    assert!(
+        wait_until(Duration::from_secs(10), || nodes.iter().all(|n| n
+            .node
+            .databases
+            .cluster()
+            == 3))
+        .await,
+        "the view did not come back"
+    );
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    for n in &nodes {
+        assert_eq!(held_in(n, 2, &key).as_deref(), Some("1"), "{}", n.id);
+    }
+
+    for n in &nodes {
+        n.node.databases.pin_cluster(1);
+    }
+    assert!(
+        wait_until(Duration::from_secs(60), || nodes
+            .iter()
+            .all(|n| held_in(n, 2, &key).is_none()))
+        .await,
+        "the purge tick kept the counters of database 2 after the count dropped"
+    );
+    for n in &nodes {
+        assert_eq!(held_in(n, 0, &key).as_deref(), Some("1"), "{}", n.id);
+    }
+}

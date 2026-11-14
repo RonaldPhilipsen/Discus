@@ -228,7 +228,9 @@ impl Membership {
             )
         });
         self.dispatch(actions);
-        if let Some(n) = node.databases.set_view(served, multi_db) {
+        #[cfg(feature = "testing")]
+        let served = served.filter(|_| !node.faults.withhold_view.load(Ordering::Relaxed));
+        if let Some(n) = served.and_then(|served| node.databases.set_view(served, multi_db)) {
             node.drop_databases_from(n);
         }
         let count = normal_count(node.epochs().current());

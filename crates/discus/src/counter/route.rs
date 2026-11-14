@@ -271,9 +271,13 @@ pub fn broadcast(node: &Arc<Node>, spec: &'static CommandSpec, db: u32, cmd: Com
         if matches!(cache.value, Value::Error(_)) {
             return cache;
         }
-        let (kind, name) = counter_flush(&node.databases, spec.name);
-        let flush: Command = vec![Bytes::from_static(name)];
         let groups = counters.settings.groups;
+        let Some((kind, name)) = counter_flush(&node.databases, spec.name) else {
+            return error(&format!(
+                "TRYAGAIN FLUSHALL cleared the cache and 0 of {groups} counter groups"
+            ));
+        };
+        let flush: Command = vec![Bytes::from_static(name)];
         let parts = join_all(
             (0..groups).map(|g| run(&node, &counters, g, db, kind, flush.clone(), Hop::default())),
         )
@@ -295,12 +299,17 @@ pub fn broadcast(node: &Arc<Node>, spec: &'static CommandSpec, db: u32, cmd: Com
 /// only, but `DISCUS.FLUSHDB` goes into a counter log only while the gate is open and the cluster
 /// serves more than one database: a replica of an older build, whose log decoder does not know
 /// it, can join a cluster with one database. There, only database 0 holds keys, so `FLUSHALL`
-/// clears the same counters.
-fn counter_flush(dbs: &Databases, name: &str) -> (Kind, &'static [u8]) {
-    if name == "FLUSHDB" && dbs.multi_db() && dbs.cluster() > 1 {
-        (Kind::FlushOneDb, FLUSH_ONE_DB)
+/// clears the same counters. `None` for `FLUSHDB` before the view is known: the count of 1 is a
+/// guess then, and `FLUSHALL` would clear databases that clients still reach.
+fn counter_flush(dbs: &Databases, name: &str) -> Option<(Kind, &'static [u8])> {
+    if name != "FLUSHDB" {
+        Some((Kind::FlushAll, b"FLUSHALL"))
+    } else if !dbs.view_known() {
+        None
+    } else if dbs.multi_db() && dbs.cluster() > 1 {
+        Some((Kind::FlushOneDb, FLUSH_ONE_DB))
     } else {
-        (Kind::FlushAll, b"FLUSHALL")
+        Some((Kind::FlushAll, b"FLUSHALL"))
     }
 }
 
@@ -313,13 +322,22 @@ mod tests {
         let one = Databases::new(1, false);
         one.set_view(1, true);
         assert!(one.multi_db());
-        assert_eq!(counter_flush(&one, "FLUSHDB").1, b"FLUSHALL");
+        assert_eq!(counter_flush(&one, "FLUSHDB").unwrap().1, b"FLUSHALL");
         let three = Databases::new(3, false);
         three.set_view(3, true);
-        assert_eq!(counter_flush(&three, "FLUSHDB").1, FLUSH_ONE_DB);
-        assert_eq!(counter_flush(&three, "FLUSHALL").1, b"FLUSHALL");
+        assert_eq!(counter_flush(&three, "FLUSHDB").unwrap().1, FLUSH_ONE_DB);
+        assert_eq!(counter_flush(&three, "FLUSHALL").unwrap().1, b"FLUSHALL");
         three.set_view(3, false);
-        assert_eq!(counter_flush(&three, "FLUSHDB").1, b"FLUSHALL");
+        assert_eq!(counter_flush(&three, "FLUSHDB").unwrap().1, b"FLUSHALL");
+    }
+
+    #[test]
+    fn flushdb_waits_for_a_known_view() {
+        let dbs = Databases::awaiting_view(3, false);
+        assert_eq!(counter_flush(&dbs, "FLUSHDB"), None);
+        assert_eq!(counter_flush(&dbs, "FLUSHALL").unwrap().1, b"FLUSHALL");
+        dbs.set_view(1, true);
+        assert_eq!(counter_flush(&dbs, "FLUSHDB").unwrap().1, b"FLUSHALL");
     }
 
     fn ok() -> Reply {
