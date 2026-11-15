@@ -273,10 +273,15 @@ replica after a death starts cold.
   unchanged range costs one CRC16 and no HRW.
 - Scans are rate-limited, run in the background behind a snapshot watermark, and respect
   `maxmemory`. A scan is O(dataset) per surviving owner.
-- Previous-epoch fallback: while its handoff is incomplete, a new owner that misses a key asks the
-  previous owners that are not current owners. The fallback ends in three cases: the handoff
-  completes, the handoff is abandoned after bounded retries, or the previous owners leave. After
-  that, a miss is a miss and the key refills lazily.
+- Previous-epoch fallback: while its handoff is incomplete, a new owner that misses a key on a
+  write or a read asks the previous owners of the key before it runs the command. It asks only the
+  previous owners that the current epoch still lists and that have not finished their part of the
+  handoff, the old primary first. A previous owner that is still a current owner counts too. After
+  a join to a cluster with fewer nodes than the replication factor, every previous owner stays an
+  owner, and until its scan arrives it holds the only copy of the value. The local parts of
+  multi-key commands and tracked reads use the same fallback. The fallback ends in three cases:
+  the handoff completes, the handoff is abandoned after bounded retries, or the previous owners
+  leave. After that, a miss is a miss and the key refills lazily.
 
 Because of this fallback, a new owner can serve a key before its entry arrives. No slot is ever
 half moved from the view of a client, so Discus never sends `-ASK`.
@@ -292,7 +297,7 @@ sequenceDiagram
     O->>O: scan from lowest pending epoch to e+1
     O->>N: HANDOFF stream of the entries N gained
     N->>N: apply an entry only if its HLC is newer
-    Note over N,Q: while the handoff is incomplete, a miss on N asks Q first
+    Note over N,Q: while the handoff is incomplete, a miss on N asks the previous owners first
     N->>Q: GET on a miss
     Q-->>N: entry or miss
     N-->>O: handoff acknowledged
@@ -532,10 +537,12 @@ sequenceDiagram
 ### 7.3 Multi-key commands
 
 - `MGET` groups keys by owner, fans out, and merges the replies in order. The keys of one slot
-  always share a target.
-- `MSET` and multi-key `DEL` fan out and are not atomic. If any part fails, the command returns
-  `-TRYAGAIN` and the other parts stay applied. A retry of the whole command is safe. If the node
-  cannot know whether a part applied, the reply says so.
+  always share a target. If a part gets no answer, its keys go to their next owner, as for a
+  single-key read.
+- `MSET` and multi-key `DEL` fan out and are not atomic. If a part gets no answer, the command
+  returns `-TRYAGAIN` and the other parts stay applied. A retry of the whole command is safe. If
+  the node cannot know whether a part applied, the reply says so. If a part returns an error, such
+  as `-OOM`, the command returns that error.
 - `SCAN` and `RANDOMKEY` are local to the entry node. `DBSIZE` is a fan-out estimate. `FLUSHDB` and
   `FLUSHALL` broadcast best-effort.
 - On a redirect connection, a command with all keys in one slot acts like a single-key command. A
@@ -566,8 +573,8 @@ sequenceDiagram
   no reply, the entry node sends it again only for these idempotent commands: `SET` without `NX` or
   `XX`, `DEL`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `PERSIST`, `MSET`, `HSET`, `HDEL`,
   `SADD`, `SREM`, `ZADD` without `INCR`, and `ZREM`. Every other command, for example `INCR`,
-  `APPEND`, `GETDEL`, `SPOP`, `SET NX`, or the take inside `RENAME`, returns `-TRYAGAIN` once its
-  delivery is in doubt.
+  `APPEND`, `GETDEL`, `SPOP`, `SET NX`, the take inside `RENAME`, or the put inside `COPY` without
+  `REPLACE`, returns `-TRYAGAIN` once its delivery is in doubt.
 
 The diagram shows a held write during a failover.
 
@@ -721,7 +728,10 @@ directly but never gets `-MOVED`. That setting is for tests.
 - Before it becomes `NORMAL`, a joining node sets its HLC to at least the cluster maximum it
   receives. If a `NORMAL` peer is reachable but does not answer, the node does not serve writes.
   Only the bootstrap node starts from the wall clock.
-- Deletes write tombstones. The cache eviction policy does not evict tombstones. They use a
+- Deletes write tombstones. As in Valkey, `SET` and `GETEX` with a deadline at or before now are
+  deletes, so they write tombstones too. A replica that receives a newer entry that already
+  expired replaces its older entry with a tombstone. The cache eviction policy does not evict
+  tombstones. They use a
   separate reserve. If the reserve is full, the node evicts normal entries first. Then it drops the
   oldest tombstones and marks the shard `needs_refill`, so a rejoin discards that shard.
 - TTLs replicate as an absolute deadline in Unix milliseconds. Expiry is lazy on access plus a
@@ -739,22 +749,30 @@ directly but never gets `-MOVED`. That setting is for tests.
   hints (§9).
 - Read repair is miss-driven. A replica that misses asks the primary or another replica and stores
   what it finds. Hits are not compared across replicas.
-- A promoted primary exchanges per-shard HLC digests with the other replicas once and pulls newer
-  entries. Continuous anti-entropy is out of scope.
+- A promoted primary exchanges per-bucket HLC digests with the other replicas once and pulls newer
+  entries. A reply carries whole buckets up to 16 MiB. While a reply reaches that limit, the
+  primary sends another round for the remaining buckets. The exchange has its own timeout, which
+  grows with the size of the store, and a failed round is tried again up to five times.
+  Continuous anti-entropy is out of scope.
 - Repair treats tombstones as entries, so repair cannot bring back a deleted key.
 - A replica that was unreachable for longer than the tombstone TTL discards its store on rejoin.
 
 ## 9. Hinted handoff
 
 - If the primary cannot deliver a write to a secondary, it records a hint. Causes are a failed
-  connection, a timeout, a peer that is not `NORMAL`, or a queue overflow.
+  connection, a timeout, a peer that is not `NORMAL`, a queue overflow, or a peer that answers but
+  does not store the entry. An acknowledgment counts only the entries that the peer stored. If it
+  counts fewer than the batch carried, the primary offers each key of the batch at its version,
+  and the keys that the peer still asks for become hints. They do not count as acknowledged.
 - Hints live on the primary, keyed by target and key. A hint holds the full entry and its epoch.
   Hints coalesce to the latest entry per key.
 - Bounds are a byte cap and an entry cap per target, a global cap (5% of `maxmemory`), and a
   maximum age equal to the tombstone TTL. The oldest hints are evicted and counted.
-- Replay starts in two cases: the target is `NORMAL` and reconnected, or the queue of a lagging peer
-  drains below a low-water mark. The primary sends `HINT_REPLAY` batches in HLC order and waits for
-  an acknowledgment per batch. The target applies only newer entries.
+- Replay starts in three cases: the target is `NORMAL` and reconnected, the queue of a lagging peer
+  drains below a low-water mark, or the once-per-second tick finds hints for a target whose queue is
+  up. The primary sends `HINT_REPLAY` batches in HLC order and waits for an acknowledgment per
+  batch. The target applies only newer entries. A hint that the target answers but does not store
+  stays for the next tick.
 - A `DEAD` target never returns, so its hints are dropped. Hints cover transient unreachability and
   slow peers, not restarts.
 - On every epoch change, the primary drops the hints whose target no longer owns the key.
@@ -772,7 +790,7 @@ flowchart TD
     sent{"delivered?"}
     apply["secondary applies the entry if its HLC is newer"]
     hint["record a hint: target, key, entry, epoch"]
-    ready{"target NORMAL and reconnected, or queue below the low-water mark?"}
+    ready{"target NORMAL and reconnected, queue below the low-water mark, or tick with the queue up?"}
     replay["HINT_REPLAY batches in HLC order"]
     drop["drop the hint"]
     refill["mark the refill bucket needs_refill"]
@@ -1338,8 +1356,9 @@ access for clients sets `clusterClients.enabled=false`.
 
 - Drain marks the node `LEAVING` and unready. The node keeps serving existing connections and acts
   as a handoff source until the shutdown deadline. The deadline must cover the handoff and the Raft
-  moves. Then the node flushes its queues and leaves gossip. Keys not copied in time refill as
-  misses.
+  moves. Then the node flushes its queues, waits for the batches in flight, and leaves gossip.
+  Before it closes its transports, it waits once more for the writes that arrived during the
+  departure, within the same deadline. Keys not copied in time refill as misses.
 - Cluster clients move away before the node stops, because it leaves placement first (§7.6).
 - A restarted pod is a new, cold node. Use `maxSurge` so the new pod joins before the old pod
   drains, and `minReadySeconds` so one replacement finishes before the next begins.

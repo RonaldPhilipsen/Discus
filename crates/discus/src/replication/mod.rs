@@ -190,6 +190,18 @@ impl Replicator {
         let evicted = self.hints.lock().expire(Instant::now());
         self.count_evicted(&evicted);
         self.sync_charge();
+        // A hint can be recorded for a peer whose queue is up: a write that saw the queue down
+        // while it came back up, or an entry that the peer did not store. Nothing else replays
+        // those.
+        let targets = self.hints.lock().targets();
+        if !targets.is_empty() {
+            let peers = self.peers.read();
+            for t in targets {
+                if let Some(q) = peers.get(&t).filter(|q| !q.is_down()) {
+                    q.want_replay();
+                }
+            }
+        }
         if let Some(node) = self.node.upgrade() {
             let current = node.epochs().current().clone();
             self.prune_handoffs(&current);
@@ -313,9 +325,11 @@ impl Replicator {
     }
 
     /// The previous owners of `key` to ask on a miss while a handoff toward this node is
-    /// incomplete: the old owners that are not current owners, that the current epoch still
-    /// lists, and that have not finished their part. `owners` are the current owners of `key`.
-    pub fn fallback_sources(&self, node: &Node, key: &[u8], owners: &[NodeId]) -> Vec<NodeId> {
+    /// incomplete: the old owners that the current epoch still lists and that have not finished
+    /// their part, the old primary first. An old owner that is still a current owner counts too:
+    /// after a join to a cluster smaller than the replication factor, every old owner stays, and
+    /// it is the only holder of the value until its scan reaches this node.
+    pub fn fallback_sources(&self, node: &Node, key: &[u8]) -> Vec<NodeId> {
         if self.handoff.lock().incoming.is_empty() {
             return Vec::new();
         }
@@ -325,11 +339,7 @@ impl Replicator {
         let mut out = Vec::new();
         for inc in &st.incoming {
             for o in inc.old.owners(key, self.settings.rf) {
-                if !owners.contains(&o)
-                    && inc.sources.contains(&o)
-                    && current.member(o).is_some()
-                    && !out.contains(&o)
-                {
+                if inc.sources.contains(&o) && current.member(o).is_some() && !out.contains(&o) {
                     out.push(o);
                 }
             }
@@ -373,19 +383,16 @@ impl Replicator {
         }
     }
 
-    /// Wait until the node is out of placement, its scans are done, and its queues are empty.
-    /// A draining node calls this within its shutdown deadline (spec section 15.3).
+    /// Wait until the node is out of placement, its scans are done, and its queues are empty
+    /// with no batch in flight. A down queue does not count: its keys become hints. A draining
+    /// node calls this within its shutdown deadline (spec section 15.3).
     pub async fn idle(&self) {
         loop {
             let Some(node) = self.node.upgrade() else {
                 return;
             };
             let placed = node.membership().is_some() && node.epochs().current().is_normal(self.id);
-            let queued = self
-                .peers
-                .read()
-                .values()
-                .any(|q| !q.is_empty() && !q.is_down());
+            let queued = self.peers.read().values().any(|q| q.busy() && !q.is_down());
             if !placed && !self.scanning() && !queued {
                 return;
             }
@@ -756,6 +763,9 @@ impl Replicator {
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 continue;
             }
+            if q.take_replay() && !self.replay(&node, q.peer).await {
+                tracing::debug!(peer = %q.peer, "a hint replay to an up peer stopped");
+            }
             let keys = q.take(self.settings.batch_keys);
             if keys.is_empty() {
                 drop(node);
@@ -770,13 +780,26 @@ impl Replicator {
             }
             let mut batch = Batch::new(node.epoch_id());
             batch.entries = fill(&self.store, &q, keys);
+            let sent = batch.entries.len();
             if let Some(label) = &q.label {
-                discus_telemetry::global().replication_batch(label, batch.entries.len() as u64);
+                discus_telemetry::global().replication_batch(label, sent as u64);
             }
             let started = Instant::now();
-            match self.send(&node, q.peer, Message::Replicate(batch)).await {
-                Ok(_) => {
+            let reply = match self.send(&node, q.peer, Message::Replicate(batch)).await {
+                Ok(Message::BatchAck(a)) if a.applied as usize >= sent => Ok(Vec::new()),
+                Ok(Message::BatchAck(_)) => self.unstored_inflight(&node, &q).await,
+                Ok(other) => Err(TransportError::Frame(format!(
+                    "a replication batch got message type {}",
+                    other.type_code()
+                ))),
+                Err(e) => Err(e),
+            };
+            match reply {
+                Ok(unstored) => {
                     q.acked();
+                    if !unstored.is_empty() {
+                        self.hint_all(&q, unstored);
+                    }
                     self.bump_progress();
                     self.touch(q.peer);
                     if let Some(label) = &q.label {
@@ -787,10 +810,6 @@ impl Replicator {
                         self.bump_progress();
                     }
                 }
-                Err(TransportError::PeerUnsupported(_)) => {
-                    q.acked();
-                    self.bump_progress();
-                }
                 Err(e) => {
                     tracing::debug!(peer = %q.peer, error = %e, "a replication batch failed");
                     self.hint_all(&q, q.failed());
@@ -800,11 +819,51 @@ impl Replicator {
         }
     }
 
+    /// The keys of the batch in flight to `q` that the peer does not hold at their current
+    /// version, after it stored fewer entries than the batch carried. The acknowledgment counts
+    /// only the entries it stored, and an entry that it already held is not stored again, so an
+    /// offer of each key at its version tells the two apart. An entry refused for clock drift or
+    /// for a database that the peer does not hold stays unacknowledged.
+    async fn unstored_inflight(
+        &self,
+        node: &Arc<Node>,
+        q: &PeerQueue,
+    ) -> Result<Vec<DbKey>, TransportError> {
+        let offers = q
+            .inflight()
+            .into_iter()
+            .filter_map(|k| self.store.stored_version(k.db, &k.key).map(|v| (k, v)))
+            .collect();
+        self.unstored(node, q.peer, offers).await
+    }
+
+    /// The keys of `offers` that `peer` does not hold at the offered version or newer.
+    async fn unstored(
+        &self,
+        node: &Arc<Node>,
+        peer: NodeId,
+        offers: Vec<(DbKey, Version)>,
+    ) -> Result<Vec<DbKey>, TransportError> {
+        if offers.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut batch = Batch::new(node.epoch_id());
+        batch.offers = offers;
+        match self.send(node, peer, Message::Handoff(batch)).await? {
+            Message::BatchAck(a) => Ok(a.want),
+            other => Err(TransportError::Frame(format!(
+                "an offer got message type {}",
+                other.type_code()
+            ))),
+        }
+    }
+
     /// Replay the hints of `peer` (spec section 9). The refill buckets of lost hints come
     /// first: one batch tells the peer to discard its copies there, and [`Self::refill`] sends
     /// this node's entries of those buckets again. Then the hints go in HLC order, one
     /// acknowledged batch at a time. A hint is never newer than the entry that the refill sent,
-    /// so this order is safe. Only a peer that the epoch lists as `NORMAL` gets a replay.
+    /// so this order is safe. Only a peer that the epoch lists as `NORMAL` gets a replay. A hint
+    /// that the peer answered but did not store stays, and the replay ends there.
     /// Returns false when a batch failed or the epoch changed. The buckets stay lost until their
     /// refill ends, so the next replay discards and refills them again.
     async fn replay(&self, node: &Arc<Node>, peer: NodeId) -> bool {
@@ -842,18 +901,35 @@ impl Replicator {
                 .collect();
             let mut batch = Batch::new(node.epoch_id());
             batch.entries = entries;
-            match self.send(node, peer, Message::HintReplay(batch)).await {
-                Ok(_) => {
-                    self.hints.lock().confirm(peer, &sent);
-                    self.sync_charge();
-                    if let Some(label) = crate::telemetry::node_label(peer) {
-                        discus_telemetry::global().hint_replayed(&label, sent.len() as u64);
-                    }
-                }
+            let unstored = match self.send(node, peer, Message::HintReplay(batch)).await {
+                Ok(Message::BatchAck(a)) if a.applied as usize >= sent.len() => Ok(Vec::new()),
+                Ok(Message::BatchAck(_)) => self.unstored(node, peer, sent.clone()).await,
+                Ok(other) => Err(TransportError::Frame(format!(
+                    "a hint replay got message type {}",
+                    other.type_code()
+                ))),
+                Err(e) => Err(e),
+            };
+            let unstored = match unstored {
+                Ok(keys) => keys,
                 Err(e) => {
                     tracing::debug!(%peer, error = %e, "a hint replay batch failed");
                     return false;
                 }
+            };
+            // A hint that the peer did not store stays for the replay of a later tick. The peer
+            // answered, so the replay still succeeds.
+            let stored: Vec<(DbKey, Version)> = sent
+                .into_iter()
+                .filter(|(k, _)| !unstored.contains(k))
+                .collect();
+            self.hints.lock().confirm(peer, &stored);
+            self.sync_charge();
+            if let Some(label) = crate::telemetry::node_label(peer) {
+                discus_telemetry::global().hint_replayed(&label, stored.len() as u64);
+            }
+            if !unstored.is_empty() {
+                return true;
             }
         }
     }
@@ -897,7 +973,8 @@ impl Replicator {
             else {
                 return false;
             };
-            if !entries.is_empty() {
+            // A page of large values can pass the frame limit, so it goes in batches by bytes.
+            for entries in by_bytes(entries, BATCH_BYTES) {
                 let mut batch = Batch::new(epoch.id());
                 batch.entries = entries;
                 if let Err(e) = self.send(node, peer, Message::HintReplay(batch)).await {
@@ -919,6 +996,18 @@ impl Replicator {
         peer: NodeId,
         message: Message,
     ) -> Result<Message, TransportError> {
+        let timeout = node.live_settings.get().replication_timeout;
+        self.send_with(node, peer, message, timeout).await
+    }
+
+    /// [`Self::send`] with its own `timeout`.
+    pub(crate) async fn send_with(
+        &self,
+        node: &Arc<Node>,
+        peer: NodeId,
+        message: Message,
+        timeout: Duration,
+    ) -> Result<Message, TransportError> {
         let link = node
             .link()
             .ok_or_else(|| TransportError::Connect("no transport".into()))?;
@@ -928,7 +1017,6 @@ impl Replicator {
             link.saw_peer_epoch(peer, info.cluster_id, info.epoch);
             Ok(message)
         };
-        let timeout = node.live_settings.get().replication_timeout;
         let reply = node.request(peer, Lane::Bulk, build, timeout, true).await?;
         // An answered bulk message shows the peer is up (spec "Target health").
         link.note_forward(peer, true);
@@ -1034,7 +1122,17 @@ impl Replicator {
                 };
                 let (store, rf, me) = (self.store.clone(), self.settings.rf, self.id);
                 let entries = tokio::task::spawn_blocking(move || {
-                    digest::answer(&store, &old, &new, rf, from, me, db, &sums)
+                    digest::answer(
+                        &store,
+                        &old,
+                        &new,
+                        rf,
+                        from,
+                        me,
+                        db,
+                        &sums,
+                        digest::REPLY_BYTES,
+                    )
                 })
                 .await
                 .unwrap_or_default();
@@ -1145,6 +1243,27 @@ impl RefillPage {
             }
         }
     }
+}
+
+/// Split `entries` in order into batches of at most `limit` bytes. An entry larger than `limit`
+/// goes alone.
+fn by_bytes(entries: Vec<(DbKey, Entry)>, limit: u64) -> Vec<Vec<(DbKey, Entry)>> {
+    let mut out: Vec<Vec<(DbKey, Entry)>> = Vec::new();
+    let mut bytes = 0;
+    for (k, e) in entries {
+        let size = discus_store::estimate_size(&k.key, &e);
+        match out.last_mut() {
+            Some(last) if bytes + size <= limit => {
+                bytes += size;
+                last.push((k, e));
+            }
+            _ => {
+                bytes = size;
+                out.push(vec![(k, e)]);
+            }
+        }
+    }
+    out
 }
 
 /// The current entries of `keys` for one replication batch, up to about [`BATCH_BYTES`]. The
@@ -1325,6 +1444,51 @@ mod tests {
         assert_eq!(got, want);
     }
 
+    #[tokio::test]
+    async fn a_batch_in_flight_keeps_the_replicator_busy() {
+        let config = crate::Config::parse_from(["discus"]).unwrap();
+        let live = crate::settings::Live::new(crate::settings::Reloadable::from_config(&config));
+        let security = Arc::new(crate::security::tests::security(&[]));
+        let node = Arc::new(Node::new(config, security, live));
+        let r = Replicator::new(&node);
+        let peer = NodeId::from_u128(9);
+        let q = Arc::new(PeerQueue::new(peer, 8));
+        r.peers.write().insert(peer, q.clone());
+        q.push(0, &Bytes::from_static(b"k"));
+        assert_eq!(q.take(8).len(), 1);
+        let wait = tokio::time::timeout(Duration::from_millis(300), r.idle()).await;
+        assert!(wait.is_err(), "idle with a batch in flight");
+        q.acked();
+        let wait = tokio::time::timeout(Duration::from_secs(10), r.idle()).await;
+        assert!(wait.is_ok());
+    }
+
+    #[test]
+    fn a_refill_page_goes_in_batches_by_bytes() {
+        let entry = |n: usize| {
+            let key = DbKey::new(0, Bytes::from(format!("k{n}")));
+            let value = Value::Str(Bytes::from(vec![b'x'; n]));
+            (key, Entry::new(value, None))
+        };
+        let sizes = [100, 100, 5000, 100, 300, 300, 300];
+        let entries: Vec<(DbKey, Entry)> = sizes.iter().map(|n| entry(*n)).collect();
+        let limit = discus_store::estimate_size(&entries[4].0.key, &entries[4].1) * 2;
+        let batches = by_bytes(entries.clone(), limit);
+        let flat: Vec<DbKey> = batches.iter().flatten().map(|(k, _)| k.clone()).collect();
+        let want: Vec<DbKey> = entries.iter().map(|(k, _)| k.clone()).collect();
+        assert_eq!(flat, want);
+        for b in &batches {
+            let bytes: u64 = b
+                .iter()
+                .map(|(k, e)| discus_store::estimate_size(&k.key, e))
+                .sum();
+            assert!(b.len() == 1 || bytes <= limit, "{bytes}");
+        }
+        assert!(batches
+            .iter()
+            .any(|b| b.len() == 1 && b[0].0 == entries[2].0));
+    }
+
     #[test]
     fn keys_past_the_batch_size_stay_queued() {
         let store = Store::new(StoreConfig::default(), Arc::new(ManualClock::new(1)));
@@ -1343,7 +1507,7 @@ mod tests {
         assert!(entries.len() < keys.len());
         q.acked();
         let mut sent: Vec<DbKey> = entries.into_iter().map(|(k, _)| k).collect();
-        while !q.is_empty() {
+        while q.busy() {
             sent.extend(
                 fill(&store, &q, q.take(keys.len()))
                     .into_iter()

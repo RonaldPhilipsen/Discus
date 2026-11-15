@@ -408,10 +408,28 @@ impl Store {
         stamp: Version,
         f: impl FnOnce(&mut Slot) -> R,
     ) -> (R, bool) {
+        let (result, stored) = self.write_stamped(db, key, stamp, f);
+        (result, stored.is_some())
+    }
+
+    /// [`Store::write`], and the version that a change stored, `None` without a change.
+    ///
+    /// The caller takes `stamp` before the shard lock, so a racing write or an inbound entry can
+    /// store a newer version first. A change then stores the version just above the one it
+    /// replaces, with the origin of `stamp`, so the stored version only grows and the replicas
+    /// take the change too. Raising here costs one comparison, where a stamp under the lock
+    /// would take the clock lock inside every shard lock.
+    pub fn write_stamped<R>(
+        &self,
+        db: u32,
+        key: &[u8],
+        stamp: Version,
+        f: impl FnOnce(&mut Slot) -> R,
+    ) -> (R, Option<Version>) {
         let shard = &self.shards[self.shard_index(key)];
         let now = self.clock.now_ms();
         let mut added_tomb = false;
-        let (result, changed) = {
+        let (result, stored) = {
             let mut guard = shard.inner.write();
             // A live entry changes in its bucket, so the common overwrite hashes and probes once.
             if let Some(DbShard {
@@ -427,6 +445,7 @@ impl Store {
                         // found once. The placeholder costs no allocation.
                         let (k, e) = o.get_mut();
                         let e = std::mem::replace(e, Entry::new(Value::Str(Bytes::new()), None));
+                        let stamp = above(stamp, e.version);
                         let before = estimate_size(k, &e);
                         deadlines.remove(e.expires_at_ms);
                         let mut slot = Slot {
@@ -470,11 +489,16 @@ impl Store {
                         if added_tomb {
                             self.enforce_reserve();
                         }
-                        return (result, changed);
+                        return (result, changed.then_some(stamp));
                     }
                 }
             }
-            let (key_bytes, entry, old_tomb) = match self.take(&mut guard, db, key) {
+            let taken = self.take(&mut guard, db, key);
+            let stamp = match &taken {
+                Some((_, e)) => above(stamp, e.version),
+                None => stamp,
+            };
+            let (key_bytes, entry, old_tomb) = match taken {
                 Some((k, e)) if e.tombstone && !e.is_expired(now) => (Some(k), None, Some(e)),
                 Some((k, e)) if e.tombstone || e.is_expired(now) => (Some(k), None, None),
                 Some((k, e)) => (Some(k), Some(e), None),
@@ -507,12 +531,12 @@ impl Store {
                     }
                 }
             }
-            (result, changed)
+            (result, changed.then_some(stamp))
         };
         if added_tomb {
             self.enforce_reserve();
         }
-        (result, changed)
+        (result, stored)
     }
 
     fn tombstone(&self, stamp: Version, now: u64) -> Entry {
@@ -527,11 +551,13 @@ impl Store {
 
     /// Store a replicated or handed-off entry if its version is newer than the local one,
     /// tombstone or not. The entry keeps its own version and deadline. An entry that is already
-    /// expired is not stored. Returns true when the entry was stored.
+    /// expired is not stored. If it is newer than a local entry, a tombstone with its version
+    /// replaces that entry: a write with a deadline in the past is a delete, and the older value
+    /// must not stay. Returns true when the entry or the tombstone was stored.
     pub fn apply(&self, db: u32, key: &[u8], mut entry: Entry) -> bool {
         let now = self.clock.now_ms();
         if entry.is_expired(now) {
-            return false;
+            return self.apply_expired(db, key, entry.version, now);
         }
         entry.last_access_ms = now;
         let tomb = entry.tombstone;
@@ -583,6 +609,23 @@ impl Store {
             return false;
         }
         self.replace(&mut guard, db, key, entry);
+        true
+    }
+
+    /// Replace an older local entry of `key` with a tombstone at `version`.
+    fn apply_expired(&self, db: u32, key: &[u8], version: Version, now: u64) -> bool {
+        let shard = &self.shards[self.shard_index(key)];
+        let mut guard = shard.inner.write();
+        let older = guard
+            .get(db)
+            .and_then(|d| d.map.get(key))
+            .is_some_and(|cur| cur.version < version);
+        if !older {
+            return false;
+        }
+        self.replace(&mut guard, db, key, self.tombstone(version, now));
+        drop(guard);
+        self.enforce_reserve();
         true
     }
 
@@ -954,6 +997,15 @@ impl Store {
             }
         }
     }
+}
+
+/// `stamp`, or the version just above `prior` with the origin of `stamp` when `prior` is not
+/// older. The internal stamp `Version::zero()` stays.
+fn above(stamp: Version, prior: Version) -> Version {
+    if stamp > prior || stamp == Version::zero() {
+        return stamp;
+    }
+    Version::new(crate::NTP64(prior.time().0 + 1), stamp.origin())
 }
 
 #[cfg(test)]

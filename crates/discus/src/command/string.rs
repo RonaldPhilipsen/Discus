@@ -165,7 +165,8 @@ pub fn set_options(cmd: &Command, now_ms: u64) -> Result<SetOptions, CommandErro
 fn set(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     check_key(node, &cmd[1])?;
     check_value(node, &cmd[2])?;
-    let o = set_options(cmd, node.store.now_ms())?;
+    let now = node.store.now_ms();
+    let o = set_options(cmd, now)?;
     admit(node, cmd[1].len() + cmd[2].len())?;
     let value = cmd[2].clone();
     node.write(conn.db, &cmd[1], node.stamp()?, |slot| {
@@ -188,7 +189,12 @@ fn set(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
             Some(Expiry::Keep) => slot.as_ref().and_then(|e| e.expires_at_ms),
             _ => None,
         };
-        slot.set(Some(new_entry(value, expires)));
+        // Valkey turns a deadline in the past into a delete, so the replicas drop the old value.
+        if expires.is_some_and(|t| t <= now) {
+            slot.take();
+        } else {
+            slot.set(Some(new_entry(value, expires)));
+        }
         Ok(reply(old))
     })
 }
@@ -204,7 +210,8 @@ fn getdel(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
 }
 
 fn getex(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
-    let expiry = getex_expiry(cmd, node.store.now_ms())?;
+    let now = node.store.now_ms();
+    let expiry = getex_expiry(cmd, now)?;
     let deadline = match expiry {
         Some(Expiry::At(t)) => Some(Some(t)),
         Some(Expiry::Persist) => Some(None),
@@ -215,7 +222,9 @@ fn getex(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
             return Ok(Value::Null);
         };
         let reply = Value::Bulk(b.clone());
-        if let Some(d) = deadline {
+        if deadline.is_some_and(|d| d.is_some_and(|t| t <= now)) {
+            slot.take();
+        } else if let Some(d) = deadline {
             if slot.as_ref().is_some_and(|e| e.expires_at_ms != d) {
                 if let Some(e) = slot.as_mut() {
                     e.expires_at_ms = d;

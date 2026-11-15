@@ -27,7 +27,7 @@ use crate::Node;
 const RETRY: Duration = Duration::from_millis(200);
 
 /// True for a command that is safe to apply twice: the exact list of spec section 7.5
-/// plus the internal `DISCUS.PUT`.
+/// plus the internal `DISCUS.PUT` without `NX`.
 pub fn idempotent(cmd: &Command) -> bool {
     let name = upper(&cmd[0]);
     match name.as_str() {
@@ -43,7 +43,9 @@ pub fn idempotent(cmd: &Command) -> bool {
             .take_while(|a| matches!(a.as_str(), "NX" | "XX" | "GT" | "LT" | "CH" | "INCR"))
             .any(|a| a == "INCR"),
         "DEL" | "EXPIRE" | "PEXPIRE" | "EXPIREAT" | "PEXPIREAT" | "PERSIST" | "MSET" | "HSET"
-        | "HDEL" | "SADD" | "SREM" | "ZREM" | "DISCUS.PUT" => true,
+        | "HDEL" | "SADD" | "SREM" | "ZREM" => true,
+        // A resend of a put with `NX` that applied finds the key and reports no copy.
+        "DISCUS.PUT" => !cmd.iter().skip(3).any(|a| a.eq_ignore_ascii_case(b"NX")),
         _ => false,
     }
 }
@@ -136,5 +138,26 @@ pub async fn held(
             Some(f) if !resendable(&cmd, f) => return Reply::try_again(),
             Some(_) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cmd(parts: &[&str]) -> Command {
+        parts
+            .iter()
+            .map(|p| bytes::Bytes::copy_from_slice(p.as_bytes()))
+            .collect()
+    }
+
+    /// A `COPY` without `REPLACE` puts with `NX`. A resend after it applied finds the key and
+    /// returns 0, although the copy happened.
+    #[test]
+    fn a_put_with_nx_is_not_idempotent() {
+        assert!(idempotent(&cmd(&["DISCUS.PUT", "k", "blob"])));
+        assert!(!idempotent(&cmd(&["DISCUS.PUT", "k", "blob", "NX"])));
+        assert!(!idempotent(&cmd(&["discus.put", "k", "blob", "nx"])));
     }
 }
