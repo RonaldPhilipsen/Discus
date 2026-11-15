@@ -2,5 +2,24 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:best-practices"
+  ],
+  "packageRules": [
+    {
+      "description": [
+        "Auto-merge non-major updates from my own packages"
+      ],
+      "matchPackageNames": [
+        "ghcr.io/ronaldphilipsen/**",
+        "ronaldphilipsen/**"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest",
+        "pin",
+        "pinDigest"
+      ],
+      "automerge": true
+    }
   ]
 }
