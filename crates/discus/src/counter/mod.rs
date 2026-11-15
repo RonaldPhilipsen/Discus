@@ -139,6 +139,14 @@ impl View {
         normal(&self.epoch, id)
     }
 
+    /// `id` is `NORMAL` or `LEAVING`. A `LEAVING` voter still takes part in its Raft groups
+    /// until the leader moves its slot away (spec section 15.3).
+    pub fn voting(&self, id: NodeId) -> bool {
+        self.epoch
+            .member(id)
+            .is_some_and(|m| matches!(m.state, MemberState::Normal | MemberState::Leaving))
+    }
+
     pub fn normal_count(&self) -> usize {
         discus_membership::normal_count(&self.epoch)
     }
@@ -575,9 +583,12 @@ impl Counters {
         let node = self.node()?;
         let epoch = node.epochs().current().clone();
         let me = epoch.member(node.id).map(|m| m.state);
+        // A drain marks this node `LEAVING` before the epoch that says so arrives. In between
+        // it is no longer `NORMAL`, and it must keep its voter slots as a `LEAVING` node does.
+        let draining = me.is_some() && node.phase() == crate::Phase::Leaving;
         Some(View {
             me_normal: node.is_normal() && me.is_some(),
-            leaving: me == Some(MemberState::Leaving),
+            leaving: me == Some(MemberState::Leaving) || draining,
             epoch,
             me: node.id,
         })

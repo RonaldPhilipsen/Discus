@@ -501,3 +501,107 @@ async fn counter_keys_in_two_databases() {
         }
     }
 }
+
+/// One client per connection of `conns` sends `INCR key` until `stop`. Returns the successes
+/// and the replies that leave it open whether the increment applied. A client stops when its
+/// node closes the connection.
+async fn load_until(
+    conns: Vec<redis::aio::MultiplexedConnection>,
+    key: &'static str,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> (i64, i64) {
+    let ok = Arc::new(AtomicI64::new(0));
+    let ambiguous = Arc::new(AtomicI64::new(0));
+    let mut tasks = Vec::new();
+    for mut c in conns {
+        let (stop, ok, ambiguous) = (stop.clone(), ok.clone(), ambiguous.clone());
+        tasks.push(tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                match redis::cmd("INCR").arg(key).query_async::<i64>(&mut c).await {
+                    Ok(_) => {
+                        ok.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(e) if is_refused(&e) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(e) => {
+                        ambiguous.fetch_add(1, Ordering::Relaxed);
+                        if e.is_io_error() || e.is_connection_dropped() {
+                            return;
+                        }
+                    }
+                }
+            }
+        }));
+    }
+    for t in tasks {
+        t.await.unwrap();
+    }
+    (
+        ok.load(Ordering::Relaxed),
+        ambiguous.load(Ordering::Relaxed),
+    )
+}
+
+/// The leader and one more voter drain at once. The third voter still sees a quorum with the
+/// `LEAVING` voters, so it must not rebuild the group from its own state while the old leader
+/// still commits. Every increment that a client saw succeed survives the move.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn two_draining_voters_keep_every_increment() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let nodes = raft_cluster(&net, &leases, 5, &["--shutdown-timeout-secs", "30"]).await;
+    let all = refs(&nodes);
+    let key = "cnt:two-drain";
+    let g = group_of(&nodes[0], key);
+    let leader = leader_of(&all, g).unwrap();
+    let other = voters_of(&all, g)
+        .into_iter()
+        .find(|v| v.id != leader.id)
+        .unwrap();
+    let rest: Vec<&GossipNode> = all
+        .iter()
+        .copied()
+        .filter(|n| n.id != leader.id && n.id != other.id)
+        .collect();
+
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // The old leader acknowledges the writes of its own clients, so most clients sit there.
+    let mut conns = Vec::new();
+    for n in all.iter().copied().chain([leader; 4]) {
+        conns.push(n.redis().await);
+    }
+    let load = tokio::spawn(load_until(conns, key, stop.clone()));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    leader.node.drain_token().cancel();
+    other.node.drain_token().cancel();
+    let moved = || {
+        leader_of(&rest, g).is_some_and(|l| {
+            let s = status(l, g);
+            s.voters.len() == 3 && s.voters.iter().all(|v| rest.iter().any(|n| n.id == *v))
+        })
+    };
+    assert!(
+        wait_until(Duration::from_secs(30), moved).await,
+        "the group did not move to the nodes that stay\n{}",
+        dump(&all)
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    stop.store(true, Ordering::Relaxed);
+    let (ok, ambiguous) = load.await.unwrap();
+    let mut c = rest[0].redis().await;
+    let value: i64 = query_get(&mut c, key).await;
+    assert!(ok > 0, "the load did not run");
+    assert!(
+        ok <= value && value <= ok + ambiguous,
+        "the counter is {value}, with {ok} successes and {ambiguous} ambiguous increments\n{}",
+        dump(&all)
+    );
+}
+
+async fn query_get(c: &mut redis::aio::MultiplexedConnection, key: &str) -> i64 {
+    let get = redis::cmd("GET").arg(key).clone();
+    common::counters::query_until::<Option<i64>>(c, &get, Duration::from_secs(10), is_try_again)
+        .await
+        .unwrap()
+        .unwrap_or(0)
+}

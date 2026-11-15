@@ -833,12 +833,14 @@ two-voter Raft group cannot survive a loss, so small clusters use leader-followe
   `NodeId` and enters a group only as a learner. No identity votes twice, and no empty node is a
   voter.
 - A minority partition returns `-TRYAGAIN`.
-- Quorum loss recovers automatically. When a voter set has no live majority, a joint change
-  included, no membership change can commit. The leader, or else the top live voter, then
-  reconfigures the group to itself as the only voter of a new instance. When every voter is
-  `DEAD`, the top target creates the group again, empty, and its counters are lost.
-  `RAFT_FORCE_RECONFIGURE` on the admin port lets an operator act before the detector declares the
-  voters `DEAD`.
+- Quorum loss recovers automatically. A live voter is `NORMAL` or `LEAVING`, and no peer refused its
+  replica. A `LEAVING` voter still commits with the leader until the leader moves its slot away.
+  When a voter set has no live majority, a joint change included, no membership change can commit.
+  The leader, or else the top live voter, then reconfigures the group to itself as the only voter of
+  a new instance. It first stops its old replica, so the old instance acknowledges no more writes.
+  When every voter is `DEAD`, the top target creates the group again, empty, and its counters are
+  lost. `RAFT_FORCE_RECONFIGURE` on the admin port lets an operator act before the detector declares
+  the voters `DEAD`.
 - A false `DEAD` during a partition lets both sides rebuild a group. On heal, the losing side
   discards its counter state, and the increments it accepted are lost.
 
@@ -1312,9 +1314,10 @@ access for clients sets `clusterClients.enabled=false`.
 ### 15.3 Drain and rolling restart
 
 - Drain marks the node `LEAVING` and unready. The node keeps serving existing connections and acts
-  as a handoff source until the shutdown deadline. The deadline must cover the handoff and the Raft
-  moves. Then the node flushes its queues and leaves gossip. Keys not copied in time refill as
-  misses.
+  as a handoff source until the shutdown deadline. It keeps its Raft voter slots from the start of
+  the drain, also before the epoch that marks it `LEAVING` arrives. The deadline must cover the
+  handoff and the Raft moves. Then the node flushes its queues and leaves gossip. Keys not copied in
+  time refill as misses.
 - Cluster clients move away before the node stops, because it leaves placement first (§7.6).
 - A restarted pod is a new, cold node. Use `maxSurge` so the new pod joins before the old pod
   drains, and `minReadySeconds` so one replacement finishes before the next begins.
