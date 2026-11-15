@@ -323,3 +323,38 @@ fn a_rejoining_node_forgets_its_dead_records() {
         .any(|e| matches!(e, Event::Rejoining { .. })));
     assert_eq!(sim.liveness(c, gone), None);
 }
+
+#[test]
+fn a_change_that_loses_to_a_competing_epoch_is_applied_again() {
+    let mut sim = Sim::new(8, SwimConfig::fast());
+    let mut ids = sim.cluster(5);
+    ids.sort();
+    sim.run_ms(500);
+    let (a, x) = (ids[0], ids[4]);
+    let with_x = sim.epoch(a);
+    sim.kill(x);
+    // Only `a` has strong evidence, so it removes X before the others see the death.
+    for _ in 0..4 {
+        sim.data_path_failure(a, x);
+    }
+    sim.run_until(3_000, |s| s.epoch(a).member(x).is_none());
+    // A competing epoch of the same generation, from a higher origin, still lists X.
+    let lost = sim.epoch(a).id();
+    let rival = Epoch::new(
+        EpochId {
+            generation: lost.generation,
+            origin: ids[3],
+        },
+        with_x.cluster_id(),
+        with_x.members().to_vec(),
+    )
+    .unwrap();
+    for &id in &ids[..4] {
+        sim.adopt(id, rival.clone());
+    }
+    // The creator applies its change again at once, before the others detect the death.
+    sim.run_until(300, |s| {
+        let e = s.epoch(a);
+        e.id() > rival.id() && e.member(x).is_none()
+    });
+}

@@ -118,3 +118,16 @@ fn an_isolated_node_of_three_rejoins_the_two() {
         "no seed gave the isolated node the higher epoch"
     );
 }
+
+#[test]
+fn the_survivor_of_a_two_node_crash_keeps_serving() {
+    let mut sim = Sim::new(700, SwimConfig::fast());
+    let ids = sim.cluster(3);
+    sim.run_ms(1_000);
+    sim.kill(ids[1]);
+    sim.kill(ids[2]);
+    sim.run_until(10_000, |s| s.epoch(ids[0]).normal().count() == 1);
+    sim.run_ms(5_000);
+    assert!(sim.is_normal(ids[0]));
+    assert!(!rejoined(&sim, ids[0]));
+}

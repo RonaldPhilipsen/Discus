@@ -8,7 +8,9 @@
 //! records the presence that the member needs in the epoch. When the jitter timer fires, the node
 //! drops the deltas that the current epoch already shows and creates the next epoch from the
 //! current members with the rest applied. So a node never undoes a change that it has not seen,
-//! and a losing creator applies its change again in the next epoch.
+//! and a losing creator applies its change again in the next epoch: a creator remembers the
+//! members that it changed in its own epochs, and when the epoch of another node replaces them,
+//! it records the change of each of them again from its view.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
@@ -151,6 +153,9 @@ pub struct Swim {
     /// The members `NORMAL` in a refused epoch but not in the own one. This node does not add
     /// them back until they hold its current epoch, which drops them and so makes them rejoin.
     held: BTreeSet<NodeId>,
+    /// The members whose changes this node put into its own epochs since it last adopted the
+    /// epoch of another node.
+    built: BTreeSet<NodeId>,
     /// The epoch that the core processed last. It notices epochs adopted elsewhere, for example
     /// on the forward path.
     last_epoch: Option<Arc<Epoch>>,
@@ -207,6 +212,7 @@ impl Swim {
             epoch_timer: None,
             outrank: None,
             held: BTreeSet::new(),
+            built: BTreeSet::new(),
             last_epoch: None,
             limiter: JoinLimiter::default(),
             detector_n: 1,
@@ -845,11 +851,10 @@ impl Swim {
             origin: self.me.id,
         };
         match Epoch::new(id, self.cluster_id, members) {
-            Ok(epoch) => {
-                if let Err(e) = host.adopt(epoch) {
-                    tracing::warn!(error = %e, "could not adopt an own epoch");
-                }
-            }
+            Ok(epoch) => match host.adopt(epoch) {
+                Ok(_) => self.built.extend(apply.keys()),
+                Err(e) => tracing::warn!(error = %e, "could not adopt an own epoch"),
+            },
             Err(e) => tracing::warn!(error = %e, "could not build an epoch"),
         }
         self.sync_epoch(now, host);
@@ -886,6 +891,14 @@ impl Swim {
                 self.members.retain(|_, r| r.liveness != Liveness::Dead);
                 self.outrank = None;
                 self.held.clear();
+                self.built.clear();
+            }
+        }
+        if current.id().origin != self.me.id {
+            // The epoch of another node replaced the own ones, which can lack their changes. The
+            // view decides again for each of them, so only changes that this node saw come back.
+            for id in std::mem::take(&mut self.built) {
+                self.on_change(now, id);
             }
         }
         self.drop_shown_deltas(&current);
@@ -970,6 +983,7 @@ impl Swim {
         self.epoch_timer = None;
         self.outrank = None;
         self.held.clear();
+        self.built.clear();
         self.order.clear();
         self.pending.clear();
         self.probes.clear();
