@@ -7,6 +7,9 @@
 //! with `n`. Evidence adds weight for a failed probe and, with a larger weight, for a data-path
 //! failure. It halves every `evidence_half_life_ms`. Evidence alone stays below the death
 //! threshold, so a death always needs silence or the suspicion timeout too.
+//!
+//! Exponential decay is linear, so the sum of the decayed weights equals one value that decays
+//! from the last event. The detector keeps only that value, at O(1) per event and per read.
 
 use std::collections::VecDeque;
 
@@ -64,7 +67,9 @@ pub struct Detector {
     min_std_deviation: f64,
     intervals: Intervals,
     last_heartbeat: Millis,
-    evidence: Vec<(Millis, f64)>,
+    /// The decayed evidence at `evidence_at`.
+    evidence: f64,
+    evidence_at: Millis,
     half_life: f64,
     cap: f64,
 }
@@ -85,7 +90,8 @@ impl Detector {
             min_std_deviation: (period / 2).max(1) as f64,
             intervals,
             last_heartbeat: now,
-            evidence: Vec::new(),
+            evidence: 0.0,
+            evidence_at: now,
             half_life: cfg.evidence_half_life_ms.max(1) as f64,
             cap: cfg.phi_dead * EVIDENCE_CAP,
         }
@@ -103,20 +109,18 @@ impl Detector {
 
     /// Add evidence of `weight` at `now`.
     pub fn evidence(&mut self, now: Millis, weight: f64) {
-        let horizon = (self.half_life * 16.0) as Millis;
-        self.evidence
-            .retain(|(at, _)| now.saturating_sub(*at) < horizon);
-        self.evidence.push((now, weight));
+        self.evidence = self.decayed(now) + weight;
+        self.evidence_at = self.evidence_at.max(now);
     }
 
     /// The decayed evidence at `now`, capped below the death threshold.
     pub fn evidence_at(&self, now: Millis) -> f64 {
-        let sum: f64 = self
-            .evidence
-            .iter()
-            .map(|(at, w)| w * 0.5f64.powf(now.saturating_sub(*at) as f64 / self.half_life))
-            .sum();
-        sum.min(self.cap)
+        self.decayed(now).min(self.cap)
+    }
+
+    fn decayed(&self, now: Millis) -> f64 {
+        let elapsed = now.saturating_sub(self.evidence_at) as f64;
+        self.evidence * 0.5f64.powf(elapsed / self.half_life)
     }
 
     pub fn phi(&self, now: Millis) -> f64 {
@@ -247,6 +251,46 @@ mod tests {
         let d = Detector::new(&cfg(), 0, 1);
         assert!(d.raw_phi(Millis::MAX).is_infinite());
         assert_eq!(d.phi(Millis::MAX), f64::MAX);
+    }
+
+    /// The evidence list that the accumulator replaced: every event with its time.
+    fn list_evidence(events: &[(Millis, f64)], now: Millis, half_life: f64, cap: f64) -> f64 {
+        let sum: f64 = events
+            .iter()
+            .map(|(at, w)| w * 0.5f64.powf(now.saturating_sub(*at) as f64 / half_life))
+            .sum();
+        sum.min(cap)
+    }
+
+    #[test]
+    fn the_accumulator_matches_the_evidence_list() {
+        let cfg = SwimConfig {
+            evidence_half_life_ms: 1000,
+            ..cfg()
+        };
+        let mut d = Detector::new(&cfg, 0, 4);
+        let events = [
+            (0, 8.0),
+            (10, 10.0),
+            (250, 8.0),
+            (250, 10.0),
+            (1_700, 8.0),
+            (5_000, 10.0),
+            (5_010, 8.0),
+        ];
+        let mut seen = Vec::new();
+        for &(at, w) in &events {
+            d.evidence(at, w);
+            seen.push((at, w));
+            for read in [at, at + 1, at + 333, at + 4_000] {
+                let want = list_evidence(&seen, read, d.half_life, d.cap);
+                let got = d.evidence_at(read);
+                assert!((got - want).abs() < 1e-9, "at {read}: {got} != {want}");
+            }
+        }
+        // Below the cap the two agree on the raw sum too.
+        let low = list_evidence(&seen, 9_000, d.half_life, f64::MAX);
+        close(d.decayed(9_000), low);
     }
 
     #[test]
