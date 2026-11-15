@@ -93,7 +93,7 @@ pub enum Expiry {
 /// with its argument. Any other option is a syntax error.
 pub fn expiry_option(opt: &[u8], arg: &[u8], now_ms: u64, who: &str) -> Result<u64, CommandError> {
     let (unit, base) = if opt.eq_ignore_ascii_case(b"EX") {
-        (1000, now_ms)
+        (1000i64, now_ms)
     } else if opt.eq_ignore_ascii_case(b"PX") {
         (1, now_ms)
     } else if opt.eq_ignore_ascii_case(b"EXAT") {
@@ -105,12 +105,11 @@ pub fn expiry_option(opt: &[u8], arg: &[u8], now_ms: u64, who: &str) -> Result<u
     };
     let n = parse_i64(arg)?;
     let invalid = || CommandError::Custom(format!("ERR invalid expire time in '{who}' command"));
-    if n <= 0 {
-        return Err(invalid());
-    }
-    (n as u64)
-        .checked_mul(unit)
-        .and_then(|v| v.checked_add(base))
+    // Valkey keeps a deadline as signed milliseconds and refuses one that does not fit.
+    n.checked_mul(unit)
+        .and_then(|v| v.checked_add(base as i64))
+        .filter(|_| n > 0)
+        .map(|v| v as u64)
         .ok_or_else(invalid)
 }
 
@@ -351,4 +350,43 @@ fn type_(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
         None => Value::simple("none"),
         Some(e) => Value::simple(e.value.kind()),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// redis-server 8.10.2 refuses a deadline past `i64::MAX` milliseconds, so `PTTL` never
+    /// reads a negative number for a key that has a deadline.
+    #[test]
+    fn an_expiry_past_the_signed_millisecond_range_is_invalid() {
+        let now = 1_800_000_000_000;
+        let invalid = Err(CommandError::Custom(
+            "ERR invalid expire time in 'set' command".into(),
+        ));
+        assert_eq!(
+            expiry_option(b"EX", b"10000000000000000", now, "set"),
+            invalid
+        );
+        assert_eq!(
+            expiry_option(b"EX", b"9223372036854775", now, "set"),
+            invalid
+        );
+        assert_eq!(
+            expiry_option(b"PX", b"9223372036854775807", now, "set"),
+            invalid
+        );
+        assert_eq!(
+            expiry_option(b"EXAT", b"9223372036854775", now, "set"),
+            Ok(9_223_372_036_854_775_000)
+        );
+        assert_eq!(
+            expiry_option(b"PXAT", b"9223372036854775807", now, "set"),
+            Ok(i64::MAX as u64)
+        );
+        assert_eq!(
+            expiry_option(b"EX", b"9223372036854", now, "set"),
+            Ok(now + 9_223_372_036_854_000)
+        );
+    }
 }
