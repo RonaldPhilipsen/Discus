@@ -155,6 +155,18 @@ async fn a_refused_token_reaches_the_provider_once() {
 }
 
 #[tokio::test]
+async fn an_oversize_token_never_reaches_the_provider() {
+    let ca = TestCa::new();
+    let idp = MockIdp::start(&ca).await;
+    let long = "x".repeat(16 * 1024 + 1);
+    idp.add_opaque(&long, active(&idp, unix_now() + 300));
+    let node = node(&ca, &idp, "secret", &[]).await;
+    let r = send(&node, &cmd(&["AUTH", &long])).await;
+    assert!(r.starts_with("-WRONGPASS"), "{r:?}");
+    assert_eq!(idp.introspect_calls(), 0);
+}
+
+#[tokio::test]
 async fn a_wrong_client_secret_fails_closed() {
     let ca = TestCa::new();
     let idp = MockIdp::start(&ca).await;

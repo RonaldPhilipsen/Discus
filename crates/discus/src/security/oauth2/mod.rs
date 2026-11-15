@@ -462,6 +462,11 @@ impl OAuth2 {
 
     /// Before a synchronous check: refresh the JWKS when the token names an unknown `kid`.
     pub async fn prefetch(&self, token: &[u8]) {
+        // The limit holds before any decode or request, so an oversize value never reaches an
+        // identity provider. `check` refuses it.
+        if token.len() > MAX_TOKEN_BYTES {
+            return;
+        }
         if !is_jwt(token) {
             #[cfg(feature = "oauth2-introspection")]
             if let Some(i) = &self.introspector {
@@ -488,6 +493,9 @@ impl OAuth2 {
     /// Check a token. A JWT verifies locally. An opaque token needs a cached introspection
     /// answer, which `prefetch` fills.
     pub fn check(&self, token: &[u8], now: i64) -> Result<Claims, Reject> {
+        if token.len() > MAX_TOKEN_BYTES {
+            return Err(Reject::Malformed);
+        }
         if is_jwt(token) {
             return self.validator.check(token, now);
         }
