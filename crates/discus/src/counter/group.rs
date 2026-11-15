@@ -419,9 +419,9 @@ impl Group {
         if counters.raft_ready(view) {
             // The up switch: the lease holder becomes the only voter of a new Raft group with its
             // state, and lets the lease expire (spec section 10.3).
-            l.stop();
+            let state = l.seal();
             if !self
-                .create_instance(counters, view, seen, l.state(), "the up switch")
+                .create_instance(counters, view, seen, state, "the up switch")
                 .await
             {
                 self.step_down(counters, seen, l);
@@ -440,7 +440,7 @@ impl Group {
     }
 
     fn step_down(&self, counters: &Arc<Counters>, seen: u64, l: &Arc<LfLeader>) {
-        let follower = Follower::new(l.regime, None, l.state(), counters.budget());
+        let follower = Follower::new(l.regime, None, l.seal(), counters.budget());
         self.set_role_if(seen, Role::Follower(Arc::new(follower)));
     }
 

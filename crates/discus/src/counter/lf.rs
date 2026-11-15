@@ -45,6 +45,9 @@ struct Core {
     seq: u64,
     /// Ops that the follower has not acknowledged.
     pending: VecDeque<Pending>,
+    /// The state left this core (see [`LfLeader::seal`]). `execute` tests it under the same
+    /// lock, so no command applies after the copy.
+    sealed: bool,
 }
 
 /// The leader of one group in leader-follower mode.
@@ -78,6 +81,7 @@ impl LfLeader {
                 state: Tracked::new(state, budget.clone()),
                 seq: 0,
                 pending: VecDeque::new(),
+                sealed: false,
             }),
             lease_until: Mutex::new(lease_until),
             margin,
@@ -131,6 +135,15 @@ impl LfLeader {
         self.core.lock().state.get().clone()
     }
 
+    /// Stop the leader and return its final state. The seal and the copy take one lock, so the
+    /// state holds every write that this leader acknowledged.
+    pub fn seal(&self) -> CounterState {
+        self.stop();
+        let mut core = self.core.lock();
+        core.sealed = true;
+        core.state.get().clone()
+    }
+
     pub fn holds_expired(&self, now_ms: u64) -> bool {
         self.core.lock().state.get().expired_keys(now_ms)
     }
@@ -168,12 +181,19 @@ impl LfLeader {
             return Err(Refusal::NotLeader);
         }
         if kind.is_read() {
-            return Ok(self.core.lock().state.get().read(now_ms, db, kind, cmd));
+            let core = self.core.lock();
+            if core.sealed {
+                return Err(Refusal::NotLeader);
+            }
+            return Ok(core.state.get().read(now_ms, db, kind, cmd));
         }
         let follower = self.follower().is_some();
         let raw = follower.then(|| encode_command(cmd));
         let (reply, seq) = {
             let mut core = self.core.lock();
+            if core.sealed {
+                return Err(Refusal::NotLeader);
+            }
             let stamp = now_ms.max(core.last_stamp);
             core.last_stamp = stamp;
             core.seq += 1;
@@ -380,6 +400,63 @@ impl Follower {
             regime: self.regime,
             seq: core.seq,
             need_snapshot,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use crate::counter::cmd;
+
+    const LIMITS: Limits = Limits {
+        max_value_bytes: 1 << 20,
+    };
+
+    /// The up switch copies the state of a leader while writers run. A write that passed the
+    /// serving test before the stop must not apply after the copy.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_sealed_state_holds_every_acknowledged_write() {
+        let budget = Arc::new(Budget::new(u64::MAX, None));
+        let regime = Regime {
+            generation: 1,
+            origin: NodeId::from_u128(1),
+        };
+        for _ in 0..20 {
+            let l = LfLeader::new(regime, CounterState::new(), &budget, None, Duration::ZERO);
+            let writers: Vec<_> = (0..16)
+                .map(|_| {
+                    let l = l.clone();
+                    tokio::spawn(async move {
+                        let incr = cmd(&["INCR", "cnt:x"]);
+                        let mut ok = 0i64;
+                        while l
+                            .execute(Kind::Incr, 0, &incr, 1, &LIMITS, Duration::ZERO)
+                            .await
+                            .is_ok()
+                        {
+                            ok += 1;
+                            tokio::task::yield_now().await;
+                        }
+                        ok
+                    })
+                })
+                .collect();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            let state = l.seal();
+            let mut ok = 0;
+            for w in writers {
+                ok += w.await.unwrap();
+            }
+            let value: i64 = state.get(0, b"cnt:x").map_or(0, |e| {
+                std::str::from_utf8(&e.value).unwrap().parse().unwrap()
+            });
+            assert!(
+                ok <= value,
+                "{ok} writes succeeded, but the value is {value}"
+            );
         }
     }
 }
