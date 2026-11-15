@@ -70,7 +70,7 @@ pub struct SecurityArgs {
     #[arg(long, value_parser = parse_tlv)]
     pub lb_identity_tlv: Option<u8>,
     /// Client authentication policy: none, any:<factors>, or all:<factors>. Required, unless
-    /// --shared-token is set: the default is then all:tls,shared_token.
+    /// --shared-token is set: the default is then all:shared_token.
     #[arg(long)]
     pub auth_policy: Option<String>,
     /// TOML file with trusted issuers, certificate rules, and admin identities.

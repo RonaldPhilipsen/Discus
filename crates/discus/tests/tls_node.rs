@@ -18,13 +18,13 @@ fn tls_args<'a>(ca: &'a TestCa, server: &'a security_support::CertFiles) -> Vec<
 }
 
 #[tokio::test]
-async fn tls_plus_shared_token_needs_auth_over_tls() {
+async fn the_shared_token_policy_needs_auth() {
     let ca = TestCa::new();
     let server = ca.server_cert();
     let mut args = tls_args(&ca, &server);
     args.extend([
         "--auth-policy",
-        "all:tls,shared_token",
+        "all:shared_token",
         "--shared-token",
         "s3cret",
     ]);
@@ -113,6 +113,46 @@ scopes = ["discus.read"]
     let set = exchange(&mut s, &cmd(&["SET", "k", "v"])).await;
     assert!(set.starts_with("-NOPERM"), "{set:?}");
     assert_eq!(exchange(&mut s, &cmd(&["GET", "k"])).await, "$-1\r\n");
+}
+
+#[tokio::test]
+async fn a_certificate_that_matches_no_rule_is_refused() {
+    let ca = TestCa::new();
+    let server = ca.server_cert();
+    let reporting = ca.client_cert("spiffe://test/ro-reporting");
+    let app = ca.client_cert("spiffe://test/app");
+    let file = ca.path("auth.toml");
+    std::fs::write(
+        &file,
+        r#"
+[[client_cert]]
+identity = "spiffe://test/ro*"
+scopes = ["discus.read"]
+"#,
+    )
+    .unwrap();
+    let mut args = tls_args(&ca, &server);
+    args.extend([
+        "--auth-policy",
+        "any:mtls,shared_token",
+        "--shared-token",
+        "s3cret",
+        "--auth-config",
+        file.to_str().unwrap(),
+    ]);
+    let node = start(&args).await;
+    let mut s = tls_connect(node.addr, &ca, Some(&app)).await.unwrap();
+    let get = exchange(&mut s, &cmd(&["GET", "k"])).await;
+    assert!(get.starts_with("-NOAUTH"), "{get:?}");
+    // The connection stays open, so another factor of the policy still works.
+    let mut wire = cmd(&["AUTH", "s3cret"]);
+    wire.extend(cmd(&["SET", "k", "v"]));
+    assert_eq!(exchange(&mut s, &wire).await, "+OK\r\n+OK\r\n");
+    let mut matched = tls_connect(node.addr, &ca, Some(&reporting)).await.unwrap();
+    assert_eq!(
+        exchange(&mut matched, &cmd(&["GET", "k"])).await,
+        "$1\r\nv\r\n"
+    );
 }
 
 #[tokio::test]
