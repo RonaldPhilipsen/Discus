@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use bytes::BytesMut;
-use discus_resp::{encode, Command, Limits, Parser, Protocol, Value};
+use discus_resp::{encode, Command, Limits, Parser, Protocol, Value, MAX_IDLE_BUFFER};
 use discus_telemetry::Metrics;
 use futures::future::{AbortHandle, Abortable, BoxFuture};
 use futures::stream::{FuturesOrdered, StreamExt};
@@ -80,6 +80,10 @@ async fn flush<S: AsyncWrite + Unpin>(stream: &mut S, out: &mut BytesMut) -> boo
     // the end of a large reply.
     let sent = stream.write_all(out).await.is_ok() && stream.flush().await.is_ok();
     out.clear();
+    // One large reply must not keep its buffer for the life of the connection.
+    if out.capacity() > MAX_IDLE_BUFFER {
+        *out = BytesMut::new();
+    }
     sent
 }
 
@@ -489,5 +493,19 @@ mod tests {
         assert!(flush(&mut stream, &mut out).await);
         assert_eq!(stream.sent, b"+OK\r\n");
         assert!(stream.held.is_empty());
+    }
+
+    /// A large reply must not leave its buffer with the connection after the flush.
+    #[tokio::test]
+    async fn a_flush_drops_a_large_buffer() {
+        let mut stream = HoldsUntilFlush::default();
+        let mut out = BytesMut::with_capacity(8 << 20);
+        out.extend_from_slice(&[b'x'; 4 << 20]);
+        assert!(flush(&mut stream, &mut out).await);
+        assert!(out.capacity() <= MAX_IDLE_BUFFER, "{}", out.capacity());
+        let mut small = BytesMut::with_capacity(4096);
+        small.extend_from_slice(b"+OK\r\n");
+        assert!(flush(&mut stream, &mut small).await);
+        assert_eq!(small.capacity(), 4096);
     }
 }

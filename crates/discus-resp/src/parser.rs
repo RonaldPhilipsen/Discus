@@ -38,6 +38,10 @@ const MAX_HEADER_LINE: usize = 32;
 /// The free room that [`Parser::buffer`] makes for one read.
 const READ_MIN: usize = 64 * 1024;
 
+/// A read buffer above this capacity is replaced once the parser consumes the command that grew
+/// it, so one large command does not keep its memory for the life of the connection.
+pub const MAX_IDLE_BUFFER: usize = 1 << 20;
+
 /// Feed bytes in, pull complete commands out.
 pub struct Parser {
     buf: BytesMut,
@@ -103,7 +107,13 @@ impl Parser {
                         .into_iter()
                         .map(|(s, e)| Bytes::copy_from_slice(&self.buf[s..e]))
                         .collect();
+                    let large = self.buf.capacity() > MAX_IDLE_BUFFER;
                     self.buf.advance(consumed);
+                    if large && self.buf.len() < MAX_IDLE_BUFFER {
+                        let mut fresh = BytesMut::with_capacity(self.buf.len().max(READ_MIN));
+                        fresh.extend_from_slice(&self.buf);
+                        self.buf = fresh;
+                    }
                     return Ok(Some(cmd));
                 }
             }
@@ -273,5 +283,24 @@ mod tests {
         let cmd = p.next().unwrap().unwrap();
         assert_eq!(cmd.len(), 1000);
         assert!(cmd.iter().all(|a| a.as_ref() == b"x"));
+    }
+
+    /// A large command leaves a large read buffer behind. It must not stay with the connection.
+    #[test]
+    fn a_large_command_does_not_keep_a_large_buffer() {
+        let mut p = Parser::new(Limits::default());
+        let value = vec![b'v'; 8 << 20];
+        let mut wire = format!("*2\r\n$3\r\nSET\r\n${}\r\n", value.len()).into_bytes();
+        wire.extend_from_slice(&value);
+        wire.extend_from_slice(b"\r\n*1\r\n$4\r\nPI");
+        p.buffer().extend_from_slice(&wire);
+        assert_eq!(p.next().unwrap().unwrap()[1].len(), value.len());
+        assert!(p.next().unwrap().is_none());
+        // `capacity` counts only the room after the read position, and `reserve` takes back the
+        // room before it, so the size of the allocation shows after `buffer`.
+        let capacity = p.buffer().capacity();
+        assert!(capacity <= MAX_IDLE_BUFFER, "{capacity}");
+        p.feed(b"NG\r\n");
+        assert_eq!(p.next().unwrap().unwrap(), vec!["PING"]);
     }
 }
