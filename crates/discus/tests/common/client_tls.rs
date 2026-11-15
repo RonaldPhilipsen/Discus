@@ -3,6 +3,7 @@
 
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose};
 use rustls_pki_types::{CertificateDer, ServerName};
@@ -121,4 +122,21 @@ pub async fn try_connect(addr: SocketAddr) -> std::io::Result<TlsStream<TcpStrea
     connector
         .connect(ServerName::IpAddress(addr.ip().into()), tcp)
         .await
+}
+
+/// The timeouts of every test client. The redis crate allows 1 s to connect and 500 ms per reply,
+/// and a loaded CI runner can stall a node for longer than that, so a test failed on a slow
+/// machine instead of on a wrong answer.
+pub fn connection_config() -> redis::AsyncConnectionConfig {
+    redis::AsyncConnectionConfig::new()
+        .set_connection_timeout(Some(Duration::from_secs(30)))
+        .set_response_timeout(Some(Duration::from_secs(30)))
+}
+
+/// A connection to the node at `url` with [`connection_config`].
+pub async fn redis_connection(url: &str) -> redis::aio::MultiplexedConnection {
+    redis_client(url)
+        .get_multiplexed_async_connection_with_config(&connection_config())
+        .await
+        .unwrap()
 }
