@@ -5,7 +5,7 @@ use std::sync::Arc;
 use discus_placement::NodeId;
 use discus_resp::{Command, Value};
 use discus_wire::ForwardMode;
-use futures::future::join_all;
+use futures::future::{join_all, BoxFuture};
 
 use super::route::{key_args, Route};
 use super::writeset::SetKey;
@@ -83,6 +83,59 @@ async fn run_group(
         );
     }
     hold::send_or_hold(node, spec, db, g.target, &g.cmd, hop, write).await
+}
+
+/// Run a read group. When no answer comes, its keys run again on their next candidates in
+/// `alts` (by position in the request), split by that candidate, as a single-key read tries the
+/// next owner. `tried` are the targets that failed for this group before. `None` when a key has
+/// no candidate left.
+#[allow(clippy::too_many_arguments)]
+fn read_group<'a>(
+    node: &'a Arc<Node>,
+    spec: &'static CommandSpec,
+    db: u32,
+    g: &'a Group<NodeId>,
+    hop: &'a Hop,
+    alts: &'a [Vec<NodeId>],
+    merge: Merge,
+    mut tried: Vec<NodeId>,
+) -> BoxFuture<'a, Option<Reply>> {
+    Box::pin(async move {
+        if let Some(reply) = run_group(node, spec, db, g, hop, false).await {
+            return Some(reply);
+        }
+        tried.push(g.target);
+        let mut at = g.positions.iter();
+        let subs = split(&g.cmd, 1, |_| {
+            let pos = *at.next()?;
+            alts.get(pos)?.iter().find(|t| !tried.contains(t)).copied()
+        })?;
+        let nested: Vec<Group<NodeId>> = subs
+            .iter()
+            .map(|s| Group {
+                target: s.target,
+                cmd: s.cmd.clone(),
+                positions: s.positions.iter().map(|p| g.positions[*p]).collect(),
+            })
+            .collect();
+        let parts = join_all(
+            nested
+                .iter()
+                .map(|s| read_group(node, spec, db, s, hop, alts, merge, tried.clone())),
+        )
+        .await;
+        let mut values = Vec::with_capacity(parts.len());
+        for part in parts {
+            let reply = part?;
+            if matches!(reply.value, Value::Error(_)) {
+                return Some(reply);
+            }
+            values.push(reply.value);
+        }
+        merge
+            .apply(g.positions.len(), &subs, values)
+            .map(Reply::value)
+    })
 }
 
 /// The newest applied stamp of the parts.
@@ -195,12 +248,17 @@ pub fn multi(
             return Dispatch::Ready(Reply::error(moved));
         }
     }
+    // The candidates of each key of a read, by position, for a retry of a failed part.
+    let mut alts: Vec<Vec<NodeId>> = Vec::new();
     let groups = route.in_scope(|| {
         split(&cmd, width, |key| {
             let owners = node.owners(key);
-            candidates(node, db, key, &owners, write, rr, need(key))
-                .first()
-                .copied()
+            let targets = candidates(node, db, key, &owners, write, rr, need(key));
+            let first = targets.first().copied();
+            if !write {
+                alts.push(targets);
+            }
+            first
         })
     });
     drop(route);
@@ -230,11 +288,13 @@ pub fn multi(
     let node = node.clone();
     let total = (cmd.len() - 1) / width;
     Dispatch::Pending(Box::pin(async move {
-        let parts = join_all(
-            groups
-                .iter()
-                .map(|g| run_group(&node, spec, db, g, &hop, write)),
-        )
+        let parts = join_all(groups.iter().map(|g| async {
+            if write {
+                run_group(&node, spec, db, g, &hop, true).await
+            } else {
+                read_group(&node, spec, db, g, &hop, &alts, merge, Vec::new()).await
+            }
+        }))
         .await;
         for (g, part) in groups.iter().zip(&parts) {
             if let Some(r) = part {
@@ -251,8 +311,11 @@ pub fn multi(
         for part in parts {
             match part {
                 Some(r) if !matches!(r.value, Value::Error(_)) => replies.push(r),
-                // A failed part makes the whole command fail. The other parts stay applied.
-                _ => return Reply::try_again(),
+                // The error of a part, such as `-OOM`, is the reply. The other parts stay
+                // applied.
+                Some(r) => return Reply::value(r.value),
+                // No owner answered a read part.
+                None => return Reply::try_again(),
             }
         }
         let applied = newest(&replies);

@@ -526,10 +526,12 @@ sequenceDiagram
 ### 7.3 Multi-key commands
 
 - `MGET` groups keys by owner, fans out, and merges the replies in order. The keys of one slot
-  always share a target.
-- `MSET` and multi-key `DEL` fan out and are not atomic. If any part fails, the command returns
-  `-TRYAGAIN` and the other parts stay applied. A retry of the whole command is safe. If the node
-  cannot know whether a part applied, the reply says so.
+  always share a target. If a part gets no answer, its keys go to their next owner, as for a
+  single-key read.
+- `MSET` and multi-key `DEL` fan out and are not atomic. If a part gets no answer, the command
+  returns `-TRYAGAIN` and the other parts stay applied. A retry of the whole command is safe. If
+  the node cannot know whether a part applied, the reply says so. If a part returns an error, such
+  as `-OOM`, the command returns that error.
 - `SCAN` and `RANDOMKEY` are local to the entry node. `DBSIZE` is a fan-out estimate. `FLUSHDB` and
   `FLUSHALL` broadcast best-effort.
 - On a redirect connection, a command with all keys in one slot acts like a single-key command. A

@@ -128,8 +128,9 @@ keys of one group is atomic.
 In a cluster, any node accepts any command and forwards it to the owner of the key. Some commands
 behave differently from Redis:
 
-- `MSET` and `DEL` with several keys are not atomic. If one part fails, the command returns
-  `-TRYAGAIN` and the other parts stay applied. A retry of the whole command is safe.
+- `MSET` and `DEL` with several keys are not atomic. If one part gets no answer, the command
+  returns `-TRYAGAIN` and the other parts stay applied. A retry of the whole command is safe. If
+  one part returns an error, such as `-OOM`, the command returns that error.
 - `SCAN` and `RANDOMKEY` see only the keys of the node that the client is connected to. They never
   list counter keys.
 - `DBSIZE` adds the counts of every member that answers and divides the sum by the replication
