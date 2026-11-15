@@ -1111,6 +1111,10 @@ same owners in every database.
 - 0-RTT is off, because 0-RTT data can be replayed.
 - If an address changes, use connection migration. Configure idle timeout, keep-alive, and a
   handshake timeout. A failed handshake, a reset, or a forward timeout feeds the failure detector.
+- The timeout of a request also covers the wait for its connection. A request that times out
+  before its connection is ready was not sent. The dial goes on, and later requests use its
+  connection. The pool keeps a failed dial for at most 1 s or the handshake timeout. In that time,
+  requests to the peer fail at once with the same error and do not dial again.
 
 ### 13.2 Messages
 

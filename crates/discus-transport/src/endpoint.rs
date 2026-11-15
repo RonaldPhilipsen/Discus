@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::time::Instant;
+
 use discus_placement::{ClusterId, EpochId, NodeId};
 use discus_wire::{
     caps, decode_frame, encode_frame, DecodeError, Frame, HandshakeCode, HandshakeFailed, Hello,
@@ -226,7 +228,24 @@ struct Conn {
     shared: Option<Arc<Shared>>,
 }
 
-type Slot = Arc<tokio::sync::Mutex<Option<Conn>>>;
+/// What a pool slot holds.
+#[derive(Default)]
+enum Pooled {
+    #[default]
+    Empty,
+    Live(Conn),
+    /// A dial that failed `at`. Callers get its error at once until [`FAILED_DIAL_HOLD`] passed,
+    /// so a queue of callers does not dial a dead peer one after the other.
+    Failed {
+        at: Instant,
+        error: TransportError,
+    },
+}
+
+type Slot = Arc<tokio::sync::Mutex<Pooled>>;
+
+/// How long a slot keeps a failed dial, at most. A shorter handshake timeout shortens it.
+const FAILED_DIAL_HOLD: Duration = Duration::from_secs(1);
 
 /// The QUIC client configs of the channels that an endpoint dials.
 #[derive(Clone)]
@@ -390,9 +409,18 @@ impl Transport {
         message: Message,
         timeout: Duration,
     ) -> Result<(PeerInfo, Message), GossipError> {
+        let deadline = Instant::now() + timeout;
         let pool = &self.0.gossip_pool;
         let Conn { conn, info, .. } = self
-            .cached_or_dial(pool, addr, None, addr, Channel::Gossip, false)
+            .cached_or_dial(
+                pool,
+                addr,
+                None,
+                addr,
+                Channel::Gossip,
+                false,
+                Some(deadline),
+            )
             .await
             .map_err(|e| match e {
                 TransportError::Handshake { reason, .. } => GossipError::Refused(reason),
@@ -413,7 +441,8 @@ impl Transport {
         };
         let request = encode_frame(&frame);
         TransportStats::bump(&self.0.stats.requests_out);
-        let bytes = match tokio::time::timeout(timeout, exchange(&conn, &info, &request)).await {
+        let bytes = match tokio::time::timeout_at(deadline, exchange(&conn, &info, &request)).await
+        {
             Err(_) => return Err(GossipError::Silent(Box::new(info))),
             Ok(Err(e)) => {
                 let reason = e.reason();
@@ -464,7 +493,7 @@ impl Transport {
     pub async fn peer(&self, node: NodeId, addr: SocketAddr) -> Result<PeerInfo, TransportError> {
         let pool = self.pool(Lane::Command);
         let pooled = self
-            .cached_or_dial(pool, node, Some(node), addr, Channel::Rpc, true)
+            .cached_or_dial(pool, node, Some(node), addr, Channel::Rpc, true, None)
             .await?;
         Ok(pooled.info)
     }
@@ -485,9 +514,11 @@ impl Transport {
     }
 
     /// Send one request on `lane` and wait for its reply frame. `build` makes the request from
-    /// the `PeerInfo` of the connection, or refuses to send it. `timeout` covers the request
-    /// after the connection exists. `write` labels a timeout in the evidence channel. A bulk
-    /// timeout is not evidence, because a large batch can be slow on a healthy peer.
+    /// the `PeerInfo` of the connection, or refuses to send it. `timeout` covers the whole
+    /// request, with the wait for the connection. When it ends before the connection is ready,
+    /// the request was not sent, and the dial goes on for later requests. `write` labels a
+    /// timeout in the evidence channel. A bulk timeout is not evidence, because a large batch can
+    /// be slow on a healthy peer.
     ///
     /// A small request on the command lane takes the shared stream. Any other request takes a
     /// new stream.
@@ -502,6 +533,7 @@ impl Transport {
         timeout: Duration,
         write: bool,
     ) -> Result<Frame, TransportError> {
+        let deadline = Instant::now() + timeout;
         let Conn { conn, info, shared } = self
             .cached_or_dial(
                 self.pool(lane),
@@ -510,6 +542,7 @@ impl Transport {
                 addr,
                 Channel::Rpc,
                 lane == Lane::Command,
+                Some(deadline),
             )
             .await?;
         let frame = Frame {
@@ -536,7 +569,7 @@ impl Transport {
             let reply = exchange(&conn, &info, &bytes).await?;
             Ok(decode_frame(&reply, &limits))
         };
-        let decoded = match tokio::time::timeout(timeout, sent).await {
+        let decoded = match tokio::time::timeout_at(deadline, sent).await {
             Err(_) => {
                 if lane == Lane::Command {
                     emit(
@@ -608,6 +641,10 @@ impl Transport {
         let (server, clients) = quic_configs(tls, self.0.channels, &self.0.quic)?;
         self.0.endpoint.set_server_config(Some(server));
         *self.0.clients.write() = clients;
+        // A held failure can come from the old certificates.
+        forget_failed(&self.0.pool);
+        forget_failed(&self.0.bulk_pool);
+        forget_failed(&self.0.gossip_pool);
         Ok(())
     }
 
@@ -621,7 +658,9 @@ impl Transport {
     /// The live pooled connection under `key`, or a new one to `addr`. Concurrent callers wait
     /// on the slot lock, so they share one dial. `node` is the expected peer of an RPC
     /// connection: its connection is watched, and its failed dial is evidence. `share` opens the
-    /// shared stream on a new connection.
+    /// shared stream on a new connection. A caller waits until `deadline` at most. The dial runs
+    /// in its own task, so it ends and fills the slot even when its caller gives up.
+    #[allow(clippy::too_many_arguments)]
     async fn cached_or_dial<K: std::hash::Hash + Eq>(
         &self,
         pool: &Mutex<HashMap<K, Slot>>,
@@ -630,6 +669,7 @@ impl Transport {
         addr: SocketAddr,
         channel: Channel,
         share: bool,
+        deadline: Option<Instant>,
     ) -> Result<Conn, TransportError> {
         if self.0.closed.is_cancelled() {
             return Err(TransportError::Connect("the transport is closed".into()));
@@ -640,37 +680,80 @@ impl Transport {
             )));
         }
         let slot = pool.lock().entry(key).or_default().clone();
-        let mut guard = slot.lock().await;
-        if let Some(c) = guard.as_ref() {
-            if c.conn.close_reason().is_none() {
-                return Ok(c.clone());
+        let this = self.clone();
+        let get = async move {
+            let mut guard = slot.lock_owned().await;
+            match &*guard {
+                Pooled::Live(c) if c.conn.close_reason().is_none() => return Ok(c.clone()),
+                Pooled::Failed { at, error }
+                    if at.elapsed() < FAILED_DIAL_HOLD.min(this.0.handshake_timeout) =>
+                {
+                    return Err(error.clone());
+                }
+                _ => {}
             }
+            *guard = Pooled::Empty;
+            let dial = tokio::spawn(async move {
+                let result = this.dial_and_open(node, addr, channel, share).await;
+                *guard = match &result {
+                    Ok(conn) => Pooled::Live(conn.clone()),
+                    Err(error) => Pooled::Failed {
+                        at: Instant::now(),
+                        error: error.clone(),
+                    },
+                };
+                result
+            });
+            dial.await
+                .unwrap_or_else(|e| Err(TransportError::Connect(e.to_string())))
+        };
+        match deadline {
+            None => get.await,
+            Some(deadline) => tokio::time::timeout_at(deadline, get)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(TransportError::Connect(
+                        "the deadline passed before the connection was ready".into(),
+                    ))
+                }),
         }
-        *guard = None;
-        let dial = tokio::time::timeout(self.0.handshake_timeout, self.dial(node, addr, channel));
-        let result = match dial.await {
+    }
+
+    /// Dial, run `HELLO`, and open the shared stream when `share`. Each step has the handshake
+    /// timeout. Without a shared stream, every request takes its own stream.
+    async fn dial_and_open(
+        &self,
+        node: Option<NodeId>,
+        addr: SocketAddr,
+        channel: Channel,
+        share: bool,
+    ) -> Result<Conn, TransportError> {
+        let timeout = self.0.handshake_timeout;
+        let result = match tokio::time::timeout(timeout, self.dial(node, addr, channel)).await {
             Ok(r) => r,
             Err(_) => Err(TransportError::Connect("the handshake timed out".into())),
         };
-        match (result, node) {
-            (Ok(mut conn), node) => {
+        let mut conn = match result {
+            Ok(conn) => conn,
+            Err(e) => {
                 if let Some(node) = node {
-                    tokio::spawn(watch(self.0.clone(), node, conn.conn.clone()));
+                    TransportStats::bump(&self.0.stats.handshake_failures);
+                    let kind = PeerEventKind::HandshakeFailed(e.to_string());
+                    emit(&self.0, Some(node), addr, kind);
                 }
-                if share {
-                    conn.shared = self.open_shared(&conn).await;
-                }
-                *guard = Some(conn.clone());
-                Ok(conn)
+                return Err(e);
             }
-            (Err(e), Some(node)) => {
-                TransportStats::bump(&self.0.stats.handshake_failures);
-                let kind = PeerEventKind::HandshakeFailed(e.to_string());
-                emit(&self.0, Some(node), addr, kind);
-                Err(e)
-            }
-            (Err(e), None) => Err(e),
+        };
+        if let Some(node) = node {
+            tokio::spawn(watch(self.0.clone(), node, conn.conn.clone()));
         }
+        if share {
+            conn.shared = tokio::time::timeout(timeout, self.open_shared(&conn))
+                .await
+                .ok()
+                .flatten();
+        }
+        Ok(conn)
     }
 
     async fn dial(
@@ -784,13 +867,21 @@ fn forget<K: std::hash::Hash + Eq>(
         return;
     };
     if let Ok(mut guard) = slot.try_lock() {
-        if guard
-            .as_ref()
-            .is_some_and(|c| c.conn.stable_id() == conn.stable_id())
-        {
-            *guard = None;
+        if matches!(&*guard, Pooled::Live(c) if c.conn.stable_id() == conn.stable_id()) {
+            *guard = Pooled::Empty;
         }
     };
+}
+
+/// Empty every slot that holds a failed dial. A slot with a dial in progress keeps its result.
+fn forget_failed<K: std::hash::Hash + Eq>(pool: &Mutex<HashMap<K, Slot>>) {
+    for slot in pool.lock().values() {
+        if let Ok(mut guard) = slot.try_lock() {
+            if matches!(&*guard, Pooled::Failed { .. }) {
+                *guard = Pooled::Empty;
+            }
+        }
+    }
 }
 
 fn emit(inner: &Inner, peer: Option<NodeId>, addr: SocketAddr, kind: PeerEventKind) {
