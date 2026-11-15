@@ -13,6 +13,8 @@ pub enum Factor {
     Oauth2,
     /// The client sent the shared token.
     SharedToken,
+    /// The client logged in as a user of the ACL file.
+    Password,
 }
 
 impl Factor {
@@ -22,6 +24,7 @@ impl Factor {
             Factor::Mtls => "mtls",
             Factor::Oauth2 => "oauth2",
             Factor::SharedToken => "shared_token",
+            Factor::Password => "password",
         }
     }
 
@@ -31,6 +34,7 @@ impl Factor {
             Factor::Mtls,
             Factor::Oauth2,
             Factor::SharedToken,
+            Factor::Password,
         ]
         .into_iter()
         .find(|f| f.name() == s)
@@ -62,7 +66,8 @@ impl Policy {
         for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
             let f = Factor::parse(name).ok_or_else(|| {
                 format!(
-                    "--auth-policy: unknown factor {name:?}, use tls, mtls, oauth2, or shared_token"
+                    "--auth-policy: unknown factor {name:?}, use tls, mtls, oauth2, shared_token, \
+                     or password"
                 )
             })?;
             if !factors.contains(&f) {
@@ -201,6 +206,9 @@ mod tests {
         assert!(Policy::parse("any:mtls,oauth2").unwrap().uses(Factor::Mtls));
         assert!(Policy::parse("some:mtls").is_err());
         assert!(Policy::parse("any:").is_err());
+        let p = Policy::parse("all:tls,password").unwrap();
+        assert!(p.uses(Factor::Password));
+        assert_eq!(p.to_string(), "all:tls,password");
     }
 
     #[test]

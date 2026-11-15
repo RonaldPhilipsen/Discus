@@ -8,7 +8,7 @@ use std::time::Duration;
 use security_support::idp::{unix_now, MockIdp};
 use security_support::{
     cmd, exchange, send, start, start_oauth2, status, tls_connect, try_start, wait_status,
-    write_file, Node, TestCa,
+    write_file, Node, TestCa, ACL_USERS,
 };
 use serde_json::json;
 
@@ -215,6 +215,32 @@ async fn all_mtls_oauth2_needs_both_factors() {
     wire.extend(cmd(&["PING"]));
     let r = exchange(&mut anon, &wire).await;
     assert!(r.starts_with("+OK\r\n-NOAUTH"), "{r:?}");
+}
+
+#[tokio::test]
+async fn a_name_of_the_acl_file_takes_the_password_path() {
+    let ca = TestCa::new();
+    let idp = MockIdp::start(&ca).await;
+    let file = write_file(&ca, "auth.toml", &idp.toml(&ca, ""));
+    let acl = write_file(&ca, "users.acl", ACL_USERS);
+    let node = start(&[
+        "--auth-policy",
+        "any:password,oauth2",
+        "--auth-config",
+        &file,
+        "--acl-file",
+        &acl,
+    ])
+    .await;
+    assert!(wait_status(node.admin, "/readyz", 200, Duration::from_secs(60)).await);
+    let t = idp.token("discus.read");
+    let named = send(&node, &cmd(&["AUTH", "reader", &t])).await;
+    assert!(named.starts_with("-WRONGPASS"), "{named:?}");
+    // A name that the file does not have is only a hint.
+    assert_eq!(send(&node, &cmd(&["AUTH", "someone", &t])).await, "+OK\r\n");
+    assert_eq!(send(&node, &cmd(&["AUTH", "OAUTH2", &t])).await, "+OK\r\n");
+    // The user default is off, so the value goes on to the token check.
+    assert_eq!(auth(&node, &t).await, "+OK\r\n");
 }
 
 #[tokio::test]

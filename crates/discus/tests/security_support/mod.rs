@@ -231,6 +231,19 @@ pub async fn start_oauth2(file: &str, args: &[&str]) -> Node {
 #[cfg(feature = "oauth2")]
 pub mod idp;
 
+/// The ACL file of the ACL user tests.
+pub const ACL_USERS: &str = "\
+user default off
+user admin on >admin-pass ~* +@all
+user reader on >read-pass ~cache:* +@read +@connection
+user writer on >w1 >w2 %W~jobs:* %R~cache:* +@all -@dangerous
+user gone off >gone-pass ~* +@all
+";
+
+/// The reply to a command with a key that the user cannot access.
+pub const NOPERM_KEY: &str =
+    "-NOPERM this user has no permissions to access one of the keys used as arguments\r\n";
+
 /// Write `content` to a new file in the CA directory and return its path.
 pub fn write_file(ca: &TestCa, name: &str, content: &str) -> String {
     let path = ca.path(name);

@@ -275,7 +275,7 @@ pub fn prepare(
     cmd: Command,
 ) -> Prepared {
     let spec = match command::check(spec, &cmd).and_then(|spec| {
-        node.security.authorize(conn, spec)?;
+        node.security.authorize(conn, spec, &cmd)?;
         Ok(spec)
     }) {
         Ok(spec) => spec,

@@ -1,9 +1,11 @@
 //! The authentication state of one client connection.
 
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use bytes::Bytes;
 
+use super::acl::User;
 use super::policy::{Factor, Policy, Scopes};
 
 /// A verified client certificate and the scopes its identity maps to.
@@ -38,6 +40,14 @@ impl std::fmt::Debug for TokenGrant {
     }
 }
 
+/// A logged-in user of the ACL file.
+#[derive(Debug, Clone)]
+pub struct UserGrant {
+    pub user: Arc<User>,
+    /// The ACL generation that `user` comes from.
+    pub generation: u64,
+}
+
 /// What the node knows about the client of one connection.
 #[derive(Debug, Clone, Default)]
 pub struct ConnAuth {
@@ -51,6 +61,7 @@ pub struct ConnAuth {
     pub token: Option<TokenGrant>,
     /// Failed authentication attempts on this connection.
     pub failures: u32,
+    pub user: Option<UserGrant>,
 }
 
 impl ConnAuth {
@@ -67,20 +78,33 @@ impl ConnAuth {
             Factor::Mtls => self.cert.is_some(),
             Factor::Oauth2 => self.token.is_some(),
             Factor::SharedToken => self.shared,
+            Factor::Password => self.user.is_some(),
         }
     }
 
-    /// The scopes that one identity factor grants. `tls` grants nothing.
+    /// True when the connection meets the policy. `tls` alone never meets an `any` policy.
+    pub fn authenticated(&self, policy: &Policy) -> bool {
+        match policy {
+            Policy::None => true,
+            Policy::All(factors) => factors.iter().all(|f| self.has(*f)),
+            Policy::Any(factors) => factors.iter().any(|f| *f != Factor::Tls && self.has(*f)),
+        }
+    }
+
+    /// The scopes that one identity factor grants. `tls` grants nothing, and a user grant gives
+    /// no scopes: its rules decide.
     fn grant(&self, f: Factor) -> Option<Scopes> {
         match f {
             Factor::Tls => None,
             Factor::Mtls => self.cert.as_ref().map(|c| c.scopes),
             Factor::Oauth2 => self.token.as_ref().map(|t| t.scopes),
             Factor::SharedToken => self.shared.then_some(Scopes::READ_WRITE),
+            Factor::Password => None,
         }
     }
 
-    /// The scopes of the connection, or `None` when the policy is not met.
+    /// The scopes from the certificate, the token, and the shared token. `None` when the policy is
+    /// not met, or when none of them applies. A user grant gives no scopes: its rules decide.
     ///
     /// `all` takes the intersection of the identity factors, so the strictest factor wins. `any`
     /// takes the union of the factors that are present.
@@ -156,6 +180,36 @@ mod tests {
         let p = Policy::parse("any:mtls,oauth2").unwrap();
         assert_eq!(a.scopes(&p), Some(Scopes::READ.union(Scopes::ADMIN)));
         assert_eq!(ConnAuth::default().scopes(&p), None);
+    }
+
+    fn grant() -> UserGrant {
+        UserGrant {
+            user: Arc::new(User::new("u")),
+            generation: 0,
+        }
+    }
+
+    #[test]
+    fn a_user_meets_the_password_factor_and_gives_no_scopes() {
+        let a = ConnAuth {
+            tls: true,
+            user: Some(grant()),
+            ..ConnAuth::default()
+        };
+        let all = Policy::parse("all:tls,password").unwrap();
+        assert!(a.authenticated(&all));
+        assert_eq!(a.scopes(&all), None);
+        let tls_only = ConnAuth {
+            tls: true,
+            ..ConnAuth::default()
+        };
+        assert!(!tls_only.authenticated(&all));
+
+        let any = Policy::parse("any:mtls,password").unwrap();
+        assert!(a.authenticated(&any));
+        assert!(!ConnAuth::default().authenticated(&any));
+        let both = Policy::parse("all:mtls,password").unwrap();
+        assert!(!a.authenticated(&both));
     }
 
     #[test]
