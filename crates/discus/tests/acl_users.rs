@@ -200,3 +200,28 @@ async fn a_broken_reload_keeps_the_users() {
         "+OK\r\n"
     );
 }
+
+#[tokio::test]
+async fn a_user_without_the_connection_group_cannot_ping() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("users.acl");
+    std::fs::write(
+        &file,
+        format!("{ACL_USERS}user nocon on >nocon-pass ~* +@read\n"),
+    )
+    .unwrap();
+    let node = start(&[
+        "--acl-file",
+        file.to_str().unwrap(),
+        "--auth-max-failures-per-source",
+        "1000000",
+    ])
+    .await;
+    let mut s = login(&node, "nocon", "nocon-pass").await;
+    assert_eq!(run(&mut s, &["PING"]).await, no_perm("ping"));
+    assert_eq!(
+        run(&mut s, &["AUTH", "reader", "read-pass"]).await,
+        "+OK\r\n"
+    );
+    assert_eq!(run(&mut s, &["PING"]).await, "+PONG\r\n");
+}

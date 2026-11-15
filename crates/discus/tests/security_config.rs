@@ -126,7 +126,16 @@ async fn the_acl_file_and_the_password_factor_go_together() {
     .await;
     assert!(e.contains("shared_token and password"), "{e}");
     let e = bind_error(&["--acl-file", &f, "--shared-token", "x"]).await;
-    assert!(e.contains("--auth-policy"), "{e}");
+    assert!(
+        e.contains("--shared-token and --acl-file are both set, so set --auth-policy"),
+        "{e}"
+    );
+    let t = acl_file(&dir, "token", "x\n");
+    let e = bind_error(&["--acl-file", &f, "--shared-token-file", &t]).await;
+    assert!(
+        e.contains("--shared-token-file and --acl-file are both set, so set --auth-policy"),
+        "{e}"
+    );
     let e = bind_error(&["--acl-file", &f, "--auth-policy", "none"]).await;
     assert!(e.contains("does not use password"), "{e}");
     let e = bind_error(&["--auth-policy", "all:tls,password"]).await;
@@ -141,7 +150,10 @@ async fn a_bad_or_missing_acl_file_is_an_error() {
     assert!(e.contains("line 1: a line must start with \"user\""), "{e}");
     let missing = dir.path().join("missing.acl");
     let e = bind_error(&["--acl-file", missing.to_str().unwrap()]).await;
-    assert!(e.contains("--acl-file"), "{e}");
+    assert!(
+        e.contains(&format!("--acl-file {}", missing.display())),
+        "{e}"
+    );
 }
 
 #[tokio::test]

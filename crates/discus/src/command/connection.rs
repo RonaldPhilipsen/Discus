@@ -84,7 +84,8 @@ fn auth(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     if cmd.len() > 3 {
         return Err(CommandError::Syntax);
     }
-    // The username is an identity hint. The token is the credential.
+    // A name that the ACL file has selects that user, and the token is its password. Any other
+    // name is only an identity hint, and the token is the credential.
     let user = (cmd.len() == 3).then(|| &cmd[1][..]);
     node.security
         .authenticate(conn, user, &cmd[cmd.len() - 1])?;

@@ -157,9 +157,13 @@ impl Security {
         let policy = match &args.auth_policy {
             Some(p) => Policy::parse(p)?,
             None if shared_token.is_some() && acl.is_some() => {
-                return fail(
-                    "--shared-token-file and --acl-file are both set, so set --auth-policy",
-                );
+                let flag = match config.shared_token_file {
+                    Some(_) => "--shared-token-file",
+                    None => "--shared-token",
+                };
+                return fail(format!(
+                    "{flag} and --acl-file are both set, so set --auth-policy"
+                ));
             }
             None if acl.is_some() => Policy::All(vec![Factor::Tls, Factor::Password]),
             None if shared_token.is_some() => Policy::All(vec![Factor::Tls, Factor::SharedToken]),
@@ -980,5 +984,92 @@ pub(crate) mod tests {
         s.reload_acl().unwrap();
         assert!(accepts(b"new"));
         assert!(!accepts(b"old"));
+    }
+
+    /// A node with the user `u` (password `p`) and the policy `policy`.
+    fn with_user(rules: &str, policy: &str) -> Security {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("users.acl");
+        std::fs::write(&file, format!("user u on >p {rules}\n")).unwrap();
+        let s = security(&["--acl-file", file.to_str().unwrap()]);
+        Security {
+            policy: Policy::parse(policy).unwrap(),
+            ..s
+        }
+    }
+
+    fn user_conn(s: &Security, scopes: Option<Scopes>) -> ConnState {
+        let mut conn = ConnState::new(
+            1,
+            ConnAuth {
+                tls: true,
+                ..ConnAuth::default()
+            },
+        );
+        conn.auth.cert = scopes.map(|scopes| CertGrant {
+            identity: "c".into(),
+            scopes,
+        });
+        s.authenticate(&mut conn, Some(b"u"), b"p").unwrap();
+        conn
+    }
+
+    fn no_perm(name: &str) -> Result<(), CommandError> {
+        Err(CommandError::NoPerm(name.into()))
+    }
+
+    #[test]
+    fn all_needs_the_scopes_and_the_rules() {
+        let get = crate::counter::cmd(&["GET", "k"]);
+        let set = crate::counter::cmd(&["SET", "k", "v"]);
+
+        let s = with_user("~k +@all", "all:mtls,password");
+        let mut conn = user_conn(&s, Some(Scopes::READ));
+        assert_eq!(s.authorize(&mut conn, spec(b"SET"), &set), no_perm("set"));
+        assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), Ok(()));
+
+        let s = with_user("~k +get", "all:mtls,password");
+        let mut conn = user_conn(&s, Some(Scopes::READ_WRITE));
+        assert_eq!(s.authorize(&mut conn, spec(b"SET"), &set), no_perm("set"));
+        let other = crate::counter::cmd(&["GET", "other"]);
+        assert_eq!(
+            s.authorize(&mut conn, spec(b"GET"), &other),
+            Err(CommandError::NoPermKey)
+        );
+    }
+
+    #[test]
+    fn any_needs_the_scopes_or_the_rules() {
+        let set = crate::counter::cmd(&["SET", "k", "v"]);
+
+        let s = with_user("~k +@all", "any:mtls,password");
+        let mut conn = user_conn(&s, Some(Scopes::READ));
+        assert_eq!(s.authorize(&mut conn, spec(b"SET"), &set), Ok(()));
+
+        let s = with_user("~k +get", "any:mtls,password");
+        let mut conn = user_conn(&s, Some(Scopes::READ));
+        assert_eq!(s.authorize(&mut conn, spec(b"SET"), &set), no_perm("set"));
+
+        let mut conn = user_conn(&s, None);
+        let get = crate::counter::cmd(&["GET", "k"]);
+        assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), Ok(()));
+        assert_eq!(s.authorize(&mut conn, spec(b"SET"), &set), no_perm("set"));
+    }
+
+    #[test]
+    fn tls_without_a_user_is_not_authenticated() {
+        let s = with_user("~k +@all", "all:tls,password");
+        let mut conn = ConnState::new(
+            1,
+            ConnAuth {
+                tls: true,
+                ..ConnAuth::default()
+            },
+        );
+        let get = crate::counter::cmd(&["GET", "k"]);
+        assert_eq!(
+            s.authorize(&mut conn, spec(b"GET"), &get),
+            Err(CommandError::NoAuth)
+        );
     }
 }

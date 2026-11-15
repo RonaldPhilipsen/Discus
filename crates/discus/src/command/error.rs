@@ -22,7 +22,8 @@ pub enum CommandError {
     TryAgain,
     /// Routing failed: an owner is unreachable, or the hop budget ran out during an epoch change.
     ClusterTryAgain,
-    /// The scopes of the connection do not allow the command (lower-case name).
+    /// The scopes of the connection or the rules of its user do not allow the command (lower-case
+    /// name).
     NoPerm(String),
     /// The user rules do not allow one of the keys of the command. The text names no key.
     NoPermKey,
