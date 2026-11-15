@@ -352,8 +352,13 @@ names that the user cannot read, as in Valkey.
 - `AUTH default <value>` works like `AUTH <value>`. Many client libraries send this form for a
   credential without a username. Only the exact name `default` counts, because names are
   case-sensitive.
-- The node never sends the password of a user to an identity provider. If the password path
-  decides a value, the node does not send that value for introspection.
+- If the command names a user of the file, the node never sends the value to an identity
+  provider. This also holds for a wrong password.
+- If the user `default` accepts the value, the node does not send the value to an identity
+  provider either.
+- In every other case, the node treats the value as a token. With introspection, the value then
+  goes to the identity provider. Thus a client that sends a password without its username, or
+  with a mistyped username, sends that password to the identity provider.
 - A user that is `off` cannot log in.
 - A second successful `AUTH` on a connection replaces the user.
 
@@ -410,8 +415,8 @@ The file is the only source of users. If you copy a Valkey ACL file, change thes
 - The rule words, such as `on` and `nopass`, are case-sensitive. Command names and category names
   ignore case.
 - A byte order mark at the start of the file is an error.
-- A client that sends no `AUTH` gets `-NOAUTH`, also with `user default on nopass`. In Valkey, that
-  client is the user `default`.
+- If the policy needs the `password` factor, a client that sends no `AUTH` gets `-NOAUTH`, also
+  with `user default on nopass`. In Valkey, that client is the user `default`.
 - A user never opens the admin port.
 - Discus does not copy users between nodes. Each node reads its own file.
 
