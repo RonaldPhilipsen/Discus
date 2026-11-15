@@ -100,6 +100,19 @@ async fn expiry_mid_connection_gives_noauth_and_closes_the_connection() {
 }
 
 #[tokio::test]
+async fn the_largest_exp_does_not_overflow() {
+    let ca = TestCa::new();
+    let idp = MockIdp::start(&ca).await;
+    let node = node(&ca, &[&idp], "", &[]).await;
+    let mut c = idp.claims("discus.read");
+    c["exp"] = json!(i64::MAX);
+    let token = idp.sign("k1", &c);
+    let mut wire = cmd(&["AUTH", &token]);
+    wire.extend(cmd(&["GET", "k"]));
+    assert_eq!(send(&node, &wire).await, "+OK\r\n$-1\r\n");
+}
+
+#[tokio::test]
 async fn an_unknown_kid_refreshes_the_jwks_once() {
     let ca = TestCa::new();
     let idp = MockIdp::start(&ca).await;

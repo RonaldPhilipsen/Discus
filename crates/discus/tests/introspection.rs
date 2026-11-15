@@ -155,6 +155,17 @@ async fn a_refused_token_reaches_the_provider_once() {
 }
 
 #[tokio::test]
+async fn the_largest_exp_does_not_overflow() {
+    let ca = TestCa::new();
+    let idp = MockIdp::start(&ca).await;
+    idp.add_opaque("opaque-1", active(&idp, i64::MAX));
+    let node = node(&ca, &idp, "secret", &[]).await;
+    let mut wire = cmd(&["AUTH", "opaque-1"]);
+    wire.extend(cmd(&["GET", "k"]));
+    assert_eq!(send(&node, &wire).await, "+OK\r\n$-1\r\n");
+}
+
+#[tokio::test]
 async fn an_oversize_token_never_reaches_the_provider() {
     let ca = TestCa::new();
     let idp = MockIdp::start(&ca).await;

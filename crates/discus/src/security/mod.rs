@@ -737,7 +737,7 @@ impl Security {
                     conn.auth.token = None;
                 }
             }
-        } else if now > t.exp + skew || t.nbf.is_some_and(|n| now + skew < n) {
+        } else if now > t.exp.saturating_add(skew) || t.nbf.is_some_and(|n| now + skew < n) {
             tracing::debug!(conn = conn.id, "token expired");
             conn.auth.token = None;
         }

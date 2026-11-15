@@ -180,7 +180,7 @@ impl Introspector {
             return Err(Reject::Inactive);
         }
         let exp = a.exp.ok_or(Reject::Malformed)?;
-        if now > exp + self.skew {
+        if now > exp.saturating_add(self.skew) {
             return Err(Reject::Expired);
         }
         if a.nbf.is_some_and(|n| now + self.skew < n) {
