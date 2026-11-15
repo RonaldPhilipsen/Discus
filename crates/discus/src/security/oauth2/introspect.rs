@@ -34,6 +34,16 @@ struct Answer {
     jti: Option<String>,
     scope: Option<String>,
     scp: Option<OneOrMany>,
+    token_type: Option<String>,
+}
+
+/// The `token_type` values of an access token: the OAuth 2.0 token types of RFC 6749 section
+/// 7.1 and RFC 6750, and the token type URI of RFC 8693 section 3.
+fn is_access_token_type(kind: &str) -> bool {
+    matches!(
+        kind,
+        "access_token" | "Bearer" | "bearer" | "urn:ietf:params:oauth:token-type:access_token"
+    )
 }
 
 pub struct Introspector {
@@ -42,6 +52,7 @@ pub struct Introspector {
     client_id: String,
     secret: String,
     skew: i64,
+    require_aud: bool,
     max_cache_secs: i64,
     /// Token -> checked claims and the time the entry ends.
     cache: Mutex<HashMap<Bytes, (Claims, i64)>>,
@@ -87,6 +98,7 @@ impl Introspector {
             client_id,
             secret,
             skew: skew_secs as i64,
+            require_aud: f.require_aud,
             max_cache_secs: MAX_CACHE_SECS,
             cache: Mutex::new(HashMap::new()),
             refused: Mutex::new(HashMap::new()),
@@ -179,6 +191,12 @@ impl Introspector {
         if !a.active {
             return Err(Reject::Inactive);
         }
+        if a.token_type
+            .as_deref()
+            .is_some_and(|t| !is_access_token_type(t))
+        {
+            return Err(Reject::TokenType);
+        }
         let exp = a.exp.ok_or(Reject::Malformed)?;
         if now > exp.saturating_add(self.skew) {
             return Err(Reject::Expired);
@@ -191,7 +209,7 @@ impl Introspector {
         }
         let audience = &trusted.rules.audience;
         let aud_ok = match &a.aud {
-            None => true,
+            None => !self.require_aud,
             Some(OneOrMany::One(s)) => s == audience,
             Some(OneOrMany::Many(v)) => v.contains(audience),
         };

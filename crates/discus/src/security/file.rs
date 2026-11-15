@@ -122,6 +122,9 @@ pub struct IssuerFile {
     pub client_secret_file: Option<PathBuf>,
     /// Default: `introspection_endpoint` from discovery.
     pub introspection_url: Option<String>,
+    /// Refuse an introspection answer without `aud`.
+    #[serde(default)]
+    pub require_aud: bool,
     /// Scopes per `sub` pattern. When present, they replace the `scope` claim.
     #[serde(default)]
     pub subject: Vec<SubjectFile>,

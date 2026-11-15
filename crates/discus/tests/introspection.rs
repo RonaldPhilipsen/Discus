@@ -155,6 +155,65 @@ async fn a_refused_token_reaches_the_provider_once() {
 }
 
 #[tokio::test]
+async fn an_answer_for_another_token_type_is_refused() {
+    let ca = TestCa::new();
+    let idp = MockIdp::start(&ca).await;
+    let node = node(&ca, &idp, "secret", &[]).await;
+    for (i, kind) in [
+        "access_token",
+        "Bearer",
+        "bearer",
+        "urn:ietf:params:oauth:token-type:access_token",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let token = format!("access-{i}");
+        let mut answer = active(&idp, unix_now() + 300);
+        answer["token_type"] = json!(kind);
+        idp.add_opaque(&token, answer);
+        assert_eq!(
+            send(&node, &cmd(&["AUTH", &token])).await,
+            "+OK\r\n",
+            "{kind}"
+        );
+    }
+    for (i, kind) in ["refresh_token", "urn:ietf:params:oauth:token-type:id_token"]
+        .iter()
+        .enumerate()
+    {
+        let token = format!("other-{i}");
+        let mut answer = active(&idp, unix_now() + 300);
+        answer["token_type"] = json!(kind);
+        idp.add_opaque(&token, answer);
+        let r = send(&node, &cmd(&["AUTH", &token])).await;
+        assert!(r.starts_with("-WRONGPASS"), "{kind}: {r:?}");
+    }
+}
+
+#[tokio::test]
+async fn require_aud_refuses_an_answer_without_aud() {
+    let ca = TestCa::new();
+    let idp = MockIdp::start(&ca).await;
+    let mut no_aud = active(&idp, unix_now() + 300);
+    no_aud.as_object_mut().unwrap().remove("aud");
+    idp.add_opaque("no-aud", no_aud);
+    idp.add_opaque("with-aud", active(&idp, unix_now() + 300));
+    let plain = node(&ca, &idp, "secret", &[]).await;
+    assert_eq!(send(&plain, &cmd(&["AUTH", "no-aud"])).await, "+OK\r\n");
+
+    let secret_file = write_file(&ca, "secret", "secret");
+    let extra = format!(
+        "client_id = \"discus\"\nclient_secret_file = \"{secret_file}\"\nrequire_aud = true"
+    );
+    let file = write_file(&ca, "strict.toml", &idp.toml(&ca, &extra));
+    let strict = start_oauth2(&file, &[]).await;
+    let r = send(&strict, &cmd(&["AUTH", "no-aud"])).await;
+    assert!(r.starts_with("-WRONGPASS"), "{r:?}");
+    assert_eq!(send(&strict, &cmd(&["AUTH", "with-aud"])).await, "+OK\r\n");
+}
+
+#[tokio::test]
 async fn the_largest_exp_does_not_overflow() {
     let ca = TestCa::new();
     let idp = MockIdp::start(&ca).await;

@@ -71,6 +71,8 @@ pub enum Reject {
     Stale,
     /// Introspection said the token is not active, or did not answer.
     Inactive,
+    /// Introspection said the token is not an access token.
+    TokenType,
 }
 
 impl fmt::Display for Reject {
@@ -88,6 +90,7 @@ impl fmt::Display for Reject {
             Reject::NoScope => "no Discus scope",
             Reject::Stale => "issuer keys unavailable or stale",
             Reject::Inactive => "token not active",
+            Reject::TokenType => "not an access token",
         })
     }
 }

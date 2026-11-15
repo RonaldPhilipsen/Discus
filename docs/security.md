@@ -707,6 +707,7 @@ audience = "discus"
 client_id = "discus"
 client_secret_file = "/etc/discus/introspection-secret"
 # introspection_url = "https://login.example.com/oauth2/introspect"
+# require_aud = false
 ```
 
 Only one issuer can turn on introspection. The node sends a token with no JWT shape to that
@@ -714,7 +715,13 @@ issuer only. Without `introspection_url`, the node uses the `introspection_endpo
 discovery document.
 
 The node accepts an answer only when `active` is true and `exp` is present and not past. When the
-answer has `iss` or `aud`, they must match. The node keeps an answer until the token expires, or
+answer has `iss` or `aud`, they must match. With `require_aud = true`, the node also refuses an
+answer without `aud`. Set it when the identity provider always sends `aud`, so a token for another
+service never gets access.
+
+When the answer has `token_type`, it must name an access token: `access_token`, `Bearer`,
+`bearer`, or `urn:ietf:params:oauth:token-type:access_token`. The node refuses every other token
+type, for example a refresh token. The node keeps an answer until the token expires, or
 for at most 300 seconds.
 
 A connection keeps its access only as long as the answer lives. When the answer ends, the node
