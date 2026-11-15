@@ -715,7 +715,10 @@ directly but never gets `-MOVED`. That setting is for tests.
 - Before it becomes `NORMAL`, a joining node sets its HLC to at least the cluster maximum it
   receives. If a `NORMAL` peer is reachable but does not answer, the node does not serve writes.
   Only the bootstrap node starts from the wall clock.
-- Deletes write tombstones. The cache eviction policy does not evict tombstones. They use a
+- Deletes write tombstones. As in Valkey, `SET` and `GETEX` with a deadline at or before now are
+  deletes, so they write tombstones too. A replica that receives a newer entry that already
+  expired replaces its older entry with a tombstone. The cache eviction policy does not evict
+  tombstones. They use a
   separate reserve. If the reserve is full, the node evicts normal entries first. Then it drops the
   oldest tombstones and marks the shard `needs_refill`, so a rejoin discards that shard.
 - TTLs replicate as an absolute deadline in Unix milliseconds. Expiry is lazy on access plus a

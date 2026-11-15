@@ -498,11 +498,13 @@ impl Store {
 
     /// Store a replicated or handed-off entry if its version is newer than the local one,
     /// tombstone or not. The entry keeps its own version and deadline. An entry that is already
-    /// expired is not stored. Returns true when the entry was stored.
+    /// expired is not stored. If it is newer than a local entry, a tombstone with its version
+    /// replaces that entry: a write with a deadline in the past is a delete, and the older value
+    /// must not stay. Returns true when the entry or the tombstone was stored.
     pub fn apply(&self, db: u32, key: &[u8], mut entry: Entry) -> bool {
         let now = self.clock.now_ms();
         if entry.is_expired(now) {
-            return false;
+            return self.apply_expired(db, key, entry.version, now);
         }
         entry.last_access_ms = now;
         let tomb = entry.tombstone;
@@ -554,6 +556,23 @@ impl Store {
             return false;
         }
         self.replace(&mut guard, db, key, entry);
+        true
+    }
+
+    /// Replace an older local entry of `key` with a tombstone at `version`.
+    fn apply_expired(&self, db: u32, key: &[u8], version: Version, now: u64) -> bool {
+        let shard = &self.shards[self.shard_index(key)];
+        let mut guard = shard.inner.write();
+        let older = guard
+            .get(db)
+            .and_then(|d| d.map.get(key))
+            .is_some_and(|cur| cur.version < version);
+        if !older {
+            return false;
+        }
+        self.replace(&mut guard, db, key, self.tombstone(version, now));
+        drop(guard);
+        self.enforce_reserve();
         true
     }
 
