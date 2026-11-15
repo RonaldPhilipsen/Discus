@@ -491,14 +491,24 @@ impl Security {
         }
     }
 
-    /// The grant of a verified certificate identity. Read-write without a matching rule.
-    fn cert_grant(&self, identity: String) -> CertGrant {
-        let scopes = self
-            .cert_rules
-            .iter()
-            .find(|(pattern, _)| identity::pattern_matches(pattern, &identity))
-            .map_or(Scopes::READ_WRITE, |(_, scopes)| *scopes);
-        CertGrant { identity, scopes }
+    /// The grant of a verified certificate identity. Without any rule every identity gets
+    /// read-write. With rules, an identity that matches none gets no grant, so a typing error in
+    /// a rule never widens access.
+    fn cert_grant(&self, identity: String) -> Option<CertGrant> {
+        let scopes = if self.cert_rules.is_empty() {
+            Scopes::READ_WRITE
+        } else {
+            let rule = self
+                .cert_rules
+                .iter()
+                .find(|(pattern, _)| identity::pattern_matches(pattern, &identity));
+            let Some((_, scopes)) = rule else {
+                tracing::debug!(%identity, "no client_cert rule matches the identity");
+                return None;
+            };
+            *scopes
+        };
+        Some(CertGrant { identity, scopes })
     }
 
     /// Run the transport setup of a new client connection: the TLS handshake in `node` mode, and
@@ -547,16 +557,17 @@ impl Security {
             }
             if let Some(identity) = header.identity {
                 tracing::debug!(%identity, "forwarded client identity");
-                auth.cert = Some(self.cert_grant(identity));
+                auth.cert = self.cert_grant(identity);
             }
             return Ok((Box::new(tls), auth));
         }
         let conn = tls.get_ref().1;
         if conn.peer_certificates().is_some_and(|c| !c.is_empty()) {
-            // A verified certificate without a SAN or CN still meets mtls.
+            // A verified certificate without a SAN or CN has an empty identity. It meets mtls
+            // unless client_cert rules exist and none matches the empty identity.
             let identity = identity::peer_identity(conn).unwrap_or_default();
             tracing::debug!(%identity, "client certificate verified");
-            auth.cert = Some(self.cert_grant(identity));
+            auth.cert = self.cert_grant(identity);
         }
         Ok((Box::new(tls), auth))
     }
@@ -764,6 +775,25 @@ pub(crate) mod tests {
         let config = Config::parse_from(argv).unwrap();
         let live_settings = Live::new(crate::settings::Reloadable::from_config(&config));
         Security::from_config(&config, live_settings).unwrap()
+    }
+
+    #[test]
+    fn a_certificate_identity_needs_a_matching_rule_when_rules_exist() {
+        let open = security(&[]);
+        let grant = open.cert_grant("spiffe://test/app".into()).unwrap();
+        assert_eq!(grant.scopes, Scopes::READ_WRITE);
+
+        let ruled = Security {
+            cert_rules: vec![("spiffe://test/ro*".into(), Scopes::READ)],
+            ..open
+        };
+        let grant = ruled
+            .cert_grant("spiffe://test/ro-reporting".into())
+            .unwrap();
+        assert_eq!(grant.identity, "spiffe://test/ro-reporting");
+        assert_eq!(grant.scopes, Scopes::READ);
+        assert!(ruled.cert_grant("spiffe://test/app".into()).is_none());
+        assert!(ruled.cert_grant(String::new()).is_none());
     }
 
     #[test]
