@@ -6,20 +6,9 @@ metadata:
   labels:
     {{- include "discus.labels" . | nindent 4 }}
 rules:
-  # Kubernetes cannot limit create to a name, because the name is not known before the request.
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    verbs: ["create"]
-  # The names follow --lease-name and --counter-lease-prefix in the Deployment. The binary names
-  # the lease of counter group g <prefix>-<g>, for g from 0 to counterGroups - 1.
-  - apiGroups: ["coordination.k8s.io"]
-    resources: ["leases"]
-    verbs: ["get", "update"]
-    resourceNames:
-      - {{ include "discus.fullname" . }}-cluster
-      {{- range $g := until (int .Values.counterGroups) }}
-      - {{ include "discus.fullname" $ }}-counter-{{ $g }}
-      {{- end }}
+    verbs: ["get", "create", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
