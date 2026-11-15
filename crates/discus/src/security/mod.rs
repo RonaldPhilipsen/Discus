@@ -152,6 +152,8 @@ impl Security {
         let oauth = Self::oauth2(args, &policy, &file)?;
         #[cfg(not(feature = "oauth2"))]
         Self::no_oauth2(&policy, &file)?;
+        let users = trust_root_users(config, &file, policy.uses(Factor::Oauth2));
+        tls::warn_if_no_trust_roots(&users, &tls::trust_roots());
         let lb = args.tls_mode == TlsMode::Lb;
         if lb && (args.lb_trusted_source.is_empty() || args.tls_client_ca.is_none()) {
             return fail(
@@ -857,6 +859,32 @@ fn credentials_arg(cmd: &discus_resp::Command) -> Option<(Option<&[u8]>, &[u8])>
         .map(|i| (Some(&cmd[i + 1][..]), &cmd[i + 2][..]))
 }
 
+/// What uses the build trust roots, named for the log: each OAuth 2.0 issuer without `ca_file`
+/// when the policy uses oauth2, and an https OTLP endpoint without `--otel-ca-file`.
+fn trust_root_users(config: &Config, file: &AuthFile, oauth2: bool) -> Vec<String> {
+    let mut users = Vec::new();
+    if oauth2 {
+        let plain = |f: &&file::IssuerFile| {
+            f.discovery_url
+                .as_deref()
+                .unwrap_or(&f.issuer)
+                .starts_with("http://")
+        };
+        for f in file
+            .issuer
+            .iter()
+            .filter(|f| f.ca_file.is_none() && !plain(f))
+        {
+            users.push(format!("OAuth 2.0 issuer {:?}", f.issuer));
+        }
+    }
+    let otel = &config.telemetry;
+    if otel.otel && otel.otel_endpoint.starts_with("https://") && otel.otel_ca_file.is_none() {
+        users.push(format!("OTLP endpoint {:?}", otel.otel_endpoint));
+    }
+    users
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -892,6 +920,49 @@ pub(crate) mod tests {
             all.extend(["--auth-policy", "none"]);
         }
         try_security(&all).unwrap()
+    }
+
+    #[test]
+    fn trust_root_users_name_what_has_no_ca_file() {
+        let file: AuthFile = toml::from_str(
+            r#"
+            [[issuer]]
+            issuer = "https://public"
+            audience = "discus"
+            [[issuer]]
+            issuer = "https://private"
+            audience = "discus"
+            ca_file = "/ca.pem"
+            [[issuer]]
+            issuer = "https://dev"
+            audience = "discus"
+            discovery_url = "http://dev/.well-known/openid-configuration"
+            "#,
+        )
+        .unwrap();
+        let parse = |args: &[&str]| {
+            let mut argv = vec!["discus"];
+            argv.extend_from_slice(args);
+            Config::parse_from(argv).unwrap()
+        };
+        let plain = parse(&[]);
+        assert_eq!(
+            trust_root_users(&plain, &file, true),
+            ["OAuth 2.0 issuer \"https://public\""]
+        );
+        assert!(trust_root_users(&plain, &file, false).is_empty());
+
+        let https = ["--otel", "--otel-endpoint", "https://collector:4317"];
+        assert_eq!(
+            trust_root_users(&parse(&https), &AuthFile::default(), false),
+            ["OTLP endpoint \"https://collector:4317\""]
+        );
+        let with_ca = [&https[..], &["--otel-ca-file", "/ca.pem"]].concat();
+        assert!(trust_root_users(&parse(&with_ca), &AuthFile::default(), false).is_empty());
+        let http = ["--otel", "--otel-endpoint", "http://collector:4317"];
+        assert!(trust_root_users(&parse(&http), &AuthFile::default(), false).is_empty());
+        let off = ["--otel-endpoint", "https://collector:4317"];
+        assert!(trust_root_users(&parse(&off), &AuthFile::default(), false).is_empty());
     }
 
     #[test]

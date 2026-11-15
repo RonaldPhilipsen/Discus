@@ -668,7 +668,9 @@ The node fetches the discovery document of each issuer at startup. Then it fetch
   ready.
 
 The node uses the trust root build feature for HTTPS to the issuer. Set `ca_file` to trust only
-one CA instead.
+one CA instead. If an issuer has no `ca_file` and the trust root store is empty at start, the node
+logs a warning that names the issuer. The node then cannot load the keys of that issuer and does
+not become ready.
 
 ### Expiry
 

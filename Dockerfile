@@ -11,11 +11,10 @@ ENV RUSTFLAGS="-C target-feature=+crt-static"
 ARG VERSION=dev
 ENV DISCUS_BUILD=$VERSION
 RUN cargo build --release --locked -p discus --target x86_64-unknown-linux-gnu --features "$FEATURES"
-# The Pyroscope agent cannot start without system CA certificates, so a profiling image gets them.
-RUN mkdir -p /out \
-    && case " $(echo "$FEATURES" | tr ',' ' ') " in *" pyroscope "*) \
-        mkdir -p /out/etc/ssl/certs && cp /etc/ssl/certs/ca-certificates.crt /out/etc/ssl/certs/ ;; \
-    esac
+# The default build reads the system trust roots. An OAuth 2.0 issuer without ca_file, an https
+# OTLP endpoint without --otel-ca-file, and the Pyroscope agent need them, so every image gets the
+# CA bundle.
+RUN mkdir -p /out/etc/ssl/certs && cp /etc/ssl/certs/ca-certificates.crt /out/etc/ssl/certs/
 
 FROM scratch
 COPY --from=build /out/ /

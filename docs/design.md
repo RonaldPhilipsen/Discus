@@ -1392,6 +1392,10 @@ from one feature. Cluster mTLS and client mTLS always use the configured CA.
 | `roots-system` | on | The system trust store, through `rustls-native-certs`. |
 | `roots-webpki` | off | The Mozilla roots compiled in through `webpki-roots`, for scratch or distroless images. |
 
+The release image starts from `scratch` and copies the CA bundle of the build image, so
+`roots-system` finds roots there. At start, the node logs a warning when the store is empty and an
+issuer or the OTLP endpoint uses it.
+
 Exactly one TLS backend and one trust root feature must be on, or the build fails. The startup log
 and `INFO` list the enabled features.
 
