@@ -109,10 +109,7 @@ lease only when one full lease duration passes without a change of the record. I
 the renewal time of the holder with its own wall clock, so clock skew between nodes cannot end a
 live lease.
 
-The service account of the pods needs these permissions in its namespace. The node uses the
-cluster lease `--lease-name` and one lease per counter group, `<--counter-lease-prefix>-<g>` for
-`g` from 0 to `--counter-groups` minus 1. Kubernetes cannot limit `create` to a name, so only `get`
-and `update` list the names. This example has the default 8 groups:
+The service account of the pods needs these permissions in its namespace:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -122,20 +119,7 @@ metadata:
 rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    verbs: ["create"]
-  - apiGroups: ["coordination.k8s.io"]
-    resources: ["leases"]
-    verbs: ["get", "update"]
-    resourceNames:
-      - discus-cluster
-      - discus-counter-0
-      - discus-counter-1
-      - discus-counter-2
-      - discus-counter-3
-      - discus-counter-4
-      - discus-counter-5
-      - discus-counter-6
-      - discus-counter-7
+    verbs: ["get", "create", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -1107,7 +1091,6 @@ Linearizability does not hold across it, and Discus does not automate it:
 1. Stop the clients that write counter keys.
 2. Read every counter key with `GET` and `PTTL`, and save the values.
 3. Restart every node with the new `--counter-groups`. A full cold restart clears the counters.
-   With the chart, set `counterGroups`. The chart then also gives the Role the new lease names.
 4. Write the saved values back with `SET` and `PX`.
 5. Start the clients again.
 
