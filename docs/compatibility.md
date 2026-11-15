@@ -233,7 +233,8 @@ Run `mise run build-matrix` to check every supported combination.
 - `SCAN` counts entries examined, as Redis does, so a `MATCH` batch can be empty before the cursor
   ends. It does not accept `TYPE`.
 - `DBSIZE` includes expired keys that the background sweep has not removed yet.
-- `COMMAND` returns command names only. `COMMAND DOCS` and `COMMAND INFO` return empty arrays.
+- `COMMAND` returns one entry for each command. `COMMAND INFO` returns the entries of the named
+  commands, and a null for an unknown name. `COMMAND DOCS` returns an empty array.
 - `CONFIG GET` answers three names. Other names return an empty array, so `redis-benchmark` prints
   `Could not fetch server CONFIG` and continues.
 - `FLUSHDB` and `FLUSHALL` accept `ASYNC` or `SYNC` and ignore it.

@@ -225,15 +225,19 @@ applies the rules from left to right. This is an example file:
 # An administrator. It can run every command on every key.
 user admin on allkeys +@all #f8d0ecc0b1332a8d24b9aedd2b08a1de79116e43eb661409bc1bc07bab948ec5
 
-# A read-only user. It can read every key.
+# A read-only user. It can read every key and run every command of @read.
 user reporting on allkeys +@read +@connection #c44b2dc134935203670c2f44343df9b18a97e59a460919753d1d010b1f4e3552
 
 # A service. It reads the keys "config:*" and writes the keys "queue:*".
-user app on %R~config:* %W~queue:* +@read +@write +@connection #da5aef018d0ebf8aa8b9ce37720c50fd9aae477c00a7cae02fba69a6aeb80093
+# It cannot run dangerous commands, such as FLUSHALL.
+user app on %R~config:* %W~queue:* +@read +@write -@dangerous +@connection #da5aef018d0ebf8aa8b9ce37720c50fd9aae477c00a7cae02fba69a6aeb80093
 ```
 
 The hashes in this example are for the passwords `admin-secret-p4ss`, `reader-secret-p4ss`, and
 `app-secret-p4ss`. Never use them. Make a new password and a new hash for each user.
+
+The `+@read` rule of the user `reporting` also allows `SCAN`, `RANDOMKEY`, and `DBSIZE`. They have
+no key argument, so they show key names or counts outside the key patterns of a user.
 
 These are the rules:
 
@@ -268,7 +272,7 @@ key.
 
 #### Errors that stop the node
 
-The node refuses to start with a file that has an error. The error names the line. These are the
+The node refuses to start with a file that has an error. Most errors name the line. These are the
 causes:
 
 - A line does not start with `user`, or it has no name.
@@ -276,8 +280,10 @@ causes:
 - The name is `OAUTH2` in any case. `AUTH OAUTH2 <token>` selects OAuth 2.0.
 - A rule is not in the table. This includes `<password`, `!hash`, selectors, and `+command|sub`.
 - A `+` or `-` rule names a command that Discus does not have.
+- A password hash after `#` does not have exactly 64 hex digits.
 - A category is not one of the 21 categories of Valkey or `all`.
-- The file has no user.
+- The file has no user. This error names no line.
+- The file is missing or the node cannot read it. The error has the form `--acl-file <path>: ...`.
 
 The error for an unknown rule has this form: `line 3: unknown rule at word 5`. It gives the
 position of the word and never its text. A mistyped rule can hold a password, and the error goes
@@ -305,6 +311,9 @@ Each command has the categories of Valkey:
 Category rules are the portable form, because they work in Valkey and in Discus. To list the
 commands of a category, run `ACL CAT <category>`. `CLUSTER` is in `@connection`, so `+@connection`
 is enough for a cluster client. `INFO` and `CONFIG` are in `@dangerous`, not in `@read`.
+
+`@write` includes `FLUSHDB`, `FLUSHALL`, and `SWAPDB`. They have no key argument, so a user with
+`+@write` can run them on any key. To remove them, add `-@dangerous` after `+@write`.
 
 A key that a command reads needs read access. A key that a command changes needs write access. A
 command that changes a key and uses its old value needs both. These commands are:
@@ -339,14 +348,20 @@ Every failure returns the same `-WRONGPASS` error and counts for the limits in
 
 #### Rules and scopes
 
-A user has no scopes. Its rules decide, and they cover the connection commands too. A user needs
-`+@connection` for `PING`, `SELECT`, and `CLUSTER`. `AUTH`, `HELLO`, and `QUIT` always run.
+A user has no scopes. Its rules decide, and they cover the connection commands too. `AUTH`,
+`HELLO`, and `QUIT` always run. `+@connection` covers `PING`, `ECHO`, `SELECT`, `COMMAND`,
+`CLIENT`, `CLUSTER`, `ACL`, `READONLY`, `READWRITE`, and `ASKING`. `INFO` and `CONFIG` are in
+`@dangerous`, so a user needs a rule for them.
 
 A client certificate or a token keeps its scopes. The policy says how the scopes and the rules
 combine:
 
 - With an `all` policy, the scopes and the rules must both allow the command.
 - With an `any` policy, one of them is enough.
+
+With an `any` policy, such as `any:mtls,password`, take care with client certificates. A
+certificate that matches no `[[client_cert]]` rule grants read and write. That client can run
+every data command, whatever the rules of its user say.
 
 #### Denied commands
 
@@ -428,9 +443,9 @@ The scopes do not apply to a user of the ACL file. The rules of the user decide.
 A read-only client that runs a write command gets
 `-NOPERM this user has no permissions to run the '<command>' command`.
 
-Connection commands need a login but no scope. A user needs `+@connection` for them. They are
-`PING`, `ECHO`, `QUIT`, `AUTH`, `HELLO`, `SELECT`, `COMMAND`, `CLIENT`, and `CLUSTER`. `INFO` and
-`CONFIG GET` count as reads.
+Connection commands need a login but no scope. They are `PING`, `ECHO`, `QUIT`, `AUTH`, `HELLO`,
+`SELECT`, `COMMAND`, `CLIENT`, and `CLUSTER`. `INFO` and `CONFIG GET` count as reads. A user of
+the ACL file needs a rule for each of them, except `AUTH`, `HELLO`, and `QUIT`.
 
 Each factor grants scopes:
 
@@ -802,6 +817,9 @@ rules apply:
   returns `-NOAUTH`.
 - The new rules apply to the next command of each connection.
 - A changed password keeps the connections that are logged in.
+
+With an `any` policy, another factor can still authenticate the connection, for example a client
+certificate. Then the connection keeps the access of that factor after the user is gone.
 
 In Kubernetes, change the Secret of `aclFile.secretName`. The mounted file changes after the Secret
 changes, usually within a minute or two. Each node reads its own copy, so for a short time some
