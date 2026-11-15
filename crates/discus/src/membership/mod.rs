@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use discus_membership::{
-    normal_count, Action, Event, Host, LeaseHolder, LeaseProvider, LeaseState, Millis, Outcome,
-    Phase, Swim,
+    normal_count, Action, Event, Host, LeaseError, LeaseHolder, LeaseProvider, LeaseState, Millis,
+    Outcome, Phase, Swim,
 };
 use discus_placement::{ClusterId, MemberState, NodeId, Weight};
 use discus_store::{every, on_events};
@@ -341,12 +341,9 @@ impl Membership {
             tracing::warn!(error = %e, "the cluster lease call failed");
         }
         let now = self.now();
+        let authoritative = self.lease.authoritative();
         self.drive(|swim, host| {
-            if let Ok(LeaseState::Held(h) | LeaseState::HeldByOther(h)) = &result {
-                if self.lease.authoritative() {
-                    host.lease_cluster = Some(h.cluster_id);
-                }
-            }
+            host.lease_cluster = lease_cluster(host.lease_cluster, &result, authoritative);
             swim.lease_result(now, result, host);
         });
     }
@@ -490,5 +487,40 @@ impl Membership {
         futures::future::join_all(sends).await;
         self.stop.cancel();
         tracing::info!("left gossip");
+    }
+}
+
+/// The cluster that the lease names after a lease call, for the merge decision (spec section
+/// 6.3). A failed call forgets the last answer, so no merge is decided on an old read.
+fn lease_cluster(
+    old: Option<ClusterId>,
+    result: &Result<LeaseState, LeaseError>,
+    authoritative: bool,
+) -> Option<ClusterId> {
+    match result {
+        Ok(LeaseState::Held(h) | LeaseState::HeldByOther(h)) if authoritative => Some(h.cluster_id),
+        Ok(_) => old,
+        Err(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_lease_call_forgets_the_lease_cluster() {
+        let a = ClusterId::from_u128(1);
+        let b = ClusterId::from_u128(2);
+        let holder = LeaseHolder {
+            identity: "n".into(),
+            address: "10.0.0.1:7379".parse().unwrap(),
+            cluster_id: b,
+        };
+        let held = Ok(LeaseState::HeldByOther(holder));
+        assert_eq!(lease_cluster(Some(a), &held, true), Some(b));
+        assert_eq!(lease_cluster(None, &held, false), None);
+        let failed = Err(LeaseError("down".into()));
+        assert_eq!(lease_cluster(Some(a), &failed, true), None);
     }
 }
