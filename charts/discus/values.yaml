@@ -230,4 +230,7 @@ podAnnotations: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
-topologySpreadConstraints: []
+# null spreads the pods over the Kubernetes nodes: maxSkew 1 on kubernetes.io/hostname, with
+# ScheduleAnyway, so a full node never blocks a pod. A list replaces this default, and [] turns
+# it off.
+topologySpreadConstraints: null

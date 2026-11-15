@@ -288,6 +288,11 @@ Follow these rules:
 The chart in `charts/discus` creates the resources above and a PodDisruptionBudget. Each release
 publishes the chart with the same version as the image.
 
+By default, the chart spreads the pods over the Kubernetes nodes, with `maxSkew: 1` on
+`kubernetes.io/hostname` and `whenUnsatisfiable: ScheduleAnyway`. So one node failure takes at
+most one replica when there are enough nodes. A list in `topologySpreadConstraints` replaces this
+default, and `[]` turns it off.
+
 Before you install the chart, create a Secret with the keys `ca.crt`, `tls.crt`, and `tls.key`.
 Use a CA that serves only this release and signs no client certificates, because every certificate
 from the CA is a member of the cluster. Then install the chart:

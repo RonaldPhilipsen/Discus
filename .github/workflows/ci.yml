@@ -178,6 +178,12 @@ jobs:
       - run: >-
           (helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
           --set 'extraArgs[0]=--counter-groups=4' 2>&1 || true) | grep -q 'set counterGroups instead'
+      - run: >-
+          helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
+          | grep -A3 'topologySpreadConstraints:' | grep -q 'topologyKey: kubernetes.io/hostname'
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
+          --set-json 'topologySpreadConstraints=[]' | grep -q 'topologySpreadConstraints'
 
   # redis-cli against a fresh node, for every supported and unsupported command.
   compat:
