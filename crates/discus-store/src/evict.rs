@@ -53,16 +53,13 @@ impl Store {
         for offset in 0..n {
             let shard = &self.shards[(first + offset) % n];
             let mut guard = shard.inner.write();
-            let len = guard.map_len();
-            if len == guard.tomb_len() {
+            if guard.map_len() == guard.tomb_len() {
                 continue;
             }
-            let start = shard.cursor.fetch_add(EVICTION_SAMPLES, Ordering::Relaxed) % len;
+            // A random run of buckets, as Valkey samples for eviction.
+            let start = fastrand::usize(..guard.num_buckets());
             let victim: Option<(u32, Bytes)> = guard
-                .entries()
-                .skip(start)
-                .chain(guard.entries())
-                .take(len)
+                .entries_from(start)
                 .filter(|(_, _, e)| !e.tombstone)
                 .take(EVICTION_SAMPLES)
                 .min_by_key(|(_, _, e)| e.last_access_ms)

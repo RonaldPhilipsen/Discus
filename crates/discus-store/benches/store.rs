@@ -105,5 +105,48 @@ fn store(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, store);
+/// A store of 16 shards at its memory limit, so each new key evicts one.
+fn full_store(value: &Bytes) -> Store {
+    let probe = Store::new(StoreConfig::default(), Arc::new(SystemClock));
+    put(&probe, &key(0), value);
+    let per_entry = probe.used_memory();
+    let store = Store::new(
+        StoreConfig {
+            shards: 16,
+            max_memory: per_entry * KEYS,
+            ..StoreConfig::default()
+        },
+        Arc::new(SystemClock),
+    );
+    for i in 0..KEYS {
+        put(&store, &key(i), value);
+    }
+    store
+}
+
+fn maintenance(c: &mut Criterion) {
+    let value = Bytes::from(vec![b'x'; 256]);
+    let mut group = c.benchmark_group("maintenance");
+    group.throughput(Throughput::Elements(1));
+
+    let store = full_store(&value);
+    let mut i = KEYS;
+    group.bench_function("write_evict_16_shards", |b| {
+        b.iter(|| {
+            i += 1;
+            let k = format!("new:{i:012}");
+            assert_eq!(store.reserve(300), discus_store::Admit::Ok);
+            put(&store, k.as_bytes(), &value);
+        });
+    });
+
+    // Live keys only, so each sweep reads its sample and removes nothing.
+    let store = full_store(&value);
+    group.bench_function("sweep_20_per_shard_16_shards", |b| {
+        b.iter(|| black_box(store.sweep_expired(20)));
+    });
+    group.finish();
+}
+
+criterion_group!(benches, store, maintenance);
 criterion_main!(benches);

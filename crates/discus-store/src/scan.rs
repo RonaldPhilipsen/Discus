@@ -188,14 +188,11 @@ impl Store {
             let Some(d) = guard.get(db).filter(|d| d.live > 0) else {
                 continue;
             };
-            let len = d.map.len();
-            let start = fastrand::usize(..len);
-            let live = d
-                .map
-                .iter()
-                .skip(start)
-                .chain(d.map.iter())
-                .take(len)
+            let buckets = d.map.num_buckets();
+            let start = fastrand::usize(..buckets);
+            let live = (start..buckets)
+                .chain(0..start)
+                .filter_map(|i| d.map.bucket(i))
                 .find(|(_, e)| !e.tombstone && !e.is_expired(now));
             if let Some((k, _)) = live {
                 return Some(k.clone());
