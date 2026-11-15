@@ -167,6 +167,11 @@ probes:
     failureThreshold: 3
     timeoutSeconds: 1
 
+# The number of counter groups (--counter-groups). Each group has a Lease, and the Role allows
+# only these Lease names. A change is an offline procedure: see docs/cluster.md. Do not set
+# --counter-groups in extraArgs.
+counterGroups: 8
+
 # The termination grace period of the pod is this value plus 15 seconds.
 shutdownTimeoutSeconds: 30
 
