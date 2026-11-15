@@ -49,6 +49,9 @@ pub struct SwimConfig {
     pub epoch_jitter_ms: Millis,
     /// A starting node looks for a NORMAL peer this long before it tries the lease.
     pub bootstrap_deadline_ms: Millis,
+    /// The duration of the cluster lease. A node that held the lease for a cluster it left waits
+    /// this long before it forms a new one, so its old hold has expired.
+    pub lease_duration_ms: Millis,
     /// Level smoothing of the local health score for a rising tick lag.
     pub health_alpha_up: f64,
     /// Level smoothing of the local health score for a falling tick lag.
@@ -94,6 +97,7 @@ impl Default for SwimConfig {
             suspicion_k: 3,
             epoch_jitter_ms: 50,
             bootstrap_deadline_ms: 10_000,
+            lease_duration_ms: 15_000,
             health_alpha_up: 0.2,
             health_alpha_down: 0.01,
             health_beta: 0.3,
@@ -109,7 +113,8 @@ impl Default for SwimConfig {
 }
 
 impl SwimConfig {
-    /// Fast timings for tests: a 100 ms period and a 300 to 1000 ms suspicion timeout.
+    /// Fast timings for tests: a 100 ms period, a 300 to 1000 ms suspicion timeout, and a 2 s
+    /// lease.
     pub fn fast() -> SwimConfig {
         SwimConfig {
             period_ms: 100,
@@ -120,6 +125,7 @@ impl SwimConfig {
             suspicion_max_ms: 1_000,
             evidence_half_life_ms: 1_000,
             bootstrap_deadline_ms: 500,
+            lease_duration_ms: 2_000,
             ..SwimConfig::default()
         }
     }

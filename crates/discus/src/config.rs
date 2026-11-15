@@ -527,6 +527,7 @@ impl Config {
             suspicion_min_ms: self.suspicion_min_ms,
             suspicion_max_ms: self.suspicion_max_ms,
             bootstrap_deadline_ms: self.bootstrap_deadline_ms,
+            lease_duration_ms: self.lease_duration_ms,
             lower_databases: self.lower_databases,
             ..discus_membership::SwimConfig::default()
         }

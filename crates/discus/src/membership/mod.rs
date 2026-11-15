@@ -377,7 +377,7 @@ impl Membership {
                     tokio::spawn(self.clone().lease_call());
                 }
                 Event::ClusterLost { old, winner } => {
-                    tracing::warn!(%old, %winner, "lost a cluster merge, discarding the store");
+                    tracing::warn!(%old, %winner, "left the cluster, discarding the store");
                     if let Some(n) = &node {
                         n.store.clear();
                     }

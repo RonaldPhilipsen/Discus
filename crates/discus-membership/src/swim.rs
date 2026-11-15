@@ -140,6 +140,8 @@ pub struct Swim {
     learned: Vec<SocketAddr>,
     seek_started: Option<Millis>,
     last_normal_seen: Option<Millis>,
+    /// When the lease last named this node as the holder.
+    lease_held_at: Option<Millis>,
     next_join: Millis,
     join_cursor: usize,
     next_lease: Millis,
@@ -205,6 +207,7 @@ impl Swim {
             learned: Vec::new(),
             seek_started: None,
             last_normal_seen: None,
+            lease_held_at: None,
             next_join: 0,
             join_cursor: 0,
             next_lease: 0,
@@ -915,14 +918,19 @@ impl Swim {
         if g.from.id == self.me.id {
             return;
         }
-        if g.cluster_id != ClusterId::NIL {
+        // Only a `NORMAL` sender shows a live cluster. A seeker keeps the ID of the cluster it
+        // lost, and the size of its last epoch.
+        let normal = g.from.state == MemberState::Normal;
+        if g.cluster_id != ClusterId::NIL && normal {
             self.last_normal_seen = Some(now);
         }
         if g.cluster_id != ClusterId::NIL
             && self.cluster_id != ClusterId::NIL
             && g.cluster_id != self.cluster_id
         {
-            self.foreign(now, g, host);
+            if normal {
+                self.foreign(now, g, host);
+            }
             return;
         }
         if g.cluster_id == ClusterId::NIL || self.cluster_id == ClusterId::NIL {
@@ -972,9 +980,18 @@ impl Swim {
             return;
         }
         tracing::warn!(ours = %self.cluster_id, winner = %won, "lost a merge, joining the winner");
+        self.drop_cluster(won, host);
+        self.last_normal_seen = Some(now);
+        self.add_seed(g.from.addr);
+        self.set_state(now, MemberState::Joining, Phase::Seeking);
+    }
+
+    /// Discard the cluster: the store, the counters, the view, and the epochs. `winner` is the
+    /// cluster that replaces it, or NIL.
+    fn drop_cluster(&mut self, winner: ClusterId, host: &mut dyn Host) {
         self.events.push(Event::ClusterLost {
             old: self.cluster_id,
-            winner: won,
+            winner,
         });
         host.reset_cluster(provisional_epoch(self.me.id));
         self.cluster_id = ClusterId::NIL;
@@ -989,21 +1006,29 @@ impl Swim {
         self.probes.clear();
         self.broadcasts = Broadcasts::default();
         self.last_epoch = Some(host.epoch());
-        self.last_normal_seen = Some(now);
-        self.add_seed(g.from.addr);
-        self.set_state(now, MemberState::Joining, Phase::Seeking);
     }
 
-    fn may_form(&self, now: Millis) -> bool {
+    /// Seeking for the bootstrap deadline without a message from a `NORMAL` member.
+    fn alone(&self, now: Millis) -> bool {
         let deadline = self.cfg.bootstrap_deadline_ms;
         self.phase == Phase::Seeking
-            && self.cluster_id == ClusterId::NIL
             && self
                 .seek_started
                 .is_some_and(|s| now.saturating_sub(s) >= deadline)
             && self
                 .last_normal_seen
                 .is_none_or(|t| now.saturating_sub(t) >= deadline)
+    }
+
+    /// A node that held the lease waits for the lease duration: a renewal by the same identity
+    /// succeeds at once, so a node that left its cluster could otherwise form a second cluster
+    /// next to it.
+    fn may_form(&self, now: Millis) -> bool {
+        self.cluster_id == ClusterId::NIL
+            && self.alone(now)
+            && self
+                .lease_held_at
+                .is_none_or(|t| now.saturating_sub(t) >= self.cfg.lease_duration_ms)
     }
 
     /// Form a new cluster: epoch `(1, self)`, the HLC stays on the wall clock (spec section 6.2).
@@ -1027,8 +1052,12 @@ impl Swim {
     ) {
         match result {
             Ok(LeaseState::Held(h)) => {
-                if h.identity == self.me.id.to_string() && self.may_form(now) {
-                    self.form(now, h.cluster_id, host);
+                if h.identity == self.me.id.to_string() {
+                    let may_form = self.may_form(now);
+                    self.lease_held_at = Some(now);
+                    if may_form {
+                        self.form(now, h.cluster_id, host);
+                    }
                 }
             }
             Ok(LeaseState::HeldByOther(h)) => self.add_seed(h.address),
@@ -1104,8 +1133,20 @@ impl Swim {
         out
     }
 
-    fn seek(&mut self, now: Millis, host: &dyn Host, out: &mut Vec<Action>) {
+    fn seek(&mut self, now: Millis, host: &mut dyn Host, out: &mut Vec<Action>) {
         self.seek_started.get_or_insert(now);
+        if self.cluster_id != ClusterId::NIL && self.alone(now) {
+            // A rejoiner whose cluster is gone. It seeks as a new node, so it can join or form
+            // another cluster. The lease still keeps it from forming one beside a live cluster,
+            // whose members renew the lease (spec section 6.2). It keeps the addresses that it
+            // knows, so it finds the cluster again if the cluster comes back.
+            tracing::warn!(old = %self.cluster_id, "no member of the cluster answers, leaving it");
+            let known = self.join_targets();
+            self.drop_cluster(ClusterId::NIL, host);
+            for addr in known {
+                self.add_seed(addr);
+            }
+        }
         if now >= self.next_join {
             self.next_join = now + self.cfg.period_ms;
             let targets = self.join_targets();

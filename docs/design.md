@@ -356,6 +356,12 @@ A Kubernetes `Lease` makes sure that only one node forms a new cluster.
   precondition makes it exclusive. The winner mints the `cluster_id`, creates epoch `(1, self)`,
   sets its HLC from the wall clock, creates the counter groups, and serves. A loser reads the holder
   address from the `discus.io/address` annotation, adds it as a seed, and keeps looking.
+- Only a `NORMAL` member counts as a found peer. A seeker that still carries the ID of a lost
+  cluster does not stop formation, and it does not take part in a merge (§6.3).
+- A rejoining node that finds no `NORMAL` member until the bootstrap deadline gives up the
+  cluster. It discards its store and counters, keeps the addresses that it knows as seeds, and
+  seeks like a new node. If it held the lease before, it forms a cluster only after the lease
+  duration, so its old hold cannot let it form a second cluster beside a live one.
 - Every `NORMAL` member runs acquire-or-renew (duration 15 s, renew every 5 s), so a live cluster
   always holds the lease. The holder writes `holderIdentity`, `discus.io/address`, and
   `discus.io/cluster-id`. After a full cold restart, the lease expires and the first node to
