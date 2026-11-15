@@ -70,8 +70,7 @@ pub async fn start_node(args: &[&str]) -> SocketAddr {
 /// Start a node and return a multiplexed redis-rs connection to it.
 pub async fn connect(args: &[&str]) -> redis::aio::MultiplexedConnection {
     let addr = start_node(args).await;
-    let client = client_tls::redis_client(&format!("rediss://{addr}"));
-    client.get_multiplexed_async_connection().await.unwrap()
+    client_tls::redis_connection(&format!("rediss://{addr}")).await
 }
 
 /// A command from its parts.
