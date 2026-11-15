@@ -835,6 +835,7 @@ async fn cluster_client(
     let certs = tls.unwrap_or_else(client_tls::redis_certs);
     redis::cluster::ClusterClientBuilder::new(urls)
         .response_timeout(Duration::from_secs(30))
+        .connection_timeout(Duration::from_secs(30))
         .certs(certs)
         .build()
         .unwrap()
