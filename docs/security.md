@@ -58,6 +58,12 @@ The certificate file can hold a chain.
 Set `--tls-client-ca` to ask clients for a certificate. The node verifies a client certificate
 against this CA only. It never uses the system trust store for client certificates.
 
+Use a client CA that is not the cluster CA. With an empty `--cluster-san`, every certificate from
+the cluster CA is a member of the cluster, and a member needs no client authorization. A client
+certificate from that CA then gives access to the cluster ports. If one CA must serve both, set
+`--cluster-san`. The Helm chart refuses an install that has the same CA for both and no URI SAN
+test. See [Install with Helm](cluster.md#install-with-helm).
+
 By default a client certificate is optional. Set `--tls-client-auth required` to refuse every
 client without one.
 
@@ -232,8 +238,9 @@ Connection commands need a login but no scope. They are `PING`, `ECHO`, `QUIT`, 
 Each factor grants scopes:
 
 - The shared token grants `discus.read` and `discus.write`.
-- A client certificate grants the scopes of its first matching `[[client_cert]]` rule. Without a
-  match it grants `discus.read` and `discus.write`.
+- A client certificate grants `discus.read` and `discus.write` when the `--auth-config` file has
+  no `[[client_cert]]` rule. With at least one rule, it grants the scopes of its first matching
+  rule. A certificate that matches no rule gives no `mtls` factor.
 - A token grants the scopes in its claims, or the scopes of its `sub` rule.
 
 With an `all` policy, the client gets only the scopes that every identity factor grants. With an
@@ -246,6 +253,11 @@ Client certificate rules go in the `--auth-config` file. A trailing `*` matches 
 identity = "spiffe://example.org/ns/reporting/*"
 scopes = ["discus.read"]
 ```
+
+With this file, a client whose certificate identity does not start with
+`spiffe://example.org/ns/reporting/` does not have the `mtls` factor. Discus keeps the TLS
+connection open, so the client can still log in with another factor that the policy accepts. Add
+a rule for each identity that needs access.
 
 ## Commands from other nodes
 

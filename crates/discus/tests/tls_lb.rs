@@ -103,6 +103,38 @@ async fn a_header_without_a_client_certificate_gives_no_mtls_factor() {
 }
 
 #[tokio::test]
+async fn a_forwarded_identity_follows_the_client_cert_rules() {
+    let ca = TestCa::new();
+    let server = ca.server_cert();
+    let lb = ca.client_cert("spiffe://test/lb");
+    let file = ca.path("auth.toml");
+    std::fs::write(
+        &file,
+        r#"
+[[client_cert]]
+identity = "ro-*"
+scopes = ["discus.read"]
+"#,
+    )
+    .unwrap();
+    let mut args = lb_args(&ca, &server, "127.0.0.1/32");
+    args.extend([
+        "--auth-policy",
+        "any:mtls",
+        "--auth-config",
+        file.to_str().unwrap(),
+    ]);
+    let node = start(&args).await;
+    let mut wire = cmd(&["SET", "k", "v"]);
+    wire.extend(cmd(&["GET", "k"]));
+    let matched = via_lb(&node, &ca, Some(&lb), &header(Some("ro-reporting")), &wire).await;
+    assert!(matched.starts_with("-NOPERM"), "{matched:?}");
+    assert!(matched.ends_with("$-1\r\n"), "{matched:?}");
+    let unmatched = via_lb(&node, &ca, Some(&lb), &header(Some("app")), &cmd(&["PING"])).await;
+    assert!(unmatched.starts_with("-NOAUTH"), "{unmatched:?}");
+}
+
+#[tokio::test]
 async fn a_v1_header_with_the_shared_token_works() {
     let ca = TestCa::new();
     let server = ca.server_cert();
