@@ -67,14 +67,51 @@ jobs:
             FEATURES=${{ matrix.variant.features }}
           cache-from: type=gha,scope=${{ matrix.variant.name }}
 
+  # A release candidate publishes only a head commit that passed CI. The ruleset protects the
+  # merge into main, so a push to main has passed CI already.
+  ci:
+    name: Wait for CI
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      actions: read
+    steps:
+      - name: Wait for the CI run of the head commit
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          while true; do
+            run=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=pull_request&per_page=1" \
+              --jq '.workflow_runs[0] // empty | [.status, (.conclusion // "-"), .html_url] | @tsv')
+            if [ -n "$run" ]; then
+              IFS=$'\t' read -r status conclusion url <<<"$run"
+              if [ "$status" = completed ]; then
+                echo "CI run $url: $conclusion"
+                [ "$conclusion" = success ]
+                exit
+              fi
+              echo "CI run $url: $status"
+            else
+              echo "No CI run for $SHA yet"
+            fi
+            sleep 30
+          done
+
   image:
     name: Build and push image (${{ matrix.variant.name }})
-    needs: version
+    needs: [version, ci]
     if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+      # Keyless signing with cosign: the OIDC token of this job is the signing identity.
+      id-token: write
     strategy:
       matrix:
         variant: *variants
@@ -93,10 +130,17 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           push: true
+          sbom: true
+          provenance: mode=max
           tags: ${{ env.IMAGE }}:${{ needs.version.outputs.version }}${{ matrix.variant.suffix }}
           build-args: |
             FEATURES=${{ matrix.variant.features }}
@@ -105,6 +149,11 @@ jobs:
             CREATED=${{ steps.created.outputs.created }}
           cache-from: type=gha,scope=${{ matrix.variant.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.variant.name }}
+      # Sign the digest that this job pushed, not the tag, so a later push to the tag is not signed.
+      - name: Sign image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE@$DIGEST"
 
   chart:
     name: Package and push Helm chart
@@ -113,11 +162,21 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4
+      # cosign reads the Docker credentials. Helm keeps its own registry login.
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Log in to the registry
         env:
           GH_TOKEN: ${{ github.token }}
@@ -129,9 +188,19 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
         run: helm package charts/discus --version "$VERSION" --app-version "$VERSION"
       - name: Push chart
+        id: push
         env:
           VERSION: ${{ needs.version.outputs.version }}
-        run: helm push "discus-$VERSION.tgz" oci://ghcr.io/ronaldphilipsen/charts
+        run: |
+          out=$(helm push "discus-$VERSION.tgz" oci://ghcr.io/ronaldphilipsen/charts 2>&1)
+          echo "$out"
+          digest=$(sed -n 's/^Digest: //p' <<<"$out")
+          [ -n "$digest" ]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Sign chart
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "ghcr.io/ronaldphilipsen/charts/discus@$DIGEST"
 
   release:
     name: Create GitHub release
