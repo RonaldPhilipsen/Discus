@@ -65,31 +65,37 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5
-      - run: helm lint charts/discus --strict --set cluster.tls.secretName=discus-tls
-      - run: helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+      - run: helm lint charts/discus --strict --set cluster.tls.secretName=discus-tls --set authPolicy=none
+      - run: helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
+      - run: >-
+          (helm template discus charts/discus --set cluster.tls.secretName=discus-tls 2>&1 || true)
+          | grep -q 'authPolicy is required'
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --set authPolicy=mtls
       - run: >-
           helm template discus charts/discus --set cluster.tls.secretName=discus-tls
           --set clientTls.verifyClients=true,clientTls.clientAuth=required
           --set clientTls.clientCaSecretName=discus-client-ca
           --set 'authPolicy=all:mtls\,oauth2' --set authConfig.secretName=discus-auth
       - run: >-
-          helm template discus charts/discus --namespace cache --set cluster.tls.secretName=discus-tls
+          helm template discus charts/discus --namespace cache --set cluster.tls.secretName=discus-tls --set authPolicy=none
           --set cluster.san.enabled=true
           | grep -q -- '--cluster-san=spiffe://cluster.local/ns/cache/sa/discus$'
       - run: >-
-          helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
           --set clientTls.verifyClients=true --set cluster.san.enabled=true
           | grep -q -- '--tls-client-ca=/client-tls/ca.crt'
       - run: >-
-          helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
           --set clientTls.verifyClients=true
           2>&1 | grep -q 'lets a client certificate join the cluster'
       - run: >-
-          helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
           --set clientTls.verifyClients=true --set clientTls.secretName=discus-tls
           2>&1 | grep -q 'lets a client certificate join the cluster'
       - run: >-
-          helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
           --set clientTls.verifyClients=true --set clientTls.clientCaSecretName=discus-client-ca
           | grep -q -- '--cluster-san=$'
       - run: >-
@@ -98,34 +104,37 @@ jobs:
           | grep -q -- '--shared-token-file=/shared-token/token'
       - run: >-
           ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --set sharedToken.secretName=discus-token | grep -q -- '--auth-policy'
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
           | grep -q 'shared-token'
       - run: >-
           ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
           --set sharedToken.secretName=discus-token --set sharedToken.key=../token
       - run: >-
-          helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
           --set settings.budget.holdMs=1500 | grep -A12 'discus.toml' | grep -q 'hold-ms = 1500'
       - run: >-
-          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
           --set settings.budget.holdMs=fast
       - run: >-
-          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
           --set settings.budget.holMs=5
       - run: >-
-          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
           --set settings.extra.misc.n=null
       - run: >-
-          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
           --skip-schema-validation --set settings.extra.misc.n=null
       - run: >-
-          helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
           --set databases=3 --set settings.budget.holdMs=1500
           | grep -A3 'discus.toml' | grep -q '^ *databases = 3'
       - run: >-
-          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
           --set databases=3 | grep -q -- '--databases'
       - run: >-
-          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
           --set databases=0
 
   # redis-cli against a fresh node, for every supported and unsupported command.

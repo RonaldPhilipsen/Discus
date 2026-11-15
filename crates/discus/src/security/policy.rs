@@ -32,7 +32,7 @@ impl Factor {
 /// How the factors of a connection combine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Policy {
-    /// Every TLS client is authenticated, with read-write access. The default without a shared token.
+    /// Every TLS client is authenticated, with read-write access.
     None,
     /// At least one factor.
     Any(Vec<Factor>),

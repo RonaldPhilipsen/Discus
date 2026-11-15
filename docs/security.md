@@ -11,10 +11,11 @@ always uses QUIC with mTLS. See [Running a cluster](cluster.md) for its certific
 
 ## Quick start
 
-By default, a node asks only for TLS. Each client connects with TLS and needs no credentials:
+A node needs an authentication policy. Without one, it refuses to start. With the policy `none`,
+the node asks only for TLS. Each client connects with TLS and needs no credentials:
 
 ```bash
-discus --tls-cert /etc/discus/tls.crt --tls-key /etc/discus/tls.key
+discus --tls-cert /etc/discus/tls.crt --tls-key /etc/discus/tls.key --auth-policy none
 ```
 
 To also ask each client for an OAuth 2.0 token, set the policy `all:oauth2`:
@@ -149,16 +150,20 @@ accepts `tls` in an `all:` list, ignores it, and logs a warning at startup. For 
 with `all:tls`, because these policies would let every client in. For TLS without credentials,
 use `none`.
 
-Without `--auth-policy`, the node picks a default:
+Without `--auth-policy`, the result depends on the shared token:
 
-| Setting | Default policy |
+| Setting | Result |
 | --- | --- |
-| `--shared-token-file` or `--shared-token` set | `all:shared_token` |
-| No shared token | `none` |
+| `--shared-token-file` or `--shared-token` set | The policy is `all:shared_token`. |
+| No shared token | The node refuses to start. The error names `--auth-policy`. |
+
+The node never opens the client port without credentials unless you ask for it. Set
+`--auth-policy none` to make that choice.
 
 A shared token that the policy does not use stops the node at startup. With `none`, every client
-that can reach the port and complete the TLS handshake gets read and write access. To limit
-access, set a policy with `mtls`, `oauth2`, or `shared_token`.
+that can reach the port and complete the TLS handshake gets read and write access. The node logs
+a warning about this at startup. To limit access, set a policy with `mtls`, `oauth2`, or
+`shared_token`.
 
 Examples:
 
@@ -555,7 +560,7 @@ identity provider without `ca_file`.
 | `--tls-client-auth` | `optional` | `required` refuses clients without a certificate in `node` mode. |
 | `--lb-trusted-source` | none | A network that the load balancer connects from. Repeat it for more. |
 | `--lb-identity-tlv` | none | A PROXY v2 TLV type from `0xE0` to `0xEF` that holds the client identity. |
-| `--auth-policy` | see above | The client authentication policy. |
+| `--auth-policy` | required without a shared token | The client authentication policy. See [Authentication policy](#authentication-policy). |
 | `--auth-config` | none | The TOML file with issuers, rules, and admin identities. |
 | `--shared-token-file` | none | A file with the shared token for the `shared_token` factor. The node reloads it after a change. |
 | `--shared-token` | none | The shared token as a value. The process list shows it, so use `--shared-token-file`. |

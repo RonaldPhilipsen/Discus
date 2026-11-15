@@ -152,6 +152,8 @@ async fn a_zero_tls_period_pauses_and_resumes() {
         cert.to_str().unwrap(),
         "--tls-key",
         key.to_str().unwrap(),
+        "--auth-policy",
+        "none",
     ];
     let config = discus::Config::load_from(argv).unwrap();
     let server = discus::Server::bind(config).await.unwrap();

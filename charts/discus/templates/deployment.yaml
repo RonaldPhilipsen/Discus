@@ -127,8 +127,10 @@ spec:
             - --tls-client-auth={{ .clientAuth }}
             {{- end }}
             {{- end }}
-            {{- with .Values.authPolicy }}
-            - --auth-policy={{ . }}
+            {{- if .Values.authPolicy }}
+            - --auth-policy={{ .Values.authPolicy }}
+            {{- else if not .Values.sharedToken.secretName }}
+            {{- fail "authPolicy is required. Set authPolicy=none for TLS without credentials, or a policy with mtls, oauth2, or shared_token, for example authPolicy=all:mtls. With sharedToken.secretName, an empty value gives the shared token policy" }}
             {{- end }}
             {{- if .Values.authConfig.secretName }}
             - --auth-config=/auth/auth.toml

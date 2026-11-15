@@ -1174,9 +1174,13 @@ line. To move to it, install a new cluster. The cache starts empty.
 ### 14.2 Client authentication policy
 
 - The policy lists factors (`mtls`, `oauth2`, `shared_token`) and combines them with `any`
-  or `all`. Every client uses TLS, so TLS is not a factor. The default policy is `none`, so a
-  client needs no factor. With a policy that names factors, a client without them gets
-  `-NOAUTH`. The old factor name `tls` is still accepted in an `all` list and ignored.
+  or `all`. Every client uses TLS, so TLS is not a factor. With the policy `none`, a client needs
+  no factor. With a policy that names factors, a client without them gets `-NOAUTH`. The old
+  factor name `tls` is still accepted in an `all` list and ignored.
+- The policy has no default without a shared token. A node without a policy and without a shared
+  token refuses to start, so open access is always a choice of the operator. The node logs a
+  warning at startup when the policy is `none`. With a shared token and no policy, the policy is
+  `all:shared_token`.
 - A shared token grants read-write by default and is meant for simple setups. An mTLS-only client
   gets read-write when no certificate rule exists. With at least one rule, the client gets the
   scope of the first rule that matches its certificate identity. An identity that matches no rule
