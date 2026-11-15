@@ -61,7 +61,7 @@ pub fn server_args<S: AsRef<str>>(args: &[S]) -> Vec<String> {
         let f = fixture();
         out.extend(["--tls-cert", &f.cert, "--tls-key", &f.key].map(String::from));
     }
-    if !has("--auth-policy") && !has("--shared-token") {
+    if !has("--auth-policy") && !has("--shared-token") && !has("--shared-token-file") {
         out.extend(["--auth-policy", "none"].map(String::from));
     }
     out

@@ -86,6 +86,9 @@ async fn jwks(State(s): State<Arc<IdpState>>, headers: HeaderMap) -> Response {
 async fn introspect(State(s): State<Arc<IdpState>>, headers: HeaderMap, body: String) -> Response {
     record(&s, &headers);
     s.introspect_calls.fetch_add(1, Ordering::SeqCst);
+    if s.down.load(Ordering::SeqCst) {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     // Client authentication: Basic discus:secret.
     let auth = headers
         .get("authorization")

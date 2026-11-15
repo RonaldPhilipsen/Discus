@@ -61,6 +61,49 @@ async fn a_shared_token_policy_needs_the_token() {
     assert!(e.contains("--shared-token"), "{e}");
 }
 
+/// A token file with `content` in `dir`.
+fn token_file(dir: &tempfile::TempDir, content: &str) -> String {
+    let file = dir.path().join("token");
+    std::fs::write(&file, content).expect("the test directory is writable");
+    file.to_str().expect("a UTF-8 path").to_string()
+}
+
+#[tokio::test]
+async fn a_shared_token_and_a_token_file_together_are_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = token_file(&dir, "x\n");
+    let e = bind_error(&["--shared-token", "x", "--shared-token-file", &file]).await;
+    assert!(e.contains("--shared-token-file, not both"), "{e}");
+}
+
+#[tokio::test]
+async fn an_empty_token_file_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = token_file(&dir, " \n");
+    let e = bind_error(&["--shared-token-file", &file]).await;
+    assert!(
+        e.contains("--shared-token-file") && e.contains(&file),
+        "{e}"
+    );
+}
+
+#[tokio::test]
+async fn a_missing_token_file_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("token");
+    let file = file.to_str().unwrap();
+    let e = bind_error(&["--shared-token-file", file]).await;
+    assert!(e.contains("--shared-token-file") && e.contains(file), "{e}");
+}
+
+#[tokio::test]
+async fn an_unused_token_file_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = token_file(&dir, "x\n");
+    let e = bind_error(&["--auth-policy", "none", "--shared-token-file", &file]).await;
+    assert!(e.contains("--shared-token-file is set"), "{e}");
+}
+
 #[tokio::test]
 async fn a_node_without_a_client_certificate_refuses_to_start() {
     let e = bind_error_without_tls(&["--auth-policy", "none"]).await;

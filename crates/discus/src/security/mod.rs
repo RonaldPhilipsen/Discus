@@ -18,7 +18,7 @@ pub mod tls;
 
 use std::io;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -78,6 +78,19 @@ impl ClientTlsFiles {
     }
 }
 
+/// The token in the file of `--shared-token-file`, without trailing whitespace.
+fn read_shared_token(path: &Path) -> io::Result<String> {
+    let content = std::fs::read_to_string(path)?;
+    let token = content.trim_end();
+    if token.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the file has no token",
+        ));
+    }
+    Ok(token.to_string())
+}
+
 /// The security state of a node.
 pub struct Security {
     mode: TlsMode,
@@ -87,7 +100,9 @@ pub struct Security {
     lb_identity_tlv: Option<u8>,
     cert_rules: Vec<(String, Scopes)>,
     policy: Policy,
-    shared_token: Option<String>,
+    /// A reload of `shared_token_file` replaces the content.
+    shared_token: Option<ArcSwap<String>>,
+    shared_token_file: Option<PathBuf>,
     live_settings: Arc<Live>,
     limiter: FailureLimiter,
     admin_tls: Option<Arc<ArcSwap<rustls::ServerConfig>>>,
@@ -109,11 +124,26 @@ impl Security {
             Some(path) => AuthFile::load(path)?,
             None => AuthFile::default(),
         };
+        let shared_token = match (&config.shared_token, &config.shared_token_file) {
+            (Some(_), Some(_)) => {
+                return fail("set --shared-token or --shared-token-file, not both");
+            }
+            (Some(token), None) => {
+                tracing::warn!(
+                    "--shared-token shows the token in the process list and in the pod spec. Use \
+                     --shared-token-file"
+                );
+                Some(token.clone())
+            }
+            (None, Some(path)) => Some(
+                read_shared_token(path)
+                    .map_err(|e| format!("--shared-token-file {}: {e}", path.display()))?,
+            ),
+            (None, None) => None,
+        };
         let policy = match &args.auth_policy {
             Some(p) => Policy::parse(p)?,
-            None if config.shared_token.is_some() => {
-                Policy::All(vec![Factor::Tls, Factor::SharedToken])
-            }
+            None if shared_token.is_some() => Policy::All(vec![Factor::Tls, Factor::SharedToken]),
             // An open node must be a choice of the operator, never a silent default.
             None => {
                 return fail(
@@ -131,12 +161,20 @@ impl Security {
         if policy.uses(Factor::Mtls) && args.tls_client_ca.is_none() {
             return fail("the policy uses mtls, so set --tls-client-ca");
         }
-        match (policy.uses(Factor::SharedToken), &config.shared_token) {
-            (true, None) => return fail("the policy uses shared_token, so set --shared-token"),
+        match (policy.uses(Factor::SharedToken), &shared_token) {
+            (true, None) => {
+                return fail(
+                    "the policy uses shared_token, so set --shared-token-file or --shared-token",
+                )
+            }
             (false, Some(_)) => {
+                let flag = match config.shared_token_file {
+                    Some(_) => "--shared-token-file",
+                    None => "--shared-token",
+                };
                 return fail(format!(
-                    "--shared-token is set, but the policy {policy} does not use shared_token"
-                ))
+                    "{flag} is set, but the policy {policy} does not use shared_token"
+                ));
             }
             _ => {}
         }
@@ -195,7 +233,8 @@ impl Security {
             lb_identity_tlv: args.lb_identity_tlv,
             cert_rules,
             policy,
-            shared_token: config.shared_token.clone(),
+            shared_token: shared_token.map(ArcSwap::from_pointee),
+            shared_token_file: config.shared_token_file.clone(),
             limiter: FailureLimiter::new(live_settings.clone()),
             live_settings,
             admin_tls,
@@ -256,6 +295,15 @@ impl Security {
         if oauth.is_empty() {
             return fail("the policy uses oauth2, but --auth-config lists no trusted issuer");
         }
+        #[cfg(all(feature = "testing", feature = "oauth2-introspection"))]
+        let oauth = match args.test_introspection_cache_secs {
+            Some(secs) => {
+                let mut oauth = oauth;
+                oauth.set_introspection_cache_secs(secs);
+                oauth
+            }
+            None => oauth,
+        };
         Ok(Some(oauth))
     }
 
@@ -308,6 +356,20 @@ impl Security {
         Ok(())
     }
 
+    /// The file that [`Security::reload_shared_token`] reads, with `--shared-token-file`.
+    pub fn shared_token_file(&self) -> Option<&Path> {
+        self.shared_token_file.as_deref()
+    }
+
+    /// Read the shared token file again, and use the token for every new `AUTH`. A connection
+    /// that is logged in stays logged in. On an error, the node keeps its current token.
+    pub fn reload_shared_token(&self) -> io::Result<()> {
+        if let (Some(slot), Some(path)) = (&self.shared_token, &self.shared_token_file) {
+            slot.store(Arc::new(read_shared_token(path)?));
+        }
+        Ok(())
+    }
+
     /// Whether an admin request may pass: an admin certificate, or a bearer token with
     /// `discus.admin`. A bearer token over plaintext needs `--dev-insecure-oauth2`.
     pub async fn admin_allowed(&self, peer: &admin::AdminPeer, bearer: Option<&str>) -> bool {
@@ -327,18 +389,24 @@ impl Security {
             tracing::debug!("admin bearer token over plaintext refused");
             return false;
         }
+        // A source over its failed-attempt limit never reaches the identity provider.
+        if peer.addr.is_some_and(|ip| self.limiter.blocked(ip)) {
+            tracing::debug!("admin bearer token refused, the source is over its limit");
+            return false;
+        }
         #[cfg(feature = "oauth2")]
         if let Some(o) = &self.oauth {
             o.prefetch(token.as_bytes()).await;
-            return match o.check(token.as_bytes(), oauth2::unix_now()) {
-                Ok(c) => c.scopes.is_admin(),
-                Err(reject) => {
-                    tracing::debug!(reason = %reject, "admin token refused");
-                    false
-                }
-            };
+            match o.check(token.as_bytes(), oauth2::unix_now()) {
+                Ok(c) if c.scopes.is_admin() => return true,
+                Ok(_) => tracing::debug!("admin token refused, it has no discus.admin scope"),
+                Err(reject) => tracing::debug!(reason = %reject, "admin token refused"),
+            }
         }
         let _ = token;
+        if let Some(ip) = peer.addr {
+            self.limiter.record(ip);
+        }
         false
     }
 
@@ -366,21 +434,30 @@ impl Security {
         }
     }
 
-    /// True for a command that `prefetch` must see before it runs.
-    pub fn wants_prefetch(&self, cmd: &discus_resp::Command) -> bool {
+    /// True for a command that `prefetch` must see before it runs, and for every command of a
+    /// connection whose introspected grant is due for a recheck. A connection without such a
+    /// grant pays only the `Option` test, and one with such a grant pays a clock read.
+    pub fn wants_prefetch(&self, conn: &ConnState, cmd: &discus_resp::Command) -> bool {
         #[cfg(feature = "oauth2")]
         if self.oauth.is_some() {
+            #[cfg(feature = "oauth2-introspection")]
+            if recheck_due(conn) {
+                return true;
+            }
             let name = &cmd[0];
             return name.eq_ignore_ascii_case(b"AUTH") || name.eq_ignore_ascii_case(b"HELLO");
         }
-        let _ = cmd;
+        let _ = (conn, cmd);
         false
     }
 
     /// The async part of `AUTH` and `HELLO ... AUTH`: refresh the JWKS on an unknown `kid`, so
     /// the synchronous handler finds the key.
     /// A source over its failed-attempt limit never reaches the identity provider.
-    pub async fn prefetch(&self, conn: &ConnState, cmd: &discus_resp::Command) {
+    /// Before that, it introspects again the opaque token of a grant that is due.
+    pub async fn prefetch(&self, conn: &mut ConnState, cmd: &discus_resp::Command) {
+        #[cfg(feature = "oauth2-introspection")]
+        self.refresh_grant(conn).await;
         #[cfg(feature = "oauth2")]
         if let (Some(o), Some(token)) = (&self.oauth, token_arg(cmd)) {
             if conn.auth.peer.is_some_and(|ip| self.limiter.blocked(ip)) {
@@ -389,6 +466,40 @@ impl Security {
             o.prefetch(token).await;
         }
         let _ = (conn, cmd);
+    }
+
+    /// Introspect the opaque token of a due grant again, and drop the grant unless the answer
+    /// says the token is active. No answer also drops the grant: a provider that is unreachable
+    /// cannot confirm that the token is not revoked, so the node fails closed.
+    ///
+    /// The failed-attempt limit does not apply here. The grant came from a valid token, and
+    /// each token costs at most one request per cache time.
+    #[cfg(feature = "oauth2-introspection")]
+    async fn refresh_grant(&self, conn: &mut ConnState) {
+        let Some(o) = &self.oauth else {
+            return;
+        };
+        if !recheck_due(conn) {
+            return;
+        }
+        let Some(raw) = conn.auth.token.as_ref().map(|t| t.raw.clone()) else {
+            return;
+        };
+        o.prefetch(&raw).await;
+        match o.check(&raw, oauth2::unix_now()) {
+            Ok(c) => {
+                if let Some(t) = conn.auth.token.as_mut() {
+                    t.exp = c.exp;
+                    t.nbf = c.nbf;
+                    t.scopes = c.scopes;
+                    t.recheck = c.recheck;
+                }
+            }
+            Err(reject) => {
+                tracing::debug!(conn = conn.id, reason = %reject, "token no longer active");
+                conn.auth.token = None;
+            }
+        }
     }
 
     /// The grant of a verified certificate identity. Read-write without a matching rule.
@@ -500,7 +611,7 @@ impl Security {
         let oauth2_only = user.is_some_and(|u| u.eq_ignore_ascii_case(b"OAUTH2"));
         if !oauth2_only && self.policy.uses(Factor::SharedToken) {
             if let Some(expected) = &self.shared_token {
-                if bool::from(expected.as_bytes().ct_eq(token)) {
+                if bool::from(expected.load().as_bytes().ct_eq(token)) {
                     conn.auth.shared = true;
                     return Ok(());
                 }
@@ -524,6 +635,7 @@ impl Security {
                         scopes: claims.scopes,
                         // An introspected token has no JWKS to check against again.
                         generation: oauth2::is_jwt(token).then_some(generation),
+                        recheck: claims.recheck,
                     });
                     Ok(())
                 }
@@ -608,6 +720,17 @@ impl Security {
     }
 }
 
+/// True when the connection holds an introspected grant whose answer ended. Only such a grant
+/// reads the clock.
+#[cfg(feature = "oauth2-introspection")]
+fn recheck_due(conn: &ConnState) -> bool {
+    conn.auth
+        .token
+        .as_ref()
+        .and_then(|t| t.recheck)
+        .is_some_and(|at| oauth2::unix_now() > at)
+}
+
 /// The token of `AUTH [user] <token>` or `HELLO ... AUTH <user> <token>`.
 #[cfg(feature = "oauth2")]
 fn token_arg(cmd: &discus_resp::Command) -> Option<&[u8]> {
@@ -617,6 +740,10 @@ fn token_arg(cmd: &discus_resp::Command) -> Option<&[u8]> {
             2 | 3 => Some(&cmd[cmd.len() - 1]),
             _ => None,
         };
+    }
+    // `prefetch` also runs for other commands when a grant is due. Their arguments are data.
+    if !name.eq_ignore_ascii_case(b"HELLO") {
+        return None;
     }
     (1..cmd.len())
         .find(|&i| cmd[i].eq_ignore_ascii_case(b"AUTH") && i + 2 < cmd.len())
@@ -654,7 +781,8 @@ pub(crate) mod tests {
     /// without a shared token in `args`, the policy is `none`.
     pub(crate) fn security(args: &[&str]) -> Security {
         let mut all = args.to_vec();
-        if !args.contains(&"--auth-policy") && !args.contains(&"--shared-token") {
+        if !args.contains(&"--auth-policy") && !args.iter().any(|a| a.starts_with("--shared-token"))
+        {
             all.extend(["--auth-policy", "none"]);
         }
         try_security(&all).unwrap()
@@ -681,6 +809,31 @@ pub(crate) mod tests {
             s.policy,
             Policy::All(vec![Factor::Tls, Factor::SharedToken])
         );
+    }
+
+    #[test]
+    fn a_failed_token_reload_keeps_the_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("token");
+        std::fs::write(&file, "old\n").unwrap();
+        let s = security(&["--shared-token-file", file.to_str().unwrap()]);
+        let accepts = |token: &[u8]| {
+            let mut conn = ConnState::new(1, ConnAuth::default());
+            s.authenticate(&mut conn, None, token).is_ok()
+        };
+        assert!(accepts(b"old"));
+
+        std::fs::write(&file, "\n").unwrap();
+        assert!(s.reload_shared_token().is_err());
+        std::fs::remove_file(&file).unwrap();
+        assert!(s.reload_shared_token().is_err());
+        assert!(accepts(b"old"));
+        assert!(!accepts(b""));
+
+        std::fs::write(&file, "new\n").unwrap();
+        s.reload_shared_token().unwrap();
+        assert!(accepts(b"new"));
+        assert!(!accepts(b"old"));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 [tools]
+"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
 "aqua:nextest-rs/nextest/cargo-nextest" = "0.9.151"
 prek = "0.5.10"
 flatc = "25.12.19-2026-02-06-03fffb2"
@@ -31,6 +32,10 @@ run = [
   "prek run --all-files --show-diff-on-failure",
   "prek run --all-files --show-diff-on-failure --stage pre-push",
 ]
+
+[tasks.deny]
+description = "Check the dependencies against the RustSec advisories and the license and source policy"
+run = "cargo deny check"
 
 [tasks.hooks]
 description = "Install the prek Git hooks (pre-commit and pre-push)"
