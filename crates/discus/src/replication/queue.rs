@@ -188,6 +188,12 @@ impl PeerQueue {
         self.len() == 0
     }
 
+    /// Keys wait or a batch is in flight.
+    pub fn busy(&self) -> bool {
+        let s = self.state.lock();
+        !s.keys.is_empty() || !s.inflight.is_empty()
+    }
+
     /// The key is queued or in flight.
     pub fn holds(&self, key: &dyn AsDbKey) -> bool {
         let s = self.state.lock();

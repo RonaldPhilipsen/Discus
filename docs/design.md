@@ -1331,8 +1331,9 @@ access for clients sets `clusterClients.enabled=false`.
 
 - Drain marks the node `LEAVING` and unready. The node keeps serving existing connections and acts
   as a handoff source until the shutdown deadline. The deadline must cover the handoff and the Raft
-  moves. Then the node flushes its queues and leaves gossip. Keys not copied in time refill as
-  misses.
+  moves. Then the node flushes its queues, waits for the batches in flight, and leaves gossip.
+  Before it closes its transports, it waits once more for the writes that arrived during the
+  departure, within the same deadline. Keys not copied in time refill as misses.
 - Cluster clients move away before the node stops, because it leaves placement first (§7.6).
 - A restarted pod is a new, cold node. Use `maxSurge` so the new pod joins before the old pod
   drains, and `minReadySeconds` so one replacement finishes before the next begins.

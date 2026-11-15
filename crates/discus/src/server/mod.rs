@@ -542,6 +542,7 @@ impl Server {
         drop(redirect);
         tracker.close();
         let timeout = Duration::from_secs(node.config.shutdown_timeout_secs);
+        let deadline = tokio::time::Instant::now() + timeout;
         // The node stays a handoff source, flushes its queues, and hands its counter roles over
         // within the same deadline.
         let drained = async {
@@ -562,6 +563,11 @@ impl Server {
         }
         if let Some(membership) = node.membership().cloned() {
             let _ = lane.spawn(async move { membership.depart().await }).await;
+        }
+        // A forwarded write can arrive until the departure, so the queues drain once more
+        // before the transports close.
+        if let Some(replicator) = node.replicator() {
+            let _ = tokio::time::timeout_at(deadline, replicator.idle()).await;
         }
         // The background tasks send on the transports, so they stop before the transports
         // close.

@@ -383,19 +383,16 @@ impl Replicator {
         }
     }
 
-    /// Wait until the node is out of placement, its scans are done, and its queues are empty.
-    /// A draining node calls this within its shutdown deadline (spec section 15.3).
+    /// Wait until the node is out of placement, its scans are done, and its queues are empty
+    /// with no batch in flight. A down queue does not count: its keys become hints. A draining
+    /// node calls this within its shutdown deadline (spec section 15.3).
     pub async fn idle(&self) {
         loop {
             let Some(node) = self.node.upgrade() else {
                 return;
             };
             let placed = node.membership().is_some() && node.epochs().current().is_normal(self.id);
-            let queued = self
-                .peers
-                .read()
-                .values()
-                .any(|q| !q.is_empty() && !q.is_down());
+            let queued = self.peers.read().values().any(|q| q.busy() && !q.is_down());
             if !placed && !self.scanning() && !queued {
                 return;
             }
@@ -1445,6 +1442,25 @@ mod tests {
         got.sort();
         want.sort();
         assert_eq!(got, want);
+    }
+
+    #[tokio::test]
+    async fn a_batch_in_flight_keeps_the_replicator_busy() {
+        let config = crate::Config::parse_from(["discus"]).unwrap();
+        let live = crate::settings::Live::new(crate::settings::Reloadable::from_config(&config));
+        let security = Arc::new(crate::security::tests::security(&[]));
+        let node = Arc::new(Node::new(config, security, live));
+        let r = Replicator::new(&node);
+        let peer = NodeId::from_u128(9);
+        let q = Arc::new(PeerQueue::new(peer, 8));
+        r.peers.write().insert(peer, q.clone());
+        q.push(0, &Bytes::from_static(b"k"));
+        assert_eq!(q.take(8).len(), 1);
+        let wait = tokio::time::timeout(Duration::from_millis(300), r.idle()).await;
+        assert!(wait.is_err(), "idle with a batch in flight");
+        q.acked();
+        let wait = tokio::time::timeout(Duration::from_secs(10), r.idle()).await;
+        assert!(wait.is_ok());
     }
 
     #[test]
