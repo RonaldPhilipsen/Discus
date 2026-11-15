@@ -28,6 +28,9 @@ VALUE = 256
 # encrypt replication and the cluster bus, like Discus between nodes. All pods mount this Secret
 # on /tls.
 TLS_SECRET = "bench-tls"
+# The clients present a certificate from a separate client CA. The Discus chart refuses to verify
+# clients against the cluster CA, because such a client certificate can join the cluster.
+CLIENT_TLS_SECRET = "bench-client-tls"
 # The clients skip the server name check: the certificate has no SAN for the pod IPs.
 TLS_CLI = "--tls --cert /tls/tls.crt --key /tls/tls.key --cacert /tls/ca.crt --insecure"
 
@@ -91,6 +94,18 @@ SYSTEMS = {
     "discus-cluster-1-0.5.0-rc0-pyro": ("discus-cluster", "discus", 1, "0.5.0-rc0-pyroscope"),
     "discus-cluster-3-0.5.0-rc0-pyro": ("discus-cluster", "discus", 3, "0.5.0-rc0-pyroscope"),
     "discus-cluster-6-0.5.0-rc0-pyro": ("discus-cluster", "discus", 6, "0.5.0-rc0-pyroscope"),
+    "discus-1-0.7.1-pyro": ("discus", "discus", 1, "0.7.1-pyroscope"),
+    "discus-3-0.7.1-pyro": ("discus", "discus", 3, "0.7.1-pyroscope"),
+    "discus-6-0.7.1-pyro": ("discus", "discus", 6, "0.7.1-pyroscope"),
+    "discus-cluster-1-0.7.1-pyro": ("discus-cluster", "discus", 1, "0.7.1-pyroscope"),
+    "discus-cluster-3-0.7.1-pyro": ("discus-cluster", "discus", 3, "0.7.1-pyroscope"),
+    "discus-cluster-6-0.7.1-pyro": ("discus-cluster", "discus", 6, "0.7.1-pyroscope"),
+    "discus-1-0.7.2-rc0-pyro": ("discus", "discus", 1, "0.7.2-rc0-pyroscope"),
+    "discus-3-0.7.2-rc0-pyro": ("discus", "discus", 3, "0.7.2-rc0-pyroscope"),
+    "discus-6-0.7.2-rc0-pyro": ("discus", "discus", 6, "0.7.2-rc0-pyroscope"),
+    "discus-cluster-1-0.7.2-rc0-pyro": ("discus-cluster", "discus", 1, "0.7.2-rc0-pyroscope"),
+    "discus-cluster-3-0.7.2-rc0-pyro": ("discus-cluster", "discus", 3, "0.7.2-rc0-pyroscope"),
+    "discus-cluster-6-0.7.2-rc0-pyro": ("discus-cluster", "discus", 6, "0.7.2-rc0-pyroscope"),
     "redis-sentinel-6": ("sentinel", "redis", 6),
     "valkey-sentinel-6": ("sentinel", "valkey", 6),
     "redis-cluster-noreplica-6": ("cluster0", "redis", 6),
@@ -147,13 +162,13 @@ def until(fn, what, limit=240):
     raise RuntimeError(f"timeout waiting for {what}: {last}")
 
 
-def tls_volume():
-    return ({"volumes": [{"name": "tls", "secret": {"secretName": TLS_SECRET}}]},
+def tls_volume(secret=TLS_SECRET):
+    return ({"volumes": [{"name": "tls", "secret": {"secretName": secret}}]},
             {"volumeMounts": [{"name": "tls", "mountPath": "/tls", "readOnly": True}]})
 
 
 def tool_pod(name, image, cpu, mem):
-    vol, mount = tls_volume()
+    vol, mount = tls_volume(CLIENT_TLS_SECRET)
     return {
         "apiVersion": "v1", "kind": "Pod", "metadata": {"name": name, "labels": {"bench": "tool"}},
         "spec": {
@@ -170,8 +185,10 @@ def tool_pod(name, image, cpu, mem):
 
 
 def make_certs(tmp):
-    """One CA and one certificate for every node and client. The certificate is valid for server and
-    client use, so Discus nodes, Valkey replicas, and memtier all present it."""
+    """One CA and one certificate for every node, and a second CA and certificate for the clients.
+    The node certificate is valid for server and client use, so Discus nodes and Valkey replicas
+    present it to each other. Valkey has one CA file for clients and replicas, so it gets both CAs
+    in ca-all.crt."""
     run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
          "-days", "2", "-subj", "/CN=bench CA", "-keyout", f"{tmp}/ca.key", "-out", f"{tmp}/ca.crt"])
     run(["openssl", "req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
@@ -179,9 +196,20 @@ def make_certs(tmp):
     pathlib.Path(f"{tmp}/ext").write_text("extendedKeyUsage=serverAuth,clientAuth\n")
     run(["openssl", "x509", "-req", "-in", f"{tmp}/n.csr", "-CA", f"{tmp}/ca.crt", "-CAkey", f"{tmp}/ca.key",
          "-CAcreateserial", "-days", "2", "-extfile", f"{tmp}/ext", "-out", f"{tmp}/tls.crt"])
-    kc("delete", "secret", TLS_SECRET, "--ignore-not-found")
+    run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+         "-days", "2", "-subj", "/CN=bench client CA", "-keyout", f"{tmp}/cca.key", "-out", f"{tmp}/cca.crt"])
+    run(["openssl", "req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+         "-subj", "/CN=bench client", "-keyout", f"{tmp}/client.key", "-out", f"{tmp}/c.csr"])
+    run(["openssl", "x509", "-req", "-in", f"{tmp}/c.csr", "-CA", f"{tmp}/cca.crt", "-CAkey", f"{tmp}/cca.key",
+         "-CAcreateserial", "-days", "2", "-extfile", f"{tmp}/ext", "-out", f"{tmp}/client.crt"])
+    pathlib.Path(f"{tmp}/ca-all.crt").write_text(
+        pathlib.Path(f"{tmp}/ca.crt").read_text() + pathlib.Path(f"{tmp}/cca.crt").read_text())
+    kc("delete", "secret", TLS_SECRET, CLIENT_TLS_SECRET, "--ignore-not-found")
     kc("create", "secret", "generic", TLS_SECRET, f"--from-file=ca.crt={tmp}/ca.crt",
+       f"--from-file=ca-all.crt={tmp}/ca-all.crt",
        f"--from-file=tls.crt={tmp}/tls.crt", f"--from-file=tls.key={tmp}/tls.key")
+    kc("create", "secret", "generic", CLIENT_TLS_SECRET, f"--from-file=ca.crt={tmp}/cca.crt",
+       f"--from-file=tls.crt={tmp}/client.crt", f"--from-file=tls.key={tmp}/client.key")
 
 
 def ensure_tools(tmp):
@@ -227,7 +255,7 @@ def server_sts(name, engine, n, script):
     ]
 
 
-TLS_SERVER = ("--tls-cert-file /tls/tls.crt --tls-key-file /tls/tls.key --tls-ca-cert-file /tls/ca.crt "
+TLS_SERVER = ("--tls-cert-file /tls/tls.crt --tls-key-file /tls/tls.key --tls-ca-cert-file /tls/ca-all.crt "
               "--tls-auth-clients yes --tls-replication yes --tls-cluster yes")
 
 
@@ -350,7 +378,8 @@ def deploy_discus(name, n, tag, cluster_mode=False, pyroscope_url=None):
     With pyroscope_url, the nodes push CPU profiles. The image needs the pyroscope feature."""
     release = "discus"
     # The client listener uses the cluster certificate. all:mtls matches tls-auth-clients on Valkey.
-    tls_args = "clientTls.verifyClients=true,clientTls.clientAuth=required,authPolicy=all:mtls"
+    tls_args = ("clientTls.verifyClients=true,clientTls.clientAuth=required,authPolicy=all:mtls,"
+                f"clientTls.clientCaSecretName={CLIENT_TLS_SECRET}")
     # DISCUS_CHART installs a local chart, for an image tag that has no published chart. A profiling
     # image uses the chart of its release.
     chart = os.environ.get("DISCUS_CHART")
