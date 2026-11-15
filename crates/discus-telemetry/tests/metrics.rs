@@ -185,6 +185,7 @@ fn later_plan_instruments_record_with_bounded_attributes() {
     m.members(MemberState::Normal, 3);
     m.replication_depth(&peer, 10);
     m.replication_lag(&peer, Duration::from_millis(5));
+    m.replication_batch(&peer, 12);
     m.hint_recorded(&peer);
     m.hint_replayed(&peer, 2);
     m.hint_evicted(&peer, 1);
@@ -199,6 +200,7 @@ fn later_plan_instruments_record_with_bounded_attributes() {
         "discus.members",
         "discus.replication.queue.depth",
         "discus.replication.lag",
+        "discus.replication.batch.entries",
         "discus.hints.recorded",
         "discus.hints.replayed",
         "discus.hints.evicted",

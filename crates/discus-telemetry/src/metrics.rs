@@ -31,6 +31,9 @@ pub const LATENCY_BUCKETS_MS: [f64; 10] = [0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 
 /// Forward hop histogram bounds. The hop budget is 2 (spec §7.2).
 pub const HOP_BUCKETS: [f64; 3] = [0.0, 1.0, 2.0];
 
+/// Entries in one replication batch. The top bucket is the default of `--replication-batch-keys`.
+pub const BATCH_BUCKETS: [f64; 10] = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0];
+
 /// A snapshot of the store counters, read at each metric collection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StoreStats {
@@ -136,6 +139,7 @@ struct Instruments {
     members: Gauge<u64>,
     replication_depth: Gauge<u64>,
     replication_lag: Gauge<f64>,
+    replication_batch: Histogram<u64>,
     hints_recorded: Counter<u64>,
     hints_replayed: Counter<u64>,
     hints_evicted: Counter<u64>,
@@ -392,6 +396,11 @@ impl Metrics {
                 .with_description("Replication lag toward a peer")
                 .with_unit("ms")
                 .build(),
+            replication_batch: meter
+                .u64_histogram("discus.replication.batch.entries")
+                .with_description("Entries in a replication batch")
+                .with_boundaries(BATCH_BUCKETS.to_vec())
+                .build(),
             hints_recorded: counter("discus.hints.recorded", "Hints recorded"),
             hints_replayed: counter("discus.hints.replayed", "Hints replayed"),
             hints_evicted: counter("discus.hints.evicted", "Hints evicted"),
@@ -575,6 +584,16 @@ impl Metrics {
         self.with(|i| {
             i.replication_lag
                 .record(ms(lag), &[kv(Attribute::Peer(peer.clone()))])
+        });
+    }
+
+    /// One replication batch of `entries` entries went to `peer`.
+    #[inline]
+    pub fn replication_batch(&self, peer: &NodeLabel, entries: u64) {
+        #[cfg(feature = "otel")]
+        self.with(|i| {
+            i.replication_batch
+                .record(entries, &[kv(Attribute::Peer(peer.clone()))])
         });
     }
 
