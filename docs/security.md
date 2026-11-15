@@ -58,6 +58,12 @@ The certificate file can hold a chain.
 Set `--tls-client-ca` to ask clients for a certificate. The node verifies a client certificate
 against this CA only. It never uses the system trust store for client certificates.
 
+Use a client CA that is not the cluster CA. With an empty `--cluster-san`, every certificate from
+the cluster CA is a member of the cluster, and a member needs no client authorization. A client
+certificate from that CA then gives access to the cluster ports. If one CA must serve both, set
+`--cluster-san`. The Helm chart refuses an install that has the same CA for both and no URI SAN
+test. See [Install with Helm](cluster.md#install-with-helm).
+
 By default a client certificate is optional. Set `--tls-client-auth required` to refuse every
 client without one.
 
