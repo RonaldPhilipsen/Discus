@@ -17,7 +17,6 @@
   "type": "object",
   "properties": {
     "databases": { "type": "integer", "minimum": 1, "maximum": 65536 },
-    "counterGroups": { "type": "integer", "minimum": 1, "maximum": 1024 },
     "admin": {
       "type": "object",
       "properties": {
