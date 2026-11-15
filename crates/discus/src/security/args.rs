@@ -85,10 +85,11 @@ pub struct SecurityArgs {
     /// Failed authentication attempts that close a connection.
     #[arg(long, default_value_t = 5)]
     pub auth_max_failures_per_connection: u32,
-    /// Failed authentication attempts per source address in one window.
+    /// Failed authentication attempts per source in one window. A source is an IPv4 address or
+    /// an IPv6 /64 network.
     #[arg(long, default_value_t = 20)]
     pub auth_max_failures_per_source: u32,
-    /// The failed-attempt window per source address, in seconds.
+    /// The failed-attempt window per source, in seconds.
     #[arg(long, default_value_t = 60)]
     pub auth_failure_window_secs: u64,
     /// Seconds that a new connection gets to meet the authentication policy. 0 means no limit.
