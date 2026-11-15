@@ -23,6 +23,9 @@ pub struct TokenGrant {
     pub scopes: Scopes,
     /// The JWKS generation the token was last checked against. `None` for an introspected token.
     pub generation: Option<u64>,
+    /// The end of the introspection answer, in Unix seconds. After it, the node introspects the
+    /// token again before the next command. `None` for a JWT.
+    pub recheck: Option<i64>,
 }
 
 impl std::fmt::Debug for TokenGrant {
@@ -108,6 +111,7 @@ mod tests {
             nbf: None,
             scopes,
             generation: None,
+            recheck: None,
         }
     }
 

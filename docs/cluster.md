@@ -299,6 +299,8 @@ authentication for clients:
 | `clientTls.clientCaSecretName` | A Secret with the key `ca.crt` for client certificates. The default is the Secret of `clientTls.secretName`. Use it with a public server certificate and a private CA for clients. |
 | `authPolicy` | The flag `--auth-policy`, for example `all:mtls`. |
 | `authConfig.secretName` | A Secret with the key `auth.toml`, for the flag `--auth-config`. |
+| `sharedToken.secretName` | A Secret with the shared token, for the flag `--shared-token-file`. |
+| `sharedToken.key` | The key of that Secret. The default is `token`. |
 
 The node reloads its certificates after the Secrets change, so a rotation needs no restart. See
 [Certificate rotation](security.md#certificate-rotation).
@@ -506,7 +508,7 @@ restart.
 | `--cluster-ca` | none | PEM file with the CA certificate. |
 | `--cluster-cert` | none | PEM file with this node's certificate chain. |
 | `--cluster-key` | none | PEM file with this node's private key. |
-| `--tls-reload-secs` | 10 | Seconds between checks of the certificate files. After a change, new connections use the new certificates. `0` turns the reload off. The node applies a change from the settings file. |
+| `--tls-reload-secs` | 10 | Seconds between checks of the certificate files and the shared token file. After a change, new connections use the new certificates. `0` turns the reload off. The node applies a change from the settings file. |
 | `--cluster-san` | `spiffe://cluster.local/ns/default/sa/discus` | The URI SAN that every peer must carry. If the value is empty, any certificate from the CA is accepted. |
 | `--forward-read-timeout-ms` | 500 | Time to wait for a forwarded read. |
 | `--forward-write-timeout-ms` | 2000 | Time to wait for a forwarded write. |
@@ -1189,7 +1191,7 @@ Follow these requirements:
 - Set `--forward-read-timeout-ms 200`. A read of a listed key makes one attempt and has no
   replica fallback, so the default of 20 ms can fail a read on a busy primary.
 - Use TLS and a shared token between Authelia and Discus. Set `--tls-mode`, `--tls-cert`, and
-  `--tls-key`. Set `--shared-token` and `--auth-policy all:shared_token`.
+  `--tls-key`. Set `--shared-token-file` and `--auth-policy all:shared_token`.
 - Set `database_index` to 0.
 - Do not configure the `high_availability` section of `session.redis`, because Discus has no
   Sentinel support. To survive a node loss, point `host` at a load balancer or a DNS name that
@@ -1206,7 +1208,7 @@ discus \
   --tls-cert /etc/discus/tls.crt \
   --tls-key /etc/discus/tls.key \
   --auth-policy all:shared_token \
-  --shared-token "$SESSION_TOKEN"
+  --shared-token-file /etc/discus/session-token
 ```
 
 Configure Authelia with the same token:
@@ -1216,7 +1218,7 @@ session:
   redis:
     host: 'cache.example.com'
     port: 6379
-    password: 'the value of SESSION_TOKEN'
+    password: 'the token in /etc/discus/session-token'
     database_index: 0
     tls:
       server_name: 'cache.example.com'

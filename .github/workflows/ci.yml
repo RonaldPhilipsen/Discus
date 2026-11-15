@@ -41,6 +41,15 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
 
+  # The RustSec advisories, the licenses, and the crate sources, as deny.toml sets them.
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5
+      - run: mise run deny
+
   build-matrix:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -63,6 +72,16 @@ jobs:
           --set clientTls.verifyClients=true,clientTls.clientAuth=required
           --set clientTls.clientCaSecretName=discus-client-ca
           --set 'authPolicy=all:mtls\,oauth2' --set authConfig.secretName=discus-auth
+      - run: >-
+          helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --set sharedToken.secretName=discus-token
+          | grep -q -- '--shared-token-file=/shared-token/token'
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          | grep -q 'shared-token'
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --set sharedToken.secretName=discus-token --set sharedToken.key=../token
       - run: >-
           helm template discus charts/discus --set cluster.tls.secretName=discus-tls
           --set settings.budget.holdMs=1500 | grep -A12 'discus.toml' | grep -q 'hold-ms = 1500'

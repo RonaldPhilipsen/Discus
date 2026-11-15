@@ -91,6 +91,10 @@ pub struct SecurityArgs {
     /// The failed-attempt window per source address, in seconds.
     #[arg(long, default_value_t = 60)]
     pub auth_failure_window_secs: u64,
+    /// The longest life of an introspection answer, in seconds, instead of 300.
+    #[cfg(feature = "testing")]
+    #[arg(long, hide = true)]
+    pub test_introspection_cache_secs: Option<u64>,
     /// Serve the admin port over TLS with the client listener certificate and CA.
     #[arg(long)]
     pub admin_tls: bool,
