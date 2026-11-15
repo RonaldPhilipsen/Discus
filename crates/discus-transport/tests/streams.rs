@@ -257,18 +257,29 @@ async fn a_closed_peer_reports_a_reset_and_reconnects() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let _b2 = again.expect("the port frees up");
-    let reply = a
-        .request(
+    // The pool holds a failed dial for a short time, so the first tries can fail at once.
+    let mut reply = None;
+    for _ in 0..100 {
+        let sent = a.request(
             b_id,
             addr,
             Message::Ping { nonce: 3 },
             TraceContext::default(),
             one,
             false,
-        )
-        .await
-        .unwrap();
-    assert_eq!(reply.message, Message::Pong { nonce: 3 });
+        );
+        match sent.await {
+            Ok(r) => {
+                reply = Some(r);
+                break;
+            }
+            Err(e) => {
+                assert!(e.is_unsent(), "{e:?}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    assert_eq!(reply.unwrap().message, Message::Pong { nonce: 3 });
 }
 
 #[tokio::test]

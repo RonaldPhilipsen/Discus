@@ -18,6 +18,8 @@ pub enum Value {
     Bulk(Bytes),
     Null,
     Array(Vec<Value>),
+    /// An unordered collection of distinct values: `~` in RESP3, an array in RESP2.
+    Set(Vec<Value>),
     Map(Vec<(Value, Value)>),
     Boolean(bool),
     Double(f64),

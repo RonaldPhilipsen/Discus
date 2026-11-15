@@ -74,6 +74,7 @@ against one set of trust roots:
 - With `--otel-ca-file`, the node trusts only that CA bundle.
 - Without it, the node uses the trust roots of the build. The `roots-system` feature uses the
   system trust store. The `roots-webpki` feature uses the Mozilla roots that are compiled in.
+- If the trust root store is empty at start, the node logs a warning that names the endpoint.
 
 For mTLS, also pass `--otel-cert-file` and `--otel-key-file`.
 
@@ -295,8 +296,8 @@ set. The release image has no `/tmp`, and the chart makes the root file system r
 profiler cannot create the file, the node prints `cannot start the profiler` and exits with code 2.
 
 The profiler also needs system CA certificates, also for an `http://` URL, because its HTTP client
-loads them at start. The release image has none. An image built with `FEATURES=pyroscope` gets the
-CA bundle of the Debian build image. If the node finds no certificates, it prints
+loads them at start. Every release image has the CA bundle of the Debian build image. If the node
+finds no certificates, it prints
 `cannot start the profiler` and exits with code 2.
 
 To turn on profiling with the chart, set `pyroscope.url` and use an image with the feature. The

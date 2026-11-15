@@ -361,8 +361,10 @@ fn track_here(node: &Node, db: u32, key: &[u8], reply: &mut Reply) {
     }
 }
 
-/// Serve a single-key command on this node. A replica without an entry for the key first asks
-/// the other owners (read repair). `owners` are the current owners of the key.
+/// Serve a single-key command on this node. A replica without an entry for the key, or any owner
+/// while a handoff toward it is incomplete, first asks the other owners (read repair, spec
+/// sections 5.2 and 8.2). `owners` are the current owners of the key. With `track`, the reply
+/// carries `observed` and `settled`.
 pub fn serve_here(
     node: &Arc<Node>,
     spec: &'static CommandSpec,
@@ -370,15 +372,53 @@ pub fn serve_here(
     cmd: Command,
     write: bool,
     owners: &[NodeId],
+    track: bool,
 ) -> Dispatch {
     let sources = crate::replication::repair::sources(node, db, &cmd[1], write, owners);
     if sources.is_empty() {
-        return local_acked(node, spec, db, cmd);
+        return local_tracked(node, spec, db, cmd, track);
     }
     let node = node.clone();
     let key = cmd[1].clone();
     Dispatch::Pending(Box::pin(async move {
         crate::replication::repair::fetch(&node, db, &key, sources).await;
+        local_tracked(&node, spec, db, cmd, track).finish().await
+    }))
+}
+
+/// [`local_acked`], and with `track` [`track_here`] on the reply.
+fn local_tracked(
+    node: &Arc<Node>,
+    spec: &'static CommandSpec,
+    db: u32,
+    cmd: Command,
+    track: bool,
+) -> Dispatch {
+    if !track {
+        return local_acked(node, spec, db, cmd);
+    }
+    let owned = cmd[1].clone();
+    local_acked(node, spec, db, cmd)
+        .then(node, move |node, reply| track_here(node, db, &owned, reply))
+}
+
+/// Run a multi-key command or part with every key here, like [`local_acked`]. The keys that
+/// [`crate::replication::repair::plan`] names are fetched first.
+pub(crate) fn local_part(
+    node: &Arc<Node>,
+    spec: &'static CommandSpec,
+    db: u32,
+    cmd: Command,
+    write: bool,
+) -> Dispatch {
+    let keys = route::key_args(spec.route, &cmd).into_iter().flatten();
+    let plan = crate::replication::repair::plan(node, db, keys, write);
+    if plan.is_empty() {
+        return local_acked(node, spec, db, cmd);
+    }
+    let node = node.clone();
+    Dispatch::Pending(Box::pin(async move {
+        crate::replication::repair::fetch_all(&node, db, plan).await;
         local_acked(&node, spec, db, cmd).finish().await
     }))
 }
@@ -388,7 +428,23 @@ pub fn serve_here(
 pub fn run(node: &Arc<Node>, job: Job, writes: Option<&Writes>, route: Span) -> Dispatch {
     // With one owner per key, a read reaches that owner whatever the write set requires.
     let writes = writes.filter(|_| node.config.replication_factor > 1);
-    run_hop(node, job, Hop::default(), writes, route)
+    let set_reply = job.spec.set_reply;
+    let dispatch = run_hop(node, job, Hop::default(), writes, route);
+    if !set_reply {
+        return dispatch;
+    }
+    // A forwarded reply arrives as an array, so the entry node marks the set here, for local
+    // and forwarded replies alike.
+    let as_set = |mut reply: Reply| {
+        if let Value::Array(items) = reply.value {
+            reply.value = Value::Set(items);
+        }
+        reply
+    };
+    match dispatch {
+        Dispatch::Ready(reply) => Dispatch::Ready(as_set(reply)),
+        Dispatch::Pending(f) => Dispatch::Pending(Box::pin(async move { as_set(f.await) })),
+    }
 }
 
 /// Run a data command at any hop. A command that needs no other node runs inline. A command on
@@ -646,12 +702,10 @@ fn single_planned(
     let targets = match plan {
         Plan::Retry => return Dispatch::Ready(Reply::try_again()),
         Plan::Moved(moved) => return Dispatch::Ready(Reply::error(moved)),
-        Plan::Local if need.is_some() || hop.track => {
-            let owned = cmd[1].clone();
-            return local_acked(node, spec, db, cmd)
-                .then(node, move |node, reply| track_here(node, db, &owned, reply));
+        Plan::Local => {
+            let track = need.is_some() || hop.track;
+            return serve_here(node, spec, db, cmd, write, &owners, track);
         }
-        Plan::Local => return serve_here(node, spec, db, cmd, write, &owners),
         Plan::Forward(targets) => targets,
     };
     if targets.is_empty() {

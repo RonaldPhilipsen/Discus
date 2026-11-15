@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use bytes::Bytes;
+use discus_store::entry::ENTRY_OVERHEAD;
 use discus_store::{Entry, Value as Stored, ZSet};
 
 use super::error::CommandError;
@@ -69,7 +70,13 @@ pub fn mutate<'a, C: Collection, R>(
     f: impl FnOnce(&mut C) -> Result<R, CommandError>,
 ) -> Result<R, CommandError> {
     check_key(node, key)?;
-    admit(node, key.len() + grow_bytes)?;
+    // The size estimate adds a fixed cost per member, so a write of many small members admits
+    // that cost too. A member that exists already makes this an over-estimate.
+    let adds: Vec<&Bytes> = adds.into_iter().collect();
+    admit(
+        node,
+        key.len() + grow_bytes + adds.len() * ENTRY_OVERHEAD as usize,
+    )?;
     let stamp = node.stamp()?;
     node.write(db, key, stamp, |slot| {
         let mut entry = slot

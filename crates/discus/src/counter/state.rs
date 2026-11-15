@@ -167,7 +167,7 @@ impl Kind {
 }
 
 fn unknown(cmd: &Command) -> CommandError {
-    CommandError::UnknownCommand(upper(&cmd[0]).to_lowercase())
+    CommandError::UnknownCommand(upper(&cmd[0]).to_lowercase(), String::new())
 }
 
 type Reply = Result<Value, CommandError>;
@@ -840,11 +840,11 @@ mod tests {
         let mut s = CounterState::new();
         assert_eq!(
             run(&mut s, 1, &["HSet", "k"]),
-            CommandError::UnknownCommand("hset".into()).to_value()
+            CommandError::UnknownCommand("hset".into(), String::new()).to_value()
         );
         assert_eq!(
             s.read(1, 0, Kind::Set, &cmd(&["Set", "k", "v"])),
-            CommandError::UnknownCommand("set".into()).to_value()
+            CommandError::UnknownCommand("set".into(), String::new()).to_value()
         );
     }
 

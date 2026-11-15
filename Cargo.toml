@@ -8,3 +8,8 @@ license = "MIT"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
+
+# A panic in a background task (membership, replication, counters, a reload watcher) would leave
+# a node that passes liveness but half runs. Abort stops the process, and the pod restarts empty.
+[profile.release]
+panic = "abort"

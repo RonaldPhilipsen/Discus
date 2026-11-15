@@ -106,6 +106,7 @@ async fn bind_transport(
     }
 }
 
+pub mod accept;
 mod connection;
 pub(crate) mod file_watch;
 mod order;
@@ -202,13 +203,6 @@ fn watch_acl_file(node: &Arc<Node>, seen: file_watch::Snapshot, stop: Cancellati
 }
 
 /// Accept on `listener`, or wait forever without one.
-async fn accept_on(listener: Option<&TcpListener>) -> io::Result<(TcpStream, SocketAddr)> {
-    match listener {
-        Some(l) => l.accept().await,
-        None => std::future::pending().await,
-    }
-}
-
 /// Serve a connection that a client listener accepted. At `--max-clients` open connections the
 /// node closes it instead, before the transport setup, so a refused connection costs no handshake.
 fn start_client(
@@ -238,6 +232,7 @@ pub struct Server {
     admin: std::net::TcpListener,
     node: Arc<Node>,
     lane: ControlLane,
+    admin_lane: ControlLane,
     /// The QUIC endpoints, for a reload of the cluster certificates.
     transports: Vec<Transport>,
     /// The client and cluster certificate files before the node loaded them.
@@ -325,6 +320,7 @@ impl Server {
         node.set_counters(crate::counter::Counters::new(&node, leases));
         node.set_data_handle(tokio::runtime::Handle::current());
         let lane = ControlLane::start()?;
+        let admin_lane = ControlLane::start_named("discus-admin")?;
         let mut transports = Vec::new();
         if let Some(tls) = tls {
             let cfg = &node.config;
@@ -378,6 +374,7 @@ impl Server {
             admin,
             node,
             lane,
+            admin_lane,
             transports,
             tls_seen,
             acl_seen,
@@ -426,6 +423,7 @@ impl Server {
             admin,
             node,
             lane,
+            admin_lane,
             transports,
             tls_seen,
             acl_seen,
@@ -456,7 +454,7 @@ impl Server {
         node.security.start(stop_background.clone());
         let admin_task = {
             let (node, stop) = (node.clone(), stop_background.clone());
-            lane.spawn(async move {
+            admin_lane.spawn(async move {
                 // A tokio listener belongs to the runtime that registers it, so the conversion
                 // runs on the lane.
                 let admin = TcpListener::from_std(admin)?;
@@ -516,20 +514,19 @@ impl Server {
         }
 
         let drain = node.drain_token();
-        let result = loop {
+        let (mut client_backoff, mut redirect_backoff) = Default::default();
+        loop {
             tokio::select! {
-                _ = shutdown.cancelled() => break Ok(()),
-                _ = drain.cancelled() => break Ok(()),
-                accepted = listener.accept() => match accepted {
-                    Ok(client) => start_client(&node, &tracker, &hard_stop, client, false),
-                    Err(e) => break Err(e),
-                },
-                accepted = accept_on(redirect.as_ref()) => match accepted {
-                    Ok(client) => start_client(&node, &tracker, &hard_stop, client, true),
-                    Err(e) => break Err(e),
-                },
+                _ = shutdown.cancelled() => break,
+                _ = drain.cancelled() => break,
+                client = accept::accept(&listener, &mut client_backoff, "client") => {
+                    start_client(&node, &tracker, &hard_stop, client, false);
+                }
+                client = accept::accept_on(redirect.as_ref(), &mut redirect_backoff, "redirect") => {
+                    start_client(&node, &tracker, &hard_stop, client, true);
+                }
             }
-        };
+        }
 
         node.set_phase(Phase::Leaving);
         // LEAVING leaves placement in the next epoch, and the node keeps serving its open
@@ -542,6 +539,7 @@ impl Server {
         drop(redirect);
         tracker.close();
         let timeout = Duration::from_secs(node.config.shutdown_timeout_secs);
+        let deadline = tokio::time::Instant::now() + timeout;
         // The node stays a handoff source, flushes its queues, and hands its counter roles over
         // within the same deadline.
         let drained = async {
@@ -563,6 +561,11 @@ impl Server {
         if let Some(membership) = node.membership().cloned() {
             let _ = lane.spawn(async move { membership.depart().await }).await;
         }
+        // A forwarded write can arrive until the departure, so the queues drain once more
+        // before the transports close.
+        if let Some(replicator) = node.replicator() {
+            let _ = tokio::time::timeout_at(deadline, replicator.idle()).await;
+        }
         // The background tasks send on the transports, so they stop before the transports
         // close.
         stop_background.cancel();
@@ -573,7 +576,11 @@ impl Server {
         if let Some(link) = node.link() {
             link.transport.close();
         }
-        let _ = tokio::task::spawn_blocking(move || lane.shutdown()).await;
-        result
+        let _ = tokio::task::spawn_blocking(move || {
+            admin_lane.shutdown();
+            lane.shutdown();
+        })
+        .await;
+        Ok(())
     }
 }

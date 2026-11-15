@@ -837,9 +837,15 @@ impl Node {
         stamp: Version,
         f: impl FnOnce(&mut Slot) -> R,
     ) -> R {
-        let (result, changed) = self.store.write_changed(db, key, stamp, f);
-        if changed {
-            APPLIED.with(|a| a.set(Some(stamp)));
+        let (result, stored) = self.store.write_stamped(db, key, stamp, f);
+        if let Some(applied) = stored {
+            // The store raised the stamp past a newer stored version, so the clock observes it
+            // and the next stamp is newer still. It is one step above a version that this node
+            // issued or accepted, so the drift bound accepts it.
+            if applied != stamp {
+                let _ = self.hlc.observe(applied);
+            }
+            APPLIED.with(|a| a.set(Some(applied)));
             if let Some(replicator) = self.replicator() {
                 replicator.written(self, db, key);
             }
@@ -985,5 +991,31 @@ mod tests {
         assert_eq!(host_of(&empty, addr), None);
         let set = Config::parse_from(["discus", "--client-hostname", "{ip}.peers"]).unwrap();
         assert_eq!(host_of(&set, addr).as_deref(), Some("10-1-2-3.peers"));
+    }
+
+    /// An inbound entry lands between the stamp of a local write and its shard lock.
+    #[test]
+    fn a_write_after_a_newer_inbound_entry_stays_newest() {
+        let config = Config::parse_from(["discus"]).unwrap();
+        let live = crate::settings::Live::new(crate::settings::Reloadable::from_config(&config));
+        let security = Arc::new(crate::security::tests::security(&[]));
+        let node = Node::new(config, security, live);
+        let key = Bytes::from_static(b"k");
+        let stamp = node.stamp().unwrap();
+        let mut inbound = discus_store::Entry::new(discus_store::Value::Str("peer".into()), None);
+        inbound.version = node.stamp().unwrap();
+        let peer = inbound.version;
+        assert!(node.store.apply(0, &key, inbound));
+        Node::take_applied();
+        node.write(0, &key, stamp, |slot| {
+            slot.set(Some(discus_store::Entry::new(
+                discus_store::Value::Str("local".into()),
+                None,
+            )));
+        });
+        let applied = Node::take_applied().unwrap();
+        assert!(applied > peer);
+        assert_eq!(node.store.version(0, &key), Some(applied));
+        assert!(node.stamp().unwrap() > applied);
     }
 }

@@ -1,5 +1,6 @@
-//! The control lane: one OS thread with a current-thread runtime for membership, the gossip
-//! endpoint, and the admin server.
+//! A lane: one OS thread with a current-thread runtime. The node runs two. `discus-control` runs
+//! membership and the gossip endpoint. `discus-admin` runs the admin server, so a flood of admin
+//! requests never delays gossip.
 //!
 //! These tasks must keep running when the workers of the data runtime are saturated or blocked,
 //! so a peer does not declare the node dead and the kubelet does not restart it.
@@ -21,11 +22,16 @@ pub struct ControlLane {
 impl ControlLane {
     /// Start the `discus-control` thread.
     pub fn start() -> io::Result<ControlLane> {
+        ControlLane::start_named("discus-control")
+    }
+
+    /// Start a lane on a thread called `name`.
+    pub fn start_named(name: &str) -> io::Result<ControlLane> {
         let runtime = Builder::new_current_thread().enable_all().build()?;
         let handle = runtime.handle().clone();
         let (stop, stopped) = oneshot::channel::<()>();
         let thread = std::thread::Builder::new()
-            .name("discus-control".into())
+            .name(name.into())
             .spawn(move || {
                 runtime.block_on(async {
                     let _ = stopped.await;
