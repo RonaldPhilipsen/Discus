@@ -131,3 +131,10 @@ pub async fn run_in(
         .await
         .value
 }
+
+/// Write `content` to the file `name` in `dir` and return its path.
+pub fn write_in(dir: &tempfile::TempDir, name: &str, content: &str) -> String {
+    let path = dir.path().join(name);
+    std::fs::write(&path, content).unwrap();
+    path.to_str().unwrap().to_string()
+}

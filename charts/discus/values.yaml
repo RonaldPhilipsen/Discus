@@ -70,7 +70,7 @@ clientTls:
   clientAuth: optional
 
 # The flag --auth-policy, for example all:mtls or all:oauth2. Required without
-# sharedToken.secretName: the chart fails when the value is empty, because a node without a policy
+# aclFile.secretName: the chart fails when the value is empty, because a node without a policy
 # refuses to start. The value none gives every client that completes the TLS handshake read and
 # write access, without credentials.
 authPolicy: ""
@@ -78,13 +78,13 @@ authConfig:
   # A Secret with the key auth.toml, for the flag --auth-config. The file lists the trusted
   # issuers and the client certificate rules. See docs/security.md.
   secretName: ""
-sharedToken:
-  # A Secret with the shared token, for the flag --shared-token-file. The node then uses the
-  # policy all:shared_token, unless authPolicy names another policy with shared_token. After
-  # the Secret changes, the node reads the new token without a restart.
+aclFile:
+  # A Secret with the users, their passwords, and their rules, for the flag --acl-file. The node
+  # then uses the policy all:password, unless authPolicy names another policy with password.
+  # After the Secret changes, the node reads the new file without a restart. See docs/security.md.
   secretName: ""
-  # The key of the Secret that holds the token.
-  key: token
+  # The key of the Secret that holds the file.
+  key: users.acl
 
 # The number of databases that SELECT accepts. A higher value reaches the nodes through the
 # settings file, so it needs no restart. A lower value applies nothing: see docs/cluster.md for the

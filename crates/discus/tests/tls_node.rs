@@ -18,15 +18,15 @@ fn tls_args<'a>(ca: &'a TestCa, server: &'a security_support::CertFiles) -> Vec<
 }
 
 #[tokio::test]
-async fn the_shared_token_policy_needs_auth() {
+async fn the_password_policy_needs_auth() {
     let ca = TestCa::new();
     let server = ca.server_cert();
     let mut args = tls_args(&ca, &server);
     args.extend([
         "--auth-policy",
-        "all:shared_token",
-        "--shared-token",
-        "s3cret",
+        "all:password",
+        "--acl-file",
+        security_support::common::client_tls::password_file("s3cret"),
     ]);
     let node = start(&args).await;
     let mut s = tls_connect(node.addr, &ca, None).await.unwrap();
@@ -149,9 +149,9 @@ scopes = ["discus.read"]
     let mut args = tls_args(&ca, &server);
     args.extend([
         "--auth-policy",
-        "any:mtls,shared_token",
-        "--shared-token",
-        "s3cret",
+        "any:mtls,password",
+        "--acl-file",
+        security_support::common::client_tls::password_file("s3cret"),
         "--auth-config",
         file.to_str().unwrap(),
     ]);

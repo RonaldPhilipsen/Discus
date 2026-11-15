@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 
 use discus_resp::{Command, Value};
 
+use super::category::Categories;
 use super::error::CommandError;
 use crate::cluster::route::Route;
 use crate::node::{ConnState, Node};
@@ -20,12 +21,40 @@ pub enum Access {
     Read,
     /// Changes data. Needs `discus.write`.
     Write,
+    /// Shows or changes the users of the node. Needs `discus.admin`. Only a subcommand has it.
+    Admin,
 }
 
 pub type Handler = fn(&Node, &mut ConnState, &Command) -> Result<Value, CommandError>;
 
+/// One subcommand with its own ACL rule, such as `acl|list`.
+#[derive(Debug, Clone, Copy)]
+pub struct Subcommand {
+    /// In upper case, without the name of its command.
+    pub name: &'static str,
+    /// Complete: the registry adds nothing.
+    pub categories: Categories,
+    /// What a login without a user needs from its scopes. The scopes have no rule for one
+    /// subcommand, so this replaces the access of the command.
+    pub access: Access,
+    /// A bit of the per-user command set, after the ids of the commands. 0 in a `COMMANDS` array:
+    /// only the registry sets it.
+    pub id: u16,
+}
+
+impl Subcommand {
+    pub const fn new(name: &'static str, categories: Categories, access: Access) -> Subcommand {
+        Subcommand {
+            name,
+            categories,
+            access,
+            id: 0,
+        }
+    }
+}
+
 /// One command. A negative arity means "at least |arity|" arguments, counting the name.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct CommandSpec {
     pub name: &'static str,
     pub arity: i32,
@@ -34,6 +63,14 @@ pub struct CommandSpec {
     pub route: Route,
     /// The `fast` flag of `COMMAND`, as Valkey sets it.
     pub fast: bool,
+    /// The position in `specs()`. 0 in a `COMMANDS` array: only the registry sets it.
+    pub id: u16,
+    pub categories: Categories,
+    /// A write command that also returns or uses the old value of its key.
+    pub reads_old: bool,
+    /// The subcommands that have their own ACL rule. A subcommand without an entry uses the rule
+    /// of the command.
+    pub subcommands: &'static [Subcommand],
 }
 
 impl CommandSpec {
@@ -46,6 +83,10 @@ impl CommandSpec {
             access: Access::Connection,
             route: Route::Connection,
             fast: false,
+            id: 0,
+            reads_old: false,
+            categories: Categories::EMPTY,
+            subcommands: &[],
         }
     }
 
@@ -58,6 +99,10 @@ impl CommandSpec {
             access: Access::Read,
             route: Route::Single { write: false },
             fast: false,
+            id: 0,
+            reads_old: false,
+            categories: Categories::EMPTY,
+            subcommands: &[],
         }
     }
 
@@ -70,6 +115,10 @@ impl CommandSpec {
             access: Access::Write,
             route: Route::Single { write: true },
             fast: false,
+            id: 0,
+            reads_old: false,
+            categories: Categories::EMPTY,
+            subcommands: &[],
         }
     }
 
@@ -84,35 +133,143 @@ impl CommandSpec {
     pub const fn with_fast(self) -> CommandSpec {
         CommandSpec { fast: true, ..self }
     }
+
+    pub const fn with_reads_old(self) -> CommandSpec {
+        CommandSpec {
+            reads_old: true,
+            ..self
+        }
+    }
+
+    pub const fn with_categories(self, categories: Categories) -> CommandSpec {
+        CommandSpec { categories, ..self }
+    }
+
+    pub const fn with_subcommands(self, subcommands: &'static [Subcommand]) -> CommandSpec {
+        CommandSpec {
+            subcommands,
+            ..self
+        }
+    }
+
+    /// The entry of the subcommand that `cmd` names, when it has one.
+    pub fn subcommand(&self, cmd: &Command) -> Option<&'static Subcommand> {
+        self.subcommand_named(cmd.get(1)?)
+    }
+
+    /// The entry of the subcommand `name`, ignoring case.
+    pub fn subcommand_named(&self, name: &[u8]) -> Option<&'static Subcommand> {
+        self.subcommands
+            .iter()
+            .find(|sub| sub.name.as_bytes().eq_ignore_ascii_case(name))
+    }
+
+    /// The name in an ACL rule and in a `NOPERM` error: `get`, or `acl|list` with `sub`.
+    pub fn rule_name(&self, sub: Option<&Subcommand>) -> String {
+        let mut name = self.name.to_ascii_lowercase();
+        if let Some(sub) = sub {
+            name.push('|');
+            name.push_str(&sub.name.to_ascii_lowercase());
+        }
+        name
+    }
 }
+
+/// The ids of the commands and of the subcommands fit the per-user bit set of the ACL, which has
+/// this many bits.
+pub const MAX_COMMANDS: usize = 256;
 
 /// Keyed by the upper-case name bytes, so a lookup needs no UTF-8 check. The names are fixed, so
 /// the map needs no defense against crafted keys and uses a fast hash.
-type Registry = HashMap<&'static [u8], &'static CommandSpec, foldhash::fast::FixedState>;
+type ByName = HashMap<&'static [u8], &'static CommandSpec, foldhash::fast::FixedState>;
+
+struct Registry {
+    specs: &'static [CommandSpec],
+    by_name: ByName,
+}
 
 fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(|| {
-        [
-            super::connection::COMMANDS,
-            super::string::COMMANDS,
-            super::keys::COMMANDS,
-            super::hash::COMMANDS,
-            super::set::COMMANDS,
-            super::zset::COMMANDS,
-        ]
-        .into_iter()
-        .flatten()
-        .map(|spec| (spec.name.as_bytes(), spec))
-        .collect()
+        let modules: [(&[CommandSpec], Categories); 6] = [
+            (super::connection::COMMANDS, Categories::CONNECTION),
+            (super::string::COMMANDS, Categories::STRING),
+            (super::keys::COMMANDS, Categories::KEYSPACE),
+            (super::hash::COMMANDS, Categories::HASH),
+            (super::set::COMMANDS, Categories::SET),
+            (super::zset::COMMANDS, Categories::SORTEDSET),
+        ];
+        let mut all: Vec<CommandSpec> = modules
+            .into_iter()
+            .flat_map(|(specs, module)| {
+                specs.iter().map(move |spec| CommandSpec {
+                    categories: categories_of(spec, module),
+                    ..*spec
+                })
+            })
+            .collect();
+        all.sort_unstable_by_key(|spec| spec.name);
+        for (i, spec) in all.iter_mut().enumerate() {
+            spec.id = i as u16;
+        }
+        let mut next = all.len();
+        for spec in all.iter_mut().filter(|spec| !spec.subcommands.is_empty()) {
+            let subs: Vec<Subcommand> = spec
+                .subcommands
+                .iter()
+                .enumerate()
+                .map(|(i, sub)| Subcommand {
+                    id: (next + i) as u16,
+                    ..*sub
+                })
+                .collect();
+            next += subs.len();
+            spec.subcommands = Vec::leak(subs);
+        }
+        assert!(
+            next <= MAX_COMMANDS,
+            "more than {MAX_COMMANDS} commands and subcommands"
+        );
+        let specs: &'static [CommandSpec] = Vec::leak(all);
+        Registry {
+            specs,
+            by_name: specs
+                .iter()
+                .map(|spec| (spec.name.as_bytes(), spec))
+                .collect(),
+        }
     })
+}
+
+/// `module` is the default of the module of `spec`, for a spec with no explicit categories.
+fn categories_of(spec: &CommandSpec, module: Categories) -> Categories {
+    let mut c = if spec.categories == Categories::EMPTY {
+        module
+    } else {
+        spec.categories
+    };
+    if spec.access == Access::Write {
+        c = c.union(Categories::WRITE);
+    }
+    // INFO and CONFIG read node state, not data. Valkey gives them no @read.
+    if spec.access == Access::Read && spec.route != Route::Connection {
+        c = c.union(Categories::READ);
+    }
+    c.union(if spec.fast {
+        Categories::FAST
+    } else {
+        Categories::SLOW
+    })
+}
+
+/// Every command, sorted by name. `specs()[i].id == i`.
+pub fn specs() -> &'static [CommandSpec] {
+    registry().specs
 }
 
 /// The names of every supported command, sorted.
 pub fn names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = registry().values().map(|spec| spec.name).collect();
-    names.sort_unstable();
-    names
+    registry().specs.iter().map(|spec| spec.name).collect()
 }
 
 /// No command name is longer than this, so a longer name is unknown without a lookup.
@@ -124,7 +281,7 @@ pub fn lookup(name: &[u8]) -> Option<&'static CommandSpec> {
     let upper = buf.get_mut(..name.len())?;
     upper.copy_from_slice(name);
     upper.make_ascii_uppercase();
-    registry().get(&*upper).copied()
+    registry().by_name.get(&*upper).copied()
 }
 
 /// Names that Discus recognizes and rejects on purpose.
@@ -208,5 +365,84 @@ mod tests {
         assert_eq!(access(b"GET"), Access::Read);
         assert_eq!(access(b"SET"), Access::Write);
         assert_eq!(access(b"PING"), Access::Connection);
+    }
+
+    fn cats(name: &[u8]) -> Vec<&'static str> {
+        lookup(name).unwrap().categories.names().collect()
+    }
+
+    #[test]
+    fn commands_have_the_categories_of_valkey() {
+        // The expected values are the replies of `COMMAND INFO` of redis-server 8.10.2.
+        assert_eq!(cats(b"GET"), ["read", "string", "fast"]);
+        assert_eq!(cats(b"SET"), ["write", "string", "slow"]);
+        assert_eq!(cats(b"INCR"), ["write", "string", "fast"]);
+        assert_eq!(cats(b"MSET"), ["write", "string", "slow"]);
+        assert_eq!(cats(b"DEL"), ["keyspace", "write", "slow"]);
+        assert_eq!(cats(b"EXPIRE"), ["keyspace", "write", "fast"]);
+        assert_eq!(cats(b"DBSIZE"), ["keyspace", "read", "fast"]);
+        assert_eq!(cats(b"SCAN"), ["keyspace", "read", "slow"]);
+        assert_eq!(cats(b"HGET"), ["read", "hash", "fast"]);
+        assert_eq!(cats(b"HGETALL"), ["read", "hash", "slow"]);
+        assert_eq!(cats(b"SMEMBERS"), ["read", "set", "slow"]);
+        assert_eq!(cats(b"SISMEMBER"), ["read", "set", "fast"]);
+        assert_eq!(cats(b"ZADD"), ["write", "sortedset", "fast"]);
+        assert_eq!(cats(b"ZRANGE"), ["read", "sortedset", "slow"]);
+        assert_eq!(
+            cats(b"FLUSHALL"),
+            ["keyspace", "write", "slow", "dangerous"]
+        );
+        assert_eq!(cats(b"SWAPDB"), ["keyspace", "write", "fast", "dangerous"]);
+        assert_eq!(cats(b"PING"), ["fast", "connection"]);
+        assert_eq!(cats(b"INFO"), ["slow", "dangerous"]);
+        assert_eq!(cats(b"CONFIG"), ["admin", "slow", "dangerous"]);
+        assert_eq!(cats(b"CLUSTER"), ["slow", "connection"]);
+    }
+
+    #[test]
+    fn ids_are_the_positions_in_specs() {
+        assert!(specs().len() <= MAX_COMMANDS);
+        for (i, spec) in specs().iter().enumerate() {
+            assert_eq!(usize::from(spec.id), i);
+            assert_eq!(lookup(spec.name.as_bytes()).unwrap().id, spec.id);
+        }
+        assert!(specs().windows(2).all(|w| w[0].name < w[1].name));
+    }
+
+    #[test]
+    fn subcommands_have_their_own_ids_and_categories() {
+        // The expected categories are the replies of `COMMAND INFO acl` of redis-server 8.10.2.
+        // `WHOAMI` and `CAT` are also in `@connection`, as the command `ACL` is in Discus.
+        let acl = lookup(b"ACL").unwrap();
+        let sub = |name: &str| {
+            let cmd: Command = vec!["ACL".into(), bytes::Bytes::copy_from_slice(name.as_bytes())];
+            acl.subcommand(&cmd)
+        };
+        let cats = |name: &str| sub(name).unwrap().categories.names().collect::<Vec<_>>();
+        for name in [
+            "LIST", "USERS", "GETUSER", "SETUSER", "DELUSER", "LOAD", "SAVE", "LOG", "DRYRUN",
+        ] {
+            assert_eq!(cats(name), ["admin", "slow", "dangerous"], "{name}");
+            assert_eq!(sub(name).unwrap().access, Access::Admin);
+        }
+        assert_eq!(cats("whoami"), ["slow", "connection"]);
+        assert_eq!(sub("whoami").unwrap().access, Access::Connection);
+        assert_eq!(cats("Cat"), ["slow", "connection"]);
+        assert_eq!(cats("GENPASS"), ["slow"]);
+        assert!(sub("BOGUS").is_none());
+        assert!(acl.subcommand(&vec!["ACL".into()]).is_none());
+        assert_eq!(acl.rule_name(sub("LIST")), "acl|list");
+        assert_eq!(acl.rule_name(None), "acl");
+
+        let mut ids: Vec<u16> = specs()
+            .iter()
+            .flat_map(|spec| spec.subcommands.iter().map(|sub| sub.id))
+            .collect();
+        assert!(ids.iter().all(|id| usize::from(*id) >= specs().len()));
+        assert!(ids.iter().all(|id| usize::from(*id) < MAX_COMMANDS));
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), acl.subcommands.len());
+        assert!(lookup(b"GET").unwrap().subcommands.is_empty());
     }
 }

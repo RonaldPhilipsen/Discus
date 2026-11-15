@@ -8,7 +8,7 @@ use std::time::Duration;
 use security_support::idp::{unix_now, MockIdp};
 use security_support::{
     cmd, exchange, send, start, start_oauth2, status, tls_connect, try_start, wait_status,
-    write_file, Node, TestCa,
+    write_file, Node, TestCa, ACL_USERS,
 };
 use serde_json::json;
 
@@ -186,7 +186,7 @@ async fn the_old_tls_factor_still_starts_and_means_all_oauth2() {
     let file = write_file(&ca, "auth.toml", &idp.toml(&ca, ""));
     let node = start(&[
         "--auth-policy",
-        "all:tls,oauth2",
+        "all:oauth2",
         "--dev-insecure-oauth2",
         "--auth-config",
         &file,
@@ -239,15 +239,76 @@ async fn all_mtls_oauth2_needs_both_factors() {
 }
 
 #[tokio::test]
+async fn a_name_of_the_acl_file_takes_the_password_path() {
+    let ca = TestCa::new();
+    let idp = MockIdp::start(&ca).await;
+    let node = acl_node(&ca, &idp, "any:password,oauth2", ACL_USERS).await;
+    let t = idp.token("discus.read");
+    let named = send(&node, &cmd(&["AUTH", "reader", &t])).await;
+    assert!(named.starts_with("-WRONGPASS"), "{named:?}");
+    // A name that the file does not have is only a hint.
+    assert_eq!(send(&node, &cmd(&["AUTH", "someone", &t])).await, "+OK\r\n");
+    assert_eq!(send(&node, &cmd(&["AUTH", "OAUTH2", &t])).await, "+OK\r\n");
+    // The user default is off, so the value goes on to the token check.
+    assert_eq!(auth(&node, &t).await, "+OK\r\n");
+}
+
+/// A node with the policy `policy`, the issuer of `idp`, and the users of `acl`.
+async fn acl_node(ca: &TestCa, idp: &MockIdp, policy: &str, acl: &str) -> Node {
+    let file = write_file(ca, "auth.toml", &idp.toml(ca, ""));
+    security_support::start_users_oauth2(ca, &file, policy, acl, &[]).await
+}
+
+#[tokio::test]
+async fn the_name_default_is_the_form_without_a_name() {
+    let ca = TestCa::new();
+    let idp = MockIdp::start(&ca).await;
+    let node = acl_node(&ca, &idp, "any:password,oauth2", ACL_USERS).await;
+    let t = idp.token("discus.read");
+    assert_eq!(send(&node, &cmd(&["AUTH", "default", &t])).await, "+OK\r\n");
+    let hello = send(&node, &cmd(&["HELLO", "3", "AUTH", "default", &t])).await;
+    assert!(hello.starts_with('%'), "{hello:?}");
+    // Only the exact text `default` counts, because user names are case-sensitive.
+    let upper = send(&node, &cmd(&["AUTH", "DEFAULT", &t])).await;
+    assert_eq!(upper, "+OK\r\n", "an unknown name is a hint");
+}
+
+#[tokio::test]
+async fn the_name_default_logs_in_the_user_default() {
+    let ca = TestCa::new();
+    let idp = MockIdp::start(&ca).await;
+    let acl = "user default on >default-pass ~cache:* +@read +@connection\n";
+    let node = acl_node(&ca, &idp, "any:password,oauth2", acl).await;
+    let mut s = security_support::common::client_tls::connect(node.addr).await;
+    let mut wire = cmd(&["AUTH", "default", "default-pass"]);
+    wire.extend(cmd(&["ACL", "WHOAMI"]));
+    wire.extend(cmd(&["SET", "cache:a", "1"]));
+    assert_eq!(
+        exchange(&mut s, &wire).await,
+        "+OK\r\n$7\r\ndefault\r\n\
+         -NOPERM this user has no permissions to run the 'set' command\r\n"
+    );
+}
+
+#[tokio::test]
+async fn a_wrong_password_of_default_fails_without_oauth2() {
+    let ca = TestCa::new();
+    let acl = write_file(&ca, "users.acl", ACL_USERS);
+    let node = start(&["--auth-policy", "all:password", "--acl-file", &acl]).await;
+    let r = send(&node, &cmd(&["AUTH", "default", "wrong"])).await;
+    assert!(r.starts_with("-WRONGPASS"), "{r:?}");
+}
+
+#[tokio::test]
 async fn issuers_without_oauth2_in_the_policy_are_refused() {
     let ca = TestCa::new();
     let idp = MockIdp::start(&ca).await;
     let file = write_file(&ca, "auth.toml", &idp.toml(&ca, ""));
     let e = try_start(&[
         "--auth-policy",
-        "any:shared_token",
-        "--shared-token",
-        "x",
+        "any:password",
+        "--acl-file",
+        security_support::common::client_tls::password_file("x"),
         "--auth-config",
         &file,
     ])

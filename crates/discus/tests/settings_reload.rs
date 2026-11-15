@@ -7,15 +7,8 @@ mod security_support;
 use std::path::Path;
 use std::time::Duration;
 
-use security_support::{common, tls_connect, TestCa};
+use security_support::{common, eventually, replace_file, tls_connect, TestCa};
 use tokio_util::sync::CancellationToken;
-
-/// A rename replaces the file in one step, so the node never reads a half-written file.
-fn write_settings(path: &std::path::Path, text: &str) {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, text).unwrap();
-    std::fs::rename(&tmp, path).unwrap();
-}
 
 async fn info_discus(conn: &mut redis::aio::MultiplexedConnection) -> String {
     redis::cmd("INFO")
@@ -29,7 +22,7 @@ async fn info_discus(conn: &mut redis::aio::MultiplexedConnection) -> String {
 async fn a_running_node_applies_a_changed_hold_budget() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("discus.toml");
-    write_settings(&path, "version = 1\n[budget]\nhold-ms = 3000\n");
+    replace_file(&path, "version = 1\n[budget]\nhold-ms = 3000\n");
     let path_arg = path.to_str().unwrap().to_string();
     let mut argv = vec![
         "discus",
@@ -57,7 +50,7 @@ async fn a_running_node_applies_a_changed_hold_budget() {
     let info = info_discus(&mut conn).await;
     assert!(info.contains("config_generation:0"), "{info}");
 
-    write_settings(&path, "version = 1\n[budget]\nhold-ms = 1500\n");
+    replace_file(&path, "version = 1\n[budget]\nhold-ms = 1500\n");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let info = info_discus(&mut conn).await;
@@ -80,7 +73,7 @@ async fn a_running_node_applies_a_changed_hold_budget() {
 async fn a_file_broken_after_the_start_keeps_the_start_version() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("discus.toml");
-    write_settings(&path, "version = 1\n[budget]\nhold-ms = 1500\n");
+    replace_file(&path, "version = 1\n[budget]\nhold-ms = 1500\n");
     let path_arg = path.to_str().unwrap().to_string();
     let mut argv = vec![
         "discus",
@@ -97,7 +90,7 @@ async fn a_file_broken_after_the_start_keeps_the_start_version() {
     argv.extend(tls.iter().map(String::as_str));
     let config = discus::Config::load_from(argv).unwrap();
     // The startup re-apply of the node reads this broken file and fails.
-    write_settings(&path, "version = 1\n[budget]\nhold-ms = -1\n");
+    replace_file(&path, "version = 1\n[budget]\nhold-ms = -1\n");
     let server = discus::Server::bind(config).await.unwrap();
     let addr = server.local_addr();
     let node = server.node().clone();
@@ -119,21 +112,12 @@ fn copy(from: &Path, to: &Path) {
     std::fs::write(to, std::fs::read(from).unwrap()).unwrap();
 }
 
-/// Wait until `ok` is true, for at most 60 s.
-async fn eventually<F: std::future::Future<Output = bool>>(what: &str, mut ok: impl FnMut() -> F) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    while !ok().await {
-        assert!(tokio::time::Instant::now() < deadline, "{what} within 60 s");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-}
-
 #[tokio::test]
 async fn a_zero_tls_period_pauses_and_resumes() {
     let (old, new) = (TestCa::new(), TestCa::new());
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("discus.toml");
-    write_settings(&path, "version = 1\n[tls]\nreload-secs = 10\n");
+    replace_file(&path, "version = 1\n[tls]\nreload-secs = 10\n");
     let (cert, key) = (dir.path().join("tls.crt"), dir.path().join("tls.key"));
     let first = old.server_cert();
     copy(&first.cert, &cert);
@@ -165,7 +149,7 @@ async fn a_zero_tls_period_pauses_and_resumes() {
     let first_check = tokio::time::Instant::now() + Duration::from_secs(10);
     assert!(tls_connect(addr, &old, None).await.is_ok());
 
-    write_settings(&path, "version = 1\n[tls]\nreload-secs = 0\n");
+    replace_file(&path, "version = 1\n[tls]\nreload-secs = 0\n");
     eventually("the node did not pause the certificate reload", || async {
         node.live_settings.get().tls_reload.is_zero()
     })
@@ -183,7 +167,7 @@ async fn a_zero_tls_period_pauses_and_resumes() {
     );
     assert!(tls_connect(addr, &new, None).await.is_err());
 
-    write_settings(&path, "version = 1\n[tls]\nreload-secs = 1\n");
+    replace_file(&path, "version = 1\n[tls]\nreload-secs = 1\n");
     eventually("the node did not resume the certificate reload", || async {
         tls_connect(addr, &new, None).await.is_ok()
     })
@@ -194,7 +178,7 @@ async fn a_zero_tls_period_pauses_and_resumes() {
 async fn info_shows_the_settings_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("discus.toml");
-    write_settings(&path, "version = 1\n[budget]\nhold-ms = 3000\n");
+    replace_file(&path, "version = 1\n[budget]\nhold-ms = 3000\n");
     let path_arg = path.to_str().unwrap().to_string();
     let mut argv = vec![
         "discus",
@@ -281,7 +265,7 @@ async fn a_running_node_raises_its_count() {
     let net = common::gossip::Net::new();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("discus.toml");
-    write_settings(&path, "version = 1\ndatabases = 1\n");
+    replace_file(&path, "version = 1\ndatabases = 1\n");
     let path_arg = path.to_str().unwrap().to_string();
     let node = net
         .start(
@@ -293,7 +277,7 @@ async fn a_running_node_raises_its_count() {
     let local = || node.node.databases.local();
     let announced = || node.node.membership().unwrap().local().databases;
 
-    write_settings(&path, "version = 1\ndatabases = 3\n");
+    replace_file(&path, "version = 1\ndatabases = 3\n");
     let raised =
         common::gossip::wait_until(Duration::from_secs(30), || local() == 3 && announced() == 3)
             .await;
@@ -301,7 +285,7 @@ async fn a_running_node_raises_its_count() {
     let info = info_discus(&mut conn).await;
     assert!(info.contains("config_restart_pending:\r\n"), "{info}");
 
-    write_settings(&path, "version = 1\ndatabases = 2\n");
+    replace_file(&path, "version = 1\ndatabases = 2\n");
     eventually("the node did not name databases as pending", || async {
         info_discus(&mut conn.clone())
             .await

@@ -1,9 +1,11 @@
 //! The authentication state of one client connection.
 
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use bytes::Bytes;
 
+use super::acl::User;
 use super::policy::{Factor, Policy, Scopes};
 
 /// A verified client certificate and the scopes its identity maps to.
@@ -38,17 +40,24 @@ impl std::fmt::Debug for TokenGrant {
     }
 }
 
+/// A logged-in user of the ACL file.
+#[derive(Debug, Clone)]
+pub struct UserGrant {
+    pub user: Arc<User>,
+    /// The ACL generation that `user` comes from.
+    pub generation: u64,
+}
+
 /// What the node knows about the client of one connection.
 #[derive(Debug, Clone, Default)]
 pub struct ConnAuth {
     /// The client address. In `lb` mode it is the address that the PROXY header carries.
     pub peer: Option<IpAddr>,
     pub cert: Option<CertGrant>,
-    /// The client sent the shared token.
-    pub shared: bool,
     pub token: Option<TokenGrant>,
     /// Failed authentication attempts on this connection.
     pub failures: u32,
+    pub user: Option<UserGrant>,
 }
 
 impl ConnAuth {
@@ -63,40 +72,46 @@ impl ConnAuth {
         match f {
             Factor::Mtls => self.cert.is_some(),
             Factor::Oauth2 => self.token.is_some(),
-            Factor::SharedToken => self.shared,
+            Factor::Password => self.user.is_some(),
         }
     }
 
-    /// The scopes that one factor grants.
+    /// True when the connection meets the policy.
+    pub fn authenticated(&self, policy: &Policy) -> bool {
+        match policy {
+            Policy::None => true,
+            Policy::All(factors) => factors.iter().all(|f| self.has(*f)),
+            Policy::Any(factors) => factors.iter().any(|f| self.has(*f)),
+        }
+    }
+
+    /// The scopes that one identity factor grants. A user grant gives no scopes: its rules decide.
     fn grant(&self, f: Factor) -> Option<Scopes> {
         match f {
             Factor::Mtls => self.cert.as_ref().map(|c| c.scopes),
             Factor::Oauth2 => self.token.as_ref().map(|t| t.scopes),
-            Factor::SharedToken => self.shared.then_some(Scopes::READ_WRITE),
+            Factor::Password => None,
         }
     }
 
-    /// The scopes of the connection, or `None` when the policy is not met.
+    /// The scopes from the certificate and the token. `None` when the policy is
+    /// not met, or when none of them applies. A user grant gives no scopes: its rules decide.
     ///
     /// `all` takes the intersection of the factors, so the strictest factor wins. `any`
     /// takes the union of the factors that are present.
     pub fn scopes(&self, policy: &Policy) -> Option<Scopes> {
-        match policy {
-            Policy::None => Some(Scopes::READ_WRITE),
-            Policy::All(factors) => {
-                if !factors.iter().all(|f| self.has(*f)) {
-                    return None;
-                }
-                factors
-                    .iter()
-                    .filter_map(|f| self.grant(*f))
-                    .reduce(Scopes::intersect)
-            }
-            Policy::Any(factors) => factors
-                .iter()
-                .filter_map(|f| self.grant(*f))
-                .reduce(Scopes::union),
+        let (factors, combine): (_, fn(Scopes, Scopes) -> Scopes) = match policy {
+            Policy::None => return Some(Scopes::READ_WRITE),
+            Policy::All(factors) => (factors, Scopes::intersect),
+            Policy::Any(factors) => (factors, Scopes::union),
+        };
+        if !self.authenticated(policy) {
+            return None;
         }
+        factors
+            .iter()
+            .filter_map(|f| self.grant(*f))
+            .reduce(combine)
     }
 }
 
@@ -116,13 +131,13 @@ mod tests {
     }
 
     fn policy(s: &str) -> Policy {
-        Policy::parse(s).unwrap().policy
+        Policy::parse(s).unwrap()
     }
 
     #[test]
     fn a_connection_without_credentials_never_meets_a_policy() {
         let a = ConnAuth::default();
-        for p in ["all:oauth2", "all:tls,oauth2", "any:oauth2"] {
+        for p in ["all:oauth2", "any:oauth2"] {
             assert_eq!(a.scopes(&policy(p)), None, "{p}");
         }
     }
@@ -156,13 +171,28 @@ mod tests {
         assert_eq!(ConnAuth::default().scopes(&p), None);
     }
 
+    fn grant() -> UserGrant {
+        UserGrant {
+            user: Arc::new(User::new("u")),
+            generation: 0,
+        }
+    }
+
     #[test]
-    fn the_shared_token_grants_read_write() {
+    fn a_user_meets_the_password_factor_and_gives_no_scopes() {
         let a = ConnAuth {
-            shared: true,
+            user: Some(grant()),
             ..ConnAuth::default()
         };
-        let p = policy("any:shared_token");
-        assert_eq!(a.scopes(&p), Some(Scopes::READ_WRITE));
+        let all = policy("all:password");
+        assert!(a.authenticated(&all));
+        assert_eq!(a.scopes(&all), None);
+        assert!(!ConnAuth::default().authenticated(&all));
+
+        let any = policy("any:mtls,password");
+        assert!(a.authenticated(&any));
+        assert!(!ConnAuth::default().authenticated(&any));
+        let both = policy("all:mtls,password");
+        assert!(!a.authenticated(&both));
     }
 }

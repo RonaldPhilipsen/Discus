@@ -202,7 +202,10 @@ mod otel {
         let _serial = serial();
         let h = TraceHarness::new(0.0);
         let m = h.telemetry.metrics();
-        let node = node(args(&["--shared-token", "t"]));
+        let node = node(args(&[
+            "--acl-file",
+            common::client_tls::password_file("t"),
+        ]));
         let mut conn = ConnState::new(1, ConnAuth::default());
         for c in [
             &["AUTH", "wrong"][..],

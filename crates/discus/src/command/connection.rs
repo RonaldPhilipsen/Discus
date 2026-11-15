@@ -7,8 +7,9 @@ use discus_placement::{slot, Epoch};
 use discus_resp::{Command, Protocol, Value};
 use discus_telemetry::attrs::TopologyCommand;
 
+use super::category::Categories;
 use super::error::CommandError;
-use super::table::{check, lookup, names, Access, CommandSpec};
+use super::table::{check, lookup, names, specs, Access, CommandSpec, Subcommand};
 use super::util::{glob_match, parse_i64, upper};
 use crate::build;
 use crate::cluster::route::key_args;
@@ -19,20 +20,54 @@ use crate::node::{ConnState, Node};
 pub const REDIS_VERSION: &str = "7.2.0";
 
 pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec::connection("PING", -1, ping),
-    CommandSpec::connection("ECHO", 2, echo),
-    CommandSpec::connection("QUIT", -1, quit).with_access(Access::Public),
-    CommandSpec::connection("AUTH", -2, auth).with_access(Access::Public),
-    CommandSpec::connection("HELLO", -1, hello).with_access(Access::Public),
-    CommandSpec::connection("SELECT", 2, select),
+    CommandSpec::connection("PING", -1, ping).with_fast(),
+    CommandSpec::connection("ECHO", 2, echo).with_fast(),
+    CommandSpec::connection("QUIT", -1, quit)
+        .with_access(Access::Public)
+        .with_fast(),
+    CommandSpec::connection("AUTH", -2, auth)
+        .with_access(Access::Public)
+        .with_fast(),
+    CommandSpec::connection("HELLO", -1, hello)
+        .with_access(Access::Public)
+        .with_fast(),
+    CommandSpec::connection("SELECT", 2, select).with_fast(),
     CommandSpec::connection("COMMAND", -1, command),
     CommandSpec::connection("CLIENT", -2, client),
-    CommandSpec::connection("INFO", -1, info).with_access(Access::Read),
-    CommandSpec::connection("CONFIG", -2, config).with_access(Access::Read),
+    CommandSpec::connection("ACL", -2, acl).with_subcommands(ACL_SUBCOMMANDS),
+    CommandSpec::connection("INFO", -1, info)
+        .with_access(Access::Read)
+        .with_categories(Categories::DANGEROUS),
+    CommandSpec::connection("CONFIG", -2, config)
+        .with_access(Access::Read)
+        .with_categories(Categories::ADMIN.union(Categories::DANGEROUS)),
     CommandSpec::connection("CLUSTER", -1, cluster),
-    CommandSpec::connection("READONLY", 1, readonly),
-    CommandSpec::connection("READWRITE", 1, readwrite),
-    CommandSpec::connection("ASKING", 1, asking),
+    CommandSpec::connection("READONLY", 1, readonly).with_fast(),
+    CommandSpec::connection("READWRITE", 1, readwrite).with_fast(),
+    CommandSpec::connection("ASKING", 1, asking).with_fast(),
+];
+
+/// The categories of Valkey for the subcommands that show or change the users.
+const ACL_ADMIN: Categories = Categories::ADMIN
+    .union(Categories::SLOW)
+    .union(Categories::DANGEROUS);
+
+/// `ACL` is in `@connection` in Discus, and so are the two subcommands that show no user data.
+const ACL_OPEN: Categories = Categories::CONNECTION.union(Categories::SLOW);
+
+const ACL_SUBCOMMANDS: &[Subcommand] = &[
+    Subcommand::new("CAT", ACL_OPEN, Access::Connection),
+    Subcommand::new("WHOAMI", ACL_OPEN, Access::Connection),
+    Subcommand::new("GENPASS", Categories::SLOW, Access::Connection),
+    Subcommand::new("LIST", ACL_ADMIN, Access::Admin),
+    Subcommand::new("USERS", ACL_ADMIN, Access::Admin),
+    Subcommand::new("GETUSER", ACL_ADMIN, Access::Admin),
+    Subcommand::new("SETUSER", ACL_ADMIN, Access::Admin),
+    Subcommand::new("DELUSER", ACL_ADMIN, Access::Admin),
+    Subcommand::new("LOAD", ACL_ADMIN, Access::Admin),
+    Subcommand::new("SAVE", ACL_ADMIN, Access::Admin),
+    Subcommand::new("LOG", ACL_ADMIN, Access::Admin),
+    Subcommand::new("DRYRUN", ACL_ADMIN, Access::Admin),
 ];
 
 type Reply = Result<Value, CommandError>;
@@ -73,7 +108,8 @@ fn auth(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     if cmd.len() > 3 {
         return Err(CommandError::Syntax);
     }
-    // The username is an identity hint. The token is the credential.
+    // A name that the ACL file has selects that user, and the token is its password. Any other
+    // name is only an identity hint, and the token is the credential.
     let user = (cmd.len() == 3).then(|| &cmd[1][..]);
     node.security
         .authenticate(conn, user, &cmd[cmd.len() - 1])?;
@@ -160,7 +196,8 @@ fn command(_: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 }
 
 /// One `COMMAND` entry in the Redis 7 shape. The flag is `readonly` unless the command changes
-/// data. The ACL categories, tips, key specifications, and subcommands are empty.
+/// data. The ACL categories carry an `@` each. The tips, key specifications, and subcommands are
+/// empty.
 fn command_entry(spec: &CommandSpec) -> Value {
     let flag = if spec.access == Access::Write {
         "write"
@@ -179,7 +216,12 @@ fn command_entry(spec: &CommandSpec) -> Value {
         Value::Integer(first),
         Value::Integer(last),
         Value::Integer(step),
-        Value::Array(vec![]),
+        Value::Array(
+            spec.categories
+                .names()
+                .map(|name| Value::simple(&format!("@{name}")))
+                .collect(),
+        ),
         Value::Array(vec![]),
         Value::Array(vec![]),
         Value::Array(vec![]),
@@ -213,6 +255,87 @@ fn client(_: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
         _ => Err(CommandError::Custom(format!(
             "ERR unknown subcommand or wrong number of arguments for 'CLIENT {}'",
             upper(&cmd[1])
+        ))),
+    }
+}
+
+const ACL_READ_ONLY: &str = "ERR Discus reads its users from the file of --acl-file. \
+                             Change the file, and the node loads it again.";
+
+const ACL_NO_FILE: &str = "ERR This node has no users, because --acl-file is not set.";
+
+fn acl(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    let bulk = |s: &str| Value::Bulk(Bytes::copy_from_slice(s.as_bytes()));
+    let users = || {
+        node.security
+            .acl()
+            .ok_or_else(|| CommandError::Custom(ACL_NO_FILE.into()))
+    };
+    let sub = upper(&cmd[1]);
+    match sub.as_str() {
+        "LIST" if cmd.len() == 2 => Ok(Value::Array(
+            users()?.users().iter().map(|u| bulk(&u.line())).collect(),
+        )),
+        "USERS" if cmd.len() == 2 => Ok(Value::Array(
+            users()?.users().iter().map(|u| bulk(&u.name)).collect(),
+        )),
+        "GETUSER" if cmd.len() == 3 => Ok(match users()?.user(&cmd[2]) {
+            None => Value::Null,
+            Some(user) => Value::Map(vec![
+                (
+                    bulk("flags"),
+                    Value::Array(user.flags().into_iter().map(bulk).collect()),
+                ),
+                (
+                    bulk("passwords"),
+                    Value::Array(
+                        user.passwords
+                            .iter()
+                            .map(|hash| bulk(&hex::encode(hash)))
+                            .collect(),
+                    ),
+                ),
+                (bulk("commands"), bulk(&user.commands_text())),
+                (bulk("keys"), bulk(&user.keys_text())),
+                // Discus has no pub/sub and no selectors.
+                (bulk("channels"), bulk("")),
+                (bulk("selectors"), Value::Array(vec![])),
+            ]),
+        }),
+        "WHOAMI" if cmd.len() == 2 => Ok(bulk(
+            conn.auth
+                .user
+                .as_ref()
+                .map_or(crate::security::acl::DEFAULT_USER, |g| &g.user.name),
+        )),
+        "CAT" if cmd.len() == 2 => Ok(Value::Array(
+            Categories::NAMES.iter().map(|(n, _)| bulk(n)).collect(),
+        )),
+        "CAT" if cmd.len() == 3 => {
+            let name = String::from_utf8_lossy(&cmd[2]);
+            let category = Categories::parse(&name)
+                .ok_or_else(|| CommandError::Custom(format!("ERR Unknown category '{name}'")))?;
+            Ok(Value::Array(
+                specs()
+                    .iter()
+                    .flat_map(|spec| {
+                        let subs = spec
+                            .subcommands
+                            .iter()
+                            .map(move |sub| (Some(sub), sub.categories));
+                        std::iter::once((None, spec.categories))
+                            .chain(subs)
+                            .filter(|(_, categories)| categories.intersects(category))
+                            .map(|(sub, _)| bulk(&spec.rule_name(sub)))
+                    })
+                    .collect(),
+            ))
+        }
+        "SETUSER" | "DELUSER" | "LOAD" | "SAVE" | "LOG" | "GENPASS" | "DRYRUN" => {
+            Err(CommandError::Custom(ACL_READ_ONLY.into()))
+        }
+        _ => Err(CommandError::Custom(format!(
+            "ERR unknown subcommand or wrong number of arguments for 'ACL {sub}'"
         ))),
     }
 }
@@ -529,7 +652,7 @@ mod tests {
             Value::Integer(n) => n,
             ref other => panic!("not an integer: {other:?}"),
         };
-        for empty in &parts[6..] {
+        for empty in &parts[7..] {
             assert_eq!(empty, &Value::Array(vec![]));
         }
         (int(3), int(4), int(5))
@@ -554,6 +677,21 @@ mod tests {
     }
 
     #[test]
+    fn command_info_lists_the_acl_categories() {
+        let Value::Array(entry) = command_entry(lookup(b"FLUSHALL").unwrap()) else {
+            panic!()
+        };
+        assert_eq!(
+            entry[6],
+            Value::Array(
+                ["@keyspace", "@write", "@slow", "@dangerous"]
+                    .map(Value::simple)
+                    .to_vec()
+            )
+        );
+    }
+
+    #[test]
     fn flags_follow_access() {
         let flags = |name: &str| {
             let Value::Array(p) = command_entry(lookup(name.as_bytes()).unwrap()) else {
@@ -561,7 +699,10 @@ mod tests {
             };
             p[2].clone()
         };
-        assert_eq!(flags("GET"), Value::Array(vec![Value::simple("readonly")]));
+        assert_eq!(
+            flags("GET"),
+            Value::Array(vec![Value::simple("readonly"), Value::simple("fast")])
+        );
         assert_eq!(flags("SET"), Value::Array(vec![Value::simple("write")]));
         assert_eq!(
             flags("SWAPDB"),

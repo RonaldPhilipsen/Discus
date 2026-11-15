@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use crate::command::table::Access;
+
 /// One authentication factor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Factor {
@@ -9,8 +11,8 @@ pub enum Factor {
     Mtls,
     /// The client sent a valid OAuth 2.0 token.
     Oauth2,
-    /// The client sent the shared token.
-    SharedToken,
+    /// The client logged in as a user of the ACL file.
+    Password,
 }
 
 impl Factor {
@@ -18,12 +20,12 @@ impl Factor {
         match self {
             Factor::Mtls => "mtls",
             Factor::Oauth2 => "oauth2",
-            Factor::SharedToken => "shared_token",
+            Factor::Password => "password",
         }
     }
 
     fn parse(s: &str) -> Option<Factor> {
-        [Factor::Mtls, Factor::Oauth2, Factor::SharedToken]
+        [Factor::Mtls, Factor::Oauth2, Factor::Password]
             .into_iter()
             .find(|f| f.name() == s)
     }
@@ -40,39 +42,20 @@ pub enum Policy {
     All(Vec<Factor>),
 }
 
-/// The result of `Policy::parse`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Parsed {
-    pub policy: Policy,
-    /// The list named the old factor `tls`, and the parser dropped it.
-    pub dropped_tls: bool,
-}
-
 impl Policy {
     /// Parse `none`, `any:<factor>,<factor>`, or `all:<factor>,<factor>`.
-    ///
-    /// Every client uses TLS, so `tls` is no longer a factor. Old configurations still name it:
-    /// `all:` drops it, and `any:` rejects it, because `tls` alone would meet that policy.
-    pub fn parse(s: &str) -> Result<Parsed, String> {
+    pub fn parse(s: &str) -> Result<Policy, String> {
         let s = s.trim();
         if s == "none" {
-            return Ok(Parsed {
-                policy: Policy::None,
-                dropped_tls: false,
-            });
+            return Ok(Policy::None);
         }
         let (kind, list) = s.split_once(':').ok_or_else(|| {
             format!("--auth-policy {s:?}: use none, any:<factors>, or all:<factors>")
         })?;
         let mut factors = Vec::new();
-        let mut dropped_tls = false;
         for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
-            if name == "tls" {
-                dropped_tls = true;
-                continue;
-            }
             let f = Factor::parse(name).ok_or_else(|| {
-                format!("--auth-policy: unknown factor {name:?}, use mtls, oauth2, or shared_token")
+                format!("--auth-policy: unknown factor {name:?}, use mtls, oauth2, or password")
             })?;
             if !factors.contains(&f) {
                 factors.push(f);
@@ -87,21 +70,10 @@ impl Policy {
                 ))
             }
         };
-        if dropped_tls && (kind == "any" || factors.is_empty()) {
-            return Err(
-                "--auth-policy: tls is no longer a factor, because every client uses TLS, so \
-                 this policy would let every client in. For TLS without credentials, use none. \
-                 To ask for credentials, remove tls from the list"
-                    .into(),
-            );
-        }
         if factors.is_empty() {
             return Err("--auth-policy: list at least one factor".into());
         }
-        Ok(Parsed {
-            policy: combine(factors),
-            dropped_tls,
-        })
+        Ok(combine(factors))
     }
 
     pub fn uses(&self, factor: Factor) -> bool {
@@ -193,6 +165,16 @@ impl Scopes {
     pub fn is_admin(self) -> bool {
         self.0 & Scopes::ADMIN.0 != 0
     }
+
+    /// True when these scopes are enough for a command or a subcommand with this access.
+    pub fn allows(self, access: Access) -> bool {
+        match access {
+            Access::Public | Access::Connection => true,
+            Access::Read => self.can_read(),
+            Access::Write => self.can_write(),
+            Access::Admin => self.is_admin(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -200,9 +182,7 @@ mod tests {
     use super::*;
 
     fn parse(s: &str) -> Policy {
-        let parsed = Policy::parse(s).unwrap();
-        assert!(!parsed.dropped_tls, "{s}");
-        parsed.policy
+        Policy::parse(s).unwrap()
     }
 
     #[test]
@@ -213,25 +193,17 @@ mod tests {
         assert_eq!(parse("none"), Policy::None);
         assert!(parse("any:mtls,oauth2").uses(Factor::Mtls));
         assert!(Policy::parse("some:mtls").is_err());
-        assert!(Policy::parse("some:tls,mtls").is_err());
         assert!(Policy::parse("any:").is_err());
+        let p = parse("all:password");
+        assert!(p.uses(Factor::Password));
+        assert_eq!(p.to_string(), "all:password");
     }
 
     #[test]
-    fn the_old_tls_factor_is_dropped_from_all() {
-        for old in ["all:tls,oauth2", "all:oauth2,tls", "all: tls , oauth2,tls"] {
-            let parsed = Policy::parse(old).unwrap();
-            assert!(parsed.dropped_tls, "{old}");
-            assert_eq!(parsed.policy, parse("all:oauth2"), "{old}");
-            assert_eq!(parsed.policy.to_string(), "all:oauth2");
-        }
-    }
-
-    #[test]
-    fn a_policy_that_tls_alone_would_meet_is_rejected() {
-        for bad in ["all:tls", "any:tls", "any:tls,oauth2", "any:oauth2,tls"] {
+    fn tls_is_not_a_factor() {
+        for bad in ["all:tls", "any:tls,oauth2", "all:oauth2,tls"] {
             let e = Policy::parse(bad).unwrap_err();
-            assert!(e.contains("use none"), "{bad}: {e}");
+            assert!(e.contains("unknown factor \"tls\""), "{bad}: {e}");
         }
     }
 

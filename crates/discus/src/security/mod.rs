@@ -3,6 +3,7 @@
 //! `Security` owns every decision. The server calls it at accept time, the `AUTH` and `HELLO`
 //! handlers call `authenticate`, and the dispatcher calls `authorize` before each command.
 
+pub mod acl;
 pub mod admin;
 pub mod args;
 pub mod file;
@@ -19,18 +20,17 @@ pub mod tls;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use tokio::net::TcpStream;
 
-use ctutils::CtEq;
-
 pub use args::{ClientAuth, SecurityArgs, TlsMode};
 pub use file::AuthFile;
 pub use policy::{Factor, Policy, Scopes};
-pub use session::{CertGrant, ConnAuth, TokenGrant};
+pub use session::{CertGrant, ConnAuth, TokenGrant, UserGrant};
 pub use stream::ClientStream;
 
 use crate::command::table::Access;
@@ -38,6 +38,7 @@ use crate::command::{CommandError, CommandSpec};
 use crate::node::ConnState;
 use crate::settings::Live;
 use crate::Config;
+use acl::Acl;
 use limiter::FailureLimiter;
 
 /// A configuration that the node refuses to start with. The text names the flag or the feature.
@@ -78,19 +79,6 @@ impl ClientTlsFiles {
     }
 }
 
-/// The token in the file of `--shared-token-file`, without trailing whitespace.
-fn read_shared_token(path: &Path) -> io::Result<String> {
-    let content = std::fs::read_to_string(path)?;
-    let token = content.trim_end();
-    if token.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the file has no token",
-        ));
-    }
-    Ok(token.to_string())
-}
-
 /// The security state of a node.
 pub struct Security {
     mode: TlsMode,
@@ -100,9 +88,10 @@ pub struct Security {
     lb_identity_tlv: Option<u8>,
     cert_rules: Vec<(String, Scopes)>,
     policy: Policy,
-    /// A reload of `shared_token_file` replaces the content.
-    shared_token: Option<ArcSwap<String>>,
-    shared_token_file: Option<PathBuf>,
+    acl: Option<ArcSwap<Acl>>,
+    acl_file: Option<PathBuf>,
+    /// Counts the loads of `acl_file`, so a connection can tell that its user is stale.
+    acl_generation: AtomicU64,
     live_settings: Arc<Live>,
     limiter: FailureLimiter,
     admin_tls: Option<Arc<ArcSwap<rustls::ServerConfig>>>,
@@ -124,44 +113,32 @@ impl Security {
             Some(path) => AuthFile::load(path)?,
             None => AuthFile::default(),
         };
-        let shared_token = match (&config.shared_token, &config.shared_token_file) {
-            (Some(_), Some(_)) => {
-                return fail("set --shared-token or --shared-token-file, not both");
+        let acl = match &args.acl_file {
+            Some(path) => {
+                Some(Acl::load(path).map_err(|e| format!("--acl-file {}: {e}", path.display()))?)
             }
-            (Some(token), None) => {
-                tracing::warn!(
-                    "--shared-token shows the token in the process list and in the pod spec. Use \
-                     --shared-token-file"
-                );
-                Some(token.clone())
-            }
-            (None, Some(path)) => Some(
-                read_shared_token(path)
-                    .map_err(|e| format!("--shared-token-file {}: {e}", path.display()))?,
-            ),
-            (None, None) => None,
+            None => None,
         };
         let policy = match &args.auth_policy {
-            Some(p) => {
-                let parsed = Policy::parse(p)?;
-                if parsed.dropped_tls {
-                    tracing::warn!(
-                        policy = %parsed.policy,
-                        "--auth-policy names the factor tls, which is no longer needed because \
-                         every client uses TLS. Remove tls from the list"
-                    );
-                }
-                parsed.policy
-            }
-            None if shared_token.is_some() => Policy::All(vec![Factor::SharedToken]),
+            Some(p) => Policy::parse(p)?,
+            None if acl.is_some() => Policy::All(vec![Factor::Password]),
             // An open node must be a choice of the operator, never a silent default.
             None => {
                 return fail(
                     "--auth-policy is not set. Choose a policy: --auth-policy none for TLS \
-                     without credentials, or a policy with mtls, oauth2, or shared_token",
+                     without credentials, or a policy with mtls, oauth2, or password",
                 )
             }
         };
+        match (policy.uses(Factor::Password), &acl) {
+            (true, None) => return fail("the policy uses password, so set --acl-file"),
+            (false, Some(_)) => {
+                return fail(format!(
+                    "--acl-file is set, but the policy {policy} does not use password"
+                ))
+            }
+            _ => {}
+        }
 
         let (Some(tls_cert), Some(tls_key)) = (&args.tls_cert, &args.tls_key) else {
             return fail(
@@ -170,23 +147,6 @@ impl Security {
         };
         if policy.uses(Factor::Mtls) && args.tls_client_ca.is_none() {
             return fail("the policy uses mtls, so set --tls-client-ca");
-        }
-        match (policy.uses(Factor::SharedToken), &shared_token) {
-            (true, None) => {
-                return fail(
-                    "the policy uses shared_token, so set --shared-token-file or --shared-token",
-                )
-            }
-            (false, Some(_)) => {
-                let flag = match config.shared_token_file {
-                    Some(_) => "--shared-token-file",
-                    None => "--shared-token",
-                };
-                return fail(format!(
-                    "{flag} is set, but the policy {policy} does not use shared_token"
-                ));
-            }
-            _ => {}
         }
         #[cfg(feature = "oauth2")]
         let oauth = Self::oauth2(args, &policy, &file)?;
@@ -243,8 +203,9 @@ impl Security {
             lb_identity_tlv: args.lb_identity_tlv,
             cert_rules,
             policy,
-            shared_token: shared_token.map(ArcSwap::from_pointee),
-            shared_token_file: config.shared_token_file.clone(),
+            acl: acl.map(ArcSwap::from_pointee),
+            acl_file: args.acl_file.clone(),
+            acl_generation: AtomicU64::new(0),
             limiter: FailureLimiter::new(live_settings.clone()),
             live_settings,
             admin_tls,
@@ -366,16 +327,23 @@ impl Security {
         Ok(())
     }
 
-    /// The file that [`Security::reload_shared_token`] reads, with `--shared-token-file`.
-    pub fn shared_token_file(&self) -> Option<&Path> {
-        self.shared_token_file.as_deref()
+    /// The file that [`Security::reload_acl`] reads, with `--acl-file`.
+    pub fn acl_file(&self) -> Option<&Path> {
+        self.acl_file.as_deref()
     }
 
-    /// Read the shared token file again, and use the token for every new `AUTH`. A connection
-    /// that is logged in stays logged in. On an error, the node keeps its current token.
-    pub fn reload_shared_token(&self) -> io::Result<()> {
-        if let (Some(slot), Some(path)) = (&self.shared_token, &self.shared_token_file) {
-            slot.store(Arc::new(read_shared_token(path)?));
+    /// The current users, with `--acl-file`.
+    pub fn acl(&self) -> Option<Arc<Acl>> {
+        self.acl.as_ref().map(|slot| slot.load_full())
+    }
+
+    /// Read the ACL file again. A connection takes its new rules, or loses its login, at its
+    /// next command. On an error, the node keeps its users.
+    pub fn reload_acl(&self) -> io::Result<()> {
+        if let (Some(slot), Some(path)) = (&self.acl, &self.acl_file) {
+            slot.store(Arc::new(Acl::load(path)?));
+            // The users go first, so a connection that sees the new generation sees them too.
+            self.acl_generation.fetch_add(1, Ordering::Release);
         }
         Ok(())
     }
@@ -446,7 +414,8 @@ impl Security {
 
     /// True for a command that `prefetch` must see before it runs, and for every command of a
     /// connection whose introspected grant is due for a recheck. A connection without such a
-    /// grant pays only the `Option` test, and one with such a grant pays a clock read.
+    /// grant pays only the `Option` test, and one with such a grant pays a clock read. An `AUTH`
+    /// or `HELLO` with a password policy also pays the password check.
     pub fn wants_prefetch(&self, conn: &ConnState, cmd: &discus_resp::Command) -> bool {
         #[cfg(feature = "oauth2")]
         if self.oauth.is_some() {
@@ -454,8 +423,7 @@ impl Security {
             if recheck_due(conn) {
                 return true;
             }
-            let name = &cmd[0];
-            return name.eq_ignore_ascii_case(b"AUTH") || name.eq_ignore_ascii_case(b"HELLO");
+            return self.token_to_prefetch(cmd).is_some();
         }
         let _ = (conn, cmd);
         false
@@ -469,13 +437,21 @@ impl Security {
         #[cfg(feature = "oauth2-introspection")]
         self.refresh_grant(conn).await;
         #[cfg(feature = "oauth2")]
-        if let (Some(o), Some(token)) = (&self.oauth, token_arg(cmd)) {
+        if let (Some(o), Some(token)) = (&self.oauth, self.token_to_prefetch(cmd)) {
             if conn.auth.peer.is_some_and(|ip| self.limiter.blocked(ip)) {
                 return;
             }
             o.prefetch(token).await;
         }
         let _ = (conn, cmd);
+    }
+
+    /// The token of `AUTH` or `HELLO ... AUTH` that the identity provider may see: none when the
+    /// password path decides the value, because a password must never leave the node.
+    #[cfg(feature = "oauth2")]
+    fn token_to_prefetch<'c>(&self, cmd: &'c discus_resp::Command) -> Option<&'c [u8]> {
+        let (user, value) = credentials_arg(cmd)?;
+        matches!(self.password_path(user, value), PasswordPath::Undecided).then_some(value)
     }
 
     /// Introspect the opaque token of a due grant again, and drop the grant unless the answer
@@ -594,11 +570,13 @@ impl Security {
 
     /// True when the connection meets the policy.
     pub fn is_authenticated(&self, auth: &ConnAuth) -> bool {
-        auth.scopes(&self.policy).is_some()
+        auth.authenticated(&self.policy)
     }
 
-    /// Handle the credentials of `AUTH` or `HELLO ... AUTH`. `user` is only a hint, except that
-    /// `OAUTH2` selects OAuth 2.0. The auth attempt metric counts every result (spec §15.4).
+    /// Handle the credentials of `AUTH` or `HELLO ... AUTH`. A user of the ACL file takes the
+    /// password path. Any other `user` is only a hint, except that `OAUTH2` selects OAuth 2.0
+    /// and `default` is the form without a name.
+    /// The auth attempt metric counts every result (spec §15.4).
     pub fn authenticate(
         &self,
         conn: &mut ConnState,
@@ -616,7 +594,7 @@ impl Security {
         user: Option<&[u8]>,
         token: &[u8],
     ) -> Result<(), CommandError> {
-        if !self.policy.uses(Factor::SharedToken) && !self.policy.uses(Factor::Oauth2) {
+        if !self.policy.uses(Factor::Oauth2) && !self.policy.uses(Factor::Password) {
             return Err(CommandError::Custom(
                 "ERR AUTH <password> called without any password configured for the default \
                  user. Are you sure your configuration is correct?"
@@ -628,14 +606,20 @@ impl Security {
                 return Err(self.failed(conn, "the source is over its failed-attempt limit"));
             }
         }
-        let oauth2_only = user.is_some_and(|u| u.eq_ignore_ascii_case(b"OAUTH2"));
-        if !oauth2_only && self.policy.uses(Factor::SharedToken) {
-            if let Some(expected) = &self.shared_token {
-                if bool::from(expected.load().as_bytes().ct_eq(token)) {
-                    conn.auth.shared = true;
-                    return Ok(());
+        // With an `any` policy, one credential is the whole login, so a new login replaces the
+        // earlier one. An earlier token must not keep its scopes next to a user with fewer
+        // rights. With an `all` policy, the connection needs both.
+        let replaces = matches!(self.policy, Policy::Any(_));
+        match self.password_path(user, token) {
+            PasswordPath::Accepted(grant) => {
+                conn.auth.user = Some(grant);
+                if replaces {
+                    conn.auth.token = None;
                 }
+                return Ok(());
             }
+            PasswordPath::Refused => return Err(self.failed(conn, "wrong password or user is off")),
+            PasswordPath::Undecided => {}
         }
         #[cfg(feature = "oauth2")]
         if let Some(o) = &self.oauth {
@@ -657,12 +641,49 @@ impl Security {
                         generation: oauth2::is_jwt(token).then_some(generation),
                         recheck: claims.recheck,
                     });
+                    if replaces {
+                        conn.auth.user = None;
+                    }
                     Ok(())
                 }
                 Err(reject) => Err(self.failed(conn, &reject.to_string())),
             };
         }
-        Err(self.failed(conn, "the token does not match"))
+        Err(self.failed(conn, "no factor accepts the credential"))
+    }
+
+    /// Decide whether the password path takes the value of `AUTH [user] <value>`. Both
+    /// `check_credentials` and the OAuth 2.0 prefetch use this, so they never disagree, and a value
+    /// that the password path decides never reaches an identity provider.
+    fn password_path(&self, user: Option<&[u8]>, value: &[u8]) -> PasswordPath {
+        let Some(acl) = self
+            .acl
+            .as_ref()
+            .filter(|_| self.policy.uses(Factor::Password))
+        else {
+            return PasswordPath::Undecided;
+        };
+        if user.is_some_and(|u| u.eq_ignore_ascii_case(b"OAUTH2")) {
+            return PasswordPath::Undecided;
+        }
+        // Read the generation before the users: `reload_acl` stores the users first and changes
+        // the generation second, so an old user never pairs with a new generation.
+        let generation = self.acl_generation.load(Ordering::Acquire);
+        let acl = acl.load();
+        // Hash before the lookup, so an unknown name costs the same as a wrong password.
+        let hash = acl::sha256(value);
+        // Most client libraries send `AUTH default <value>` for a credential without a user, so
+        // the exact name `default` is the form without a name. Names are case-sensitive.
+        let named = user.filter(|u| *u != acl::DEFAULT_USER.as_bytes());
+        match acl.user(named.unwrap_or(acl::DEFAULT_USER.as_bytes())) {
+            Some(u) if u.accepts(&hash) => PasswordPath::Accepted(UserGrant {
+                user: u.clone(),
+                generation,
+            }),
+            // The file names this user, so the value is its password and nothing else.
+            Some(_) if named.is_some() => PasswordPath::Refused,
+            _ => PasswordPath::Undecided,
+        }
     }
 
     /// Drop the token grant of a connection when it expired, or when it fails a full check
@@ -696,6 +717,24 @@ impl Security {
         }
     }
 
+    /// After a reload, give the connection the new rules of its user, or drop the login when the
+    /// user is gone or off. A changed password keeps the login.
+    fn recheck_user(&self, conn: &mut ConnState) {
+        let Some(grant) = &conn.auth.user else { return };
+        let current = self.acl_generation.load(Ordering::Acquire);
+        if grant.generation == current {
+            return;
+        }
+        let users = self.acl.as_ref().map(|a| a.load());
+        conn.auth.user = users
+            .and_then(|acl| acl.user(grant.user.name.as_bytes()).cloned())
+            .filter(|u| u.enabled)
+            .map(|user| UserGrant {
+                user,
+                generation: current,
+            });
+    }
+
     /// Count a failed attempt and return the generic error. The reason goes to the debug log.
     fn failed(&self, conn: &mut ConnState, reason: &str) -> CommandError {
         conn.auth.failures += 1;
@@ -719,25 +758,72 @@ impl Security {
         CommandError::Custom("WRONGPASS invalid username-password pair or user is disabled.".into())
     }
 
-    /// Check that the connection can run the command `spec`.
-    pub fn authorize(&self, conn: &mut ConnState, spec: &CommandSpec) -> Result<(), CommandError> {
+    /// Check that the connection can run the command `cmd` with the spec `spec`. With an `all`
+    /// policy, the scopes and the user rules must both allow it. With an `any` policy, one of
+    /// them is enough.
+    pub fn authorize(
+        &self,
+        conn: &mut ConnState,
+        spec: &CommandSpec,
+        cmd: &discus_resp::Command,
+    ) -> Result<(), CommandError> {
         if self.policy == Policy::None || spec.access == Access::Public {
             return Ok(());
         }
         #[cfg(feature = "oauth2")]
         self.recheck_token(conn);
-        let scopes = conn.auth.scopes(&self.policy).ok_or(CommandError::NoAuth)?;
-        let allowed = match spec.access {
-            Access::Public | Access::Connection => true,
-            Access::Read => scopes.can_read(),
-            Access::Write => scopes.can_write(),
-        };
-        if allowed {
-            Ok(())
-        } else {
-            Err(CommandError::NoPerm(spec.name.to_ascii_lowercase()))
+        self.recheck_user(conn);
+        if !conn.auth.authenticated(&self.policy) {
+            return Err(CommandError::NoAuth);
+        }
+        let sub = spec.subcommand(cmd);
+        let no_perm = || CommandError::NoPerm(spec.rule_name(sub));
+        let scopes = conn.auth.scopes(&self.policy);
+        // The access of the command, and the access of what `cmd` runs: a subcommand with its own
+        // entry can need more.
+        let by_access = scopes.map(|s| s.allows(spec.access));
+        let by_scopes = scopes.is_some_and(|s| s.allows(sub.map_or(spec.access, |sub| sub.access)));
+        let all = matches!(self.policy, Policy::All(_));
+        if !all && by_scopes {
+            return Ok(());
+        }
+        let by_user = conn
+            .auth
+            .user
+            .as_ref()
+            .filter(|_| self.policy.uses(Factor::Password))
+            .map(|grant| {
+                grant.user.check(spec, sub, cmd).map_err(|d| match d {
+                    acl::Denied::Command => no_perm(),
+                    acl::Denied::Key => CommandError::NoPermKey,
+                })
+            });
+        match (by_access, by_user) {
+            // The rule of the user decides the subcommand, so the scopes need only the access.
+            (Some(access), Some(user)) if all => {
+                user?;
+                if access {
+                    Ok(())
+                } else {
+                    Err(no_perm())
+                }
+            }
+            (_, Some(user)) => user,
+            (Some(_), None) if by_scopes => Ok(()),
+            (Some(_), None) => Err(no_perm()),
+            (None, None) => Err(CommandError::NoAuth),
         }
     }
+}
+
+/// The result of the password path for one credential.
+enum PasswordPath {
+    /// A user of the file accepts the value.
+    Accepted(UserGrant),
+    /// The file names the user, and the value is not its password.
+    Refused,
+    /// The password path does not decide, and the value goes on to the other factors.
+    Undecided,
 }
 
 /// True when the connection holds an introspected grant whose answer ended. Only such a grant
@@ -751,13 +837,14 @@ fn recheck_due(conn: &ConnState) -> bool {
         .is_some_and(|at| oauth2::unix_now() > at)
 }
 
-/// The token of `AUTH [user] <token>` or `HELLO ... AUTH <user> <token>`.
+/// The user and the value of `AUTH [user] <value>` or `HELLO ... AUTH <user> <value>`.
 #[cfg(feature = "oauth2")]
-fn token_arg(cmd: &discus_resp::Command) -> Option<&[u8]> {
+fn credentials_arg(cmd: &discus_resp::Command) -> Option<(Option<&[u8]>, &[u8])> {
     let name = &cmd[0];
     if name.eq_ignore_ascii_case(b"AUTH") {
         return match cmd.len() {
-            2 | 3 => Some(&cmd[cmd.len() - 1]),
+            2 => Some((None, &cmd[1])),
+            3 => Some((Some(&cmd[1]), &cmd[2])),
             _ => None,
         };
     }
@@ -767,7 +854,7 @@ fn token_arg(cmd: &discus_resp::Command) -> Option<&[u8]> {
     }
     (1..cmd.len())
         .find(|&i| cmd[i].eq_ignore_ascii_case(b"AUTH") && i + 2 < cmd.len())
-        .map(|i| &cmd[i + 2][..])
+        .map(|i| (Some(&cmd[i + 1][..]), &cmd[i + 2][..]))
 }
 
 #[cfg(test)]
@@ -798,11 +885,10 @@ pub(crate) mod tests {
     }
 
     /// A `Security` with a self-signed client certificate and `args`. Without a policy and
-    /// without a shared token in `args`, the policy is `none`.
+    /// without an ACL file in `args`, the policy is `none`.
     pub(crate) fn security(args: &[&str]) -> Security {
         let mut all = args.to_vec();
-        if !args.contains(&"--auth-policy") && !args.iter().any(|a| a.starts_with("--shared-token"))
-        {
+        if !args.contains(&"--auth-policy") && !args.contains(&"--acl-file") {
             all.extend(["--auth-policy", "none"]);
         }
         try_security(&all).unwrap()
@@ -820,25 +906,6 @@ pub(crate) mod tests {
     fn an_explicit_none_policy_starts() {
         let s = try_security(&["--auth-policy", "none"]).unwrap();
         assert_eq!(s.policy, Policy::None);
-    }
-
-    #[test]
-    fn a_shared_token_alone_gets_the_shared_token_policy() {
-        let s = try_security(&["--shared-token", "x"]).unwrap();
-        assert_eq!(s.policy, Policy::All(vec![Factor::SharedToken]));
-    }
-
-    #[test]
-    fn the_shared_token_default_and_the_old_spelling_give_the_same_policy() {
-        let default = security(&["--shared-token", "x"]);
-        assert_eq!(default.policy.to_string(), "all:shared_token");
-        let old = security(&[
-            "--shared-token",
-            "x",
-            "--auth-policy",
-            "all:tls,shared_token",
-        ]);
-        assert_eq!(old.policy, default.policy);
     }
 
     #[test]
@@ -861,58 +928,237 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_failed_token_reload_keeps_the_token() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("token");
-        std::fs::write(&file, "old\n").unwrap();
-        let s = security(&["--shared-token-file", file.to_str().unwrap()]);
-        let accepts = |token: &[u8]| {
-            let mut conn = ConnState::new(1, ConnAuth::default());
-            s.authenticate(&mut conn, None, token).is_ok()
-        };
-        assert!(accepts(b"old"));
-
-        std::fs::write(&file, "\n").unwrap();
-        assert!(s.reload_shared_token().is_err());
-        std::fs::remove_file(&file).unwrap();
-        assert!(s.reload_shared_token().is_err());
-        assert!(accepts(b"old"));
-        assert!(!accepts(b""));
-
-        std::fs::write(&file, "new\n").unwrap();
-        s.reload_shared_token().unwrap();
-        assert!(accepts(b"new"));
-        assert!(!accepts(b"old"));
-    }
-
-    #[test]
     fn a_read_only_connection_cannot_write() {
-        let s = security(&["--shared-token", "x"]);
+        let s = Security {
+            policy: Policy::Any(vec![Factor::Mtls]),
+            ..security(&[])
+        };
         let mut conn = ConnState::new(1, ConnAuth::default());
+        let get = crate::counter::cmd(&["GET", "k"]);
+        let set = crate::counter::cmd(&["SET", "k", "v"]);
         assert_eq!(
-            s.authorize(&mut conn, spec(b"GET")),
+            s.authorize(&mut conn, spec(b"GET"), &get),
             Err(CommandError::NoAuth)
         );
-        conn.auth.shared = true;
-        assert_eq!(s.authorize(&mut conn, spec(b"SET")), Ok(()));
-        // Only an mTLS or OAuth 2.0 grant can be read-only, so fake one through a policy that
-        // takes the intersection.
-        let ro = Security {
-            policy: Policy::Any(vec![Factor::Mtls]),
-            ..s
-        };
+        conn.auth.cert = Some(CertGrant {
+            identity: "rw".into(),
+            scopes: Scopes::READ_WRITE,
+        });
+        assert_eq!(s.authorize(&mut conn, spec(b"SET"), &set), Ok(()));
         conn.auth.cert = Some(CertGrant {
             identity: "ro".into(),
             scopes: Scopes::READ,
         });
-        assert_eq!(ro.authorize(&mut conn, spec(b"GET")), Ok(()));
+        assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), Ok(()));
         assert_eq!(
-            ro.authorize(&mut conn, spec(b"SET")),
+            s.authorize(&mut conn, spec(b"SET"), &set),
             Err(CommandError::NoPerm("set".into()))
         );
         assert_eq!(
             CommandError::NoPerm("set".into()).text(),
             "NOPERM this user has no permissions to run the 'set' command"
         );
+    }
+
+    #[test]
+    fn a_failed_acl_reload_keeps_the_users() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("users.acl");
+        std::fs::write(&file, "user a on >old ~* +@all\n").unwrap();
+        let s = security(&["--acl-file", file.to_str().unwrap()]);
+        let accepts = |password: &[u8]| {
+            let mut conn = ConnState::new(1, ConnAuth::default());
+            s.authenticate(&mut conn, Some(b"a"), password).is_ok()
+        };
+        assert!(accepts(b"old"));
+
+        std::fs::write(&file, "usr a\n").unwrap();
+        assert!(s.reload_acl().is_err());
+        assert!(accepts(b"old"));
+        std::fs::remove_file(&file).unwrap();
+        assert!(s.reload_acl().is_err());
+        assert!(accepts(b"old"));
+
+        std::fs::write(&file, "user a on >new ~* +@all\n").unwrap();
+        s.reload_acl().unwrap();
+        assert!(accepts(b"new"));
+        assert!(!accepts(b"old"));
+    }
+
+    /// A node with the user `u` (password `p`) and the policy `policy`.
+    fn with_user(rules: &str, policy: &str) -> Security {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("users.acl");
+        std::fs::write(&file, format!("user u on >p {rules}\n")).unwrap();
+        let s = security(&["--acl-file", file.to_str().unwrap()]);
+        Security {
+            policy: Policy::parse(policy).unwrap(),
+            ..s
+        }
+    }
+
+    fn user_conn(s: &Security, scopes: Option<Scopes>) -> ConnState {
+        let mut conn = ConnState::new(1, ConnAuth::default());
+        conn.auth.cert = scopes.map(|scopes| CertGrant {
+            identity: "c".into(),
+            scopes,
+        });
+        s.authenticate(&mut conn, Some(b"u"), b"p").unwrap();
+        conn
+    }
+
+    fn no_perm(name: &str) -> Result<(), CommandError> {
+        Err(CommandError::NoPerm(name.into()))
+    }
+
+    #[test]
+    fn all_needs_the_scopes_and_the_rules() {
+        let get = crate::counter::cmd(&["GET", "k"]);
+        let set = crate::counter::cmd(&["SET", "k", "v"]);
+
+        let s = with_user("~k +@all", "all:mtls,password");
+        let mut conn = user_conn(&s, Some(Scopes::READ));
+        assert_eq!(s.authorize(&mut conn, spec(b"SET"), &set), no_perm("set"));
+        assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), Ok(()));
+
+        let s = with_user("~k +get", "all:mtls,password");
+        let mut conn = user_conn(&s, Some(Scopes::READ_WRITE));
+        assert_eq!(s.authorize(&mut conn, spec(b"SET"), &set), no_perm("set"));
+        let other = crate::counter::cmd(&["GET", "other"]);
+        assert_eq!(
+            s.authorize(&mut conn, spec(b"GET"), &other),
+            Err(CommandError::NoPermKey)
+        );
+    }
+
+    #[test]
+    fn the_rule_of_a_user_decides_a_subcommand_that_shows_the_users() {
+        let list = crate::counter::cmd(&["ACL", "LIST"]);
+        let acl = spec(b"ACL");
+
+        // `all`: the certificate has no admin scope, and the rule of the user is enough.
+        let s = with_user("~k +@all", "all:mtls,password");
+        let mut conn = user_conn(&s, Some(Scopes::READ_WRITE));
+        assert_eq!(s.authorize(&mut conn, acl, &list), Ok(()));
+        let s = with_user("~k +@connection", "all:mtls,password");
+        let mut conn = user_conn(&s, Some(Scopes::READ_WRITE.union(Scopes::ADMIN)));
+        assert_eq!(s.authorize(&mut conn, acl, &list), no_perm("acl|list"));
+
+        // `any`: a certificate without the admin scope never opens it for a user without the rule.
+        let s = with_user("~k +@connection", "any:mtls,password");
+        let mut conn = user_conn(&s, Some(Scopes::READ_WRITE));
+        assert_eq!(s.authorize(&mut conn, acl, &list), no_perm("acl|list"));
+        let mut conn = user_conn(&s, Some(Scopes::ADMIN));
+        assert_eq!(s.authorize(&mut conn, acl, &list), Ok(()));
+        let s = with_user("~k +acl|list", "any:mtls,password");
+        let mut conn = user_conn(&s, Some(Scopes::READ_WRITE));
+        assert_eq!(s.authorize(&mut conn, acl, &list), Ok(()));
+    }
+
+    #[test]
+    fn a_login_replaces_the_earlier_one_only_with_an_any_policy() {
+        let token = || TokenGrant {
+            raw: bytes::Bytes::new(),
+            exp: i64::MAX,
+            nbf: None,
+            scopes: Scopes::READ_WRITE,
+            generation: None,
+            recheck: None,
+        };
+        for (policy, kept) in [
+            ("any:oauth2,password", false),
+            ("all:oauth2,password", true),
+        ] {
+            let s = with_user("~k +get", policy);
+            let mut conn = ConnState::new(1, ConnAuth::default());
+            conn.auth.token = Some(token());
+            s.authenticate(&mut conn, Some(b"u"), b"p").unwrap();
+            assert!(conn.auth.user.is_some(), "{policy}");
+            assert_eq!(conn.auth.token.is_some(), kept, "{policy}");
+        }
+    }
+
+    #[test]
+    fn any_needs_the_scopes_or_the_rules() {
+        let set = crate::counter::cmd(&["SET", "k", "v"]);
+
+        let s = with_user("~k +@all", "any:mtls,password");
+        let mut conn = user_conn(&s, Some(Scopes::READ));
+        assert_eq!(s.authorize(&mut conn, spec(b"SET"), &set), Ok(()));
+
+        let s = with_user("~k +get", "any:mtls,password");
+        let mut conn = user_conn(&s, Some(Scopes::READ));
+        assert_eq!(s.authorize(&mut conn, spec(b"SET"), &set), no_perm("set"));
+
+        let mut conn = user_conn(&s, None);
+        let get = crate::counter::cmd(&["GET", "k"]);
+        assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), Ok(()));
+        assert_eq!(s.authorize(&mut conn, spec(b"SET"), &set), no_perm("set"));
+    }
+
+    #[test]
+    fn tls_without_a_user_is_not_authenticated() {
+        let s = with_user("~k +@all", "all:password");
+        let mut conn = ConnState::new(1, ConnAuth::default());
+        let get = crate::counter::cmd(&["GET", "k"]);
+        assert_eq!(
+            s.authorize(&mut conn, spec(b"GET"), &get),
+            Err(CommandError::NoAuth)
+        );
+    }
+
+    #[test]
+    fn a_reload_that_turns_a_user_off_ends_its_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("users.acl");
+        std::fs::write(&file, "user u on >p ~* +@all\n").unwrap();
+        let s = security(&["--acl-file", file.to_str().unwrap()]);
+        let mut conn = ConnState::new(1, ConnAuth::default());
+        s.authenticate(&mut conn, Some(b"u"), b"p").unwrap();
+        let get = crate::counter::cmd(&["GET", "k"]);
+        assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), Ok(()));
+
+        let old_grant = conn.auth.user.clone();
+        std::fs::write(&file, "user u on >p ~* +@connection\n").unwrap();
+        s.reload_acl().unwrap();
+        conn.auth.user = old_grant;
+        assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), no_perm("get"));
+
+        std::fs::write(&file, "user u off >p ~* +@all\n").unwrap();
+        s.reload_acl().unwrap();
+        assert_eq!(
+            s.authorize(&mut conn, spec(b"GET"), &get),
+            Err(CommandError::NoAuth)
+        );
+    }
+
+    #[test]
+    fn a_login_without_a_user_needs_the_admin_scope_to_show_the_users() {
+        let s = Security {
+            policy: Policy::Any(vec![Factor::Mtls]),
+            ..security(&[])
+        };
+        let run = |scopes: Scopes, parts: &[&str]| {
+            let mut conn = ConnState::new(1, ConnAuth::default());
+            conn.auth.cert = Some(CertGrant {
+                identity: "c".into(),
+                scopes,
+            });
+            s.authorize(&mut conn, spec(b"ACL"), &crate::counter::cmd(parts))
+        };
+        let no_perm = |name: &str| Err(CommandError::NoPerm(name.into()));
+
+        let rw = Scopes::READ_WRITE;
+        assert_eq!(run(rw, &["ACL", "WHOAMI"]), Ok(()));
+        assert_eq!(run(rw, &["ACL", "CAT"]), Ok(()));
+        assert_eq!(run(rw, &["ACL", "BOGUS"]), Ok(()));
+        assert_eq!(run(rw, &["ACL", "LIST"]), no_perm("acl|list"));
+        assert_eq!(run(rw, &["acl", "users"]), no_perm("acl|users"));
+        assert_eq!(run(rw, &["ACL", "GETUSER", "u"]), no_perm("acl|getuser"));
+        assert_eq!(run(rw, &["ACL", "SETUSER", "u"]), no_perm("acl|setuser"));
+
+        let admin = Scopes::READ.union(Scopes::ADMIN);
+        assert_eq!(run(admin, &["ACL", "LIST"]), Ok(()));
+        assert_eq!(run(admin, &["ACL", "GETUSER", "u"]), Ok(()));
     }
 }

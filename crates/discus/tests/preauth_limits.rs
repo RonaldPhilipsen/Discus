@@ -68,7 +68,8 @@ async fn connect_served(
 
 #[tokio::test]
 async fn a_large_bulk_before_auth_closes_the_connection() {
-    let addr = common::start_node(&["--shared-token", "s3cret"]).await;
+    let addr =
+        common::start_node(&["--acl-file", common::client_tls::password_file("s3cret")]).await;
     let mut s = common::client_tls::connect(addr).await;
     // Only the header: the node refuses the length before it buffers the value.
     s.write_all(b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$100000\r\n")
@@ -83,7 +84,8 @@ async fn a_large_bulk_before_auth_closes_the_connection() {
 
 #[tokio::test]
 async fn a_long_command_before_auth_closes_the_connection() {
-    let addr = common::start_node(&["--shared-token", "s3cret"]).await;
+    let addr =
+        common::start_node(&["--acl-file", common::client_tls::password_file("s3cret")]).await;
     let mut s = common::client_tls::connect(addr).await;
     s.write_all(b"*1000\r\n").await.unwrap();
     let text = read_to_close(&mut s).await.unwrap();
@@ -95,7 +97,8 @@ async fn a_long_command_before_auth_closes_the_connection() {
 
 #[tokio::test]
 async fn a_large_request_of_small_arguments_before_auth_closes_the_connection() {
-    let addr = common::start_node(&["--shared-token", "s3cret"]).await;
+    let addr =
+        common::start_node(&["--acl-file", common::client_tls::password_file("s3cret")]).await;
     let mut s = common::client_tls::connect(addr).await;
     let mut wire = b"*3\r\n$4\r\nMSET\r\n".to_vec();
     for _ in 0..2 {
@@ -118,7 +121,8 @@ async fn a_large_request_of_small_arguments_before_auth_closes_the_connection() 
 
 #[tokio::test]
 async fn the_same_request_after_auth_works() {
-    let addr = common::start_node(&["--shared-token", "s3cret"]).await;
+    let addr =
+        common::start_node(&["--acl-file", common::client_tls::password_file("s3cret")]).await;
     let mut s = common::client_tls::connect(addr).await;
     expect(&mut s, AUTH, "+OK\r\n").await;
     expect(&mut s, &set("k", 100_000), "+OK\r\n").await;
@@ -127,7 +131,8 @@ async fn the_same_request_after_auth_works() {
 
 #[tokio::test]
 async fn auth_and_a_large_set_in_one_pipeline_work() {
-    let addr = common::start_node(&["--shared-token", "s3cret"]).await;
+    let addr =
+        common::start_node(&["--acl-file", common::client_tls::password_file("s3cret")]).await;
     let mut s = common::client_tls::connect(addr).await;
     let mut wire = AUTH.to_vec();
     wire.extend_from_slice(&set("big", 1 << 20));
@@ -137,7 +142,8 @@ async fn auth_and_a_large_set_in_one_pipeline_work() {
 
 #[tokio::test]
 async fn a_failed_auth_keeps_the_small_limits() {
-    let addr = common::start_node(&["--shared-token", "s3cret"]).await;
+    let addr =
+        common::start_node(&["--acl-file", common::client_tls::password_file("s3cret")]).await;
     let mut s = common::client_tls::connect(addr).await;
     s.write_all(b"*2\r\n$4\r\nAUTH\r\n$5\r\nwrong\r\n*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$100000\r\n")
         .await
@@ -161,14 +167,26 @@ async fn policy_none_keeps_the_normal_limits_and_has_no_deadline() {
 
 #[tokio::test]
 async fn the_auth_deadline_closes_an_idle_unauthenticated_connection() {
-    let addr = common::start_node(&["--shared-token", "s3cret", "--auth-timeout-secs", "2"]).await;
+    let addr = common::start_node(&[
+        "--acl-file",
+        common::client_tls::password_file("s3cret"),
+        "--auth-timeout-secs",
+        "2",
+    ])
+    .await;
     let mut s = common::client_tls::connect(addr).await;
     assert_eq!(read_to_close(&mut s).await.unwrap(), "");
 }
 
 #[tokio::test]
 async fn the_auth_deadline_closes_a_connection_that_sends_no_credential() {
-    let addr = common::start_node(&["--shared-token", "s3cret", "--auth-timeout-secs", "2"]).await;
+    let addr = common::start_node(&[
+        "--acl-file",
+        common::client_tls::password_file("s3cret"),
+        "--auth-timeout-secs",
+        "2",
+    ])
+    .await;
     let mut s = common::client_tls::connect(addr).await;
     s.write_all(PING).await.unwrap();
     let text = read_to_close(&mut s).await.unwrap();
@@ -177,7 +195,13 @@ async fn the_auth_deadline_closes_a_connection_that_sends_no_credential() {
 
 #[tokio::test]
 async fn an_authenticated_connection_outlives_the_auth_deadline() {
-    let addr = common::start_node(&["--shared-token", "s3cret", "--auth-timeout-secs", "5"]).await;
+    let addr = common::start_node(&[
+        "--acl-file",
+        common::client_tls::password_file("s3cret"),
+        "--auth-timeout-secs",
+        "5",
+    ])
+    .await;
     let mut s = common::client_tls::connect(addr).await;
     expect(&mut s, AUTH, "+OK\r\n").await;
     tokio::time::sleep(Duration::from_secs(7)).await;
@@ -186,7 +210,13 @@ async fn an_authenticated_connection_outlives_the_auth_deadline() {
 
 #[tokio::test]
 async fn auth_timeout_zero_turns_the_deadline_off() {
-    let addr = common::start_node(&["--shared-token", "s3cret", "--auth-timeout-secs", "0"]).await;
+    let addr = common::start_node(&[
+        "--acl-file",
+        common::client_tls::password_file("s3cret"),
+        "--auth-timeout-secs",
+        "0",
+    ])
+    .await;
     let mut s = common::client_tls::connect(addr).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     expect(&mut s, AUTH, "+OK\r\n").await;

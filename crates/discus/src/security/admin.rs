@@ -2,7 +2,7 @@
 //!
 //! The probes stay open: the kubelet calls them without credentials, and they show only the
 //! phase. Every route under `/admin/` needs an admin certificate or a bearer token with
-//! `discus.admin`. The shared token never opens them.
+//! `discus.admin`. A user of the ACL file never opens them.
 
 use std::net::IpAddr;
 use std::sync::Arc;

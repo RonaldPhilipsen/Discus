@@ -11,7 +11,7 @@ features from that value.
 
 | Family | Commands |
 | --- | --- |
-| Connection | `PING`, `ECHO`, `QUIT`, `AUTH`, `HELLO` (RESP2 and RESP3), `SELECT` (every database), `COMMAND` (`COUNT`, `INFO`, `GETKEYS`, and the full list), `READONLY`, `READWRITE`, `ASKING`, `CLUSTER` (see below), `CLIENT` (`SETNAME`, `GETNAME`, `ID`, `SETINFO`), `INFO`, `CONFIG GET` (`maxmemory`, `databases`, `maxclients`) |
+| Connection | `PING`, `ECHO`, `QUIT`, `AUTH`, `HELLO` (RESP2 and RESP3), `SELECT` (every database), `COMMAND` (`COUNT`, `INFO`, `GETKEYS`, and the full list), `READONLY`, `READWRITE`, `ASKING`, `CLUSTER` (see below), `ACL` (`WHOAMI`, `CAT`, `LIST`, `USERS`, `GETUSER`), `CLIENT` (`SETNAME`, `GETNAME`, `ID`, `SETINFO`), `INFO`, `CONFIG GET` (`maxmemory`, `databases`, `maxclients`) |
 | Strings | `GET`, `SET` (`EX`, `PX`, `EXAT`, `PXAT`, `NX`, `XX`, `KEEPTTL`, `GET`), `GETDEL`, `GETEX`, `MGET`, `MSET`, `INCR`, `DECR`, `INCRBY`, `DECRBY`, `INCRBYFLOAT`, `APPEND`, `STRLEN` |
 | Keys and expiry | `DEL`, `EXISTS`, `TYPE`, `RENAME`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `MOVE`, `COPY` (`DB`, `REPLACE`), `SCAN` (`MATCH`, `COUNT`), `RANDOMKEY`, `DBSIZE`, `FLUSHDB`, `FLUSHALL` |
 | Hashes | `HSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HINCRBY`, `HKEYS`, `HVALS` |
@@ -82,10 +82,11 @@ A Discus node ID has 32 hex digits. A reply adds `00000000` to it, so that clien
 40 digits accept it.
 
 `COMMAND` returns the Redis 7 shape. Each entry has the name, the arity, the flags, the first key,
-the last key, and the step. The flags are `readonly` or `write`. The lists of ACL categories, tips,
-key specifications, and subcommands are empty. `COMMAND INFO <name>` returns the entries of the
-named commands. `COMMAND GETKEYS` returns the keys of a command. `COMMAND COUNT` returns the number
-of commands. `COMMAND DOCS` returns an empty reply.
+the last key, and the step. The flags are `readonly` or `write`, and `fast` where Valkey sets it.
+The list of ACL categories holds the categories of Valkey. The lists of tips, key specifications,
+and subcommands are empty. `COMMAND INFO <name>` returns the entries of the named commands.
+`COMMAND GETKEYS` returns the keys of a command. `COMMAND COUNT` returns the number of commands.
+`COMMAND DOCS` returns an empty reply.
 
 `INFO` has a `# Cluster` section. It shows `cluster_enabled:1` while the topology commands answer.
 Otherwise it shows `cluster_enabled:0`. Some tools treat a node with `cluster_enabled:1` as a
@@ -153,11 +154,20 @@ See [Running a cluster](cluster.md) for the details.
 
 ## Authentication
 
-`AUTH` and `HELLO ... AUTH` accept the shared token or an OAuth 2.0 token. `AUTH OAUTH2 <token>`
-selects OAuth 2.0. The username is only a hint. A failed `AUTH` always returns the same
-`-WRONGPASS` error. A command that the scopes of the connection do not allow returns
-`-NOPERM this user has no permissions to run the '<command>' command`. An expired token turns the
-next command into `-NOAUTH`, and the client can send `AUTH` again on the same connection.
+`AUTH` and `HELLO ... AUTH` accept an OAuth 2.0 token or the password of a user
+of the ACL file. `AUTH OAUTH2 <token>` selects OAuth 2.0. If the ACL file does not name the
+username, the username is only a hint. `AUTH default <value>` works like `AUTH <value>`. A failed
+`AUTH` always returns the same `-WRONGPASS` error. A command that the scopes of the connection do
+not allow returns `-NOPERM this user has no permissions to run the '<command>' command`. An expired
+token turns the next command into `-NOAUTH`, and the client can send `AUTH` again on the same
+connection.
+
+The users come from the file of `--acl-file`. `ACL WHOAMI`, `ACL CAT`, `ACL LIST`, `ACL USERS`,
+and `ACL GETUSER` work. `ACL LIST`, `ACL USERS`, and `ACL GETUSER` are in `@admin`, as in Valkey.
+These `ACL` subcommands return an error: `SETUSER`, `DELUSER`, `LOAD`, `SAVE`, `LOG`, `GENPASS`,
+and `DRYRUN`. The file can hold a rule for one subcommand of `ACL`, such as `+acl|list`. Discus
+refuses selectors and rules for a subcommand of a different command, such as `+config|get`. It
+also refuses a `+` or `-` rule for a command that it lacks.
 
 See [security.md](security.md) for TLS, the authentication policy, scopes, and the admin port.
 
@@ -230,7 +240,8 @@ Run `mise run build-matrix` to check every supported combination.
 - `SCAN` counts entries examined, as Redis does, so a `MATCH` batch can be empty before the cursor
   ends. It does not accept `TYPE`.
 - `DBSIZE` includes expired keys that the background sweep has not removed yet.
-- `COMMAND` returns command names only. `COMMAND DOCS` and `COMMAND INFO` return empty arrays.
+- `COMMAND` returns one entry for each command. `COMMAND INFO` returns the entries of the named
+  commands, and a null for an unknown name. `COMMAND DOCS` returns an empty array.
 - `CONFIG GET` answers three names. Other names return an empty array, so `redis-benchmark` prints
   `Could not fetch server CONFIG` and continues.
 - `FLUSHDB` and `FLUSHALL` accept `ASYNC` or `SYNC` and ignore it.

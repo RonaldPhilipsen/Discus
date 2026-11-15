@@ -184,20 +184,20 @@ fn watch_certificates(
     );
 }
 
-/// Reload the shared token after its file changes. The period is the one of the certificates.
-fn watch_shared_token(node: &Arc<Node>, seen: file_watch::Snapshot, stop: CancellationToken) {
-    let Some(file) = node.security.shared_token_file() else {
+/// Reload the ACL file after it changes. The period is the one of the certificates.
+fn watch_acl_file(node: &Arc<Node>, seen: file_watch::Snapshot, stop: CancellationToken) {
+    let Some(file) = node.security.acl_file() else {
         return;
     };
     let live_settings = node.live_settings.clone();
     let security = node.security.clone();
     file_watch::watch(
-        "shared token",
+        "ACL file",
         vec![file.to_path_buf()],
         seen,
         move || live_settings.get().tls_reload,
         stop,
-        move || security.reload_shared_token(),
+        move || security.reload_acl(),
     );
 }
 
@@ -242,8 +242,8 @@ pub struct Server {
     transports: Vec<Transport>,
     /// The client and cluster certificate files before the node loaded them.
     tls_seen: (file_watch::Snapshot, file_watch::Snapshot),
-    /// The shared token file before the node loaded it.
-    token_seen: file_watch::Snapshot,
+    /// The ACL file before the node loaded it.
+    acl_seen: file_watch::Snapshot,
 }
 
 impl Server {
@@ -261,7 +261,7 @@ impl Server {
             file_watch::snapshot(&Security::client_tls_files(&config.security)),
             file_watch::snapshot(&cluster_tls_files(&config)),
         );
-        let token_seen = file_watch::snapshot(config.shared_token_file.as_slice());
+        let acl_seen = file_watch::snapshot(config.security.acl_file.as_slice());
         let tls = if config.cluster_enabled() {
             let (Some(ca), Some(cert), Some(key)) = (
                 &config.cluster_ca,
@@ -380,7 +380,7 @@ impl Server {
             lane,
             transports,
             tls_seen,
-            token_seen,
+            acl_seen,
         })
     }
 
@@ -428,11 +428,11 @@ impl Server {
             lane,
             transports,
             tls_seen,
-            token_seen,
+            acl_seen,
         } = self;
         let stop_background = CancellationToken::new();
         watch_certificates(&node, transports, tls_seen, stop_background.clone());
-        watch_shared_token(&node, token_seen, stop_background.clone());
+        watch_acl_file(&node, acl_seen, stop_background.clone());
         crate::settings::reload::spawn(&node, stop_background.clone());
         {
             let node = node.clone();

@@ -51,9 +51,20 @@ fn fixture() -> &'static Fixture {
     })
 }
 
+/// The path of an ACL file whose user `default` has the password `password` and every right, for
+/// the flag `--acl-file`. `AUTH <password>` then logs in, so this is the node with one password.
+pub fn password_file(password: &str) -> &'static str {
+    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+    let dir = DIR.get_or_init(|| tempfile::tempdir().unwrap());
+    let path = dir.path().join(format!("{password}.acl"));
+    // Each test of a process writes the same content, so a second write changes nothing.
+    std::fs::write(&path, format!("user default on >{password} ~* +@all\n")).unwrap();
+    path.display().to_string().leak()
+}
+
 /// The flags that a test node needs to accept clients. These are the client TLS flags, unless
-/// `args` brings its own certificate, and the policy `none`, unless `args` sets a policy or a
-/// shared token.
+/// `args` brings its own certificate, and the policy `none`, unless `args` sets a policy or an
+/// ACL file.
 pub fn server_args<S: AsRef<str>>(args: &[S]) -> Vec<String> {
     let has = |flag: &str| args.iter().any(|a| a.as_ref() == flag);
     let mut out = Vec::new();
@@ -61,7 +72,7 @@ pub fn server_args<S: AsRef<str>>(args: &[S]) -> Vec<String> {
         let f = fixture();
         out.extend(["--tls-cert", &f.cert, "--tls-key", &f.key].map(String::from));
     }
-    if !has("--auth-policy") && !has("--shared-token") && !has("--shared-token-file") {
+    if !has("--auth-policy") && !has("--acl-file") {
         out.extend(["--auth-policy", "none"].map(String::from));
     }
     out

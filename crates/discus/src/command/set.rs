@@ -15,13 +15,15 @@ type Set = HashSet<Bytes>;
 type Reply = Result<Value, CommandError>;
 
 pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec::write("SADD", -3, sadd),
-    CommandSpec::write("SREM", -3, srem),
+    CommandSpec::write("SADD", -3, sadd).with_fast(),
+    CommandSpec::write("SREM", -3, srem).with_fast(),
     CommandSpec::read("SMEMBERS", 2, smembers),
-    CommandSpec::read("SISMEMBER", 3, sismember),
-    CommandSpec::read("SMISMEMBER", -3, smismember),
-    CommandSpec::read("SCARD", 2, scard),
-    CommandSpec::write("SPOP", -2, spop),
+    CommandSpec::read("SISMEMBER", 3, sismember).with_fast(),
+    CommandSpec::read("SMISMEMBER", -3, smismember).with_fast(),
+    CommandSpec::read("SCARD", 2, scard).with_fast(),
+    CommandSpec::write("SPOP", -2, spop)
+        .with_fast()
+        .with_reads_old(),
     CommandSpec::read("SRANDMEMBER", -2, srandmember),
 ];
 

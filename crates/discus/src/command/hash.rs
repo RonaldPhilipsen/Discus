@@ -15,15 +15,17 @@ type Hash = HashMap<Bytes, Bytes>;
 type Reply = Result<Value, CommandError>;
 
 pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec::write("HSET", -4, hset),
-    CommandSpec::write("HSETNX", 4, hsetnx),
-    CommandSpec::read("HGET", 3, hget),
-    CommandSpec::read("HMGET", -3, hmget),
+    CommandSpec::write("HSET", -4, hset).with_fast(),
+    CommandSpec::write("HSETNX", 4, hsetnx).with_fast(),
+    CommandSpec::read("HGET", 3, hget).with_fast(),
+    CommandSpec::read("HMGET", -3, hmget).with_fast(),
     CommandSpec::read("HGETALL", 2, hgetall),
-    CommandSpec::write("HDEL", -3, hdel),
-    CommandSpec::read("HEXISTS", 3, hexists),
-    CommandSpec::read("HLEN", 2, hlen),
-    CommandSpec::write("HINCRBY", 4, hincrby),
+    CommandSpec::write("HDEL", -3, hdel).with_fast(),
+    CommandSpec::read("HEXISTS", 3, hexists).with_fast(),
+    CommandSpec::read("HLEN", 2, hlen).with_fast(),
+    CommandSpec::write("HINCRBY", 4, hincrby)
+        .with_fast()
+        .with_reads_old(),
     CommandSpec::read("HKEYS", 2, hkeys),
     CommandSpec::read("HVALS", 2, hvals),
 ];

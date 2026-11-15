@@ -8,7 +8,7 @@
       "type": "string",
       "pattern": "^$|^none$|^(any|all):.+$"
     },
-    "sharedToken": {
+    "aclFile": {
       "type": "object",
       "properties": {
         "secretName": { "type": "string" },

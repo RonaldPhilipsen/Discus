@@ -15,16 +15,18 @@ use crate::node::{ConnState, Node};
 type Reply = Result<Value, CommandError>;
 
 pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec::write("ZADD", -4, zadd),
-    CommandSpec::read("ZSCORE", 3, zscore),
-    CommandSpec::read("ZMSCORE", -3, zmscore),
-    CommandSpec::write("ZREM", -3, zrem),
-    CommandSpec::read("ZCARD", 2, zcard),
+    CommandSpec::write("ZADD", -4, zadd).with_fast(),
+    CommandSpec::read("ZSCORE", 3, zscore).with_fast(),
+    CommandSpec::read("ZMSCORE", -3, zmscore).with_fast(),
+    CommandSpec::write("ZREM", -3, zrem).with_fast(),
+    CommandSpec::read("ZCARD", 2, zcard).with_fast(),
     CommandSpec::read("ZRANGE", -4, zrange),
     CommandSpec::read("ZREVRANGE", -4, zrevrange),
     CommandSpec::read("ZRANGEBYSCORE", -4, zrangebyscore),
-    CommandSpec::write("ZINCRBY", 4, zincrby),
-    CommandSpec::read("ZCOUNT", 4, zcount),
+    CommandSpec::write("ZINCRBY", 4, zincrby)
+        .with_fast()
+        .with_reads_old(),
+    CommandSpec::read("ZCOUNT", 4, zcount).with_fast(),
 ];
 
 /// A bound such as `1.5`, `(1.5`, `-inf`, or `+inf`.

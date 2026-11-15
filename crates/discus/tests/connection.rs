@@ -15,8 +15,9 @@ async fn hello_switches_to_resp3_and_reports_version() {
 }
 
 #[tokio::test]
-async fn auth_is_required_when_a_token_is_configured() {
-    let addr = common::start_node(&["--shared-token", "s3cret"]).await;
+async fn auth_is_required_when_a_password_is_configured() {
+    let addr =
+        common::start_node(&["--acl-file", common::client_tls::password_file("s3cret")]).await;
     let denied = common::roundtrip(addr, b"*1\r\n$4\r\nPING\r\n").await;
     assert!(denied.starts_with("-NOAUTH"), "{denied:?}");
     let wire = b"*2\r\n$4\r\nAUTH\r\n$6\r\ns3cret\r\n*1\r\n$4\r\nPING\r\n";
@@ -24,18 +25,29 @@ async fn auth_is_required_when_a_token_is_configured() {
     assert_eq!(ok, "+OK\r\n+PONG\r\n");
     let wrong = common::roundtrip(addr, b"*2\r\n$4\r\nAUTH\r\n$5\r\nwrong\r\n").await;
     assert!(wrong.starts_with("-WRONGPASS"), "{wrong:?}");
-    let two = common::roundtrip(addr, b"*3\r\n$4\r\nAUTH\r\n$4\r\nuser\r\n$6\r\ns3cret\r\n").await;
+    let two = common::roundtrip(
+        addr,
+        b"*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$6\r\ns3cret\r\n",
+    )
+    .await;
     assert_eq!(two, "+OK\r\n");
+    // An empty name is not the user `default`, as in Valkey.
+    let empty = common::roundtrip(addr, b"*3\r\n$4\r\nAUTH\r\n$0\r\n\r\n$6\r\ns3cret\r\n").await;
+    assert!(empty.starts_with("-WRONGPASS"), "{empty:?}");
+    // The password belongs to the user `default`. A different name is a different user.
+    let other =
+        common::roundtrip(addr, b"*3\r\n$4\r\nAUTH\r\n$4\r\nuser\r\n$6\r\ns3cret\r\n").await;
+    assert!(other.starts_with("-WRONGPASS"), "{other:?}");
     let hello = common::roundtrip(
         addr,
-        b"*5\r\n$5\r\nHELLO\r\n$1\r\n3\r\n$4\r\nAUTH\r\n$4\r\nuser\r\n$6\r\ns3cret\r\n",
+        b"*5\r\n$5\r\nHELLO\r\n$1\r\n3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$6\r\ns3cret\r\n",
     )
     .await;
     assert!(hello.starts_with('%'), "{hello:?}");
 }
 
 #[tokio::test]
-async fn auth_without_a_configured_token_is_an_error() {
+async fn auth_without_a_configured_password_is_an_error() {
     let addr = common::start_node(&[]).await;
     let reply = common::roundtrip(addr, b"*2\r\n$4\r\nAUTH\r\n$1\r\nx\r\n").await;
     assert!(
@@ -89,7 +101,9 @@ async fn command_info_and_getkeys() {
     let addr = common::start_node(&[]).await;
     let info = common::roundtrip(addr, b"*3\r\n$7\r\nCOMMAND\r\n$4\r\nINFO\r\n$3\r\nget\r\n").await;
     assert!(
-        info.starts_with("*1\r\n*10\r\n$3\r\nget\r\n:2\r\n*1\r\n+readonly\r\n:1\r\n:1\r\n:1\r\n"),
+        info.starts_with(
+            "*1\r\n*10\r\n$3\r\nget\r\n:2\r\n*2\r\n+readonly\r\n+fast\r\n:1\r\n:1\r\n:1\r\n"
+        ),
         "{info:?}"
     );
     let unknown =

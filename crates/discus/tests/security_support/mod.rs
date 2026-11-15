@@ -2,7 +2,7 @@
 #![allow(dead_code, unused_imports, clippy::unwrap_used)]
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -203,7 +203,7 @@ pub async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, wire: &[u8])
 #[path = "../common/mod.rs"]
 pub mod common;
 
-pub use common::{status, try_start_full as try_start, wait_status, Running as Node};
+pub use common::{status, try_start_full as try_start, wait_status, write_in, Running as Node};
 
 pub async fn start(args: &[&str]) -> Node {
     try_start(args).await.unwrap()
@@ -230,6 +230,69 @@ pub async fn start_oauth2(file: &str, args: &[&str]) -> Node {
 
 #[cfg(feature = "oauth2")]
 pub mod idp;
+
+/// The ACL file of the ACL user tests.
+pub const ACL_USERS: &str = "\
+user default off
+user admin on >admin-pass ~* +@all
+user reader on >read-pass ~cache:* +@read +@connection
+user writer on >w1 >w2 %W~jobs:* %R~cache:* +@all -@dangerous
+user gone off >gone-pass ~* +@all
+";
+
+/// The reply to a command with a key that the user cannot access.
+pub const NOPERM_KEY: &str =
+    "-NOPERM this user has no permissions to access one of the keys used as arguments\r\n";
+
+/// Wait until `ok` is true, for at most 60 s. A node checks its files every second in these tests,
+/// so 60 s is generous. `what` is the text of the failure.
+pub async fn eventually<F: std::future::Future<Output = bool>>(
+    what: &str,
+    mut ok: impl FnMut() -> F,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while !ok().await {
+        assert!(tokio::time::Instant::now() < deadline, "{what} within 60 s");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Replace the file with one rename, as Kubernetes does, so the node never reads half a file.
+pub fn replace_file(path: &Path, content: &str) {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, content).unwrap();
+    std::fs::rename(&tmp, path).unwrap();
+}
+
+/// A node with the policy `policy`, the issuers of `auth_file`, the users of `acl`, and `args`.
+/// The source limit is high, because the tests send wrong credentials. It waits until the node is
+/// ready.
+pub async fn start_users_oauth2(
+    ca: &TestCa,
+    auth_file: &str,
+    policy: &str,
+    acl: &str,
+    args: &[&str],
+) -> Node {
+    let acl = write_file(ca, "users.acl", acl);
+    let mut argv = vec![
+        "--auth-policy",
+        policy,
+        "--auth-config",
+        auth_file,
+        "--acl-file",
+        &acl,
+        "--auth-max-failures-per-source",
+        "1000000",
+    ];
+    argv.extend_from_slice(args);
+    let node = start(&argv).await;
+    assert!(
+        wait_status(node.admin, "/readyz", 200, Duration::from_secs(60)).await,
+        "the node never became ready"
+    );
+    node
+}
 
 /// Write `content` to a new file in the CA directory and return its path.
 pub fn write_file(ca: &TestCa, name: &str, content: &str) -> String {
