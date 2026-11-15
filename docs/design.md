@@ -1107,6 +1107,9 @@ same owners in every database.
   replies behind it. The acceptor runs at most the stream limit of requests from one shared stream
   at the same time. A frame that fails the verifier resets the shared stream, and the dialer sends
   later requests on streams of their own.
+- The queues of the shared stream are bounded. On the dialer, at most 4 MiB of requests wait to be
+  written, and a request whose caller stopped waiting is dropped before it goes out. On the
+  acceptor, a request keeps its place in the stream limit until its reply was written.
 - Allow at most 1024 concurrent streams per connection. Flow-control windows provide backpressure.
 - 0-RTT is off, because 0-RTT data can be replayed.
 - An endpoint sends a QUIC retry to a new connection from an address that it did not validate. A

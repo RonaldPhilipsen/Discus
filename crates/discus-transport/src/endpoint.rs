@@ -1087,9 +1087,10 @@ async fn serve_stream(
 }
 
 /// Serve a shared stream until the dialer finishes it. Each request runs in its own task, at
-/// most `max_streams` at a time, and its reply goes out when it is ready. At the limit the
-/// reader waits, so flow control holds back the dialer as the stream limit does. A reply over
-/// the shared limit goes on a new unidirectional stream.
+/// most `max_streams` at a time, and its reply goes out when it is ready. A request keeps its
+/// permit until its reply was written, so replies that a stalled dialer does not read count
+/// against the limit. At the limit the reader waits, so flow control holds back the dialer as
+/// the stream limit does. A reply over the shared limit goes on a new unidirectional stream.
 async fn serve_shared(
     inner: Arc<Inner>,
     conn: quinn::Connection,
@@ -1139,10 +1140,10 @@ async fn serve_shared(
                         let _ = send.finish();
                     }
                 }
+                drop(permit);
             } else {
-                let _ = out.send(Out::Frame(reply));
+                let _ = out.send(Out::frame(reply, Some(permit)));
             }
-            drop(permit);
         });
     }
 }
