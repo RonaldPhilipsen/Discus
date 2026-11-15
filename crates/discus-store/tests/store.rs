@@ -189,3 +189,20 @@ fn a_late_stamp_still_raises_the_stored_version() {
     assert!(gone > applied);
     assert_eq!(s.version(0, b"k"), Some(gone));
 }
+
+/// `SCAN` accepts any positive `COUNT`, as Valkey does. A huge one must not size an allocation.
+#[test]
+fn a_walk_with_a_huge_count_returns_every_key_without_a_huge_allocation() {
+    let clock = Arc::new(ManualClock::new(0));
+    let s = store(&clock);
+    for i in 0..50 {
+        s.write(0, format!("k{i}").as_bytes(), Version::zero(), |slot| {
+            slot.set(Some(Entry::new(Value::Str("v".into()), None)));
+        });
+    }
+    for count in [1 << 50, usize::MAX] {
+        let (next, keys) = s.scan(0, 0, count, None);
+        assert_eq!(next, 0);
+        assert_eq!(keys.len(), 50);
+    }
+}

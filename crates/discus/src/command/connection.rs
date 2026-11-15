@@ -10,7 +10,7 @@ use discus_telemetry::attrs::TopologyCommand;
 use super::category::Categories;
 use super::error::CommandError;
 use super::table::{check, lookup, names, specs, Access, CommandSpec, Subcommand};
-use super::util::{glob_match, parse_i64, upper};
+use super::util::{error_text, glob_match, parse_i64, upper};
 use crate::build;
 use crate::cluster::route::key_args;
 use crate::cluster::topology;
@@ -254,7 +254,7 @@ fn client(_: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
         "SETINFO" if cmd.len() == 4 => Ok(Value::ok()),
         _ => Err(CommandError::Custom(format!(
             "ERR unknown subcommand or wrong number of arguments for 'CLIENT {}'",
-            upper(&cmd[1])
+            error_text(upper(&cmd[1]).as_bytes())
         ))),
     }
 }
@@ -313,8 +313,9 @@ fn acl(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
         )),
         "CAT" if cmd.len() == 3 => {
             let name = String::from_utf8_lossy(&cmd[2]);
-            let category = Categories::parse(&name)
-                .ok_or_else(|| CommandError::Custom(format!("ERR Unknown category '{name}'")))?;
+            let category = Categories::parse(&name).ok_or_else(|| {
+                CommandError::Custom(format!("ERR Unknown category '{}'", error_text(&cmd[2])))
+            })?;
             Ok(Value::Array(
                 specs()
                     .iter()
@@ -335,7 +336,8 @@ fn acl(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
             Err(CommandError::Custom(ACL_READ_ONLY.into()))
         }
         _ => Err(CommandError::Custom(format!(
-            "ERR unknown subcommand or wrong number of arguments for 'ACL {sub}'"
+            "ERR unknown subcommand or wrong number of arguments for 'ACL {}'",
+            error_text(sub.as_bytes())
         ))),
     }
 }

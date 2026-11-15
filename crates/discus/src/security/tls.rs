@@ -51,6 +51,22 @@ pub fn trust_roots() -> RootCertStore {
     roots
 }
 
+/// Log a warning when `users` rely on the build trust roots and `roots` is empty. TLS to each of
+/// them then fails, and an OAuth 2.0 issuer without keys keeps the node from becoming ready.
+/// Returns whether it warned.
+pub fn warn_if_no_trust_roots(users: &[String], roots: &RootCertStore) -> bool {
+    if users.is_empty() || !roots.is_empty() {
+        return false;
+    }
+    tracing::warn!(
+        users = users.join(", "),
+        trust_roots = crate::build::TRUST_ROOTS,
+        "the trust root store is empty, so TLS to these endpoints fails. Set a CA file for each \
+         of them, or give the node a system CA bundle"
+    );
+    true
+}
+
 fn invalid(path: &Path, what: &str, e: impl std::fmt::Display) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
@@ -182,6 +198,20 @@ mod tests {
     #[test]
     fn webpki_roots_are_compiled_in() {
         assert!(trust_roots().len() > 50);
+    }
+
+    #[test]
+    fn an_empty_trust_root_store_warns_only_when_something_uses_it() {
+        let users = vec!["OAuth 2.0 issuer \"https://idp\"".to_string()];
+        assert!(warn_if_no_trust_roots(&users, &RootCertStore::empty()));
+        assert!(!warn_if_no_trust_roots(&[], &RootCertStore::empty()));
+        let ca = rcgen::CertificateParams::new(Vec::<String>::new())
+            .unwrap()
+            .self_signed(&rcgen::KeyPair::generate().unwrap())
+            .unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.der().clone()).unwrap();
+        assert!(!warn_if_no_trust_roots(&users, &roots));
     }
 
     #[test]

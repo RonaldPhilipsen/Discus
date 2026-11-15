@@ -6,6 +6,7 @@
 pub mod entry;
 pub mod evict;
 pub mod glob;
+mod keymap;
 pub mod scan;
 pub mod store;
 pub mod ttl;

@@ -328,3 +328,130 @@ async fn a_bad_frame_resets_the_shared_stream_but_not_the_connection() {
     assert!(conn.close_reason().is_none());
     assert_eq!(p.ping(3, LONG, true).await.unwrap(), 3);
 }
+
+/// Holds every `Fetch` until the gate opens, and records the nonce of every `Ping`.
+struct Gate {
+    epoch: EpochId,
+    open: tokio::sync::watch::Receiver<bool>,
+    pings: parking_lot::Mutex<Vec<u64>>,
+}
+
+impl Service for Gate {
+    fn epoch(&self) -> EpochId {
+        self.epoch
+    }
+
+    fn call(self: Arc<Self>, inbound: Inbound) -> BoxFuture<'static, Message> {
+        Box::pin(async move {
+            match inbound.message {
+                Message::Fetch { .. } => {
+                    let mut open = self.open.clone();
+                    let _ = open.wait_for(|o| *o).await;
+                    Message::Pong { nonce: 0 }
+                }
+                Message::Ping { nonce } => {
+                    self.pings.lock().push(nonce);
+                    Message::Pong { nonce }
+                }
+                _ => Message::Unsupported { message_type: 0 },
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_queued_write_whose_caller_timed_out_is_not_sent() {
+    let ca = TestCa::new();
+    let cluster = ClusterId::mint();
+    let (a_id, b_id) = (NodeId::random(), NodeId::random());
+    let a = Transport::bind(config(&ca, a_id, cluster), TestService::new(epoch(1, a_id)))
+        .await
+        .unwrap();
+    let (gate, open) = tokio::sync::watch::channel(false);
+    let service = Arc::new(Gate {
+        epoch: epoch(1, b_id),
+        open,
+        pings: parking_lot::Mutex::new(Vec::new()),
+    });
+    let mut cb = config(&ca, b_id, cluster);
+    cb.max_streams = 1;
+    let b = Transport::bind(cb, service.clone()).await.unwrap();
+    let addr = b.local_addr();
+    a.peer(b_id, addr).await.unwrap();
+    // The acceptor runs one request and stops reading, so flow control stalls the dialer
+    // writer with many requests still in its queue.
+    let fillers: Vec<_> = (0..60)
+        .map(|i| {
+            let a = a.clone();
+            tokio::spawn(async move {
+                let fetch = Message::Fetch {
+                    keys: vec![DbKey::new(0, vec![i as u8; 60_000])],
+                };
+                a.request(b_id, addr, fetch, TraceContext::default(), LONG, true)
+                    .await
+            })
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let late: Vec<_> = (1..=10u64)
+        .map(|nonce| {
+            let a = a.clone();
+            tokio::spawn(async move {
+                let ping = Message::Ping { nonce };
+                let short = Duration::from_millis(300);
+                a.request(b_id, addr, ping, TraceContext::default(), short, true)
+                    .await
+            })
+        })
+        .collect();
+    for t in late {
+        assert_eq!(t.await.unwrap().unwrap_err(), TransportError::Timeout);
+    }
+    gate.send(true).unwrap();
+    for t in fillers {
+        t.await.unwrap().unwrap();
+    }
+    let reply = a
+        .request(
+            b_id,
+            addr,
+            Message::Ping { nonce: 99 },
+            TraceContext::default(),
+            LONG,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply.message, Message::Pong { nonce: 99 });
+    assert_eq!(*service.pings.lock(), vec![99]);
+}
+
+#[tokio::test]
+async fn a_dialer_that_does_not_read_replies_holds_back_the_acceptor() {
+    let ca = TestCa::new();
+    let cluster = ClusterId::mint();
+    let b_id = NodeId::random();
+    let mut cb = config(&ca, b_id, cluster);
+    cb.max_streams = 4;
+    let b = Transport::bind(cb, Arc::new(Delay(epoch(1, b_id))))
+        .await
+        .unwrap();
+    let conn = raw(&ca, cluster, b.local_addr()).await;
+    let (mut send, _recv) = conn.open_bi().await.unwrap();
+    frame::write_frame(&mut send, &[]).await.unwrap();
+    // Each reply is just under the shared limit, and nobody reads them.
+    for id in 0..200u64 {
+        let fetch = encode_frame(&Frame {
+            request_id: id,
+            trace: TraceContext::default(),
+            message: Message::Fetch {
+                keys: vec![DbKey::new(0, "size:60000")],
+            },
+        });
+        frame::write_frame(&mut send, &fetch).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    // The receive window holds a few dozen replies. The acceptor then stops taking requests.
+    let served = b.stats().snapshot().shared_in;
+    assert!(served < 100, "the acceptor served {served} requests");
+}

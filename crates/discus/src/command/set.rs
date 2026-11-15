@@ -17,13 +17,14 @@ type Reply = Result<Value, CommandError>;
 pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::write("SADD", -3, sadd).with_fast(),
     CommandSpec::write("SREM", -3, srem).with_fast(),
-    CommandSpec::read("SMEMBERS", 2, smembers),
+    CommandSpec::read("SMEMBERS", 2, smembers).with_set_reply(),
     CommandSpec::read("SISMEMBER", 3, sismember).with_fast(),
     CommandSpec::read("SMISMEMBER", -3, smismember).with_fast(),
     CommandSpec::read("SCARD", 2, scard).with_fast(),
     CommandSpec::write("SPOP", -2, spop)
         .with_fast()
-        .with_reads_old(),
+        .with_reads_old()
+        .with_set_reply(),
     CommandSpec::read("SRANDMEMBER", -2, srandmember),
 ];
 
