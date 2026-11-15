@@ -473,8 +473,7 @@ async fn a_purge_removes_expired_keys_from_every_voter() {
 
 /// A connection to `n` that selects database `db` in its URL.
 async fn in_database(n: &GossipNode, db: u32) -> redis::aio::MultiplexedConnection {
-    let client = common::client_tls::redis_client(&format!("rediss://{}/{db}", n.addr));
-    client.get_multiplexed_async_connection().await.unwrap()
+    common::client_tls::redis_connection(&format!("rediss://{}/{db}", n.addr)).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

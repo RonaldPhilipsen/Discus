@@ -390,12 +390,7 @@ async fn conn(addr: SocketAddr, resp3: bool) -> redis::aio::MultiplexedConnectio
     } else {
         format!("rediss://{addr}")
     };
-    let config =
-        redis::AsyncConnectionConfig::new().set_response_timeout(Some(Duration::from_secs(30)));
-    client_tls::redis_client(&url)
-        .get_multiplexed_async_connection_with_config(&config)
-        .await
-        .unwrap()
+    client_tls::redis_connection(&url).await
 }
 
 async fn query(c: &mut redis::aio::MultiplexedConnection, parts: &[&str]) -> redis::Value {
@@ -524,6 +519,7 @@ async fn resp3_topology_parses() {
         .certs(client_tls::redis_certs())
         .use_protocol(redis::ProtocolVersion::RESP3)
         .response_timeout(Duration::from_secs(30))
+        .connection_timeout(Duration::from_secs(30))
         .build()
         .unwrap();
     let mut cluster = client.get_async_connection().await.unwrap();
@@ -626,6 +622,7 @@ async fn cluster_client_routes_directly() {
     let client = redis::cluster::ClusterClientBuilder::new(urls)
         .certs(client_tls::redis_certs())
         .response_timeout(Duration::from_secs(30))
+        .connection_timeout(Duration::from_secs(30))
         .build()
         .unwrap();
     let mut cluster = client.get_async_connection().await.unwrap();
@@ -687,6 +684,7 @@ async fn single_node_answers_one_range() {
     let client = redis::cluster::ClusterClientBuilder::new(vec![format!("rediss://{port}")])
         .certs(client_tls::redis_certs())
         .response_timeout(Duration::from_secs(30))
+        .connection_timeout(Duration::from_secs(30))
         .build()
         .unwrap();
     let mut cluster = client.get_async_connection().await.unwrap();
