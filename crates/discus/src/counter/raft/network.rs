@@ -95,6 +95,35 @@ impl RaftNetworkFactory<TypeConfig> for NetFactory {
     }
 }
 
+/// The largest entry bytes of one `RAFT_APPEND`, as [`super::store::entry_bytes`] counts them.
+/// A single larger entry still goes alone.
+pub const APPEND_BYTES: u64 = 4 << 20;
+
+/// The part of `rpc` whose entries fit in `limit` bytes, at least one entry, and the last log
+/// ID that it sends when it leaves entries out.
+fn split_append(
+    mut rpc: AppendEntriesRequest<TypeConfig>,
+    limit: u64,
+) -> (AppendEntriesRequest<TypeConfig>, Option<super::LogId>) {
+    let mut total = 0;
+    let keep = rpc
+        .entries
+        .iter()
+        .position(|e| {
+            total += super::store::entry_bytes(e);
+            total > limit
+        })
+        .map(|i| i.max(1));
+    match keep {
+        Some(n) if n < rpc.entries.len() => {
+            rpc.entries.truncate(n);
+            let last = rpc.entries.last().map(|e| e.log_id);
+            (rpc, last)
+        }
+        _ => (rpc, None),
+    }
+}
+
 pub struct NetClient {
     link: Arc<dyn RaftLink>,
     header: RaftHeader,
@@ -148,8 +177,17 @@ impl RaftNetwork<TypeConfig> for NetClient {
         option: RPCOption,
     ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig, RaftError<TypeConfig>>>
     {
+        // openraft 0.10 bounds a batch by entry count only and has no "payload too large"
+        // error. A batch past `APPEND_BYTES` goes out in part, and `PartialSuccess` makes
+        // openraft send the rest next.
+        let (rpc, sent) = split_append(rpc, APPEND_BYTES);
         let message = Message::RaftAppend(convert::append_to(self.header, &rpc));
-        self.rpc(message, &option, convert::append_reply_of).await
+        match self.rpc(message, &option, convert::append_reply_of).await? {
+            AppendEntriesResponse::Success if sent.is_some() => {
+                Ok(AppendEntriesResponse::PartialSuccess(sent))
+            }
+            reply => Ok(reply),
+        }
     }
 
     async fn install_snapshot(
@@ -182,6 +220,55 @@ impl RaftNetwork<TypeConfig> for NetClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::counter::cmd;
+    use crate::counter::raft::{Entry, LogId, Op};
+    use openraft::impls::leader_id_adv::LeaderId;
+    use openraft::EntryPayload;
+
+    fn append(sizes: &[usize]) -> AppendEntriesRequest<TypeConfig> {
+        let entries = sizes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| Entry {
+                log_id: LogId::new(
+                    LeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    i as u64 + 1,
+                ),
+                payload: EntryPayload::Normal(Op {
+                    stamp_ms: 1,
+                    db: 0,
+                    command: cmd(&["SET", "cnt:x", &"v".repeat(*n)]),
+                }),
+            })
+            .collect();
+        AppendEntriesRequest {
+            vote: convert::vote_of(discus_wire::RaftVote::default()),
+            prev_log_id: None,
+            entries,
+            leader_commit: None,
+        }
+    }
+
+    #[test]
+    fn a_large_batch_goes_out_in_part() {
+        let mb = 1 << 20;
+        let (rpc, sent) = split_append(append(&[mb; 10]), 4 * mb as u64);
+        assert_eq!(rpc.entries.len(), 3);
+        assert_eq!(sent.map(|l| l.index), Some(3));
+        // One entry above the limit still goes, alone.
+        let (rpc, sent) = split_append(append(&[8 * mb, mb]), 4 * mb as u64);
+        assert_eq!(rpc.entries.len(), 1);
+        assert_eq!(sent.map(|l| l.index), Some(1));
+        let (rpc, sent) = split_append(append(&[mb, mb]), 4 * mb as u64);
+        assert_eq!(rpc.entries.len(), 2);
+        assert_eq!(sent, None);
+        let (rpc, sent) = split_append(append(&[8 * mb]), 4 * mb as u64);
+        assert_eq!(rpc.entries.len(), 1);
+        assert_eq!(sent, None);
+    }
 
     #[test]
     fn a_refusal_stays_after_a_later_contact() {

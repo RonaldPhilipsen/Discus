@@ -152,6 +152,7 @@ fn every_counter_message_round_trips() {
             seq: 12,
             ops: vec![op(5, 0, b"op1"), op(6, 0, b"op2")],
             snapshot: None,
+            chunk: None,
         }),
         Message::CounterSync(CounterSync {
             group: 3,
@@ -159,6 +160,18 @@ fn every_counter_message_round_trips() {
             seq: 0,
             ops: vec![],
             snapshot: Some(Bytes::new()),
+            chunk: None,
+        }),
+        Message::CounterSync(CounterSync {
+            group: 3,
+            regime: regime(),
+            seq: 7,
+            ops: vec![],
+            snapshot: Some(Bytes::from_static(b"part")),
+            chunk: Some(discus_wire::SnapshotChunk {
+                offset: 1 << 20,
+                last: true,
+            }),
         }),
         Message::CounterAck(CounterAck {
             group: 3,
@@ -274,6 +287,7 @@ fn ops_raft_entries_and_snapshots_keep_their_databases() {
             seq: 12,
             ops: vec![op(5, 0, b"op1"), op(6, 2, b"op2")],
             snapshot: None,
+            chunk: None,
         }),
         Message::RaftAppend(RaftAppend {
             header: header(),

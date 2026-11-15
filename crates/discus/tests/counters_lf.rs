@@ -15,6 +15,7 @@ use common::gossip::{refs, socket, wait_agreed, wait_until, GossipNode, Net, Opt
 use common::run_in;
 use discus::counter::state::Kind;
 use discus::counter::Refusal;
+use discus::server::Clocks;
 use discus_placement::mock::MockClock;
 use discus_placement::{Clock, SystemClock};
 use discus_resp::Value;
@@ -617,4 +618,212 @@ async fn a_node_without_a_known_view_keeps_every_database() {
     for n in &nodes {
         assert_eq!(held_in(n, 0, &key).as_deref(), Some("1"), "{}", n.id);
     }
+}
+
+/// The leader dies while the follower cannot reach the lease. A new node with no hint then
+/// joins at the top of the group. It must wait for the follower, which holds the counters,
+/// instead of taking the lease and starting the group empty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_node_waits_for_the_follower_that_holds_the_state() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (nodes, gates) = two(&net, &leases, &[]).await;
+    let refs = refs(&nodes);
+    let key = "cnt:held";
+    let g = group_of(&nodes[0], key);
+    let mut c = nodes[0].redis().await;
+    for _ in 0..7 {
+        let _: i64 = incr_until(&mut c, key, Duration::from_secs(5)).await;
+    }
+    let li = nodes
+        .iter()
+        .position(|n| n.id == leader_of(&refs, g).unwrap().id)
+        .unwrap();
+    let (leader, follower) = (&nodes[li], &nodes[1 - li]);
+    assert!(all_hold(&[follower], key, "7", Duration::from_secs(5)).await);
+    gates[1 - li].store(false, Ordering::Relaxed);
+    leader.kill();
+    assert!(
+        wait_until(Duration::from_secs(20), || follower
+            .node
+            .epochs()
+            .current()
+            .member(leader.id)
+            .is_none())
+        .await,
+        "the leader never left the epoch"
+    );
+    // A node ID that ranks above the follower in the group.
+    let members = follower.node.epochs().current().members().to_vec();
+    let new_id = std::iter::repeat_with(discus_placement::NodeId::random)
+        .find(|id| {
+            let mut m = members.clone();
+            let mut joined = m[0].clone();
+            joined.id = *id;
+            m.push(joined);
+            discus_placement::hrw::owners(&discus::counter::group_key(g), &m, 1) == [*id]
+        })
+        .unwrap();
+    let id_flag = new_id.to_string();
+    let (new, _) = join_to(&net, &leases, &[follower], &["--node-id", &id_flag]).await;
+    wait_agreed(&[follower, &new], Duration::from_secs(10)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    gates[1 - li].store(true, Ordering::Relaxed);
+    let mut nc = new.redis().await;
+    assert_eq!(incr_until(&mut nc, key, Duration::from_secs(20)).await, 8);
+}
+
+/// A follower that holds a newer regime refuses every sync of an older one. The leader then
+/// leads on in a newer regime instead of sending the same sync forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_leader_takes_a_regime_above_a_refusing_follower() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (nodes, _gates) = two(&net, &leases, &[]).await;
+    let refs = refs(&nodes);
+    let key = "cnt:refused";
+    let g = group_of(&nodes[0], key);
+    let mut c = nodes[0].redis().await;
+    for _ in 0..3 {
+        let _: i64 = incr_until(&mut c, key, Duration::from_secs(5)).await;
+    }
+    let leader = leader_of(&refs, g).unwrap();
+    let follower = refs.iter().copied().find(|n| n.id != leader.id).unwrap();
+    let newer = discus_wire::Regime {
+        generation: 100,
+        origin: discus_placement::NodeId::random(),
+    };
+    let counters = follower.node.counters().unwrap();
+    let sync = discus_wire::CounterSync {
+        group: g,
+        regime: newer,
+        seq: 1,
+        ops: Vec::new(),
+        snapshot: Some(Bytes::from(
+            discus::counter::state::CounterState::new().encode(),
+        )),
+        chunk: None,
+    };
+    let ack = counters
+        .group(g)
+        .on_sync(counters, &counters.view().unwrap(), newer.origin, &sync);
+    assert!(!ack.need_snapshot);
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            status(leader, g).regime.is_some_and(|r| r > newer)
+                && held_in(follower, 0, key).as_deref() == Some("3")
+        })
+        .await,
+        "the leader did not move above the refusing regime"
+    );
+    let mut lc = leader.redis().await;
+    assert_eq!(incr_until(&mut lc, key, Duration::from_secs(5)).await, 4);
+}
+
+/// A group state larger than one snapshot part reaches a new follower in parts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_large_state_reaches_a_new_follower() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (first, _) = join_to(&net, &leases, &[], &[]).await;
+    let mut c = first.redis().await;
+    let value = "v".repeat(1 << 20);
+    for i in 0..10 {
+        let key = format!("cnt:{{big}}{i}");
+        let set = redis::cmd("SET").arg(&key).arg(&value).clone();
+        common::counters::query_until::<()>(
+            &mut c,
+            &set,
+            Duration::from_secs(10),
+            common::counters::is_try_again,
+        )
+        .await
+        .unwrap();
+    }
+    let (second, _) = join_to(&net, &leases, &[&first], &[]).await;
+    wait_agreed(&[&first, &second], Duration::from_secs(10)).await;
+    let g = group_of(&first, "cnt:{big}0");
+    assert!(
+        wait_until(Duration::from_secs(20), || {
+            let s = status(&second, g);
+            s.role == "follower" && s.synced
+        })
+        .await,
+        "the follower never synced"
+    );
+    assert_eq!(
+        held_in(&second, 0, "cnt:{big}9").map(|v| v.len()),
+        Some(1 << 20)
+    );
+}
+
+/// A read on a leader with a fast clock finds a key expired. A failover then moves the group
+/// to a node whose clock runs behind. The key must stay expired, so `INCR` starts from 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_key_read_as_expired_stays_expired_after_a_failover() {
+    const SKEW: u64 = 10_000;
+    // Only the wall clocks differ. The HLC of both nodes follows real time, so membership
+    // accepts the skew.
+    let (fast, slow, hlc) = (MockClock::<22>, MockClock::<23>, MockClock::<24>);
+    let real_ms = || SystemClock.now_ms();
+    fast.set(real_ms() + SKEW);
+    slow.set(real_ms());
+    hlc.set(real_ms());
+    let ticking = tokio::spawn(async move {
+        loop {
+            fast.set(real_ms() + SKEW);
+            slow.set(real_ms());
+            hlc.set(real_ms());
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    });
+    let (net, leases) = (Net::new(), Leases::new());
+    let (sa, aa) = socket();
+    let (sb, ab) = socket();
+    let start = |s, seed, clock: Clocks| {
+        let (net, leases) = (&net, &leases);
+        async move {
+            net.start_on(
+                s,
+                &[seed],
+                &[],
+                Opts {
+                    clocks: Some(clock),
+                    counter_leases: Some(leases.for_node(Arc::new(AtomicBool::new(true)))),
+                    defaults: FAST,
+                    ..Opts::default()
+                },
+            )
+            .await
+        }
+    };
+    // The fast node starts first, so it leads the group, and leadership is sticky.
+    let na = start(sa, ab, (hlc.hlc_clock(), Arc::new(fast))).await;
+    let g = 0;
+    assert!(
+        wait_until(Duration::from_secs(10), || role(&na, g) == "leader").await,
+        "the fast node does not lead"
+    );
+    let nb = start(sb, aa, (hlc.hlc_clock(), Arc::new(slow))).await;
+    let refs = [&na, &nb];
+    wait_agreed(&refs, Duration::from_secs(10)).await;
+    assert!(wait_until(Duration::from_secs(10), || settled(&refs)).await);
+    assert_eq!(leader_of(&refs, g).map(|l| l.id), Some(na.id));
+    let key = key_of_group(&na, g);
+    let mut c = na.redis().await;
+    let _: i64 = redis::cmd("INCR")
+        .arg(&key)
+        .arg("PX")
+        .arg(1000)
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let got: Option<i64> = c.get(&key).await.unwrap();
+    assert_eq!(got, None, "the key did not expire on the leader");
+    assert!(
+        wait_until(Duration::from_secs(5), || held_in(&nb, 0, &key).is_none()).await,
+        "the follower still holds the key that the leader read as expired"
+    );
+    na.kill();
+    let mut bc = nb.redis().await;
+    assert_eq!(incr_until(&mut bc, &key, Duration::from_secs(15)).await, 1);
+    ticking.abort();
 }

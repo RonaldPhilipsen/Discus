@@ -185,6 +185,7 @@ fn messages() -> Vec<(&'static str, Message)> {
                     command: Bytes::from_static(b"op"),
                 }],
                 snapshot: None,
+                chunk: None,
             }),
         ),
         (

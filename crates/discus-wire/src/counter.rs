@@ -440,6 +440,9 @@ pub(crate) fn encode(fbb: &mut FlatBufferBuilder<'_>, message: &Message) -> bool
                     ops: Some(ops),
                     snapshot,
                     has_snapshot: s.snapshot.is_some(),
+                    snapshot_chunked: s.chunk.is_some(),
+                    snapshot_offset: s.chunk.map_or(0, |c| c.offset),
+                    snapshot_last: s.chunk.is_some_and(|c| c.last),
                 },
             );
             fbb.finish_minimal(t);
@@ -560,6 +563,10 @@ pub(crate) fn decode_known(
                     })
                     .collect::<Result<_, DecodeError>>()?,
                 snapshot: s.has_snapshot().then(|| bytes_of(s.snapshot())),
+                chunk: s.snapshot_chunked().then(|| SnapshotChunk {
+                    offset: s.snapshot_offset(),
+                    last: s.snapshot_last(),
+                }),
             })
         }
         T::COUNTER_ACK => {

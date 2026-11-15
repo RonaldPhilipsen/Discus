@@ -87,16 +87,42 @@ impl RaftRole {
     ) -> Result<Value, Refusal> {
         let raft = &self.replica.raft;
         if kind.is_read() {
-            return match tokio::time::timeout(timeout, self.replica.ensure_linearizable()).await {
-                Ok(Ok(_)) => Ok(self
-                    .replica
-                    .sm
-                    .lock()
-                    .state
-                    .get()
-                    .read(now_ms, db, kind, cmd)),
-                _ => Err(Refusal::NotLeader),
+            let expires = self
+                .replica
+                .sm
+                .lock()
+                .state
+                .get()
+                .read_expires(now_ms, db, kind, cmd);
+            // A key that this leader reads as expired must stay expired under any later leader,
+            // so its expiry goes through the log first. The applied entry also proves the
+            // leadership that a read index would.
+            let ready = if expires {
+                let purge = Op {
+                    stamp_ms: self.stamp(now_ms),
+                    db,
+                    command: vec![bytes::Bytes::from_static(super::state::PURGE)],
+                };
+                matches!(
+                    tokio::time::timeout(timeout, raft.client_write(purge)).await,
+                    Ok(Ok(_))
+                )
+            } else {
+                matches!(
+                    tokio::time::timeout(timeout, self.replica.ensure_linearizable()).await,
+                    Ok(Ok(_))
+                )
             };
+            if !ready {
+                return Err(Refusal::NotLeader);
+            }
+            return Ok(self
+                .replica
+                .sm
+                .lock()
+                .state
+                .get()
+                .read(now_ms, db, kind, cmd));
         }
         let op = Op {
             stamp_ms: self.stamp(now_ms),
@@ -290,6 +316,7 @@ impl Group {
         r: &Arc<RaftRole>,
     ) {
         let replica = &r.replica;
+        replica.compact(counters.settings.raft_log_bytes).await;
         let dropped_since = r.dropped_since.lock().take();
         let voters = replica.voters();
         let me_voter = replica.is_voter();
@@ -300,8 +327,10 @@ impl Group {
         // A voter set without a live majority can commit nothing, so no membership change can
         // repair it (spec section 10.2). This comes before the leader branch, and it covers a
         // joint change whose new voters went away. The leader acts, or else the top live voter.
+        // The liveness rule of `next_move`: a `LEAVING` voter still commits with the leader, so
+        // it counts toward the quorum until the leader moves its slot away.
         let live = |(id, n): &(u64, NodeId)| {
-            *id == replica.replica || (view.normal(*n) && !replica.contacts.refused(*id))
+            *id == replica.replica || (view.voting(*n) && !replica.contacts.refused(*id))
         };
         let quorum = replica.voter_configs().iter().all(|c| {
             2 * voters
@@ -315,7 +344,7 @@ impl Group {
                 .ranked(self.g)
                 .into_iter()
                 .find(|n| voters.iter().any(|v| v.1 == *n && live(v)));
-            let leader_up = replica.leader_node().is_some_and(|l| view.normal(l));
+            let leader_up = replica.leader_node().is_some_and(|l| view.voting(l));
             if r.leads() || (top == Some(view.me) && !leader_up) {
                 // The peers that refused can have moved on to a newer regime.
                 if counters
@@ -326,7 +355,9 @@ impl Group {
                     self.set_role_if(seen, Role::Idle);
                     return;
                 }
-                let state = replica.state();
+                // The seal stops every later apply, so the old instance acknowledges no write
+                // that the new one misses (as in `down_switch`).
+                let state = replica.stop().await;
                 self.create_instance(counters, view, seen, state, "the other voters are gone")
                     .await;
                 return;
@@ -388,14 +419,34 @@ impl Group {
         seen: u64,
         r: &Arc<RaftRole>,
     ) {
+        let replica = &r.replica;
+        let voters = replica.voter_nodes();
         if !view.me_normal {
-            // A `LEAVING` replica cannot take the lease, and the survivors switch without it.
+            // A `LEAVING` replica cannot take the lease. While the `NORMAL` voters can elect a
+            // leader without it, the survivors switch without it. Otherwise it leads on and
+            // hands its role over first (spec section 15.3).
+            if !normal_quorum(&voters, |n| view.normal(n)) {
+                if r.leads() {
+                    self.hand_over(counters, view, r).await;
+                    return;
+                }
+                if r.is_voter() && voters.len() == 1 {
+                    return;
+                }
+            }
             self.set_role_if(seen, Role::Idle);
             return;
         }
-        let replica = &r.replica;
+        if !r.is_voter() {
+            // A learner waits while a voter can still lead. Once none is left, it competes for
+            // the lease with the state that it holds.
+            if !voters.iter().any(|n| view.voting(*n)) {
+                self.wait_or_take(counters, view, seen, Role::Raft(r.clone()))
+                    .await;
+            }
+            return;
+        }
         let leader = replica.leader_node().filter(|l| view.normal(*l));
-        let voters = replica.voter_nodes();
         // A voter that does not lead holds only the entries that it applied. While the `NORMAL`
         // voters can still elect a leader, an old leader that is `LEAVING` or about to be
         // `DEAD` can still commit with them, so the voter waits for the next leader to switch.
@@ -436,6 +487,42 @@ impl Group {
         self.start_leader(counters, view, leader).await;
     }
 
+    /// A `LEAVING` leader below three `NORMAL` members makes the top `NORMAL` replica the only
+    /// voter. The change commits only once that replica holds every entry before it, and the
+    /// new voter then leads and switches down.
+    async fn hand_over(&self, counters: &Arc<Counters>, view: &View, r: &Arc<RaftRole>) {
+        let replica = &r.replica;
+        if replica.change_pending() {
+            return;
+        }
+        let listed: Vec<(u64, NodeId)> = replica
+            .voters()
+            .into_iter()
+            .chain(replica.learners())
+            .filter(|(id, _)| !replica.contacts.refused(*id))
+            .collect();
+        let Some(next) = view
+            .ranked(self.g)
+            .into_iter()
+            .find_map(|n| listed.iter().find(|l| l.1 == n).map(|l| l.0))
+        else {
+            return;
+        };
+        if !counters.may_change() {
+            return;
+        }
+        tracing::info!(
+            group = self.g,
+            "handing the group over before the drain ends"
+        );
+        let change = ChangeMembers::ReplaceAllVoters(BTreeSet::from([next]));
+        let _ = tokio::time::timeout(
+            CHANGE_TIMEOUT,
+            replica.raft.change_membership(change, false),
+        )
+        .await;
+    }
+
     /// The next membership change toward the target voters, in priority order: a lost learner
     /// goes, a joint change ends, a missing target joins, the voters become the targets in one
     /// change, and last the learners that are no target leave.
@@ -453,13 +540,8 @@ impl Group {
             replica.contacts.refused(*id)
                 || replica.contacts.silent_for(*id, leading_since) > settings.voter_timeout
         };
-        let alive = |(id, n): &(u64, NodeId)| {
-            *id == replica.replica
-                || (view.epoch.member(*n).is_some_and(|m| {
-                    m.state == discus_placement::MemberState::Normal
-                        || m.state == discus_placement::MemberState::Leaving
-                }) && !lost(id))
-        };
+        let alive =
+            |(id, n): &(u64, NodeId)| *id == replica.replica || (view.voting(*n) && !lost(id));
         // A node that joins again discards its replica, and it refuses the old ID. The node
         // stays listed under that ID, so it gets no new replica until the learner goes.
         if let Some(l) = learners.iter().find(|(id, _)| lost(id)) {

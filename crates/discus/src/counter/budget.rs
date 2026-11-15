@@ -44,14 +44,14 @@ impl Budget {
         self.used() >= self.reserve
     }
 
-    fn charge(&self, bytes: u64) {
+    pub(super) fn charge(&self, bytes: u64) {
         self.used.fetch_add(bytes, Ordering::Relaxed);
         if let Some(store) = &self.store {
             store.charge(bytes);
         }
     }
 
-    fn release(&self, bytes: u64) {
+    pub(super) fn release(&self, bytes: u64) {
         self.used.fetch_sub(bytes, Ordering::Relaxed);
         if let Some(store) = &self.store {
             store.release(bytes);

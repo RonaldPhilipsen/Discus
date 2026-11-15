@@ -289,6 +289,15 @@ pub struct CounterSync {
     pub seq: u64,
     pub ops: Vec<CounterOp>,
     pub snapshot: Option<Bytes>,
+    /// Set when `snapshot` is one part of a larger snapshot.
+    pub chunk: Option<SnapshotChunk>,
+}
+
+/// Where a part of a counter snapshot belongs. The parts of one snapshot go out in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotChunk {
+    pub offset: u64,
+    pub last: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

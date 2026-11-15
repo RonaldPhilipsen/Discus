@@ -867,9 +867,20 @@ two-voter Raft group cannot survive a loss, so small clusters use leader-followe
 - Leadership is sticky. After two missed syncs, the follower starts to read the lease, and it
   takes the lease when the lease expires. Other members wait two lease durations without a leader
   before they read it.
+- A node without counter state asks the other members before it takes the lease. A follower, or a
+  Raft replica, that holds the state of the group answers so. The node then waits two lease
+  durations for that member to take over. After the wait it starts empty in a regime above the
+  regime of the answer. The answer reuses the fields of the leader hint: it names no leader and
+  names the sender as the follower. An older build ignores it, so it needs no new capability.
+- A follower refuses a sync of a regime older than its own. On that refusal the leader keeps its
+  state and its lease and leads on in a regime above the refused one. Its snapshot then replaces
+  the state of the follower.
 - The leader sends each entry to the follower and waits up to 50 ms for the acknowledgment. On a
   timeout it marks the follower lagging, replies anyway, and sends a fresh snapshot later. A joining
   follower receives a snapshot.
+- One `COUNTER_SYNC` carries at most 512 ops and 4 MiB of commands. A snapshot above 4 MiB goes in
+  parts of 4 MiB, the last part with a final flag, to a follower with the capability bit
+  `COUNTER_CHUNKS`. A follower without the bit gets the snapshot in one frame, as before.
 - Failover takes about one lease duration plus two renew intervals and loses the increments that a
   lagging follower missed. With one node, a node loss loses the counters. Counter availability in
   this mode depends on the API server.
@@ -880,7 +891,8 @@ two-voter Raft group cannot survive a loss, so small clusters use leader-followe
 ### 10.2 Raft mode
 
 - The leader appends the command to an in-memory log, replicates to a quorum (2 of 3), commits,
-  applies, and replies. Commands are batched per append.
+  applies, and replies. Commands are batched per append. One `RAFT_APPEND` carries at most 4 MiB of
+  entries, or one larger entry. The rest goes in the next append. A snapshot goes in parts of 1 MiB.
 - The target voters of group `g` are the top three `NORMAL` members by HRW with `g` as the key.
 - The leader adds each missing target as a learner and waits for it to catch up. When all three
   targets are ready, the leader replaces the voters with the targets in one change. A ready target
@@ -903,12 +915,14 @@ two-voter Raft group cannot survive a loss, so small clusters use leader-followe
   `NodeId` and enters a group only as a learner. No identity votes twice, and no empty node is a
   voter.
 - A minority partition returns `-TRYAGAIN`.
-- Quorum loss recovers automatically. When a voter set has no live majority, a joint change
-  included, no membership change can commit. The leader, or else the top live voter, then
-  reconfigures the group to itself as the only voter of a new instance. When every voter is
-  `DEAD`, the top target creates the group again, empty, and its counters are lost.
-  `RAFT_FORCE_RECONFIGURE` on the admin port lets an operator act before the detector declares the
-  voters `DEAD`.
+- Quorum loss recovers automatically. A live voter is `NORMAL` or `LEAVING`, and no peer refused its
+  replica. A `LEAVING` voter still commits with the leader until the leader moves its slot away.
+  When a voter set has no live majority, a joint change included, no membership change can commit.
+  The leader, or else the top live voter, then reconfigures the group to itself as the only voter of
+  a new instance. It first stops its old replica, so the old instance acknowledges no more writes.
+  When every voter is `DEAD`, the top target creates the group again, empty, and its counters are
+  lost. `RAFT_FORCE_RECONFIGURE` on the admin port lets an operator act before the detector declares
+  the voters `DEAD`.
 - A false `DEAD` during a partition lets both sides rebuild a group. On heal, the losing side
   discards its counter state, and the increments it accepted are lost.
 
@@ -944,6 +958,10 @@ sequenceDiagram
 - Down: below three members, the group switches at once. The Raft leader takes the lease. If the
   leader is gone, a surviving voter takes it. Other members wait one lease duration first. If quorum
   was already lost, the last committed entries can be lost.
+- A `LEAVING` leader that the `NORMAL` voters cannot replace, for example the only voter just after
+  the up switch, keeps serving. It makes the top `NORMAL` replica the only voter, and that replica
+  then leads and takes the lease. A learner whose voters are all gone takes part in the lease race
+  with the state that it holds.
 - The epoch drives both switches, so every node agrees on the mode of every group.
 
 ```mermaid
@@ -975,14 +993,20 @@ stateDiagram-v2
 - `INCR key EX|PX|EXAT|PXAT` is an atomic extension for rate limiting. The leader stamps every
   command with its clock, and the state machine expires keys against that stamp, never against the
   local clock. Replicas therefore agree on expiry.
+- A read on the leader judges expiry by the leader clock. When a key that the read looks at is
+  alive by the state machine but expired by the leader clock, the leader first writes a `PURGE`
+  entry with its stamp and then replies. So a key that read as expired stays expired under a later
+  leader with a slower clock.
 - A change of `G` is an offline procedure: pause strong writes, snapshot each group, reassign keys,
   restart the groups, and resume. Linearizability does not hold across it.
 - If a counter command got no reply, the entry node cannot know whether it applied. It returns
   `-TRYAGAIN` with a message that says so. A fan-out passes that message on unchanged.
 - The p99 target for a counter write is 5 ms. Counter throughput scales with `G`, not with group
   size.
-- If the counter memory reserve is full, counter writes return `-OOM`. A full cold restart loses
-  every counter.
+- If the counter memory reserve is full, counter writes return `-OOM`. The Raft log counts in the
+  reserve. A replica takes a snapshot when its log bytes pass half of its share of the reserve,
+  and its leader refuses writes with `-OOM` while the log is above the share. A full cold restart
+  loses every counter.
 
 ### 10.5 Growth from one node to three
 
@@ -1396,10 +1420,11 @@ access for clients sets `clusterClients.enabled=false`.
 ### 15.3 Drain and rolling restart
 
 - Drain marks the node `LEAVING` and unready. The node keeps serving existing connections and acts
-  as a handoff source until the shutdown deadline. The deadline must cover the handoff and the Raft
-  moves. Then the node flushes its queues, waits for the batches in flight, and leaves gossip.
-  Before it closes its transports, it waits once more for the writes that arrived during the
-  departure, within the same deadline. Keys not copied in time refill as misses.
+  as a handoff source until the shutdown deadline. It keeps its Raft voter slots from the start of
+  the drain, also before the epoch that marks it `LEAVING` arrives. The deadline must cover the
+  handoff and the Raft moves. Then the node flushes its queues, waits for the batches in flight, and
+  leaves gossip. Before it closes its transports, it waits once more for the writes that arrived
+  during the departure, within the same deadline. Keys not copied in time refill as misses.
 - Cluster clients move away before the node stops, because it leaves placement first (§7.6).
 - A restarted pod is a new, cold node. Use `maxSurge` so the new pod joins before the old pod
   drains, and `minReadySeconds` so one replacement finishes before the next begins.

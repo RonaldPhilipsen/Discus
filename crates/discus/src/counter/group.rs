@@ -98,6 +98,8 @@ pub struct Inner {
     pub tried: Option<Instant>,
     /// The first role this node had in the current regime, for tests.
     pub first_role: Option<(Regime, &'static str)>,
+    /// Since when this node, without state, defers to a peer that holds the state.
+    pub deferred: Option<Instant>,
 }
 
 impl Inner {
@@ -328,13 +330,15 @@ impl Group {
         view.ranked(self.g).first().copied()
     }
 
-    /// What this node answers to `RAFT_LEADER`: its own hint, or the Raft leader it follows.
+    /// What this node answers to `RAFT_LEADER`: its own hint, the Raft leader it follows, or
+    /// [`holder_hint`] when it holds the state as a follower.
     pub fn answer_hint(&self, me: NodeId) -> Option<GroupHint> {
         if let Some(h) = self.own_hint(me) {
             return Some(h);
         }
         match self.role() {
             Role::Raft(r) => Some(raft_answer(self.g, r.regime(), r.hint(self.g))),
+            Role::Follower(f) => Some(holder_hint(self.g, f.regime, me)),
             _ => None,
         }
     }
@@ -390,6 +394,17 @@ impl Group {
 
     async fn lead(&self, counters: &Arc<Counters>, view: &View, seen: u64, l: &Arc<LfLeader>) {
         let settings = &counters.settings;
+        if let Some(newer) = l.superseded() {
+            // The follower refused this regime for a newer one, and it refuses every later sync
+            // of it. The leader keeps its state and lease and leads on in a regime above it.
+            self.inner.lock().saw(newer);
+            let state = l.seal();
+            let why = "a follower refused an older regime";
+            if let Some(next) = self.become_leader(counters, seen, state, l.lease_until(), why) {
+                tokio::spawn(next.sender(counters.clone(), self.g, settings.lease_renew));
+            }
+            return;
+        }
         if l.fenced() {
             let due = self
                 .inner
@@ -419,9 +434,9 @@ impl Group {
         if counters.raft_ready(view) {
             // The up switch: the lease holder becomes the only voter of a new Raft group with its
             // state, and lets the lease expire (spec section 10.3).
-            l.stop();
+            let state = l.seal();
             if !self
-                .create_instance(counters, view, seen, l.state(), "the up switch")
+                .create_instance(counters, view, seen, state, "the up switch")
                 .await
             {
                 self.step_down(counters, seen, l);
@@ -440,11 +455,17 @@ impl Group {
     }
 
     fn step_down(&self, counters: &Arc<Counters>, seen: u64, l: &Arc<LfLeader>) {
-        let follower = Follower::new(l.regime, None, l.state(), counters.budget());
+        let follower = Follower::new(l.regime, None, l.seal(), counters.budget());
         self.set_role_if(seen, Role::Follower(Arc::new(follower)));
     }
 
-    async fn wait_or_take(&self, counters: &Arc<Counters>, view: &View, seen: u64, role: Role) {
+    pub(super) async fn wait_or_take(
+        &self,
+        counters: &Arc<Counters>,
+        view: &View,
+        seen: u64,
+        role: Role,
+    ) {
         let settings = &counters.settings;
         // A follower of an older regime holds nothing that a newer leader needs.
         if let Role::Follower(f) = &role {
@@ -463,6 +484,7 @@ impl Group {
             let mut inner = self.inner.lock();
             if live.is_some() {
                 inner.leaderless = None;
+                inner.deferred = None;
             } else if inner.leaderless.is_none() {
                 inner.leaderless = Some(Instant::now());
             }
@@ -490,8 +512,20 @@ impl Group {
         }
         // Ask first, so a node never claims a group that a member it has no hint from leads,
         // for example a Raft leader right after the up switch.
-        if let Some(best) = counters.ask_now(self.g).await {
+        let (best, held) = counters.ask_with_holders(self.g).await;
+        if let Some(best) = best {
             if role.regime().is_none_or(|r| best.regime > r) {
+                return;
+            }
+        }
+        // A peer holds the state of the group, and this node holds none. That peer takes the
+        // lease after one lease duration of silence, so this node waits two before it starts
+        // empty, and then in a newer regime than the peer.
+        if let (Some(held), None) = (held, role.regime()) {
+            let mut inner = self.inner.lock();
+            inner.saw(held);
+            let since = *inner.deferred.get_or_insert_with(Instant::now);
+            if since.elapsed() < 2 * settings.lease_duration {
                 return;
             }
         }
@@ -668,6 +702,36 @@ pub(super) fn raft_answer(g: u16, regime: Regime, known: Option<GroupHint>) -> G
         leader: NodeId::NIL,
         ..hint
     }
+}
+
+/// The answer to `RAFT_LEADER` of a leader-follower follower of `regime`: it names no leader
+/// and names `me` as the follower. It says that `me` holds the state of the regime. A build
+/// without this rule drops the hint, because it names no `NORMAL` leader.
+pub(super) fn holder_hint(g: u16, regime: Regime, me: NodeId) -> GroupHint {
+    GroupHint {
+        group: g,
+        mode: CounterMode::LeaderFollower,
+        regime,
+        leader: NodeId::NIL,
+        follower: Some(me),
+        ..GroupHint::default()
+    }
+}
+
+/// The newest regime of a peer that answered that it holds the state of group `g` without
+/// leading it: a follower by [`holder_hint`], or a Raft replica by [`raft_answer`].
+pub(super) fn held_regime(g: u16, answers: &[(NodeId, Vec<GroupHint>)]) -> Option<Regime> {
+    answers
+        .iter()
+        .flat_map(|(peer, hints)| {
+            hints.iter().filter(move |h| {
+                h.group == g
+                    && h.leader == NodeId::NIL
+                    && (h.mode == CounterMode::Raft || h.follower == Some(*peer))
+            })
+        })
+        .map(|h| h.regime)
+        .max()
 }
 
 /// The best hint of a round of `RAFT_LEADER` answers for group `g`, and the peers that answered

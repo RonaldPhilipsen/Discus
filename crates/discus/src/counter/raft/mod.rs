@@ -100,6 +100,7 @@ pub struct Replica {
     pub regime: Regime,
     pub contacts: Arc<Contacts>,
     pub started: Instant,
+    log: LogStore,
 }
 
 impl Replica {
@@ -121,12 +122,13 @@ impl Replica {
             regime,
             contacts: contacts.clone(),
         };
-        let sm = Arc::new(Mutex::new(Sm::new(budget, limits)));
+        let sm = Arc::new(Mutex::new(Sm::new(budget.clone(), limits)));
+        let log = LogStore::new(budget);
         let raft = Raft::new(
             replica,
             Arc::new(timing.config()?),
             net,
-            LogStore::default(),
+            log.clone(),
             SmStore(sm.clone()),
         )
         .await
@@ -138,7 +140,32 @@ impl Replica {
             regime,
             contacts,
             started: Instant::now(),
+            log,
         })
+    }
+
+    /// The bytes of the log entries that this replica holds.
+    pub fn log_bytes(&self) -> u64 {
+        self.log.bytes()
+    }
+
+    /// Keep the log below `limit` bytes: past half of it, build a snapshot, then purge the log up
+    /// to that snapshot. The entry count of the snapshot policy alone lets a few large writes
+    /// fill the memory (spec section 10.4).
+    pub async fn compact(&self, limit: u64) {
+        if self.log_bytes() <= limit / 2 {
+            return;
+        }
+        let (snapshot, purged) = self.with_metrics(|m| (m.snapshot, m.purged));
+        let trigger = self.raft.trigger();
+        match snapshot {
+            Some(s) if purged.is_none_or(|p| p.index < s.index) => {
+                let _ = trigger.purge_log(s.index).await;
+            }
+            _ => {
+                let _ = trigger.snapshot().await;
+            }
+        }
     }
 
     /// Make this replica the only voter and start from `initial`. The state travels as the first
@@ -554,6 +581,97 @@ mod tests {
                 "{ok} writes succeeded, but the value is {value}"
             );
         }
+    }
+
+    /// Large writes to one key keep the state small but fill the log. The log counts in the
+    /// budget, and the replica compacts it by bytes long before the entry count is reached.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_log_is_charged_and_compacted_by_bytes() {
+        let link = Arc::new(MemLink::default());
+        let budget = Arc::new(Budget::new(u64::MAX, None));
+        let a = replica(&link, 1, 1_000_000, &budget).await;
+        a.bootstrap(
+            NodeId::from_u128(1),
+            &CounterState::new(),
+            5,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let value = "v".repeat(64 << 10);
+        for _ in 0..40 {
+            a.raft
+                .client_write(Op {
+                    stamp_ms: 10,
+                    db: 0,
+                    command: cmd(&["SET", "cnt:x", &value]),
+                })
+                .await
+                .unwrap();
+        }
+        let state = a.state().bytes();
+        assert!(a.log_bytes() >= 40 * (64 << 10), "{}", a.log_bytes());
+        assert!(
+            budget.used() >= state + a.log_bytes(),
+            "the budget holds {} bytes, the state {state} and the log {}",
+            budget.used(),
+            a.log_bytes()
+        );
+        let limit = 1 << 20;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while a.log_bytes() > limit / 2 {
+            assert!(
+                Instant::now() < deadline,
+                "the log keeps {} bytes",
+                a.log_bytes()
+            );
+            a.compact(limit).await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(budget.used() < state + limit);
+        a.shutdown().await;
+    }
+
+    /// A learner far behind gets a batch of many large entries, which goes out in parts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_batch_of_large_entries_reaches_a_learner() {
+        let link = Arc::new(MemLink::default());
+        let budget = Arc::new(Budget::new(u64::MAX, None));
+        let a = replica(&link, 1, 1_000_000, &budget).await;
+        a.bootstrap(
+            NodeId::from_u128(1),
+            &CounterState::new(),
+            5,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let value = "v".repeat(1 << 20);
+        for i in 0..12 {
+            a.raft
+                .client_write(Op {
+                    stamp_ms: 10,
+                    db: 0,
+                    command: cmd(&["SET", &format!("cnt:{i}"), &value]),
+                })
+                .await
+                .unwrap();
+        }
+        let b = replica(&link, 2, 1_000_000, &budget).await;
+        a.raft
+            .add_learner(
+                b.replica,
+                Peer {
+                    node: NodeId::from_u128(2),
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        wait_applied(&b, "cnt:11", &value).await;
+        assert_eq!(b.sm.lock().installed, 0, "the learner got a snapshot");
+        a.shutdown().await;
+        b.shutdown().await;
     }
 
     #[tokio::test]
