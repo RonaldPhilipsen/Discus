@@ -266,8 +266,8 @@ The chart in `charts/discus` creates the resources above and a PodDisruptionBudg
 publishes the chart with the same version as the image.
 
 Before you install the chart, create a Secret with the keys `ca.crt`, `tls.crt`, and `tls.key`.
-The certificate must carry the URI SAN `spiffe://cluster.local/ns/<namespace>/sa/<account>`. Then
-install the chart:
+Use a CA that serves only this release and signs no client certificates, because every certificate
+from the CA is a member of the cluster. Then install the chart:
 
 ```bash
 helm install <release> oci://ghcr.io/ronaldphilipsen/charts/discus \
@@ -276,18 +276,18 @@ helm install <release> oci://ghcr.io/ronaldphilipsen/charts/discus \
   --set cluster.tls.secretName=<secret>
 ```
 
-The chart requires a URI SAN on every peer certificate by default. The value `<account>` is the
-service account of the release. By default, it is the full name of the release, for example
-`discus` or `blue-discus`. With cert-manager, put the URI in the field `uris` of the `Certificate`.
-To require a different URI, set `cluster.san.value`. A node refuses a peer certificate without the
-URI SAN, so the nodes of a release with such a certificate do not form a cluster.
+The chart does not require a URI SAN by default. To require one on every peer certificate, set
+`cluster.san.enabled=true`. The certificate of each node must then carry the URI SAN
+`spiffe://cluster.local/ns/<namespace>/sa/<account>`. The value `<account>` is the service account
+of the release. By default, it is the full name of the release, for example `discus` or
+`blue-discus`. The URI is a name in the certificate only, so you need no SPIFFE or SPIRE
+installation. With cert-manager, put the URI in the field `uris` of the `Certificate`. To require
+a different URI, set `cluster.san.value`. Client certificates never need this URI.
 
-To turn the test off, set `cluster.san.enabled=false`. Every certificate from the CA is then a
-member of the cluster, so use a CA that serves only this release and signs no client certificates.
-The chart refuses `cluster.san.enabled=false` together with `clientTls.verifyClients=true` when
-the client CA is the cluster CA, because a client certificate is then a member of the cluster and a
-member needs no client authorization. In that case, keep the URI SAN test on, or set
-`clientTls.clientCaSecretName` to a Secret with a separate client CA.
+Without the URI SAN test, every certificate from the cluster CA is a member of the cluster, and a
+member needs no client authorization. So the chart refuses `clientTls.verifyClients=true` when the
+client CA is the cluster CA and the test is off. In that case, set `clientTls.clientCaSecretName`
+to a Secret with a separate client CA, or set `cluster.san.enabled=true`.
 
 You can install more than one release in a namespace. The chart gives each release its own lease
 names, so each release is a separate cluster. Use a different CA for each release, or require a
@@ -301,7 +301,7 @@ authentication for clients:
 | Value | Effect |
 | --- | --- |
 | `clientTls.secretName` | A Secret with the keys `tls.crt` and `tls.key`. The default is `cluster.tls.secretName`. |
-| `clientTls.verifyClients=true` | The node asks for client certificates and verifies them against the key `ca.crt` of the Secret. If that Secret is `cluster.tls.secretName`, the chart requires `cluster.san.enabled=true`. |
+| `clientTls.verifyClients=true` | The node asks for client certificates and verifies them against the key `ca.crt` of the Secret. If that Secret is `cluster.tls.secretName`, the chart requires `clientTls.clientCaSecretName` or `cluster.san.enabled=true`. |
 | `clientTls.clientAuth` | `optional` or `required`. The default is `optional`. |
 | `clientTls.clientCaSecretName` | A Secret with the key `ca.crt` for client certificates. The default is the Secret of `clientTls.secretName`. Use it with a public server certificate and a private CA for clients. |
 | `authPolicy` | The flag `--auth-policy`, for example `all:mtls`. |
