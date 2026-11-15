@@ -58,7 +58,11 @@ command that starts with `GEO`.
 [Cluster commands](#cluster-commands). On any other node, `CLUSTER` returns an error that
 explains that Discus is not a Redis Cluster and that clients do not need topology awareness.
 
-Any other unknown command returns `-ERR unknown command '<name>'`.
+Any other unknown command returns the error of Valkey:
+`-ERR unknown command '<name>', with args beginning with: '<arg>' '<arg>' `. A command with no
+arguments gets only `-ERR unknown command '<name>'`. The name stops at 128 bytes, and the quoted
+arguments stop when their text reaches 128 bytes. A CR or LF in a simple string reply or an error
+reply becomes a space, as in Valkey, so client bytes cannot split one reply into two.
 
 ## Cluster commands
 

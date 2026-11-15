@@ -340,7 +340,7 @@ pub fn check(
         return Err(if is_unsupported(&upper) {
             CommandError::Unsupported(upper)
         } else {
-            CommandError::UnknownCommand(String::from_utf8_lossy(name).into_owned())
+            CommandError::unknown_command(cmd)
         });
     };
     let argc = cmd.len() as i32;
@@ -358,6 +358,7 @@ pub fn check(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     #[test]
     fn get_reads_and_set_writes() {
@@ -444,5 +445,42 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), acl.subcommands.len());
         assert!(lookup(b"GET").unwrap().subcommands.is_empty());
+    }
+
+    fn unknown(args: &[&[u8]]) -> String {
+        let cmd: Command = args.iter().map(|a| Bytes::copy_from_slice(a)).collect();
+        check(None, &cmd).map(|_| ()).unwrap_err().text()
+    }
+
+    /// The texts of redis-server 8.10.2: the name and the quoted arguments stop at 128 bytes.
+    #[test]
+    fn an_unknown_command_has_the_text_of_valkey() {
+        assert_eq!(unknown(&[b"foo"]), "ERR unknown command 'foo'");
+        assert_eq!(
+            unknown(&[b"foo", b"bar", b""]),
+            "ERR unknown command 'foo', with args beginning with: 'bar' '' "
+        );
+        let long = [b'a'; 200];
+        assert_eq!(
+            unknown(&[&long]),
+            format!("ERR unknown command '{}'", "a".repeat(128))
+        );
+        assert_eq!(
+            unknown(&[b"foo", &long, b"x"]),
+            format!(
+                "ERR unknown command 'foo', with args beginning with: '{}' ",
+                "a".repeat(128)
+            )
+        );
+        let many: Vec<&[u8]> = std::iter::once(&b"foo"[..])
+            .chain(std::iter::repeat_n(&b"abc"[..], 29))
+            .collect();
+        assert_eq!(
+            unknown(&many),
+            format!(
+                "ERR unknown command 'foo', with args beginning with: {}'ab' ",
+                "'abc' ".repeat(21)
+            )
+        );
     }
 }

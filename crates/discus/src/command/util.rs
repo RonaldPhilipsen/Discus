@@ -28,6 +28,21 @@ pub fn parse_f64(b: &[u8]) -> Result<f64, CommandError> {
     Ok(f)
 }
 
+/// What C `printf("%.*s", max, b)` prints, as Valkey puts client bytes in an error text: the
+/// bytes before the first NUL, at most `max` of them.
+pub fn c_prefix(b: &[u8], max: usize) -> &[u8] {
+    let end = b.iter().position(|&c| c == 0).unwrap_or(b.len()).min(max);
+    &b[..end]
+}
+
+/// [`c_prefix`] with the 128-byte limit that Valkey uses for most client bytes in an error text.
+pub fn error_text(b: &[u8]) -> String {
+    String::from_utf8_lossy(c_prefix(b, ERROR_TEXT_BYTES)).into_owned()
+}
+
+/// Valkey prints client bytes in an error text with `%.128s`.
+pub const ERROR_TEXT_BYTES: usize = 128;
+
 pub fn upper(b: &Bytes) -> String {
     String::from_utf8_lossy(b).to_ascii_uppercase()
 }
