@@ -230,14 +230,16 @@ user reporting on allkeys +@read +@connection #c44b2dc134935203670c2f44343df9b18
 
 # A service. It reads the keys "config:*" and writes the keys "queue:*".
 # It cannot run dangerous commands, such as FLUSHALL.
+# It can list the names of all keys with SCAN.
 user app on %R~config:* %W~queue:* +@read +@write -@dangerous +@connection #da5aef018d0ebf8aa8b9ce37720c50fd9aae477c00a7cae02fba69a6aeb80093
 ```
 
 The hashes in this example are for the passwords `admin-secret-p4ss`, `reader-secret-p4ss`, and
 `app-secret-p4ss`. Never use them. Make a new password and a new hash for each user.
 
-The `+@read` rule of the user `reporting` also allows `SCAN`, `RANDOMKEY`, and `DBSIZE`. They have
-no key argument, so they show key names or counts outside the key patterns of a user.
+The `+@read` rule of the user `app` also allows `SCAN`, `RANDOMKEY`, and `DBSIZE`. These commands
+have no key argument. Thus `app` can see the names and the count of all keys, also outside
+`config:*` and `queue:*`.
 
 These are the rules:
 
@@ -342,11 +344,16 @@ names that the user cannot read, as in Valkey.
 
 #### Login
 
-- If the file names the username, the value is the password of that user. A wrong password fails.
-  The node does not try the value as an OAuth 2.0 token.
+- If the file names the username, and the name is not `default`, the value is the password of that
+  user. A wrong password fails. The node does not try the value as an OAuth 2.0 token.
 - If the file does not name the username, the username is only a hint. The value is a token.
 - `AUTH <value>` tries the user `default` first. If that fails and the policy has `oauth2`, the
   node tries the value as a token.
+- `AUTH default <value>` works like `AUTH <value>`. Many client libraries send this form for a
+  credential without a username. Only the exact name `default` counts, because names are
+  case-sensitive.
+- The node never sends the password of a user to an identity provider. If the password path
+  decides a value, the node does not send that value for introspection.
 - A user that is `off` cannot log in.
 - A second successful `AUTH` on a connection replaces the user.
 
@@ -400,6 +407,11 @@ The file is the only source of users. If you copy a Valkey ACL file, change thes
   `@connection`.
 - `CLIENT` has the categories of `CLIENT SETNAME`. `CONFIG` has the categories of `CONFIG GET`.
 - A `+` or `-` rule for a command that Discus lacks stops the node. Use category rules.
+- The rule words, such as `on` and `nopass`, are case-sensitive. Command names and category names
+  ignore case.
+- A byte order mark at the start of the file is an error.
+- A client that sends no `AUTH` gets `-NOAUTH`, also with `user default on nopass`. In Valkey, that
+  client is the user `default`.
 - A user never opens the admin port.
 - Discus does not copy users between nodes. Each node reads its own file.
 
@@ -832,6 +844,10 @@ rules apply:
 
 With an `any` policy, another factor can still authenticate the connection, for example a client
 certificate. Then the connection keeps the access of that factor after the user is gone.
+
+Outside Kubernetes, write the new file next to the old file, and then rename it over the old file.
+A file that you write in place can load half written. Then a rule at the end of a line can be
+missing.
 
 In Kubernetes, change the Secret of `aclFile.secretName`. The mounted file changes after the Secret
 changes, usually within a minute or two. Each node reads its own copy, so for a short time some

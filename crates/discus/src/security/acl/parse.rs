@@ -338,5 +338,10 @@ mod tests {
             assert!(!e.contains("pa"), "{e}");
         }
         assert_eq!(error("# nothing\n"), "the file has no user");
+        assert_eq!(error("user a ON"), "line 1: unknown rule at word 3");
+        assert_eq!(
+            error("\u{feff}user a on"),
+            "line 1: a line must start with \"user\""
+        );
     }
 }
