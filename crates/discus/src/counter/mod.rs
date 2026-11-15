@@ -708,11 +708,20 @@ impl Counters {
 
     /// Ask now and wait for the answers. Returns the best hint with a `NORMAL` leader.
     pub async fn ask_now(&self, g: u16) -> Option<GroupHint> {
-        let view = self.view()?;
+        self.ask_with_holders(g).await.0
+    }
+
+    /// Like [`Counters::ask_now`], and also the newest regime of a peer that answered that it
+    /// holds the state of the group without leading it.
+    pub async fn ask_with_holders(&self, g: u16) -> (Option<GroupHint>, Option<Regime>) {
+        let Some(view) = self.view() else {
+            return (None, None);
+        };
         let answers = self.ask_all(&view, g).await;
+        let held = group::held_regime(g, &answers);
         let (best, denied) = group::pick(g, &view, answers);
         self.group(g).learn(best.clone(), &denied);
-        best
+        (best, held)
     }
 
     /// Ask every other `NORMAL` member about group `g`. Returns the members that answered, and

@@ -618,3 +618,100 @@ async fn a_node_without_a_known_view_keeps_every_database() {
         assert_eq!(held_in(n, 0, &key).as_deref(), Some("1"), "{}", n.id);
     }
 }
+
+/// The leader dies while the follower cannot reach the lease. A new node with no hint then
+/// joins at the top of the group. It must wait for the follower, which holds the counters,
+/// instead of taking the lease and starting the group empty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_node_waits_for_the_follower_that_holds_the_state() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (nodes, gates) = two(&net, &leases, &[]).await;
+    let refs = refs(&nodes);
+    let key = "cnt:held";
+    let g = group_of(&nodes[0], key);
+    let mut c = nodes[0].redis().await;
+    for _ in 0..7 {
+        let _: i64 = incr_until(&mut c, key, Duration::from_secs(5)).await;
+    }
+    let li = nodes
+        .iter()
+        .position(|n| n.id == leader_of(&refs, g).unwrap().id)
+        .unwrap();
+    let (leader, follower) = (&nodes[li], &nodes[1 - li]);
+    assert!(all_hold(&[follower], key, "7", Duration::from_secs(5)).await);
+    gates[1 - li].store(false, Ordering::Relaxed);
+    leader.kill();
+    assert!(
+        wait_until(Duration::from_secs(20), || follower
+            .node
+            .epochs()
+            .current()
+            .member(leader.id)
+            .is_none())
+        .await,
+        "the leader never left the epoch"
+    );
+    // A node ID that ranks above the follower in the group.
+    let members = follower.node.epochs().current().members().to_vec();
+    let new_id = std::iter::repeat_with(discus_placement::NodeId::random)
+        .find(|id| {
+            let mut m = members.clone();
+            let mut joined = m[0].clone();
+            joined.id = *id;
+            m.push(joined);
+            discus_placement::hrw::owners(&discus::counter::group_key(g), &m, 1) == [*id]
+        })
+        .unwrap();
+    let id_flag = new_id.to_string();
+    let (new, _) = join_to(&net, &leases, &[follower], &["--node-id", &id_flag]).await;
+    wait_agreed(&[follower, &new], Duration::from_secs(10)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    gates[1 - li].store(true, Ordering::Relaxed);
+    let mut nc = new.redis().await;
+    assert_eq!(incr_until(&mut nc, key, Duration::from_secs(20)).await, 8);
+}
+
+/// A follower that holds a newer regime refuses every sync of an older one. The leader then
+/// leads on in a newer regime instead of sending the same sync forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_leader_takes_a_regime_above_a_refusing_follower() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (nodes, _gates) = two(&net, &leases, &[]).await;
+    let refs = refs(&nodes);
+    let key = "cnt:refused";
+    let g = group_of(&nodes[0], key);
+    let mut c = nodes[0].redis().await;
+    for _ in 0..3 {
+        let _: i64 = incr_until(&mut c, key, Duration::from_secs(5)).await;
+    }
+    let leader = leader_of(&refs, g).unwrap();
+    let follower = refs.iter().copied().find(|n| n.id != leader.id).unwrap();
+    let newer = discus_wire::Regime {
+        generation: 100,
+        origin: discus_placement::NodeId::random(),
+    };
+    let counters = follower.node.counters().unwrap();
+    let sync = discus_wire::CounterSync {
+        group: g,
+        regime: newer,
+        seq: 1,
+        ops: Vec::new(),
+        snapshot: Some(Bytes::from(
+            discus::counter::state::CounterState::new().encode(),
+        )),
+    };
+    let ack = counters
+        .group(g)
+        .on_sync(counters, &counters.view().unwrap(), newer.origin, &sync);
+    assert!(!ack.need_snapshot);
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            status(leader, g).regime.is_some_and(|r| r > newer)
+                && held_in(follower, 0, key).as_deref() == Some("3")
+        })
+        .await,
+        "the leader did not move above the refusing regime"
+    );
+    let mut lc = leader.redis().await;
+    assert_eq!(incr_until(&mut lc, key, Duration::from_secs(5)).await, 4);
+}

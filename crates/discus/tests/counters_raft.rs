@@ -605,3 +605,85 @@ async fn query_get(c: &mut redis::aio::MultiplexedConnection, key: &str) -> i64 
         .unwrap()
         .unwrap_or(0)
 }
+
+/// Just after the up switch the lease holder is the only voter, and the learners catch up. If
+/// it drains then, it hands the group over before it goes, and the counters survive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn draining_the_only_voter_hands_the_group_over() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let f = flags(&["--shutdown-timeout-secs", "30"]);
+    let (nodes, _) = start(&net, &leases, 2, &f).await;
+    let two = refs(&nodes);
+    wait_agreed(&two, Duration::from_secs(10)).await;
+    let keys: Vec<String> = (0..GROUPS)
+        .map(|g| key_in(&nodes[0], g, "single"))
+        .collect();
+    let mut c = nodes[0].redis().await;
+    for k in &keys {
+        for _ in 0..5 {
+            let _: i64 = incr_until(&mut c, k, Duration::from_secs(10)).await;
+        }
+    }
+    // A group whose leader adds the other node before the third, which it cannot reach,
+    // stays at one voter and one learner. Pick the ID of the third node so that one exists.
+    let lead = leader_of(&two, group_of(&nodes[0], &keys[0])).unwrap();
+    let other = two.iter().copied().find(|n| n.id != lead.id).unwrap();
+    let members = lead.node.epochs().current().members().to_vec();
+    let (third_id, g) = std::iter::repeat_with(NodeId::random)
+        .find_map(|id| {
+            let mut m = members.clone();
+            let mut joined = m[0].clone();
+            joined.id = id;
+            m.push(joined);
+            (0..GROUPS).find_map(|g| {
+                let rank = discus_placement::hrw::owners(&group_key(g), &m, 3);
+                let pos = |n: NodeId| rank.iter().position(|r| *r == n);
+                (leader_of(&two, g).is_some_and(|l| l.id == lead.id) && pos(other.id) < pos(id))
+                    .then_some((id, g))
+            })
+        })
+        .unwrap();
+    lead.node.faults.blocked.lock().insert(third_id);
+    let id_flag: &'static str = Box::leak(third_id.to_string().into_boxed_str());
+    let mut f3 = f.clone();
+    f3.extend(["--node-id", id_flag]);
+    let (third, _) = join_to(&net, &leases, &two, &f3).await;
+    third.node.faults.blocked.lock().insert(lead.id);
+    let all = [&nodes[0], &nodes[1], &third];
+    let single = || {
+        let s = status(lead, g);
+        s.role == "leader" && s.voters == [lead.id] && s.learners.contains(&other.id)
+    };
+    assert!(
+        wait_until(Duration::from_secs(20), single).await,
+        "group {g} did not reach one voter and a learner\n{}",
+        dump(&all)
+    );
+    let key = &keys[usize::from(g)];
+    assert!(all_hold(&[other], key, "5", Duration::from_secs(10)).await);
+    lead.node.drain_token().cancel();
+    let rest = [other, &third];
+    let gone = || {
+        rest.iter().all(|n| {
+            let e = n.node.epochs().current().clone();
+            e.member(lead.id)
+                .is_none_or(|m| m.state != discus_placement::MemberState::Normal)
+        })
+    };
+    assert!(
+        wait_until(Duration::from_secs(20), gone).await,
+        "the drain did not reach the epoch"
+    );
+    let mut oc = other.redis().await;
+    assert_eq!(
+        incr_or_show(&mut oc, key, Duration::from_secs(30), &all).await,
+        6
+    );
+    assert!(
+        wait_until(Duration::from_secs(15), || leader_of(&rest, g)
+            .is_some_and(|l| status(l, g).voters.is_empty()))
+        .await,
+        "the group did not switch down\n{}",
+        dump(&all)
+    );
+}

@@ -393,14 +393,34 @@ impl Group {
         seen: u64,
         r: &Arc<RaftRole>,
     ) {
+        let replica = &r.replica;
+        let voters = replica.voter_nodes();
         if !view.me_normal {
-            // A `LEAVING` replica cannot take the lease, and the survivors switch without it.
+            // A `LEAVING` replica cannot take the lease. While the `NORMAL` voters can elect a
+            // leader without it, the survivors switch without it. Otherwise it leads on and
+            // hands its role over first (spec section 15.3).
+            if !normal_quorum(&voters, |n| view.normal(n)) {
+                if r.leads() {
+                    self.hand_over(counters, view, r).await;
+                    return;
+                }
+                if r.is_voter() && voters.len() == 1 {
+                    return;
+                }
+            }
             self.set_role_if(seen, Role::Idle);
             return;
         }
-        let replica = &r.replica;
+        if !r.is_voter() {
+            // A learner waits while a voter can still lead. Once none is left, it competes for
+            // the lease with the state that it holds.
+            if !voters.iter().any(|n| view.voting(*n)) {
+                self.wait_or_take(counters, view, seen, Role::Raft(r.clone()))
+                    .await;
+            }
+            return;
+        }
         let leader = replica.leader_node().filter(|l| view.normal(*l));
-        let voters = replica.voter_nodes();
         // A voter that does not lead holds only the entries that it applied. While the `NORMAL`
         // voters can still elect a leader, an old leader that is `LEAVING` or about to be
         // `DEAD` can still commit with them, so the voter waits for the next leader to switch.
@@ -439,6 +459,42 @@ impl Group {
         discus_telemetry::global()
             .counter_mode_switch(discus_telemetry::attrs::CounterMode::LeaderFollower);
         self.start_leader(counters, view, leader).await;
+    }
+
+    /// A `LEAVING` leader below three `NORMAL` members makes the top `NORMAL` replica the only
+    /// voter. The change commits only once that replica holds every entry before it, and the
+    /// new voter then leads and switches down.
+    async fn hand_over(&self, counters: &Arc<Counters>, view: &View, r: &Arc<RaftRole>) {
+        let replica = &r.replica;
+        if replica.change_pending() {
+            return;
+        }
+        let listed: Vec<(u64, NodeId)> = replica
+            .voters()
+            .into_iter()
+            .chain(replica.learners())
+            .filter(|(id, _)| !replica.contacts.refused(*id))
+            .collect();
+        let Some(next) = view
+            .ranked(self.g)
+            .into_iter()
+            .find_map(|n| listed.iter().find(|l| l.1 == n).map(|l| l.0))
+        else {
+            return;
+        };
+        if !counters.may_change() {
+            return;
+        }
+        tracing::info!(
+            group = self.g,
+            "handing the group over before the drain ends"
+        );
+        let change = ChangeMembers::ReplaceAllVoters(BTreeSet::from([next]));
+        let _ = tokio::time::timeout(
+            CHANGE_TIMEOUT,
+            replica.raft.change_membership(change, false),
+        )
+        .await;
     }
 
     /// The next membership change toward the target voters, in priority order: a lost learner

@@ -63,6 +63,8 @@ pub struct LfLeader {
     acked: watch::Sender<u64>,
     wake: Notify,
     stop: CancellationToken,
+    /// The newer regime of a follower that refused a sync of this one.
+    superseded: Mutex<Option<Regime>>,
     pub since: Instant,
 }
 
@@ -90,6 +92,7 @@ impl LfLeader {
             acked: watch::channel(0).0,
             wake: Notify::new(),
             stop: CancellationToken::new(),
+            superseded: Mutex::new(None),
             since: Instant::now(),
         })
     }
@@ -129,6 +132,10 @@ impl LfLeader {
 
     pub fn stop(&self) {
         self.stop.cancel();
+    }
+
+    pub fn superseded(&self) -> Option<Regime> {
+        *self.superseded.lock()
     }
 
     pub fn state(&self) -> CounterState {
@@ -292,6 +299,12 @@ impl LfLeader {
             {
                 Ok(Message::CounterAck(a)) if a.regime == self.regime && !a.need_snapshot => {
                     self.ack(if snapshot { sent_seq } else { a.seq });
+                }
+                // A retry gets the same refusal forever. The controller leads on in a newer
+                // regime (see `Group::lead`).
+                Ok(Message::CounterAck(a)) if a.regime > self.regime => {
+                    *self.superseded.lock() = Some(a.regime);
+                    return;
                 }
                 _ => {
                     self.lagging.store(true, Ordering::Release);

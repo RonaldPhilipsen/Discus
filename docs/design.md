@@ -797,6 +797,14 @@ two-voter Raft group cannot survive a loss, so small clusters use leader-followe
   Otherwise it returns `-TRYAGAIN`. Two leaders never serve one group at the same time.
 - Leadership is sticky. When the lease expires, the follower tries to acquire it first. Other
   members wait one more lease duration.
+- A node without counter state asks the other members before it takes the lease. A follower, or a
+  Raft replica, that holds the state of the group answers so. The node then waits two lease
+  durations for that member to take over. After the wait it starts empty in a regime above the
+  regime of the answer. The answer reuses the fields of the leader hint: it names no leader and
+  names the sender as the follower. An older build ignores it, so it needs no new capability.
+- A follower refuses a sync of a regime older than its own. On that refusal the leader keeps its
+  state and its lease and leads on in a regime above the refused one. Its snapshot then replaces
+  the state of the follower.
 - The leader sends each entry to the follower and waits up to 50 ms for the acknowledgment. On a
   timeout it marks the follower lagging, replies anyway, and sends a fresh snapshot later. A joining
   follower receives a snapshot.
@@ -876,6 +884,10 @@ sequenceDiagram
 - Down: below three members, the group switches at once. The Raft leader takes the lease. If the
   leader is gone, a surviving voter takes it. Other members wait one lease duration first. If quorum
   was already lost, the last committed entries can be lost.
+- A `LEAVING` leader that the `NORMAL` voters cannot replace, for example the only voter just after
+  the up switch, keeps serving. It makes the top `NORMAL` replica the only voter, and that replica
+  then leads and takes the lease. A learner whose voters are all gone takes part in the lease race
+  with the state that it holds.
 - The epoch drives both switches, so every node agrees on the mode of every group.
 
 ```mermaid
