@@ -30,23 +30,11 @@ async fn bind_error_without_tls(args: &[&str]) -> String {
 }
 
 #[tokio::test]
-async fn a_policy_that_tls_alone_would_meet_is_refused() {
-    let e = bind_error(&[
-        "--auth-policy",
-        "any:tls,shared_token",
-        "--shared-token",
-        "x",
-    ])
-    .await;
-    assert!(e.contains("tls is no longer a factor"), "{e}");
-    let e = bind_error(&["--auth-policy", "all:tls"]).await;
-    assert!(e.contains("use none"), "{e}");
-}
-
-#[tokio::test]
 async fn an_unknown_factor_is_named() {
     let e = bind_error(&["--auth-policy", "any:passwd"]).await;
     assert!(e.contains("unknown factor \"passwd\""), "{e}");
+    let e = bind_error(&["--auth-policy", "all:tls,oauth2"]).await;
+    assert!(e.contains("unknown factor \"tls\""), "{e}");
 }
 
 #[tokio::test]

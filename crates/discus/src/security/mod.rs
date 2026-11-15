@@ -155,17 +155,7 @@ impl Security {
             None => None,
         };
         let policy = match &args.auth_policy {
-            Some(p) => {
-                let parsed = Policy::parse(p)?;
-                if parsed.dropped_tls {
-                    tracing::warn!(
-                        policy = %parsed.policy,
-                        "--auth-policy names the factor tls, which is no longer needed because \
-                         every client uses TLS. Remove tls from the list"
-                    );
-                }
-                parsed.policy
-            }
+            Some(p) => Policy::parse(p)?,
             None if shared_token.is_some() && acl.is_some() => {
                 let flag = match config.shared_token_file {
                     Some(_) => "--shared-token-file",
@@ -1014,16 +1004,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_shared_token_default_and_the_old_spelling_give_the_same_policy() {
+    fn the_shared_token_gives_its_own_default_policy() {
         let default = security(&["--shared-token", "x"]);
         assert_eq!(default.policy.to_string(), "all:shared_token");
-        let old = security(&[
-            "--shared-token",
-            "x",
-            "--auth-policy",
-            "all:tls,shared_token",
-        ]);
-        assert_eq!(old.policy, default.policy);
     }
 
     #[test]
@@ -1135,7 +1118,7 @@ pub(crate) mod tests {
         std::fs::write(&file, format!("user u on >p {rules}\n")).unwrap();
         let s = security(&["--acl-file", file.to_str().unwrap()]);
         Security {
-            policy: Policy::parse(policy).unwrap().policy,
+            policy: Policy::parse(policy).unwrap(),
             ..s
         }
     }

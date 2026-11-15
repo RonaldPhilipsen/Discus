@@ -145,11 +145,7 @@ The policy has one of these forms:
 - `any:<factor>,<factor>`. The client needs one factor.
 - `none`. Every client is in, with read and write access. Every client still uses TLS.
 
-Every client uses TLS, so TLS is not a factor. Older versions had a factor `tls`. The node still
-accepts `tls` in an `all:` list, ignores it, and logs a warning at startup. For example,
-`all:tls,oauth2` means `all:oauth2`. The node refuses to start with `tls` in an `any:` list, or
-with `all:tls`, because these policies would let every client in. For TLS without credentials,
-use `none`.
+Every client uses TLS, so TLS is not a factor. For TLS without credentials, use `none`.
 
 Without `--auth-policy`, the result depends on the shared token:
 

@@ -1177,8 +1177,7 @@ line. To move to it, install a new cluster. The cache starts empty.
 
 - The policy lists factors (`mtls`, `oauth2`, `shared_token`) and combines them with `any`
   or `all`. Every client uses TLS, so TLS is not a factor. With the policy `none`, a client needs
-  no factor. With a policy that names factors, a client without them gets `-NOAUTH`. The old
-  factor name `tls` is still accepted in an `all` list and ignored.
+  no factor. With a policy that names factors, a client without them gets `-NOAUTH`.
 - The policy has no default without a shared token. A node without a policy and without a shared
   token refuses to start, so open access is always a choice of the operator. The node logs a
   warning at startup when the policy is `none`. With a shared token and no policy, the policy is

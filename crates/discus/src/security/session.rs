@@ -139,13 +139,13 @@ mod tests {
     }
 
     fn policy(s: &str) -> Policy {
-        Policy::parse(s).unwrap().policy
+        Policy::parse(s).unwrap()
     }
 
     #[test]
     fn a_connection_without_credentials_never_meets_a_policy() {
         let a = ConnAuth::default();
-        for p in ["all:oauth2", "all:tls,oauth2", "any:oauth2"] {
+        for p in ["all:oauth2", "any:oauth2"] {
             assert_eq!(a.scopes(&policy(p)), None, "{p}");
         }
     }

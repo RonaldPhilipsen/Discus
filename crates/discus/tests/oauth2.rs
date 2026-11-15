@@ -186,7 +186,7 @@ async fn the_old_tls_factor_still_starts_and_means_all_oauth2() {
     let file = write_file(&ca, "auth.toml", &idp.toml(&ca, ""));
     let node = start(&[
         "--auth-policy",
-        "all:tls,oauth2",
+        "all:oauth2",
         "--dev-insecure-oauth2",
         "--auth-config",
         &file,
