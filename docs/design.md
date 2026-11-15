@@ -1109,6 +1109,11 @@ same owners in every database.
   later requests on streams of their own.
 - Allow at most 1024 concurrent streams per connection. Flow-control windows provide backpressure.
 - 0-RTT is off, because 0-RTT data can be replayed.
+- An endpoint sends a QUIC retry to a new connection from an address that it did not validate. A
+  peer then proves that it receives at its address before the TLS handshake starts. This adds one
+  round trip to a new connection. At most 256 inbound handshakes run at the same time. Above that
+  limit, the endpoint refuses the connection. A failed inbound handshake is not evidence for the
+  failure detector, because the dialer is not a known peer.
 - If an address changes, use connection migration. Configure idle timeout, keep-alive, and a
   handshake timeout. A failed handshake, a reset, or a forward timeout feeds the failure detector.
 - The timeout of a request also covers the wait for its connection. A request that times out

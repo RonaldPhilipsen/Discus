@@ -102,6 +102,9 @@ pub struct TransportConfig {
     pub handshake_timeout: Duration,
     /// Concurrent bidirectional streams per connection.
     pub max_streams: u32,
+    /// Inbound handshakes that run at the same time. The endpoint refuses a new connection
+    /// above it.
+    pub max_handshakes: usize,
 }
 
 impl TransportConfig {
@@ -123,6 +126,7 @@ impl TransportConfig {
             keep_alive: Duration::from_secs(5),
             handshake_timeout: Duration::from_secs(2),
             max_streams: 1024,
+            max_handshakes: 256,
         }
     }
 }
@@ -256,6 +260,11 @@ struct Clients {
 
 struct Inner {
     endpoint: quinn::Endpoint,
+    /// The server config in use. A TLS reload changes only its certificates, so it keeps the
+    /// key of the retry tokens that are on their way.
+    server: Mutex<quinn::ServerConfig>,
+    /// One permit per inbound handshake in progress.
+    handshakes: Arc<Semaphore>,
     /// A TLS reload replaces them. Open connections keep the configs of their handshake.
     clients: parking_lot::RwLock<Clients>,
     channels: Channels,
@@ -347,13 +356,15 @@ impl Transport {
         let runtime = quinn::default_runtime().ok_or_else(|| other("no async runtime"))?;
         let endpoint = quinn::Endpoint::new(
             quinn::EndpointConfig::default(),
-            Some(server),
+            Some(server.clone()),
             socket,
             runtime,
         )?;
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let inner = Arc::new(Inner {
             endpoint,
+            server: Mutex::new(server),
+            handshakes: Arc::new(Semaphore::new(config.max_handshakes)),
             clients: parking_lot::RwLock::new(clients),
             channels: config.channels,
             quic,
@@ -638,7 +649,12 @@ impl Transport {
     /// Use `tls` for every new handshake, in both directions. Open connections keep their
     /// certificates. On an error, the endpoint keeps its current certificates.
     pub fn reload_tls(&self, tls: &TlsMaterial) -> io::Result<()> {
-        let (server, clients) = quic_configs(tls, self.0.channels, &self.0.quic)?;
+        let (fresh, clients) = quic_configs(tls, self.0.channels, &self.0.quic)?;
+        let server = {
+            let mut server = self.0.server.lock();
+            server.crypto = fresh.crypto;
+            server.clone()
+        };
         self.0.endpoint.set_server_config(Some(server));
         *self.0.clients.write() = clients;
         // A held failure can come from the old certificates.
@@ -922,11 +938,29 @@ async fn accept_loop(inner: Arc<Inner>) {
                 None => return,
             },
         };
-        tokio::spawn(serve_connection(inner.clone(), incoming));
+        // A retry makes the client prove that it receives at its address before the endpoint
+        // spends a task and a TLS handshake on it. It costs a normal peer one round trip.
+        if !incoming.remote_address_validated() {
+            TransportStats::bump(&inner.stats.retries);
+            if let Err(e) = incoming.retry() {
+                e.into_incoming().refuse();
+            }
+            continue;
+        }
+        let Ok(permit) = inner.handshakes.clone().try_acquire_owned() else {
+            TransportStats::bump(&inner.stats.handshakes_refused);
+            incoming.refuse();
+            continue;
+        };
+        tokio::spawn(serve_connection(inner.clone(), incoming, permit));
     }
 }
 
-async fn serve_connection(inner: Arc<Inner>, incoming: quinn::Incoming) {
+async fn serve_connection(
+    inner: Arc<Inner>,
+    incoming: quinn::Incoming,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) {
     let addr = incoming.remote_address();
     let handshake = async {
         let conn = incoming.await.map_err(|e| e.to_string())?;
@@ -946,11 +980,13 @@ async fn serve_connection(inner: Arc<Inner>, incoming: quinn::Incoming) {
     let handshake = tokio::time::timeout(inner.handshake_timeout, handshake)
         .await
         .unwrap_or_else(|_| Err("the handshake timed out".into()));
+    drop(permit);
     let (conn, info) = match handshake {
         Ok(pair) => pair,
         Err(reason) => {
+            // Not evidence: the dialer is not a known peer, and anyone can make it fail.
             TransportStats::bump(&inner.stats.handshake_failures);
-            emit(&inner, None, addr, PeerEventKind::HandshakeFailed(reason));
+            tracing::debug!(%addr, reason, "an inbound handshake failed");
             return;
         }
     };
