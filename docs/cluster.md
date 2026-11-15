@@ -395,6 +395,10 @@ rate-bytes = 33554432          # bytes per second that one handoff scan sends at
 max-failures-per-connection = 5
 max-failures-per-source = 20
 failure-window-secs = 60
+timeout-secs = 30              # a new connection meets the policy within this time, 0 turns it off
+
+[clients]
+max = 10000                    # open client connections on one node, 0 turns the limit off
 
 [tls]
 reload-secs = 10               # seconds between checks of the certificate files, 0 turns it off
@@ -416,6 +420,8 @@ are all the keys of version 1:
 | `[auth]` | `max-failures-per-connection` | `--auth-max-failures-per-connection` |
 | `[auth]` | `max-failures-per-source` | `--auth-max-failures-per-source` |
 | `[auth]` | `failure-window-secs` | `--auth-failure-window-secs` |
+| `[auth]` | `timeout-secs` | `--auth-timeout-secs` |
+| `[clients]` | `max` | `--max-clients` |
 | `[tls]` | `reload-secs` | `--tls-reload-secs` |
 
 A node takes each setting from the first source that sets it: the command line, then the file, then
@@ -472,6 +478,8 @@ restarts no pod. The node applies it after the kubelet syncs the file and the ne
 | `settings.auth.maxFailuresPerConnection` | `[auth] max-failures-per-connection` |
 | `settings.auth.maxFailuresPerSource` | `[auth] max-failures-per-source` |
 | `settings.auth.failureWindowSecs` | `[auth] failure-window-secs` |
+| `settings.auth.timeoutSecs` | `[auth] timeout-secs` |
+| `settings.clients.max` | `[clients] max` |
 | `settings.tls.reloadSecs` | `[tls] reload-secs` |
 | `databases` | `databases`, the top-level key |
 | `settings.extra` | A map of section to keys, for keys that a newer Discus adds. A value is an integer, a boolean, a string, or an array of those. Other values stop the render. |

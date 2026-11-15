@@ -116,6 +116,13 @@ settings:
     maxFailuresPerConnection: 5
     maxFailuresPerSource: 20
     failureWindowSecs: 60
+    # Seconds that a new connection gets to meet the authentication policy. 0 turns the
+    # deadline off.
+    timeoutSecs: 30
+  clients:
+    # The most open client connections on one node. 0 turns the limit off. A lower value closes
+    # no open connection.
+    max: 10000
   tls:
     # Seconds between checks of the certificate files. 0 turns the checks off.
     reloadSecs: 10

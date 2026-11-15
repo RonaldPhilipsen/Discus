@@ -144,6 +144,7 @@ struct Instruments {
     forwards: Counter<u64>,
     forward_hops: Histogram<u64>,
     redirects: Counter<u64>,
+    rejected_connections: Counter<u64>,
     misrouted: Counter<u64>,
     topology_requests: Counter<u64>,
     quic_failures: Counter<u64>,
@@ -403,6 +404,10 @@ impl Metrics {
                 .with_boundaries(HOP_BUCKETS.to_vec())
                 .build(),
             redirects: counter("discus.client.redirects", "MOVED replies"),
+            rejected_connections: counter(
+                "discus.client.rejected_connections",
+                "Client connections closed at the connection limit",
+            ),
             misrouted: counter(
                 "discus.client.misrouted",
                 "Commands forwarded where a MOVED reply was due",
@@ -637,6 +642,12 @@ impl Metrics {
     pub fn redirect(&self) {
         #[cfg(feature = "otel")]
         self.with(|i| i.redirects.add(1, &[]));
+    }
+
+    #[inline]
+    pub fn rejected_connection(&self) {
+        #[cfg(feature = "otel")]
+        self.with(|i| i.rejected_connections.add(1, &[]));
     }
 
     #[inline]

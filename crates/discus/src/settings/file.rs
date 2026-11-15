@@ -64,6 +64,8 @@ pub const KEYS: &[Key] = &[
         "auth_max_failures_per_source",
     ),
     integer("auth", "failure-window-secs", "auth_failure_window_secs"),
+    integer("auth", "timeout-secs", "auth_timeout_secs"),
+    integer("clients", "max", "max_clients"),
     integer("tls", "reload-secs", "tls_reload_secs"),
     top_level_integer("databases", "databases"),
 ];
@@ -227,10 +229,12 @@ mod tests {
             (Some("auth"), "max-failures-per-connection"),
             (Some("auth"), "max-failures-per-source"),
             (Some("auth"), "failure-window-secs"),
+            (Some("auth"), "timeout-secs"),
+            (Some("clients"), "max"),
             (Some("tls"), "reload-secs"),
             (None, "databases"),
         ];
-        assert_eq!(KEYS.len(), 11);
+        assert_eq!(KEYS.len(), 13);
         for (key, (section, name)) in KEYS.iter().zip(expected) {
             assert_eq!((key.section, key.key), (section, name));
         }

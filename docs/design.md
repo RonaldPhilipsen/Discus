@@ -938,6 +938,8 @@ steps in reverse.
   cover the whole shard.
 - The default limits are 64 KiB per key, 64 MiB per value, and 10000 in-flight commands per
   connection. A connection over the pipeline limit is not read until replies drain.
+- A node serves at most 10000 client connections (`--max-clients`), counted from the accept. It
+  closes a connection over the limit before the TLS handshake.
 - There is no persistence.
 
 ## 12. Protocol surface
@@ -1197,6 +1199,9 @@ line. To move to it, install a new cluster. The cache starts empty.
 - Authentication errors are generic. The reason goes to the debug log. Failed attempts are
   rate-limited per connection and per source. The limit per source also counts refused bearer
   tokens on the admin port.
+- Until a connection meets the policy, one argument and one buffered request are at most 64 KiB,
+  and a command has at most 64 arguments. A connection that does not meet the policy within
+  `--auth-timeout-secs` (default 30) of the accept is closed.
 
 ### 14.3 OAuth 2.0
 

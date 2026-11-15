@@ -87,6 +87,21 @@ async fn mtls_alone_authenticates_with_read_write_by_default() {
 }
 
 #[tokio::test]
+async fn mtls_alone_starts_with_the_normal_request_limits() {
+    let ca = TestCa::new();
+    let server = ca.server_cert();
+    let client = ca.client_cert("spiffe://test/app");
+    let mut args = tls_args(&ca, &server);
+    args.extend(["--auth-policy", "any:mtls"]);
+    let node = start(&args).await;
+    let mut s = tls_connect(node.addr, &ca, Some(&client)).await.unwrap();
+    let big = "v".repeat(100_000);
+    let mut wire = cmd(&["SET", "k", &big]);
+    wire.extend(cmd(&["STRLEN", "k"]));
+    assert_eq!(exchange(&mut s, &wire).await, "+OK\r\n:100000\r\n");
+}
+
+#[tokio::test]
 async fn a_read_only_certificate_cannot_write() {
     let ca = TestCa::new();
     let server = ca.server_cert();

@@ -130,6 +130,8 @@ fn value(r: &Reloadable, name: &str) -> String {
         "auth.max-failures-per-connection" => r.auth_max_failures_per_connection.to_string(),
         "auth.max-failures-per-source" => r.auth_max_failures_per_source.to_string(),
         "auth.failure-window-secs" => r.auth_failure_window.as_secs().to_string(),
+        "auth.timeout-secs" => r.auth_timeout.as_secs().to_string(),
+        "clients.max" => r.max_clients.to_string(),
         "tls.reload-secs" => r.tls_reload.as_secs().to_string(),
         "databases" => r.databases.to_string(),
         _ => unreachable!("Reloadable::changed names {name}, which value does not know"),
@@ -264,6 +266,8 @@ mod tests {
             auth_max_failures_per_connection: a.auth_max_failures_per_connection + 1,
             auth_max_failures_per_source: a.auth_max_failures_per_source + 1,
             auth_failure_window: a.auth_failure_window + Duration::from_secs(1),
+            auth_timeout: a.auth_timeout + Duration::from_secs(1),
+            max_clients: a.max_clients + 1,
             tls_reload: a.tls_reload + Duration::from_secs(1),
             databases: a.databases + 1,
         };

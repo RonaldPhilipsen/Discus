@@ -113,7 +113,11 @@ jobs:
           --set sharedToken.secretName=discus-token --set sharedToken.key=../token
       - run: >-
           helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
-          --set settings.budget.holdMs=1500 | grep -A12 'discus.toml' | grep -q 'hold-ms = 1500'
+          --set settings.budget.holdMs=1500 | grep -A30 'discus.toml' | grep -q 'hold-ms = 1500'
+      - run: >-
+          helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
+          --set settings.clients.max=500 --set settings.auth.timeoutSecs=5
+          | grep -A30 'discus.toml' | grep -A1 '\[clients\]' | grep -q 'max = 500'
       - run: >-
           ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
           --set settings.budget.holdMs=fast

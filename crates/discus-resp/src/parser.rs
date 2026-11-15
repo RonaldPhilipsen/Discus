@@ -67,6 +67,11 @@ impl Parser {
         }
     }
 
+    /// Replace the limits. They apply from the next header that the parser reads.
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
+    }
+
     pub fn feed(&mut self, data: &[u8]) {
         self.buf.extend_from_slice(data);
     }

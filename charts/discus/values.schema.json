@@ -48,7 +48,15 @@
           "properties": {
             "maxFailuresPerConnection": { "type": ["integer", "null"], "minimum": 0 },
             "maxFailuresPerSource": { "type": ["integer", "null"], "minimum": 0 },
-            "failureWindowSecs": { "type": ["integer", "null"], "minimum": 0 }
+            "failureWindowSecs": { "type": ["integer", "null"], "minimum": 0 },
+            "timeoutSecs": { "type": ["integer", "null"], "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "clients": {
+          "type": "object",
+          "properties": {
+            "max": { "type": ["integer", "null"], "minimum": 0 }
           },
           "additionalProperties": false
         },
