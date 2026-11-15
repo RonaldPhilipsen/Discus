@@ -130,13 +130,12 @@ that the scopes deny returns `-NOPERM`, never `-MOVED`.
 
 ## Authentication policy
 
-The flag `--auth-policy` sets which factors a client needs. There are four factors:
+The flag `--auth-policy` sets which factors a client needs. There are three factors:
 
 | Factor | The client has it when |
 | --- | --- |
 | `mtls` | It presents a verified client certificate. |
 | `oauth2` | It sends a valid OAuth 2.0 token with `AUTH`. |
-| `shared_token` | It sends the shared token with `AUTH`. |
 | `password` | It sends the name and the password of a user with `AUTH`. |
 
 The policy has one of these forms:
@@ -147,22 +146,19 @@ The policy has one of these forms:
 
 Every client uses TLS, so TLS is not a factor. For TLS without credentials, use `none`.
 
-Without `--auth-policy`, the result depends on the shared token:
+Without `--auth-policy`, the result depends on the ACL file:
 
 | Setting | Result |
 | --- | --- |
-| `--shared-token-file` or `--shared-token` set | The policy is `all:shared_token`. |
 | `--acl-file` set | The policy is `all:password`. |
-| No shared token and no ACL file | The node refuses to start. The error names `--auth-policy`. |
+| No ACL file | The node refuses to start. The error names `--auth-policy`. |
 
 The node never opens the client port without credentials unless you ask for it. Set
 `--auth-policy none` to make that choice.
 
-A shared token that the policy does not use stops the node at startup. A shared token and
-`--acl-file` together, with no `--auth-policy`, also stop the node. The error names the flag of the
-shared token. With `none`, every client that can reach the port and complete the TLS handshake
-gets read and write access. The node logs a warning about this at startup. To limit access, set a
-policy with `mtls`, `oauth2`, `shared_token`, or `password`.
+With `none`, every client that can reach the port and complete the TLS handshake gets read and
+write access. The node logs a warning about this at startup. To limit access, set a policy with
+`mtls`, `oauth2`, or `password`.
 
 Examples:
 
@@ -171,41 +167,8 @@ Examples:
 | A token from an identity provider | `all:oauth2` |
 | A client certificate or a token | `any:mtls,oauth2` |
 | A client certificate and a token | `all:mtls,oauth2` |
-| A simple setup with one password | `all:shared_token` |
-| Named users with passwords and rules | `all:password` |
+| One password for every client, or named users with rules | `all:password` |
 | A client certificate or a user with a password | `any:mtls,password` |
-
-### Shared token
-
-The shared token is one password that every client sends with `AUTH`. Put it in a file and set
-`--shared-token-file`:
-
-```bash
-discus \
-  --tls-cert /etc/discus/tls.crt \
-  --tls-key /etc/discus/tls.key \
-  --shared-token-file /etc/discus/token
-```
-
-The node reads the token from the file and drops whitespace at the end, for example a newline. If
-the node cannot read the file, or the file has no token, the node refuses to start. The error
-names the flag and the file.
-
-The flag `--shared-token <value>` gives the token on the command line. Every user on the host
-can then read it in the process list, and Kubernetes shows it in the pod spec. The node logs a
-warning at startup when you use this flag. Use it only for tests. The node refuses to start with
-both flags.
-
-In the Helm chart, put the token in a Secret and set `sharedToken.secretName`. The chart mounts
-the Secret read-only and sets `--shared-token-file`. The value `sharedToken.key` names the key of
-the Secret that holds the token. The default key is `token`.
-
-```bash
-kubectl create secret generic discus-token --from-literal=token="$TOKEN"
-helm upgrade discus charts/discus --reuse-values --set sharedToken.secretName=discus-token
-```
-
-To change the token while the node runs, see [Shared token rotation](#shared-token-rotation).
 
 ### Users and passwords
 
@@ -222,6 +185,28 @@ discus \
 
 Without `--auth-policy`, the node uses the policy `all:password`. The format is the aclfile
 format of Valkey, with a few limits. See [Differences from Valkey](#differences-from-valkey).
+
+#### One password for every client
+
+For a simple setup, give the user `default` one password and every right. This file has one line:
+
+```text
+user default on allkeys +@all #<64 hex digits>
+```
+
+A client then sends `AUTH <password>`, without a name. To make the hash of a password, run this
+command:
+
+```bash
+printf '%s' "$PASSWORD" | sha256sum
+```
+
+Older versions had the flags `--shared-token` and `--shared-token-file` and the factor
+`shared_token` for this setup. They are gone. Put the token in an ACL file as the password of the
+user `default`, and use the factor `password`.
+
+One thing changes for the clients. The shared token accepted every username. The password
+belongs to the user `default`, so a client must send no username or the username `default`.
 
 #### The file
 
@@ -314,8 +299,6 @@ The node also refuses to start in these cases:
 
 - The policy has `password`, and `--acl-file` is not set.
 - `--acl-file` is set, and the policy has no `password`.
-- The policy has both `shared_token` and `password`. The shared token is the same as a password of
-  the user `default`, so use only `password`.
 
 #### Categories and key access
 
@@ -482,8 +465,7 @@ kubectl create secret generic discus-acl --from-file=users.acl
 helm upgrade discus charts/discus --reuse-values --set aclFile.secretName=discus-acl
 ```
 
-The chart refuses to render with both `aclFile.secretName` and `sharedToken.secretName`. To change
-the file while the node runs, see [ACL file rotation](#acl-file-rotation).
+To change the file while the node runs, see [ACL file rotation](#acl-file-rotation).
 
 ### Commands
 
@@ -496,8 +478,8 @@ A client sends its credential with one of these commands:
 - `AUTH <username> <password>`. This form logs in a user of the ACL file.
 - `HELLO 3 AUTH <username> <token>`
 
-With a policy that has both `shared_token` and `oauth2`, `AUTH <token>` tries the shared token
-first. With a policy that has both `password` and `oauth2`, it tries the user `default` first.
+With a policy that has both `password` and `oauth2`, `AUTH <token>` tries the user `default`
+first.
 
 A failed `AUTH` returns `-WRONGPASS invalid username-password pair or user is disabled.` for every
 reason. The reason goes to the debug log. A failed `AUTH` does not remove an earlier successful
@@ -527,7 +509,6 @@ the ACL file needs a rule for each of them, except `AUTH`, `HELLO`, and `QUIT`.
 
 Each factor grants scopes:
 
-- The shared token grants `discus.read` and `discus.write`.
 - A client certificate grants `discus.read` and `discus.write` when the `--auth-config` file has
   no `[[client_cert]]` rule. With at least one rule, it grants the scopes of its first matching
   rule. A certificate that matches no rule gives no `mtls` factor.
@@ -823,7 +804,7 @@ An admin request passes in one of two ways:
 - The client sends `Authorization: Bearer <token>` with a token that has `discus.admin`. Over
   plaintext, this needs `--dev-insecure-oauth2`.
 
-The shared token never opens the admin routes. A user of the ACL file never opens them either.
+A user of the ACL file never opens the admin routes.
 Without admin credentials, the node answers 401.
 
 Each refused bearer token counts as a failed attempt for its source address, together with the
@@ -848,7 +829,7 @@ lacks, the node refuses to start and names the missing feature.
 
 | Part | Feature |
 | --- | --- |
-| TLS modes, client certificates, shared token, ACL users, admin certificates | Always present |
+| TLS modes, client certificates, ACL users, admin certificates | Always present |
 | OAuth 2.0 tokens and `[[issuer]]` | `oauth2` |
 | Introspection | `oauth2-introspection` |
 | `[kubernetes]` | `k8s` and `oauth2` |
@@ -874,11 +855,9 @@ identity provider without `ca_file`.
 | `--tls-client-auth` | `optional` | `required` refuses clients without a certificate in `node` mode. |
 | `--lb-trusted-source` | none | A network that the load balancer connects from. Repeat it for more. |
 | `--lb-identity-tlv` | none | A PROXY v2 TLV type from `0xE0` to `0xEF` that holds the client identity. |
-| `--auth-policy` | required without a shared token | The client authentication policy. See [Authentication policy](#authentication-policy). |
+| `--auth-policy` | required without `--acl-file` | The client authentication policy. See [Authentication policy](#authentication-policy). |
 | `--auth-config` | none | The TOML file with issuers, rules, and admin identities. |
-| `--shared-token-file` | none | A file with the shared token for the `shared_token` factor. The node reloads it after a change. |
 | `--acl-file` | none | A file with users, passwords, and rules, for the `password` factor. The node reloads it after a change. |
-| `--shared-token` | none | The shared token as a value. The process list shows it, so use `--shared-token-file`. |
 | `--dev-insecure-oauth2` | off | Allows `http` issuers, and admin bearer tokens on a plaintext admin port. Development only. |
 | `--auth-clock-skew-secs` | 60 | The clock skew allowed on token times. |
 | `--auth-max-failures-per-connection` | 5 | Failed attempts that close a connection. |
@@ -887,7 +866,7 @@ identity provider without `ca_file`.
 | `--auth-timeout-secs` | 30 | Seconds that a new connection gets to meet the policy. `0` turns the deadline off. The node applies a change from the settings file. |
 | `--max-clients` | 10000 | Open client connections on both client listeners. `0` means no limit. The node applies a change from the settings file. |
 | `--admin-tls` | off | Serves the admin port over TLS. |
-| `--tls-reload-secs` | 10 | Seconds between checks of the certificate files, the shared token file, and the ACL file. `0` turns the reload off. |
+| `--tls-reload-secs` | 10 | Seconds between checks of the certificate files and the ACL file. `0` turns the reload off. |
 
 ### Certificate rotation
 
@@ -899,23 +878,6 @@ certificate of their handshake. You do not have to restart the node.
 If the new files do not load, the node logs a warning and keeps its current certificates. For
 example, this happens when the key does not match the certificate. In Kubernetes, the files of a
 mounted Secret change after the Secret changes, usually within a minute or two.
-
-### Shared token rotation
-
-The node checks the file of `--shared-token-file` every `--tls-reload-secs` seconds. If its
-content changes, the node reads the new token. Each new `AUTH` then needs the new token, and the
-old token fails. A connection that logged in with the old token keeps its login until it closes.
-You do not have to restart the node.
-
-If the node cannot read the new file, or the file has no token, the node logs a warning and keeps
-its current token. In Kubernetes, change the Secret of `sharedToken.secretName`. The mounted file
-changes after the Secret changes, usually within a minute or two.
-
-The node has one shared token at a time. Between the change of the Secret and the reload on each
-node, some nodes accept the old token and some accept the new token. Give each client the new
-token after every node has it, and make the client try again after `-WRONGPASS`.
-
-A token from `--shared-token` changes only with a restart.
 
 The node reads the `--auth-config` file once at startup. To change it, restart the node.
 

@@ -27,8 +27,6 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use tokio::net::TcpStream;
 
-use ctutils::CtEq;
-
 pub use args::{ClientAuth, SecurityArgs, TlsMode};
 pub use file::AuthFile;
 pub use policy::{Factor, Policy, Scopes};
@@ -81,19 +79,6 @@ impl ClientTlsFiles {
     }
 }
 
-/// The token in the file of `--shared-token-file`, without trailing whitespace.
-fn read_shared_token(path: &Path) -> io::Result<String> {
-    let content = std::fs::read_to_string(path)?;
-    let token = content.trim_end();
-    if token.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the file has no token",
-        ));
-    }
-    Ok(token.to_string())
-}
-
 /// The security state of a node.
 pub struct Security {
     mode: TlsMode,
@@ -103,9 +88,6 @@ pub struct Security {
     lb_identity_tlv: Option<u8>,
     cert_rules: Vec<(String, Scopes)>,
     policy: Policy,
-    /// A reload of `shared_token_file` replaces the content.
-    shared_token: Option<ArcSwap<String>>,
-    shared_token_file: Option<PathBuf>,
     acl: Option<ArcSwap<Acl>>,
     acl_file: Option<PathBuf>,
     /// Counts the loads of `acl_file`, so a connection can tell that its user is stale.
@@ -131,23 +113,6 @@ impl Security {
             Some(path) => AuthFile::load(path)?,
             None => AuthFile::default(),
         };
-        let shared_token = match (&config.shared_token, &config.shared_token_file) {
-            (Some(_), Some(_)) => {
-                return fail("set --shared-token or --shared-token-file, not both");
-            }
-            (Some(token), None) => {
-                tracing::warn!(
-                    "--shared-token shows the token in the process list and in the pod spec. Use \
-                     --shared-token-file"
-                );
-                Some(token.clone())
-            }
-            (None, Some(path)) => Some(
-                read_shared_token(path)
-                    .map_err(|e| format!("--shared-token-file {}: {e}", path.display()))?,
-            ),
-            (None, None) => None,
-        };
         let acl = match &args.acl_file {
             Some(path) => {
                 Some(Acl::load(path).map_err(|e| format!("--acl-file {}: {e}", path.display()))?)
@@ -156,31 +121,15 @@ impl Security {
         };
         let policy = match &args.auth_policy {
             Some(p) => Policy::parse(p)?,
-            None if shared_token.is_some() && acl.is_some() => {
-                let flag = match config.shared_token_file {
-                    Some(_) => "--shared-token-file",
-                    None => "--shared-token",
-                };
-                return fail(format!(
-                    "{flag} and --acl-file are both set, so set --auth-policy"
-                ));
-            }
             None if acl.is_some() => Policy::All(vec![Factor::Password]),
-            None if shared_token.is_some() => Policy::All(vec![Factor::SharedToken]),
             // An open node must be a choice of the operator, never a silent default.
             None => {
                 return fail(
                     "--auth-policy is not set. Choose a policy: --auth-policy none for TLS \
-                     without credentials, or a policy with mtls, oauth2, shared_token, or password",
+                     without credentials, or a policy with mtls, oauth2, or password",
                 )
             }
         };
-        if policy.uses(Factor::SharedToken) && policy.uses(Factor::Password) {
-            return fail(
-                "the policy uses shared_token and password. The shared token is a password of \
-                 the user default, so use only password",
-            );
-        }
         match (policy.uses(Factor::Password), &acl) {
             (true, None) => return fail("the policy uses password, so set --acl-file"),
             (false, Some(_)) => {
@@ -198,23 +147,6 @@ impl Security {
         };
         if policy.uses(Factor::Mtls) && args.tls_client_ca.is_none() {
             return fail("the policy uses mtls, so set --tls-client-ca");
-        }
-        match (policy.uses(Factor::SharedToken), &shared_token) {
-            (true, None) => {
-                return fail(
-                    "the policy uses shared_token, so set --shared-token-file or --shared-token",
-                )
-            }
-            (false, Some(_)) => {
-                let flag = match config.shared_token_file {
-                    Some(_) => "--shared-token-file",
-                    None => "--shared-token",
-                };
-                return fail(format!(
-                    "{flag} is set, but the policy {policy} does not use shared_token"
-                ));
-            }
-            _ => {}
         }
         #[cfg(feature = "oauth2")]
         let oauth = Self::oauth2(args, &policy, &file)?;
@@ -271,8 +203,6 @@ impl Security {
             lb_identity_tlv: args.lb_identity_tlv,
             cert_rules,
             policy,
-            shared_token: shared_token.map(ArcSwap::from_pointee),
-            shared_token_file: config.shared_token_file.clone(),
             acl: acl.map(ArcSwap::from_pointee),
             acl_file: args.acl_file.clone(),
             acl_generation: AtomicU64::new(0),
@@ -397,23 +327,9 @@ impl Security {
         Ok(())
     }
 
-    /// The file that [`Security::reload_shared_token`] reads, with `--shared-token-file`.
-    pub fn shared_token_file(&self) -> Option<&Path> {
-        self.shared_token_file.as_deref()
-    }
-
     /// The file that [`Security::reload_acl`] reads, with `--acl-file`.
     pub fn acl_file(&self) -> Option<&Path> {
         self.acl_file.as_deref()
-    }
-
-    /// Read the shared token file again, and use the token for every new `AUTH`. A connection
-    /// that is logged in stays logged in. On an error, the node keeps its current token.
-    pub fn reload_shared_token(&self) -> io::Result<()> {
-        if let (Some(slot), Some(path)) = (&self.shared_token, &self.shared_token_file) {
-            slot.store(Arc::new(read_shared_token(path)?));
-        }
-        Ok(())
     }
 
     /// The current users, with `--acl-file`.
@@ -678,10 +594,7 @@ impl Security {
         user: Option<&[u8]>,
         token: &[u8],
     ) -> Result<(), CommandError> {
-        if !self.policy.uses(Factor::SharedToken)
-            && !self.policy.uses(Factor::Oauth2)
-            && !self.policy.uses(Factor::Password)
-        {
+        if !self.policy.uses(Factor::Oauth2) && !self.policy.uses(Factor::Password) {
             return Err(CommandError::Custom(
                 "ERR AUTH <password> called without any password configured for the default \
                  user. Are you sure your configuration is correct?"
@@ -700,15 +613,6 @@ impl Security {
             }
             PasswordPath::Refused => return Err(self.failed(conn, "wrong password or user is off")),
             PasswordPath::Undecided => {}
-        }
-        let oauth2_only = user.is_some_and(|u| u.eq_ignore_ascii_case(b"OAUTH2"));
-        if !oauth2_only && self.policy.uses(Factor::SharedToken) {
-            if let Some(expected) = &self.shared_token {
-                if bool::from(expected.load().as_bytes().ct_eq(token)) {
-                    conn.auth.shared = true;
-                    return Ok(());
-                }
-            }
         }
         #[cfg(feature = "oauth2")]
         if let Some(o) = &self.oauth {
@@ -971,13 +875,10 @@ pub(crate) mod tests {
     }
 
     /// A `Security` with a self-signed client certificate and `args`. Without a policy and
-    /// without a shared token in `args`, the policy is `none`.
+    /// without an ACL file in `args`, the policy is `none`.
     pub(crate) fn security(args: &[&str]) -> Security {
         let mut all = args.to_vec();
-        let sets_policy = |a: &&str| {
-            *a == "--auth-policy" || *a == "--acl-file" || a.starts_with("--shared-token")
-        };
-        if !args.iter().any(sets_policy) {
+        if !args.contains(&"--auth-policy") && !args.contains(&"--acl-file") {
             all.extend(["--auth-policy", "none"]);
         }
         try_security(&all).unwrap()
@@ -995,18 +896,6 @@ pub(crate) mod tests {
     fn an_explicit_none_policy_starts() {
         let s = try_security(&["--auth-policy", "none"]).unwrap();
         assert_eq!(s.policy, Policy::None);
-    }
-
-    #[test]
-    fn a_shared_token_alone_gets_the_shared_token_policy() {
-        let s = try_security(&["--shared-token", "x"]).unwrap();
-        assert_eq!(s.policy, Policy::All(vec![Factor::SharedToken]));
-    }
-
-    #[test]
-    fn the_shared_token_gives_its_own_default_policy() {
-        let default = security(&["--shared-token", "x"]);
-        assert_eq!(default.policy.to_string(), "all:shared_token");
     }
 
     #[test]
@@ -1029,33 +918,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_failed_token_reload_keeps_the_token() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("token");
-        std::fs::write(&file, "old\n").unwrap();
-        let s = security(&["--shared-token-file", file.to_str().unwrap()]);
-        let accepts = |token: &[u8]| {
-            let mut conn = ConnState::new(1, ConnAuth::default());
-            s.authenticate(&mut conn, None, token).is_ok()
-        };
-        assert!(accepts(b"old"));
-
-        std::fs::write(&file, "\n").unwrap();
-        assert!(s.reload_shared_token().is_err());
-        std::fs::remove_file(&file).unwrap();
-        assert!(s.reload_shared_token().is_err());
-        assert!(accepts(b"old"));
-        assert!(!accepts(b""));
-
-        std::fs::write(&file, "new\n").unwrap();
-        s.reload_shared_token().unwrap();
-        assert!(accepts(b"new"));
-        assert!(!accepts(b"old"));
-    }
-
-    #[test]
     fn a_read_only_connection_cannot_write() {
-        let s = security(&["--shared-token", "x"]);
+        let s = Security {
+            policy: Policy::Any(vec![Factor::Mtls]),
+            ..security(&[])
+        };
         let mut conn = ConnState::new(1, ConnAuth::default());
         let get = crate::counter::cmd(&["GET", "k"]);
         let set = crate::counter::cmd(&["SET", "k", "v"]);
@@ -1063,21 +930,18 @@ pub(crate) mod tests {
             s.authorize(&mut conn, spec(b"GET"), &get),
             Err(CommandError::NoAuth)
         );
-        conn.auth.shared = true;
+        conn.auth.cert = Some(CertGrant {
+            identity: "rw".into(),
+            scopes: Scopes::READ_WRITE,
+        });
         assert_eq!(s.authorize(&mut conn, spec(b"SET"), &set), Ok(()));
-        // Only an mTLS or OAuth 2.0 grant can be read-only, so fake one through a policy that
-        // takes the intersection.
-        let ro = Security {
-            policy: Policy::Any(vec![Factor::Mtls]),
-            ..s
-        };
         conn.auth.cert = Some(CertGrant {
             identity: "ro".into(),
             scopes: Scopes::READ,
         });
-        assert_eq!(ro.authorize(&mut conn, spec(b"GET"), &get), Ok(()));
+        assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), Ok(()));
         assert_eq!(
-            ro.authorize(&mut conn, spec(b"SET"), &set),
+            s.authorize(&mut conn, spec(b"SET"), &set),
             Err(CommandError::NoPerm("set".into()))
         );
         assert_eq!(
@@ -1215,7 +1079,7 @@ pub(crate) mod tests {
     fn a_login_without_a_user_needs_the_admin_scope_to_show_the_users() {
         let s = Security {
             policy: Policy::Any(vec![Factor::Mtls]),
-            ..security(&["--shared-token", "x"])
+            ..security(&[])
         };
         let run = |scopes: Scopes, parts: &[&str]| {
             let mut conn = ConnState::new(1, ConnAuth::default());

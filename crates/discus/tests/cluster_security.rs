@@ -12,11 +12,13 @@ use security_support::{cmd, exchange, ACL_USERS, NOPERM_KEY};
 
 #[tokio::test]
 async fn the_entry_node_authorizes_and_the_owner_trusts_the_forward() {
-    // Each node has its own token, so a check on the owner would refuse the entry node's client.
+    // Each node has its own password, so a check on the owner would refuse the entry node's
+    // client.
     let c = start_cluster_with(2, |i| {
+        let password = if i == 0 { "entry-token" } else { "owner-token" };
         vec![
-            "--shared-token".into(),
-            if i == 0 { "entry-token" } else { "owner-token" }.into(),
+            "--acl-file".into(),
+            client_tls::password_file(password).into(),
         ]
     })
     .await;

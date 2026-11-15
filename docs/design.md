@@ -34,7 +34,7 @@ The main choices:
   over TCP.
 - Membership, gossip, and the admin server run on their own thread, so an overloaded node stays a
   healthy member.
-- Clients authenticate with OAuth 2.0 bearer tokens, mTLS, or a shared token. Kubernetes workloads
+- Clients authenticate with OAuth 2.0 bearer tokens, mTLS, or a password. Kubernetes workloads
   can use their service account token.
 - Metrics and traces export through OpenTelemetry over OTLP/gRPC.
 
@@ -1175,17 +1175,17 @@ line. To move to it, install a new cluster. The cache starts empty.
 
 ### 14.2 Client authentication policy
 
-- The policy lists factors (`mtls`, `oauth2`, `shared_token`) and combines them with `any`
+- The policy lists factors (`mtls`, `oauth2`, `password`) and combines them with `any`
   or `all`. Every client uses TLS, so TLS is not a factor. With the policy `none`, a client needs
   no factor. With a policy that names factors, a client without them gets `-NOAUTH`.
-- The policy has no default without a shared token. A node without a policy and without a shared
-  token refuses to start, so open access is always a choice of the operator. The node logs a
-  warning at startup when the policy is `none`. With a shared token and no policy, the policy is
-  `all:shared_token`.
-- A shared token grants read-write by default and is meant for simple setups. An mTLS-only client
-  gets read-write when no certificate rule exists. With at least one rule, the client gets the
-  scope of the first rule that matches its certificate identity. An identity that matches no rule
-  does not have the `mtls` factor.
+- The policy has no default without an ACL file. A node without a policy and without an ACL file
+  refuses to start, so open access is always a choice of the operator. The node logs a warning at
+  startup when the policy is `none`. With an ACL file and no policy, the policy is `all:password`.
+- The `password` factor is a user of the ACL file. The rules of the user decide its commands and its
+  keys, and the scopes do not apply. One user `default` with every right is the simple setup. An
+  mTLS-only client gets read-write when no certificate rule exists. With at least one rule, the
+  client gets the scope of the first rule that matches its certificate identity. An identity that
+  matches no rule does not have the `mtls` factor.
 - Each node authenticates its own client connections. A cluster client opens a connection to each
   node and authenticates on each one. The limiter of failed attempts counts per node.
 - Authorization runs before the redirect rule. A command that the scopes deny returns `-NOPERM`,
@@ -1193,7 +1193,7 @@ line. To move to it, install a new cluster. The cache starts empty.
 - The `CLUSTER` subcommands, `READONLY`, `READWRITE`, and `ASKING` need an authenticated
   connection under an authentication policy, because the replies show the address of every node.
 - Forwards trust the cluster mTLS. The entry node authorizes, and the target does not check again.
-- The admin port requires the `discus.admin` scope or an admin certificate, never the shared token.
+- The admin port requires the `discus.admin` scope or an admin certificate, never a password.
   `RAFT_FORCE_RECONFIGURE` exists only on the admin port.
 - Authentication errors are generic. The reason goes to the debug log. Failed attempts are
   rate-limited per connection and per source. The limit per source also counts refused bearer
@@ -1364,7 +1364,7 @@ removes its code and dependencies. Features never change the wire format.
 
 - Without `otel`, there are no metrics or traces. The node still forwards the trace context
   unchanged, so traces stay connected across it.
-- Without `oauth2`, the policy accepts only `mtls` and `shared_token`, and the node does
+- Without `oauth2`, the policy accepts only `mtls` and `password`, and the node does
   not advertise the OAuth 2.0 capability.
 - Without `k8s`, the only lease provider is `none`.
 - If the configuration enables a subsystem that the binary lacks, the node refuses to start and

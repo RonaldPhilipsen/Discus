@@ -648,7 +648,12 @@ async fn cluster_client_routes_directly() {
 #[tokio::test]
 async fn topology_needs_auth() {
     let (_c, ports) = start_authed(
-        |_| vec!["--shared-token".into(), "s3cret".into()],
+        |_| {
+            vec![
+                "--acl-file".into(),
+                security_support::common::client_tls::password_file("s3cret").into(),
+            ]
+        },
         Some("s3cret"),
     )
     .await;

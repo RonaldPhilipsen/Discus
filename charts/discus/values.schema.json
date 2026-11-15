@@ -8,14 +8,6 @@
       "type": "string",
       "pattern": "^$|^none$|^(any|all):.+$"
     },
-    "sharedToken": {
-      "type": "object",
-      "properties": {
-        "secretName": { "type": "string" },
-        "key": { "type": "string", "pattern": "^[-._a-zA-Z0-9]+$" }
-      },
-      "additionalProperties": false
-    },
     "aclFile": {
       "type": "object",
       "properties": {

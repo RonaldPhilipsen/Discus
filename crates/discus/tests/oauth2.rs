@@ -330,9 +330,9 @@ async fn issuers_without_oauth2_in_the_policy_are_refused() {
     let file = write_file(&ca, "auth.toml", &idp.toml(&ca, ""));
     let e = try_start(&[
         "--auth-policy",
-        "any:shared_token",
-        "--shared-token",
-        "x",
+        "any:password",
+        "--acl-file",
+        security_support::common::client_tls::password_file("x"),
         "--auth-config",
         &file,
     ])

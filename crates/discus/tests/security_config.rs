@@ -33,63 +33,10 @@ async fn bind_error_without_tls(args: &[&str]) -> String {
 async fn an_unknown_factor_is_named() {
     let e = bind_error(&["--auth-policy", "any:passwd"]).await;
     assert!(e.contains("unknown factor \"passwd\""), "{e}");
-    let e = bind_error(&["--auth-policy", "all:tls,oauth2"]).await;
-    assert!(e.contains("unknown factor \"tls\""), "{e}");
-}
-
-#[tokio::test]
-async fn an_unused_shared_token_is_an_error() {
-    let e = bind_error(&["--auth-policy", "none", "--shared-token", "x"]).await;
-    assert!(e.contains("--shared-token"), "{e}");
-}
-
-#[tokio::test]
-async fn a_shared_token_policy_needs_the_token() {
-    let e = bind_error(&["--auth-policy", "any:shared_token"]).await;
-    assert!(e.contains("--shared-token"), "{e}");
-}
-
-/// A token file with `content` in `dir`.
-fn token_file(dir: &tempfile::TempDir, content: &str) -> String {
-    let file = dir.path().join("token");
-    std::fs::write(&file, content).expect("the test directory is writable");
-    file.to_str().expect("a UTF-8 path").to_string()
-}
-
-#[tokio::test]
-async fn a_shared_token_and_a_token_file_together_are_an_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = token_file(&dir, "x\n");
-    let e = bind_error(&["--shared-token", "x", "--shared-token-file", &file]).await;
-    assert!(e.contains("--shared-token-file, not both"), "{e}");
-}
-
-#[tokio::test]
-async fn an_empty_token_file_is_an_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = token_file(&dir, " \n");
-    let e = bind_error(&["--shared-token-file", &file]).await;
-    assert!(
-        e.contains("--shared-token-file") && e.contains(&file),
-        "{e}"
-    );
-}
-
-#[tokio::test]
-async fn a_missing_token_file_is_an_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("token");
-    let file = file.to_str().unwrap();
-    let e = bind_error(&["--shared-token-file", file]).await;
-    assert!(e.contains("--shared-token-file") && e.contains(file), "{e}");
-}
-
-#[tokio::test]
-async fn an_unused_token_file_is_an_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = token_file(&dir, "x\n");
-    let e = bind_error(&["--auth-policy", "none", "--shared-token-file", &file]).await;
-    assert!(e.contains("--shared-token-file is set"), "{e}");
+    for old in ["tls", "shared_token"] {
+        let e = bind_error(&["--auth-policy", &format!("all:{old},oauth2")]).await;
+        assert!(e.contains(&format!("unknown factor {old:?}")), "{e}");
+    }
 }
 
 /// An ACL file with `content` in `dir`.
@@ -103,27 +50,6 @@ fn acl_file(dir: &tempfile::TempDir, name: &str, content: &str) -> String {
 async fn the_acl_file_and_the_password_factor_go_together() {
     let dir = tempfile::tempdir().unwrap();
     let f = acl_file(&dir, "users.acl", "user admin on >p ~* +@all\n");
-    let e = bind_error(&[
-        "--acl-file",
-        &f,
-        "--shared-token",
-        "x",
-        "--auth-policy",
-        "all:shared_token,password",
-    ])
-    .await;
-    assert!(e.contains("shared_token and password"), "{e}");
-    let e = bind_error(&["--acl-file", &f, "--shared-token", "x"]).await;
-    assert!(
-        e.contains("--shared-token and --acl-file are both set, so set --auth-policy"),
-        "{e}"
-    );
-    let t = acl_file(&dir, "token", "x\n");
-    let e = bind_error(&["--acl-file", &f, "--shared-token-file", &t]).await;
-    assert!(
-        e.contains("--shared-token-file and --acl-file are both set, so set --auth-policy"),
-        "{e}"
-    );
     let e = bind_error(&["--acl-file", &f, "--auth-policy", "none"]).await;
     assert!(e.contains("does not use password"), "{e}");
     let e = bind_error(&["--auth-policy", "all:password"]).await;

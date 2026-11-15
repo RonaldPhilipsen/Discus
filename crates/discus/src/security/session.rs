@@ -54,8 +54,6 @@ pub struct ConnAuth {
     /// The client address. In `lb` mode it is the address that the PROXY header carries.
     pub peer: Option<IpAddr>,
     pub cert: Option<CertGrant>,
-    /// The client sent the shared token.
-    pub shared: bool,
     pub token: Option<TokenGrant>,
     /// Failed authentication attempts on this connection.
     pub failures: u32,
@@ -74,7 +72,6 @@ impl ConnAuth {
         match f {
             Factor::Mtls => self.cert.is_some(),
             Factor::Oauth2 => self.token.is_some(),
-            Factor::SharedToken => self.shared,
             Factor::Password => self.user.is_some(),
         }
     }
@@ -93,12 +90,11 @@ impl ConnAuth {
         match f {
             Factor::Mtls => self.cert.as_ref().map(|c| c.scopes),
             Factor::Oauth2 => self.token.as_ref().map(|t| t.scopes),
-            Factor::SharedToken => self.shared.then_some(Scopes::READ_WRITE),
             Factor::Password => None,
         }
     }
 
-    /// The scopes from the certificate, the token, and the shared token. `None` when the policy is
+    /// The scopes from the certificate and the token. `None` when the policy is
     /// not met, or when none of them applies. A user grant gives no scopes: its rules decide.
     ///
     /// `all` takes the intersection of the factors, so the strictest factor wins. `any`
@@ -202,15 +198,5 @@ mod tests {
         assert!(!ConnAuth::default().authenticated(&any));
         let both = policy("all:mtls,password");
         assert!(!a.authenticated(&both));
-    }
-
-    #[test]
-    fn the_shared_token_grants_read_write() {
-        let a = ConnAuth {
-            shared: true,
-            ..ConnAuth::default()
-        };
-        let p = policy("any:shared_token");
-        assert_eq!(a.scopes(&p), Some(Scopes::READ_WRITE));
     }
 }

@@ -4,9 +4,6 @@ metadata:
   name: {{ include "discus.fullname" . }}
   labels:
     {{- include "discus.labels" . | nindent 4 }}
-{{- if and .Values.sharedToken.secretName .Values.aclFile.secretName }}
-{{- fail "sharedToken.secretName and aclFile.secretName cannot both be set: the shared token is a password of the user default, so put it in the ACL file" }}
-{{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
   # One replacement finishes before the next one begins.
@@ -132,14 +129,11 @@ spec:
             {{- end }}
             {{- if .Values.authPolicy }}
             - --auth-policy={{ .Values.authPolicy }}
-            {{- else if not (or .Values.sharedToken.secretName .Values.aclFile.secretName) }}
-            {{- fail "authPolicy is required. Set authPolicy=none for TLS without credentials, or a policy with mtls, oauth2, shared_token, or password, for example authPolicy=all:mtls. With sharedToken.secretName or aclFile.secretName, an empty value gives the policy of that Secret" }}
+            {{- else if not .Values.aclFile.secretName }}
+            {{- fail "authPolicy is required. Set authPolicy=none for TLS without credentials, or a policy with mtls, oauth2, or password, for example authPolicy=all:mtls. With aclFile.secretName, an empty value gives the policy all:password" }}
             {{- end }}
             {{- if .Values.authConfig.secretName }}
             - --auth-config=/auth/auth.toml
-            {{- end }}
-            {{- if .Values.sharedToken.secretName }}
-            - --shared-token-file=/shared-token/{{ .Values.sharedToken.key }}
             {{- end }}
             {{- if .Values.aclFile.secretName }}
             - --acl-file=/acl/{{ .Values.aclFile.key }}
@@ -204,11 +198,6 @@ spec:
               mountPath: /auth
               readOnly: true
             {{- end }}
-            {{- if .Values.sharedToken.secretName }}
-            - name: shared-token
-              mountPath: /shared-token
-              readOnly: true
-            {{- end }}
             {{- if .Values.aclFile.secretName }}
             - name: acl-file
               mountPath: /acl
@@ -242,16 +231,6 @@ spec:
         - name: auth-config
           secret:
             secretName: {{ . }}
-        {{- end }}
-        {{- with .Values.sharedToken }}
-        {{- if .secretName }}
-        - name: shared-token
-          secret:
-            secretName: {{ .secretName }}
-            items:
-              - key: {{ .key }}
-                path: {{ .key }}
-        {{- end }}
         {{- end }}
         {{- with .Values.aclFile }}
         {{- if .secretName }}

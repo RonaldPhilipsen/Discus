@@ -100,19 +100,6 @@ jobs:
           | grep -q -- '--cluster-san=$'
       - run: >-
           helm template discus charts/discus --set cluster.tls.secretName=discus-tls
-          --set sharedToken.secretName=discus-token
-          | grep -q -- '--shared-token-file=/shared-token/token'
-      - run: >-
-          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
-          --set sharedToken.secretName=discus-token | grep -q -- '--auth-policy'
-      - run: >-
-          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
-          | grep -q 'shared-token'
-      - run: >-
-          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
-          --set sharedToken.secretName=discus-token --set sharedToken.key=../token
-      - run: >-
-          helm template discus charts/discus --set cluster.tls.secretName=discus-tls
           --set aclFile.secretName=discus-acl
           | grep -q -- '--acl-file=/acl/users.acl'
       - run: >-
@@ -120,7 +107,10 @@ jobs:
           | grep -q 'acl'
       - run: >-
           ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
-          --set sharedToken.secretName=discus-token --set aclFile.secretName=discus-acl
+          --set aclFile.secretName=discus-acl | grep -q -- '--auth-policy'
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --set aclFile.secretName=discus-acl --set aclFile.key=../users.acl
       - run: >-
           helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
           --set settings.budget.holdMs=1500 | grep -A30 'discus.toml' | grep -q 'hold-ms = 1500'

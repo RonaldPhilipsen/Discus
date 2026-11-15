@@ -1,4 +1,4 @@
-//! The admin port requires `discus.admin` or an admin certificate, never the shared token
+//! The admin port requires `discus.admin` or an admin certificate, never a password of the ACL file
 //! (spec §14.1, §14.2).
 #![allow(clippy::unwrap_used)]
 mod security_support;
@@ -58,8 +58,12 @@ async fn admin_routes_are_closed_by_default() {
 }
 
 #[tokio::test]
-async fn the_shared_token_never_opens_the_admin_port() {
-    let node = start(&["--shared-token", "s3cret"]).await;
+async fn a_password_never_opens_the_admin_port() {
+    let node = start(&[
+        "--acl-file",
+        security_support::common::client_tls::password_file("s3cret"),
+    ])
+    .await;
     assert_eq!(get(&node, "/admin/security", Some("s3cret")).await.0, 401);
 }
 

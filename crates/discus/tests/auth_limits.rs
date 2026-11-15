@@ -8,7 +8,8 @@ const RIGHT: &[u8] = b"*2\r\n$4\r\nAUTH\r\n$6\r\ns3cret\r\n";
 
 #[tokio::test]
 async fn five_failures_close_the_connection() {
-    let addr = common::start_node(&["--shared-token", "s3cret"]).await;
+    let addr =
+        common::start_node(&["--acl-file", common::client_tls::password_file("s3cret")]).await;
     let mut s = common::client_tls::connect(addr).await;
     s.write_all(&WRONG.repeat(6)).await.unwrap();
     let mut all = Vec::new();
@@ -23,8 +24,8 @@ async fn five_failures_close_the_connection() {
 #[tokio::test]
 async fn a_source_over_its_limit_is_refused_without_a_check() {
     let addr = common::start_node(&[
-        "--shared-token",
-        "s3cret",
+        "--acl-file",
+        common::client_tls::password_file("s3cret"),
         "--auth-max-failures-per-source",
         "3",
     ])
@@ -40,7 +41,8 @@ async fn a_source_over_its_limit_is_refused_without_a_check() {
 
 #[tokio::test]
 async fn a_failed_auth_keeps_an_earlier_success() {
-    let addr = common::start_node(&["--shared-token", "s3cret"]).await;
+    let addr =
+        common::start_node(&["--acl-file", common::client_tls::password_file("s3cret")]).await;
     let mut wire = RIGHT.to_vec();
     wire.extend_from_slice(WRONG);
     wire.extend_from_slice(b"*1\r\n$4\r\nPING\r\n");

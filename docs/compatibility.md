@@ -154,7 +154,7 @@ See [Running a cluster](cluster.md) for the details.
 
 ## Authentication
 
-`AUTH` and `HELLO ... AUTH` accept the shared token, an OAuth 2.0 token, or the password of a user
+`AUTH` and `HELLO ... AUTH` accept an OAuth 2.0 token or the password of a user
 of the ACL file. `AUTH OAUTH2 <token>` selects OAuth 2.0. If the ACL file does not name the
 username, the username is only a hint. `AUTH default <value>` works like `AUTH <value>`. A failed
 `AUTH` always returns the same `-WRONGPASS` error. A command that the scopes of the connection do

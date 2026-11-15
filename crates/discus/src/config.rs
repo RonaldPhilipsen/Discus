@@ -146,14 +146,6 @@ pub struct Config {
     /// Placement weight of this node. Finite and greater than zero.
     #[arg(long, default_value_t = 1.0, value_parser = parse_weight)]
     pub weight: f64,
-    /// Shared token that clients must send with AUTH. The value shows in the process list, so
-    /// prefer --shared-token-file.
-    #[arg(long)]
-    pub shared_token: Option<String>,
-    /// A file with the shared token that clients must send with AUTH. The node drops trailing
-    /// whitespace, and reads the file again after a change.
-    #[arg(long)]
-    pub shared_token_file: Option<PathBuf>,
 
     /// This node's ID, 32 hex digits. Random by default. Required with static membership.
     #[arg(long)]
