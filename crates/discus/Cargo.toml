@@ -29,6 +29,7 @@ futures = "0.3"
 parking_lot = "0.13"
 ctutils = "0.4"
 sha2 = "0.10"
+hex = "0.4"
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
