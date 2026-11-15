@@ -319,6 +319,8 @@ authentication for clients:
 | `authConfig.secretName` | A Secret with the key `auth.toml`, for the flag `--auth-config`. |
 | `aclFile.secretName` | A Secret with the users and their passwords, for the flag `--acl-file`. |
 | `aclFile.key` | The key of that Secret. The default is `users.acl`. |
+| `admin.tls.enabled=true` | The admin port uses TLS (`--admin-tls`), and the probes use HTTPS. |
+| `admin.tls.secretName` | A Secret with the keys `tls.crt` and `tls.key` for the admin port. The default is the certificate of the client listener. |
 
 The node reloads its certificates after the Secrets change, so a rotation needs no restart. See
 [Certificate rotation](security.md#certificate-rotation).

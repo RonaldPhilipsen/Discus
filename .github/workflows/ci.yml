@@ -147,6 +147,19 @@ jobs:
       - run: >-
           ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
           --set probes.startup.exec=x
+      - run: >-
+          [ "$(helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
+          --set admin.tls.enabled=true | grep -c 'scheme: HTTPS')" = 3 ]
+      - run: >-
+          helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
+          --set admin.tls.enabled=true --set admin.tls.secretName=discus-admin
+          | grep -q -- '--admin-tls-cert=/admin-tls/tls.crt'
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
+          | grep -q -e '--admin-tls' -e 'scheme: HTTPS'
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
+          --set admin.tls.secretName=discus-admin
 
   # redis-cli against a fresh node, for every supported and unsupported command.
   compat:

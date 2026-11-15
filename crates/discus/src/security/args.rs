@@ -105,4 +105,11 @@ pub struct SecurityArgs {
     /// Serve the admin port over TLS with the client listener certificate and CA.
     #[arg(long)]
     pub admin_tls: bool,
+    /// A PEM certificate chain for the admin port instead of --tls-cert. Needs --admin-tls and
+    /// --admin-tls-key.
+    #[arg(long)]
+    pub admin_tls_cert: Option<PathBuf>,
+    /// The PEM private key for --admin-tls-cert.
+    #[arg(long)]
+    pub admin_tls_key: Option<PathBuf>,
 }

@@ -17,6 +17,20 @@
   "type": "object",
   "properties": {
     "databases": { "type": "integer", "minimum": 1, "maximum": 65536 },
+    "admin": {
+      "type": "object",
+      "properties": {
+        "tls": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "secretName": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "probes": {
       "type": "object",
       "properties": {

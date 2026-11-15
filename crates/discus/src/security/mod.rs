@@ -65,6 +65,8 @@ struct ClientTlsFiles {
     key: PathBuf,
     client_ca: Option<PathBuf>,
     require_client: bool,
+    /// The certificate and key of the admin port, if they differ from the listener.
+    admin: Option<(PathBuf, PathBuf)>,
 }
 
 impl ClientTlsFiles {
@@ -75,7 +77,11 @@ impl ClientTlsFiles {
 
     /// The admin port asks for a client certificate but never requires one.
     fn admin(&self) -> io::Result<rustls::ServerConfig> {
-        tls::server_config(&self.cert, &self.key, self.client_ca.as_deref(), false)
+        let (cert, key) = match &self.admin {
+            Some((cert, key)) => (cert, key),
+            None => (&self.cert, &self.key),
+        };
+        tls::server_config(cert, key, self.client_ca.as_deref(), false)
     }
 }
 
@@ -177,7 +183,14 @@ impl Security {
             key: tls_key.clone(),
             client_ca: args.tls_client_ca.clone(),
             require_client: required,
+            admin: args.admin_tls_cert.clone().zip(args.admin_tls_key.clone()),
         };
+        if args.admin_tls_cert.is_some() != args.admin_tls_key.is_some() {
+            return fail("--admin-tls-cert and --admin-tls-key must be set together");
+        }
+        if args.admin_tls_cert.is_some() && !args.admin_tls {
+            return fail("--admin-tls-cert needs --admin-tls");
+        }
         let admin_tls = if args.admin_tls {
             let config = tls_files.admin().map_err(|e| e.to_string())?;
             Some(Arc::new(ArcSwap::from_pointee(config)))
@@ -190,6 +203,12 @@ impl Security {
             return fail("[admin] cert_identities needs --admin-tls and --tls-client-ca");
         }
         let server_tls = ArcSwap::from_pointee(tls_files.listener().map_err(|e| e.to_string())?);
+        if args.dev_insecure_oauth2 {
+            tracing::warn!(
+                "--dev-insecure-oauth2: the node accepts http issuers and bearer tokens over a \
+                 plaintext admin port. Development only"
+            );
+        }
         if policy == Policy::None {
             tracing::warn!(
                 "--auth-policy none: every client that completes a TLS handshake gets read and \
@@ -306,11 +325,17 @@ impl Security {
 
     /// The files that [`Security::reload_client_tls`] reads.
     pub fn client_tls_files(args: &SecurityArgs) -> Vec<PathBuf> {
-        [&args.tls_cert, &args.tls_key, &args.tls_client_ca]
-            .into_iter()
-            .flatten()
-            .cloned()
-            .collect()
+        [
+            &args.tls_cert,
+            &args.tls_key,
+            &args.tls_client_ca,
+            &args.admin_tls_cert,
+            &args.admin_tls_key,
+        ]
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect()
     }
 
     /// Read the certificate, the key, and the client CA again, and use them for every new
@@ -920,6 +945,38 @@ pub(crate) mod tests {
             all.extend(["--auth-policy", "none"]);
         }
         try_security(&all).unwrap()
+    }
+
+    /// The log lines that `f` writes at WARN and above.
+    fn warnings(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Buf(Arc<parking_lot::Mutex<Vec<u8>>>);
+        impl io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+                self.0.lock().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf::default();
+        let out = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || out.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let text = String::from_utf8_lossy(&buf.0.lock()).into_owned();
+        text
+    }
+
+    #[test]
+    fn dev_insecure_oauth2_logs_a_warning() {
+        let on = warnings(|| drop(security(&["--dev-insecure-oauth2"])));
+        assert!(on.contains("--dev-insecure-oauth2"), "{on}");
+        let off = warnings(|| drop(security(&[])));
+        assert!(!off.contains("--dev-insecure-oauth2"), "{off}");
     }
 
     #[test]

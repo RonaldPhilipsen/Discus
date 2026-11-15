@@ -69,6 +69,16 @@ clientTls:
   # With verifyClients: optional or required.
   clientAuth: optional
 
+# The admin port 9100 serves the probes and the /admin/ routes. See docs/security.md.
+admin:
+  tls:
+    # Serves the admin port over TLS (--admin-tls), and the probes use HTTPS. The routes under
+    # /admin/ then accept an admin certificate, verified against the client CA of clientTls.
+    enabled: false
+    # A Secret with the keys tls.crt and tls.key for the admin port. The default is the
+    # certificate of the client listener. Needs enabled.
+    secretName: ""
+
 # The flag --auth-policy, for example all:mtls or all:oauth2. Required without
 # aclFile.secretName: the chart fails when the value is empty, because a node without a policy
 # refuses to start. The value none gives every client that completes the TLS handshake read and

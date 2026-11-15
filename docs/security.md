@@ -844,7 +844,12 @@ certificate still passes. The admin port takes the source address from the TCP c
 every client behind one proxy shares one limit.
 
 With `--admin-tls`, the admin port uses TLS with `--tls-cert`, `--tls-key`, and
-`--tls-client-ca`. Admin certificate identities go in the `--auth-config` file:
+`--tls-client-ca`. To give the admin port its own certificate, set `--admin-tls-cert` and
+`--admin-tls-key`. The node reloads these files with the other client TLS files. In the chart, set
+`admin.tls.enabled=true`, and optionally `admin.tls.secretName` to a Secret with the keys
+`tls.crt` and `tls.key`. The probes then use HTTPS. The kubelet does not verify the certificate.
+
+Admin certificate identities go in the `--auth-config` file:
 
 ```toml
 [admin]
@@ -887,7 +892,7 @@ identity provider without `ca_file`.
 | `--auth-policy` | required without `--acl-file` | The client authentication policy. See [Authentication policy](#authentication-policy). |
 | `--auth-config` | none | The TOML file with issuers, rules, and admin identities. |
 | `--acl-file` | none | A file with users, passwords, and rules, for the `password` factor. The node reloads it after a change. |
-| `--dev-insecure-oauth2` | off | Allows `http` issuers, and admin bearer tokens on a plaintext admin port. Development only. |
+| `--dev-insecure-oauth2` | off | Allows `http` issuers, and admin bearer tokens on a plaintext admin port. The node logs a warning at start. Development only. |
 | `--auth-clock-skew-secs` | 60 | The clock skew allowed on token times. |
 | `--auth-max-failures-per-connection` | 5 | Failed attempts that close a connection. |
 | `--auth-max-failures-per-source` | 20 | Failed attempts per source in one window. An IPv6 source is a /64 network. |
@@ -895,14 +900,16 @@ identity provider without `ca_file`.
 | `--auth-timeout-secs` | 30 | Seconds that a new connection gets to meet the policy. `0` turns the deadline off. The node applies a change from the settings file. |
 | `--max-clients` | 10000 | Open client connections on both client listeners. `0` means no limit. The node applies a change from the settings file. |
 | `--admin-tls` | off | Serves the admin port over TLS. |
+| `--admin-tls-cert` | `--tls-cert` | The PEM certificate chain of the admin port. Needs `--admin-tls` and `--admin-tls-key`. |
+| `--admin-tls-key` | `--tls-key` | The PEM private key for `--admin-tls-cert`. |
 | `--tls-reload-secs` | 10 | Seconds between checks of the certificate files and the ACL file. `0` turns the reload off. |
 
 ### Certificate rotation
 
-The node checks the files of `--tls-cert`, `--tls-key`, and `--tls-client-ca` every
-`--tls-reload-secs` seconds. If their content changes, the node loads the new files. New
-connections on the client, redirect, and admin ports then use them. Open connections keep the
-certificate of their handshake. You do not have to restart the node.
+The node checks the files of `--tls-cert`, `--tls-key`, `--tls-client-ca`, `--admin-tls-cert`,
+and `--admin-tls-key` every `--tls-reload-secs` seconds. If their content changes, the node loads
+the new files. New connections on the client, redirect, and admin ports then use them. Open
+connections keep the certificate of their handshake. You do not have to restart the node.
 
 If the new files do not load, the node logs a warning and keeps its current certificates. For
 example, this happens when the key does not match the certificate. In Kubernetes, the files of a
