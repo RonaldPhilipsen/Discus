@@ -578,8 +578,9 @@ With a policy other than `none`, a connection that has not met the policy yet ge
 A client without a credential then cannot use much memory on the node.
 
 - One argument and one buffered request are at most 64 KiB, and one command has at most 64
-  arguments. This is enough for `HELLO` and `AUTH` with the largest token. A larger request gets
-  a protocol error, and the node closes the connection.
+  arguments. This is enough for `HELLO` and `AUTH` with the largest token. The same limits hold
+  for an inline command. A larger request gets a protocol error, and the node closes the
+  connection.
 - The connection has 30 seconds from the accept to meet the policy. After that the node closes it.
   Set the time with `--auth-timeout-secs`. The value `0` turns the deadline off. A new value
   from the settings file applies to new connections.

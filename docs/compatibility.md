@@ -7,6 +7,11 @@ This page lists what a single Discus node supports today. The matrix is tested b
 Discus reports Redis version 7.2.0 in `INFO` and in the `HELLO` reply, because clients choose
 features from that value.
 
+Discus reads a command as a RESP array of bulk strings, or as an inline command: one line of
+words, as `telnet` sends. Words split as in Valkey, with double quotes, single quotes, and
+escapes. An inline line is at most 64 KiB. Lengths follow the rules of Valkey: a `+` sign or a
+leading zero is a protocol error, and an array header of zero or fewer items is skipped.
+
 ## Supported commands
 
 | Family | Commands |
