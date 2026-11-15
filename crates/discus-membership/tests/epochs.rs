@@ -296,3 +296,30 @@ fn a_drain_during_a_join_stays_leaving() {
     assert_eq!(sim.node(j).swim.phase(), discus_membership::Phase::Leaving);
     assert!(!sim.is_normal(j));
 }
+
+#[test]
+fn a_rejoining_node_forgets_its_dead_records() {
+    let mut sim = Sim::new(7, SwimConfig::fast());
+    let ids = sim.cluster(4);
+    sim.run_ms(500);
+    let (c, gone) = (ids[2], ids[3]);
+    sim.kill(gone);
+    sim.run_until(5_000, |s| {
+        s.liveness(c, gone) == Some(Liveness::Dead) && s.epoch(c).member(gone).is_none()
+    });
+    let without: Vec<Member> = sim
+        .epoch(ids[0])
+        .members()
+        .iter()
+        .filter(|m| m.id != c)
+        .cloned()
+        .collect();
+    let e = forced(&sim, ids[0], without);
+    sim.adopt(c, e);
+    sim.run_ms(10);
+    assert!(sim
+        .events(c)
+        .iter()
+        .any(|e| matches!(e, Event::Rejoining { .. })));
+    assert_eq!(sim.liveness(c, gone), None);
+}

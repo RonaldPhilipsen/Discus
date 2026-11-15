@@ -527,8 +527,8 @@ impl Swim {
     }
 
     /// Merge one rumor into the view. `direct` marks the sender part of a message, which also
-    /// counts as a heartbeat.
-    pub fn learn(&mut self, now: Millis, rumor: Rumor, direct: bool) {
+    /// counts as a heartbeat, and a rumor that the sender gives about itself.
+    pub fn learn(&mut self, now: Millis, mut rumor: Rumor, direct: bool) {
         let id = rumor.info.id;
         if id == self.me.id {
             if rumor.liveness != Liveness::Alive && rumor.info.incarnation >= self.me.incarnation {
@@ -539,10 +539,31 @@ impl Swim {
             }
             return;
         }
+        if rumor.liveness == Liveness::Dead {
+            match self.members.get(&id) {
+                // A dead record that comes back with a new time would never expire across the
+                // cluster, and a death needs no record of a member that this node never knew.
+                None => return,
+                // A node that returns from a partition carries deaths that it decided alone, at
+                // the incarnation that the member still has. A suspicion gives the member the
+                // normal timeout to refute (spec section 6.3).
+                Some(r) if !direct && r.info.incarnation == rumor.info.incarnation => {
+                    match r.liveness {
+                        Liveness::Alive => rumor.liveness = Liveness::Suspect,
+                        Liveness::Suspect if r.doubted => return,
+                        _ => {}
+                    }
+                }
+                Some(_) => {}
+            }
+        }
         let new = (rumor.info.incarnation, rumor.liveness);
         let accuser = rumor
             .accuser
             .filter(|_| rumor.liveness == Liveness::Suspect);
+        // A detector always names its node as the accuser, so a suspicion without one comes from
+        // a death heard from another node, here or where the rumor came from.
+        let doubted = rumor.liveness == Liveness::Suspect && accuser.is_none();
         let mut changed = None;
         match self.members.get_mut(&id) {
             None => {
@@ -553,6 +574,7 @@ impl Swim {
                     accusers: BTreeSet::new(),
                     detector: Detector::new(&self.cfg, now, self.detector_n),
                     hlc: None,
+                    doubted,
                 };
                 record.accusers.extend(accuser);
                 changed = Some((rumor.info.state, rumor.liveness));
@@ -572,11 +594,13 @@ impl Swim {
                     r.accusers.extend(accuser);
                     r.info = rumor.info;
                     r.liveness = rumor.liveness;
+                    r.doubted = doubted;
                     self.broadcasts.push(id);
                 } else if new == old && rumor.liveness == Liveness::Suspect {
                     // Lifeguard: independent accusers shorten the suspicion timeout. Only the
                     // first confirmations are worth spreading.
                     if let Some(a) = accuser {
+                        r.doubted = false;
                         if r.accusers.insert(a) && r.accusers.len() <= self.cfg.suspicion_k + 1 {
                             self.broadcasts.push(id);
                         }
@@ -750,6 +774,9 @@ impl Swim {
                 self.events.push(Event::Rejoining {
                     incarnation: self.me.incarnation,
                 });
+                // The cluster went on without this node, so its deaths are opinions from the
+                // time away. Spread, they would remove healthy members.
+                self.members.retain(|_, r| r.liveness != Liveness::Dead);
             }
         }
         self.drop_shown_deltas(&current);
@@ -784,7 +811,9 @@ impl Swim {
             r.hlc = Some((g.hlc, now));
         }
         for rumor in &g.rumors {
-            self.learn(now, rumor.clone(), false);
+            // The sender's word about itself is first-hand, such as the death in a `LEAVE`.
+            let first_hand = rumor.info.id == g.from.id;
+            self.learn(now, rumor.clone(), first_hand);
         }
         if let Some(body) = &g.epoch_body {
             if body.cluster_id() == self.cluster_id && body.id() > host.epoch().id() {
@@ -1026,10 +1055,12 @@ impl Swim {
                     r.liveness = Liveness::Suspect;
                     r.since = now;
                     r.accusers = BTreeSet::from([me]);
+                    r.doubted = false;
                     changes.push(*id);
                 }
                 Liveness::Suspect => {
                     if score >= self.cfg.phi_suspect && r.accusers.insert(me) {
+                        r.doubted = false;
                         self.broadcasts.push(*id);
                     }
                     let others = r.accusers.iter().filter(|a| **a != me).count();

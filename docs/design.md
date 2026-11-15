@@ -394,6 +394,11 @@ create epochs that mark the other side `DEAD`.
   incarnation and rejoins as `JOINING` with a handoff. It discards its counter state. If it was away
   for less than the tombstone TTL, it keeps its cache store. HLC last-write-wins resolves the
   conflicting writes.
+- A partitioned node marks the other side `DEAD` on its own. A `DEAD` rumor that a node hears from
+  another node, about a member that it holds alive at the same incarnation, makes that member
+  `SUSPECT` only. The member then has the normal suspicion timeout to refute it. A rumor about the
+  sender itself, such as the death in its `LEAVE`, counts as first-hand. A node that rejoins forgets
+  its `DEAD` records, and a `DEAD` rumor about an unknown node creates no record.
 - If two clusters formed independently, the cluster whose `cluster_id` matches the lease wins.
   Without lease access, the larger cluster wins, then the higher `cluster_id`. The losing nodes
   discard their store and counters and rejoin.
