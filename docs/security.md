@@ -123,7 +123,7 @@ that the scopes deny returns `-NOPERM`, never `-MOVED`.
 
 ## Authentication policy
 
-The flag `--auth-policy` sets which factors a client needs. There are four factors:
+The flag `--auth-policy` sets which factors a client needs. There are five factors:
 
 | Factor | The client has it when |
 | --- | --- |
@@ -131,6 +131,7 @@ The flag `--auth-policy` sets which factors a client needs. There are four facto
 | `mtls` | It presents a verified client certificate. |
 | `oauth2` | It sends a valid OAuth 2.0 token with `AUTH`. |
 | `shared_token` | It sends the shared token with `AUTH`. |
+| `password` | It sends the name and the password of a user with `AUTH`. |
 
 The policy has one of these forms:
 
@@ -146,11 +147,14 @@ Without `--auth-policy`, the node picks a default:
 | Setting | Default policy |
 | --- | --- |
 | `--shared-token-file` or `--shared-token` set | `all:tls,shared_token` |
-| No shared token | `none` |
+| `--acl-file` set | `all:tls,password` |
+| No shared token and no ACL file | `none` |
 
-A shared token that the policy does not use stops the node at startup. With `none`, every client
+A shared token that the policy does not use stops the node at startup. A shared token and
+`--acl-file` together, with no `--auth-policy`, also stop the node. The error names the flag of the
+shared token. Set `--auth-policy` to pick one factor. With `none`, every client
 that can reach the port and complete the TLS handshake gets read and write access. To limit
-access, set a policy with `mtls`, `oauth2`, or `shared_token`.
+access, set a policy with `mtls`, `oauth2`, `shared_token`, or `password`.
 
 Examples:
 
@@ -160,6 +164,8 @@ Examples:
 | A client certificate or a token | `any:mtls,oauth2` |
 | A client certificate and a token | `all:mtls,oauth2` |
 | A simple setup with one password over TLS | `all:tls,shared_token` |
+| Named users with passwords and rules | `all:tls,password` |
+| A client certificate or a user with a password | `any:mtls,password` |
 
 ### Shared token
 
@@ -193,17 +199,212 @@ helm upgrade discus charts/discus --reuse-values --set sharedToken.secretName=di
 
 To change the token while the node runs, see [Shared token rotation](#shared-token-rotation).
 
+### Users and passwords
+
+Users give each client its own password and its own rules. The rules say which commands the user
+can run and which keys the user can read or write. Put the users in an ACL file and set
+`--acl-file`:
+
+```bash
+discus \
+  --tls-cert /etc/discus/tls.crt \
+  --tls-key /etc/discus/tls.key \
+  --acl-file /etc/discus/users.acl
+```
+
+Without `--auth-policy`, the node uses the policy `all:tls,password`. The format is the aclfile
+format of Valkey, with a few limits. See [Differences from Valkey](#differences-from-valkey).
+
+#### The file
+
+Each line that is not empty has the form `user <name> <rule> <rule> ...`. A line that starts with
+`#` is a comment. A new user starts as `off`, with no password, no keys, and no commands. The node
+applies the rules from left to right. This is an example file:
+
+```text
+# An administrator. It can run every command on every key.
+user admin on allkeys +@all #f8d0ecc0b1332a8d24b9aedd2b08a1de79116e43eb661409bc1bc07bab948ec5
+
+# A read-only user. It can read every key.
+user reporting on allkeys +@read +@connection #c44b2dc134935203670c2f44343df9b18a97e59a460919753d1d010b1f4e3552
+
+# A service. It reads the keys "config:*" and writes the keys "queue:*".
+user app on %R~config:* %W~queue:* +@read +@write +@connection #da5aef018d0ebf8aa8b9ce37720c50fd9aae477c00a7cae02fba69a6aeb80093
+```
+
+The hashes in this example are for the passwords `admin-secret-p4ss`, `reader-secret-p4ss`, and
+`app-secret-p4ss`. Never use them. Make a new password and a new hash for each user.
+
+These are the rules:
+
+| Rule | Effect |
+| --- | --- |
+| `on`, `off` | The user can log in, or cannot. |
+| `>password` | Adds a password. The node keeps only its SHA-256 hash. |
+| `#<64 hex digits>` | Adds a password as a SHA-256 hash. |
+| `nopass` | Every password matches. Removes the stored passwords. |
+| `resetpass` | Removes the stored passwords and `nopass`. |
+| `~pattern` | Read and write access to the keys that match the glob pattern. |
+| `%R~pattern`, `%W~pattern`, `%RW~pattern` | Read access, write access, or both. |
+| `allkeys` | The same as `~*`. |
+| `resetkeys` | Removes every key pattern. |
+| `+command`, `-command` | Allows or denies one command. |
+| `+@category`, `-@category` | Allows or denies every command of a category. `@all` is every command. |
+| `allcommands`, `nocommands` | The same as `+@all` and `-@all`. |
+| `&pattern`, `allchannels`, `resetchannels` | Accepted, with no effect. Discus has no pub/sub. |
+| `reset` | Puts the user back in the state of a new user. |
+
+A password cannot hold whitespace. A user can have more than one password.
+
+The hash is SHA-256 with no salt. Thus a stolen file lets an attacker test guesses at high speed.
+Use long random passwords. To make a hash, run this command:
+
+```bash
+printf %s "$PASSWORD" | sha256sum
+```
+
+Use the 64 hex digits of the output. The file is a secret, so give it the same care as a private
+key.
+
+#### Errors that stop the node
+
+The node refuses to start with a file that has an error. The error names the line. These are the
+causes:
+
+- A line does not start with `user`, or it has no name.
+- Two lines name the same user.
+- The name is `OAUTH2` in any case. `AUTH OAUTH2 <token>` selects OAuth 2.0.
+- A rule is not in the table. This includes `<password`, `!hash`, selectors, and `+command|sub`.
+- A `+` or `-` rule names a command that Discus does not have.
+- A category is not one of the 21 categories of Valkey or `all`.
+- The file has no user.
+
+The error for an unknown rule has this form: `line 3: unknown rule at word 5`. It gives the
+position of the word and never its text. A mistyped rule can hold a password, and the error goes
+to the log.
+
+A `-` rule for a command that Discus lacks stops the node, because a typing error in a `-` rule
+otherwise leaves a command open. A category without Discus commands, such as `@pubsub`, is valid.
+
+The node also refuses to start in these cases:
+
+- The policy has `password`, and `--acl-file` is not set.
+- `--acl-file` is set, and the policy has no `password`.
+- The policy has both `shared_token` and `password`. The shared token is the same as a password of
+  the user `default`, so use only `password`.
+
+#### Categories and key access
+
+Each command has the categories of Valkey:
+
+- One data category: `@string`, `@hash`, `@set`, `@sortedset`, `@keyspace`, or `@connection`.
+- `@read` or `@write`, for a data command.
+- `@fast` or `@slow`.
+- `@dangerous` or `@admin`, where Valkey sets them.
+
+Category rules are the portable form, because they work in Valkey and in Discus. To list the
+commands of a category, run `ACL CAT <category>`. `CLUSTER` is in `@connection`, so `+@connection`
+is enough for a cluster client. `INFO` and `CONFIG` are in `@dangerous`, not in `@read`.
+
+A key that a command reads needs read access. A key that a command changes needs write access. A
+command that changes a key and uses its old value needs both. These commands are:
+
+- `GETDEL` and `GETEX`.
+- `INCR`, `DECR`, `INCRBY`, `DECRBY`, and `INCRBYFLOAT`.
+- `HINCRBY`, `ZINCRBY`, `SPOP`, and `MOVE`.
+- `SET` with the `GET` option.
+
+`RENAME` needs read and write on the source and write on the destination. `COPY` needs read on the
+source and write on the destination.
+
+Each key needs one pattern that grants the whole access. Two patterns do not add up. For example,
+`%R~x` and `%W~x` together do not allow `INCR x`. A command that names more than one key and
+meets a denied key changes nothing.
+
+A command without key arguments needs only its command rule. Thus `SCAN` and `RANDOMKEY` show key
+names that the user cannot read, as in Valkey.
+
+#### Login
+
+- If the file names the username, the value is the password of that user. A wrong password fails.
+  The node does not try the value as an OAuth 2.0 token.
+- If the file does not name the username, the username is only a hint. The value is a token.
+- `AUTH <value>` tries the user `default` first. If that fails and the policy has `oauth2`, the
+  node tries the value as a token.
+- A user that is `off` cannot log in.
+- A second successful `AUTH` on a connection replaces the user.
+
+Every failure returns the same `-WRONGPASS` error and counts for the limits in
+[Failed attempts](#failed-attempts).
+
+#### Rules and scopes
+
+A user has no scopes. Its rules decide, and they cover the connection commands too. A user needs
+`+@connection` for `PING`, `SELECT`, and `CLUSTER`. `AUTH`, `HELLO`, and `QUIT` always run.
+
+A client certificate or a token keeps its scopes. The policy says how the scopes and the rules
+combine:
+
+- With an `all` policy, the scopes and the rules must both allow the command.
+- With an `any` policy, one of them is enough.
+
+#### Denied commands
+
+A command that the rules deny returns this error:
+
+```text
+-NOPERM this user has no permissions to run the '<command>' command
+```
+
+A key that the rules deny returns this error. The text never names the key:
+
+```text
+-NOPERM this user has no permissions to access one of the keys used as arguments
+```
+
+#### Differences from Valkey
+
+The file is the only source of users. If you copy a Valkey ACL file, change these items:
+
+- `ACL SETUSER`, `DELUSER`, `LOAD`, `SAVE`, `LOG`, `GENPASS`, and `DRYRUN` return an error.
+- `ACL LIST`, `USERS`, and `GETUSER` return an error. They show password hashes, and Discus has no
+  rule for one subcommand to limit them. Read the Secret instead.
+- Selectors, such as `(~temp:* +get)`, stop the node.
+- Rules for one subcommand, such as `+config|get`, stop the node.
+- Discus has no rule for each database.
+- A `+` or `-` rule for a command that Discus lacks stops the node. Use category rules.
+- A user never opens the admin port.
+- Discus does not copy users between nodes. Each node reads its own file.
+
+`ACL WHOAMI` and `ACL CAT` work. A user needs a rule that allows `ACL` to run them.
+
+#### In Kubernetes
+
+In the Helm chart, put the file in a Secret and set `aclFile.secretName`. The chart mounts the
+Secret read-only and sets `--acl-file`. The value `aclFile.key` names the key of the Secret that
+holds the file. The default key is `users.acl`.
+
+```bash
+kubectl create secret generic discus-acl --from-file=users.acl
+helm upgrade discus charts/discus --reuse-values --set aclFile.secretName=discus-acl
+```
+
+The chart refuses to render with both `aclFile.secretName` and `sharedToken.secretName`. To change
+the file while the node runs, see [ACL file rotation](#acl-file-rotation).
+
 ### Commands
 
 A client sends its credential with one of these commands:
 
 - `AUTH <token>`
-- `AUTH <username> <token>`. The username is only a hint.
+- `AUTH <username> <token>`. If the ACL file does not name the username, the username is only a
+  hint.
 - `AUTH OAUTH2 <token>`. This form uses OAuth 2.0 only.
+- `AUTH <username> <password>`. This form logs in a user of the ACL file.
 - `HELLO 3 AUTH <username> <token>`
 
 With a policy that has both `shared_token` and `oauth2`, `AUTH <token>` tries the shared token
-first.
+first. With a policy that has both `password` and `oauth2`, it tries the user `default` first.
 
 A failed `AUTH` returns `-WRONGPASS invalid username-password pair or user is disabled.` for every
 reason. The reason goes to the debug log. A failed `AUTH` does not remove an earlier successful
@@ -221,11 +422,15 @@ Discus has three scopes:
 | `discus.write` | Commands that read or change data. |
 | `discus.admin` | The admin routes. It grants no data access. |
 
+The scopes do not apply to a user of the ACL file. The rules of the user decide. See
+[Rules and scopes](#rules-and-scopes).
+
 A read-only client that runs a write command gets
 `-NOPERM this user has no permissions to run the '<command>' command`.
 
-Connection commands need a login but no scope. They are `PING`, `ECHO`, `QUIT`, `AUTH`, `HELLO`,
-`SELECT`, `COMMAND`, `CLIENT`, and `CLUSTER`. `INFO` and `CONFIG GET` count as reads.
+Connection commands need a login but no scope. A user needs `+@connection` for them. They are
+`PING`, `ECHO`, `QUIT`, `AUTH`, `HELLO`, `SELECT`, `COMMAND`, `CLIENT`, and `CLUSTER`. `INFO` and
+`CONFIG GET` count as reads.
 
 Each factor grants scopes:
 
@@ -491,7 +696,8 @@ An admin request passes in one of two ways:
 - The client sends `Authorization: Bearer <token>` with a token that has `discus.admin`. Over
   plaintext, this needs `--dev-insecure-oauth2`.
 
-The shared token never opens the admin routes. Without admin credentials, the node answers 401.
+The shared token never opens the admin routes. A user of the ACL file never opens them either.
+Without admin credentials, the node answers 401.
 
 Each refused bearer token counts as a failed attempt for its source address, together with the
 failed `AUTH` attempts from that address (see [Failed attempts](#failed-attempts)). When an
@@ -515,7 +721,7 @@ lacks, the node refuses to start and names the missing feature.
 
 | Part | Feature |
 | --- | --- |
-| TLS modes, client certificates, shared token, admin certificates | Always present |
+| TLS modes, client certificates, shared token, ACL users, admin certificates | Always present |
 | OAuth 2.0 tokens and `[[issuer]]` | `oauth2` |
 | Introspection | `oauth2-introspection` |
 | `[kubernetes]` | `k8s` and `oauth2` |
@@ -544,6 +750,7 @@ identity provider without `ca_file`.
 | `--auth-policy` | see above | The client authentication policy. |
 | `--auth-config` | none | The TOML file with issuers, rules, and admin identities. |
 | `--shared-token-file` | none | A file with the shared token for the `shared_token` factor. The node reloads it after a change. |
+| `--acl-file` | none | A file with users, passwords, and rules, for the `password` factor. The node reloads it after a change. |
 | `--shared-token` | none | The shared token as a value. The process list shows it, so use `--shared-token-file`. |
 | `--dev-insecure-oauth2` | off | Allows `http` issuers, and admin bearer tokens on a plaintext admin port. Development only. |
 | `--auth-clock-skew-secs` | 60 | The clock skew allowed on token times. |
@@ -551,7 +758,7 @@ identity provider without `ca_file`.
 | `--auth-max-failures-per-source` | 20 | Failed attempts per source address in one window. |
 | `--auth-failure-window-secs` | 60 | The window of the per-source limit. |
 | `--admin-tls` | off | Serves the admin port over TLS. |
-| `--tls-reload-secs` | 10 | Seconds between checks of the certificate files and the shared token file. `0` turns the reload off. |
+| `--tls-reload-secs` | 10 | Seconds between checks of the certificate files, the shared token file, and the ACL file. `0` turns the reload off. |
 
 ### Certificate rotation
 
@@ -582,3 +789,28 @@ token after every node has it, and make the client try again after `-WRONGPASS`.
 A token from `--shared-token` changes only with a restart.
 
 The node reads the `--auth-config` file once at startup. To change it, restart the node.
+
+### ACL file rotation
+
+The node checks the file of `--acl-file` every `--tls-reload-secs` seconds. If its content
+changes, the node reads the whole file. You do not have to restart the node.
+
+If the file has an error, the node logs a warning and keeps its users. After a good reload, these
+rules apply:
+
+- If the user of a connection is gone or `off`, the connection loses its login. Its next command
+  returns `-NOAUTH`.
+- The new rules apply to the next command of each connection.
+- A changed password keeps the connections that are logged in.
+
+In Kubernetes, change the Secret of `aclFile.secretName`. The mounted file changes after the Secret
+changes, usually within a minute or two. Each node reads its own copy, so for a short time some
+nodes have the old file and some have the new file.
+
+To change a password without a failed login, give the user two passwords for a while:
+
+1. Add the new hash to the line of the user, next to the old hash.
+2. Change the Secret, and wait until every node has the new file.
+3. Give each client the new password.
+4. Remove the old hash from the line.
+5. Change the Secret again.
