@@ -100,6 +100,7 @@ settings:
     rateBytes: 33554432
   auth:
     maxFailuresPerConnection: 5
+    # A source is an IPv4 address or an IPv6 /64 network.
     maxFailuresPerSource: 20
     failureWindowSecs: 60
   tls:
