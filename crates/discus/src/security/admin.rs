@@ -7,6 +7,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use crate::Node;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
@@ -14,10 +15,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
-use tokio::net::TcpListener;
-
-use super::stream::TlsListener;
-use crate::Node;
 
 /// What the admin port knows about its peer.
 #[derive(Debug, Clone, Default)]
@@ -28,29 +25,6 @@ pub struct AdminPeer {
     pub identity: Option<String>,
     /// The source address. The failed-attempt limit counts refused bearer tokens for it.
     pub addr: Option<IpAddr>,
-}
-
-impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TcpListener>>
-    for AdminPeer
-{
-    fn connect_info(stream: axum::serve::IncomingStream<'_, TcpListener>) -> AdminPeer {
-        AdminPeer {
-            addr: Some(stream.remote_addr().ip()),
-            ..AdminPeer::default()
-        }
-    }
-}
-
-impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TlsListener>>
-    for AdminPeer
-{
-    fn connect_info(stream: axum::serve::IncomingStream<'_, TlsListener>) -> AdminPeer {
-        AdminPeer {
-            tls: true,
-            identity: stream.remote_addr().identity.clone(),
-            addr: Some(stream.remote_addr().addr.ip()),
-        }
-    }
 }
 
 /// One trusted issuer on the status page.

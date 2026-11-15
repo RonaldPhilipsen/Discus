@@ -828,6 +828,14 @@ An admin request passes in one of two ways:
 A user of the ACL file never opens the admin routes.
 Without admin credentials, the node answers 401.
 
+The admin port limits its own load, so a flood of connections cannot delay gossip:
+
+- The admin server runs on its own thread, `discus-admin`, apart from gossip.
+- The node takes at most 64 admin connections at once, TLS handshakes included. It closes a
+  connection above the limit at once.
+- A connection gets 5 s to send the headers of its request and 10 s for the TLS handshake.
+- A connection serves one request and then closes. It lives at most 30 s.
+
 Each refused bearer token counts as a failed attempt for its source address, together with the
 failed `AUTH` attempts from that address (see [Failed attempts](#failed-attempts)). When an
 address is over the limit, the node answers 401 to every bearer token from it until the window

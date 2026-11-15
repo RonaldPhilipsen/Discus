@@ -232,6 +232,7 @@ pub struct Server {
     admin: std::net::TcpListener,
     node: Arc<Node>,
     lane: ControlLane,
+    admin_lane: ControlLane,
     /// The QUIC endpoints, for a reload of the cluster certificates.
     transports: Vec<Transport>,
     /// The client and cluster certificate files before the node loaded them.
@@ -319,6 +320,7 @@ impl Server {
         node.set_counters(crate::counter::Counters::new(&node, leases));
         node.set_data_handle(tokio::runtime::Handle::current());
         let lane = ControlLane::start()?;
+        let admin_lane = ControlLane::start_named("discus-admin")?;
         let mut transports = Vec::new();
         if let Some(tls) = tls {
             let cfg = &node.config;
@@ -372,6 +374,7 @@ impl Server {
             admin,
             node,
             lane,
+            admin_lane,
             transports,
             tls_seen,
             acl_seen,
@@ -420,6 +423,7 @@ impl Server {
             admin,
             node,
             lane,
+            admin_lane,
             transports,
             tls_seen,
             acl_seen,
@@ -450,7 +454,7 @@ impl Server {
         node.security.start(stop_background.clone());
         let admin_task = {
             let (node, stop) = (node.clone(), stop_background.clone());
-            lane.spawn(async move {
+            admin_lane.spawn(async move {
                 // A tokio listener belongs to the runtime that registers it, so the conversion
                 // runs on the lane.
                 let admin = TcpListener::from_std(admin)?;
@@ -566,7 +570,11 @@ impl Server {
         if let Some(link) = node.link() {
             link.transport.close();
         }
-        let _ = tokio::task::spawn_blocking(move || lane.shutdown()).await;
+        let _ = tokio::task::spawn_blocking(move || {
+            admin_lane.shutdown();
+            lane.shutdown();
+        })
+        .await;
         Ok(())
     }
 }

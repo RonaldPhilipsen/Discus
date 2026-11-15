@@ -57,7 +57,7 @@ fn fail<T>(msg: impl Into<String>) -> Result<T, SecurityError> {
 }
 
 /// How long a client has to finish the connection setup, the TLS handshake included.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The files of the client listener certificate. A reload reads them again.
 struct ClientTlsFiles {
