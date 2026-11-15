@@ -22,7 +22,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::read("PTTL", 2, pttl),
     CommandSpec::write("PERSIST", 2, persist),
     CommandSpec::write("RENAME", 3, rename).with_route(Route::Rename),
-    CommandSpec::write("MOVE", 3, move_key),
+    CommandSpec::write("MOVE", 3, move_key).with_reads_old(),
     CommandSpec::write("COPY", -3, copy).with_route(Route::Copy),
     // The flags of Valkey for `COMMAND`. The connection route still answers at the entry node, so
     // it never routes as a write.

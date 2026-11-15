@@ -6,6 +6,8 @@ use std::slice;
 use bytes::Bytes;
 use discus_resp::Command;
 
+use crate::command::table::{Access, CommandSpec};
+
 /// The routing shape of a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
@@ -62,6 +64,50 @@ pub fn key_args(route: Route, cmd: &Command) -> Option<StepBy<slice::Iter<'_, By
     )
 }
 
+/// The access that a command needs on one key, as the `%R~` and `%W~` selectors of an ACL user
+/// grant it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyPerm(u8);
+
+impl KeyPerm {
+    pub const READ: KeyPerm = KeyPerm(1);
+    pub const WRITE: KeyPerm = KeyPerm(2);
+    pub const READ_WRITE: KeyPerm = KeyPerm(3);
+
+    pub const fn contains(self, other: KeyPerm) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+/// Each key argument of `cmd` with the access that the command needs on it. Empty for a route
+/// without keys. The arity is already checked.
+pub fn key_perms<'a>(
+    spec: &CommandSpec,
+    cmd: &'a Command,
+) -> impl Iterator<Item = (&'a Bytes, KeyPerm)> + 'a {
+    let set_get = spec.name == "SET" && cmd.iter().skip(3).any(|a| a.eq_ignore_ascii_case(b"GET"));
+    let default = match spec.access {
+        Access::Write if spec.reads_old || set_get => KeyPerm::READ_WRITE,
+        Access::Write => KeyPerm::WRITE,
+        _ => KeyPerm::READ,
+    };
+    let route = spec.route;
+    key_args(route, cmd)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .map(move |(i, key)| {
+            let perm = match (route, i) {
+                (Route::Copy, 0) => KeyPerm::READ,
+                (Route::Copy, _) => KeyPerm::WRITE,
+                (Route::Rename, 0) => KeyPerm::READ_WRITE,
+                (Route::Rename, _) => KeyPerm::WRITE,
+                _ => default,
+            };
+            (key, perm)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +148,70 @@ mod tests {
             Route::Broadcast,
         ] {
             assert_eq!(args(route, &mget), None);
+        }
+    }
+
+    fn perms(parts: &[&str]) -> Vec<(String, KeyPerm)> {
+        let cmd: Command = parts
+            .iter()
+            .map(|p| Bytes::copy_from_slice(p.as_bytes()))
+            .collect();
+        let spec = crate::command::lookup(&cmd[0]).unwrap();
+        key_perms(spec, &cmd)
+            .map(|(k, p)| (String::from_utf8_lossy(k).into_owned(), p))
+            .collect()
+    }
+
+    #[test]
+    fn each_key_gets_the_access_that_the_command_needs() {
+        use KeyPerm as P;
+        let k = |name: &str, p| (name.to_string(), p);
+        assert_eq!(perms(&["GET", "a"]), [k("a", P::READ)]);
+        assert_eq!(perms(&["SET", "a", "1"]), [k("a", P::WRITE)]);
+        assert_eq!(
+            perms(&["SET", "a", "1", "EX", "5", "get"]),
+            [k("a", P::READ_WRITE)]
+        );
+        assert_eq!(perms(&["INCR", "a"]), [k("a", P::READ_WRITE)]);
+        assert_eq!(perms(&["GETDEL", "a"]), [k("a", P::READ_WRITE)]);
+        assert_eq!(
+            perms(&["MGET", "a", "b"]),
+            [k("a", P::READ), k("b", P::READ)]
+        );
+        assert_eq!(
+            perms(&["MSET", "a", "1", "b", "2"]),
+            [k("a", P::WRITE), k("b", P::WRITE)]
+        );
+        assert_eq!(
+            perms(&["RENAME", "a", "b"]),
+            [k("a", P::READ_WRITE), k("b", P::WRITE)]
+        );
+        assert_eq!(
+            perms(&["COPY", "a", "b"]),
+            [k("a", P::READ), k("b", P::WRITE)]
+        );
+        assert_eq!(perms(&["DBSIZE"]), []);
+    }
+
+    #[test]
+    fn every_write_that_returns_old_data_is_marked() {
+        for name in [
+            "GETDEL",
+            "GETEX",
+            "INCR",
+            "DECR",
+            "INCRBY",
+            "DECRBY",
+            "INCRBYFLOAT",
+            "HINCRBY",
+            "ZINCRBY",
+            "SPOP",
+            "MOVE",
+        ] {
+            assert!(
+                crate::command::lookup(name.as_bytes()).unwrap().reads_old,
+                "{name}"
+            );
         }
     }
 }

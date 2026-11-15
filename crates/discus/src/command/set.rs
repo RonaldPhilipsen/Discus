@@ -21,7 +21,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::read("SISMEMBER", 3, sismember),
     CommandSpec::read("SMISMEMBER", -3, smismember),
     CommandSpec::read("SCARD", 2, scard),
-    CommandSpec::write("SPOP", -2, spop),
+    CommandSpec::write("SPOP", -2, spop).with_reads_old(),
     CommandSpec::read("SRANDMEMBER", -2, srandmember),
 ];
 

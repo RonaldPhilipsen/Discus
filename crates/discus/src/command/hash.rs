@@ -23,7 +23,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::write("HDEL", -3, hdel),
     CommandSpec::read("HEXISTS", 3, hexists),
     CommandSpec::read("HLEN", 2, hlen),
-    CommandSpec::write("HINCRBY", 4, hincrby),
+    CommandSpec::write("HINCRBY", 4, hincrby).with_reads_old(),
     CommandSpec::read("HKEYS", 2, hkeys),
     CommandSpec::read("HVALS", 2, hvals),
 ];

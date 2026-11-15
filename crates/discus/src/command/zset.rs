@@ -23,7 +23,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::read("ZRANGE", -4, zrange),
     CommandSpec::read("ZREVRANGE", -4, zrevrange),
     CommandSpec::read("ZRANGEBYSCORE", -4, zrangebyscore),
-    CommandSpec::write("ZINCRBY", 4, zincrby),
+    CommandSpec::write("ZINCRBY", 4, zincrby).with_reads_old(),
     CommandSpec::read("ZCOUNT", 4, zcount),
 ];
 

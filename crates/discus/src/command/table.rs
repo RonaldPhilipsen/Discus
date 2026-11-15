@@ -38,6 +38,8 @@ pub struct CommandSpec {
     /// The position in `specs()`. 0 in a `COMMANDS` array: only the registry sets it.
     pub id: u16,
     pub categories: Categories,
+    /// A write command that also returns or uses the old value of its key.
+    pub reads_old: bool,
 }
 
 impl CommandSpec {
@@ -51,6 +53,7 @@ impl CommandSpec {
             route: Route::Connection,
             fast: false,
             id: 0,
+            reads_old: false,
             categories: Categories::EMPTY,
         }
     }
@@ -65,6 +68,7 @@ impl CommandSpec {
             route: Route::Single { write: false },
             fast: false,
             id: 0,
+            reads_old: false,
             categories: Categories::EMPTY,
         }
     }
@@ -79,6 +83,7 @@ impl CommandSpec {
             route: Route::Single { write: true },
             fast: false,
             id: 0,
+            reads_old: false,
             categories: Categories::EMPTY,
         }
     }
@@ -93,6 +98,13 @@ impl CommandSpec {
 
     pub const fn with_fast(self) -> CommandSpec {
         CommandSpec { fast: true, ..self }
+    }
+
+    pub const fn with_reads_old(self) -> CommandSpec {
+        CommandSpec {
+            reads_old: true,
+            ..self
+        }
     }
 
     pub const fn with_categories(self, categories: Categories) -> CommandSpec {
