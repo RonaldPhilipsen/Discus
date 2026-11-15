@@ -20,9 +20,14 @@ impl PartialOrd for Score {
     }
 }
 
+/// `-0` and `0` are the same score, as in Valkey, so equal scores order by member.
 impl Ord for Score {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.0.total_cmp(&other.0)
+        if self.0 == other.0 {
+            Ordering::Equal
+        } else {
+            self.0.total_cmp(&other.0)
+        }
     }
 }
 
@@ -39,6 +44,8 @@ impl ZSet {
 
     /// Insert or update a member. Returns true when the member is new.
     pub fn insert(&mut self, member: Bytes, score: f64) -> bool {
+        // Adding `0.0` turns `-0.0` into `0.0`, so a score of `-0` reads back as `0`, as in Valkey.
+        let score = score + 0.0;
         match self.scores.insert(member.clone(), score) {
             Some(old) => {
                 self.order.remove(&(Score(old), member.clone()));

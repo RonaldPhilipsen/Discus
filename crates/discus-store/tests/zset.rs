@@ -45,3 +45,20 @@ fn range_by_score_respects_bounds() {
     let names: Vec<&[u8]> = r.iter().map(|(m, _)| m.as_ref()).collect();
     assert_eq!(names, vec![b"b" as &[u8], b"c"]);
 }
+
+/// redis-server 8.10.2: `ZADD z -0 b 0 a` orders `a` before `b`, and `ZSCORE z b` is `0`.
+#[test]
+fn minus_zero_is_the_same_score_as_zero() {
+    let mut z = ZSet::new();
+    z.insert("b".into(), -0.0);
+    z.insert("a".into(), 0.0);
+    let members: Vec<&[u8]> = z
+        .range(0, -1, false)
+        .into_iter()
+        .map(|(m, _)| m.as_ref())
+        .collect();
+    assert_eq!(members, vec![b"a" as &[u8], b"b"]);
+    assert!(z.score(b"b").is_some_and(|s| s.is_sign_positive()));
+    assert_eq!(z.count(Bound::Excluded(-0.0), Bound::Unbounded), 0);
+    assert_eq!(z.count(Bound::Included(0.0), Bound::Included(-0.0)), 2);
+}
