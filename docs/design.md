@@ -162,7 +162,7 @@ flowchart LR
 
 ### 4.1 Threads and runtimes
 
-A node runs two tokio runtimes.
+A node runs three tokio runtimes.
 
 The data runtime is multi-threaded. It runs client connections, forwards, replication, handoff,
 Raft, and the store. Its `on_thread_start` hook raises the nice value of each worker thread by
@@ -175,8 +175,13 @@ runs these tasks:
 
 - The membership tick, the evidence reader, lease renewal, and DNS discovery.
 - Outbound and inbound gossip, and the gossip QUIC endpoint.
-- The admin server. `/healthz`, `/startupz`, and `/readyz` read node state only and run here.
-  Handlers under `/admin/` send their work to the data runtime.
+
+The admin server runs on a second current-thread runtime, on the thread `discus-admin`, at
+nice 0. So a flood of admin connections or admin TLS handshakes never delays gossip.
+`/healthz`, `/startupz`, and `/readyz` read node state only and run there. Handlers under
+`/admin/` send their work to the data runtime. The admin server takes at most 64 connections at
+once, TLS handshakes included, and closes a connection above the limit. A connection gets 5 s for
+its request headers, serves one request, and lives at most 30 s.
 
 The control thread never runs store work. Membership work that touches the store, for example
 epoch adoption, goes to the data runtime through a stored `tokio::runtime::Handle`. Membership
@@ -187,8 +192,14 @@ thread too. The nice value decides only which thread runs first inside the quota
 thread uses little CPU, so it runs early in each period. Its worst-case wait is about one quota
 period, 100 ms by default. That is well inside the 500 ms probe timeout.
 
-On shutdown, the control thread stops after the data runtime finishes its graceful shutdown. So
-the node gossips its departure until the end.
+On shutdown, the control and admin threads stop after the data runtime finishes its graceful
+shutdown. So the node gossips its departure until the end.
+
+The release profile sets `panic = "abort"`. Nothing watches the handles of the background tasks.
+So a task that panics, for example membership or the replicator, would stop alone, and the node
+would still pass `/healthz`. With abort, a panic in any task or thread stops the process, and
+Kubernetes starts the pod again with an empty store. A panic in one client connection also stops
+the node. Debug and test builds keep unwinding.
 
 ## 5. Placement
 
@@ -939,7 +950,8 @@ steps in reverse.
 - The default limits are 64 KiB per key, 64 MiB per value, and 10000 in-flight commands per
   connection. A connection over the pipeline limit is not read until replies drain.
 - A node serves at most 10000 client connections (`--max-clients`), counted from the accept. It
-  closes a connection over the limit before the TLS handshake.
+  closes a connection over the limit before the TLS handshake. An `accept` error never stops a
+  listener. The node waits from 10 ms up to 1 s and accepts again.
 - There is no persistence.
 
 ## 12. Protocol surface
@@ -1300,7 +1312,7 @@ access for clients sets `clusterClients.enabled=false`.
 
 ### 15.2 Health
 
-- `/healthz` is liveness. It runs on the control thread, so it answers on an overloaded node.
+- `/healthz` is liveness. It runs on the admin thread, so it answers on an overloaded node.
 - `/startupz` passes after three conditions: the node is `NORMAL`, the store is ready, and the
   counter tier is settled. Settled means the node is a voter in every Raft group that targets it, or
   holds a current snapshot as follower. A rollout therefore waits for the counters before it
@@ -1391,6 +1403,10 @@ from one feature. Cluster mTLS and client mTLS always use the configured CA.
 | --- | --- | --- |
 | `roots-system` | on | The system trust store, through `rustls-native-certs`. |
 | `roots-webpki` | off | The Mozilla roots compiled in through `webpki-roots`, for scratch or distroless images. |
+
+The release image starts from `scratch` and copies the CA bundle of the build image, so
+`roots-system` finds roots there. At start, the node logs a warning when the store is empty and an
+issuer or the OTLP endpoint uses it.
 
 Exactly one TLS backend and one trust root feature must be on, or the build fails. The startup log
 and `INFO` list the enabled features.

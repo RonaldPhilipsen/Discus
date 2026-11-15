@@ -78,8 +78,7 @@ async fn drain_finishes_when_a_client_never_reads() {
         .await
         .unwrap();
     let (addr, shutdown) = (node.addr, node.shutdown.clone());
-    let client = common::client_tls::redis_client(&format!("rediss://{addr}"));
-    let mut c = client.get_multiplexed_async_connection().await.unwrap();
+    let mut c = common::client_tls::redis_connection(&format!("rediss://{addr}")).await;
     let _: () = c.set("big", "x".repeat(1_000_000)).await.unwrap();
 
     let mut s = common::client_tls::connect(addr).await;

@@ -138,6 +138,17 @@ spec:
             {{- if .Values.aclFile.secretName }}
             - --acl-file=/acl/{{ .Values.aclFile.key }}
             {{- end }}
+            {{- with .Values.admin.tls }}
+            {{- if .enabled }}
+            - --admin-tls
+            {{- if .secretName }}
+            - --admin-tls-cert=/admin-tls/tls.crt
+            - --admin-tls-key=/admin-tls/tls.key
+            {{- end }}
+            {{- else if .secretName }}
+            {{- fail "admin.tls.secretName needs admin.tls.enabled=true" }}
+            {{- end }}
+            {{- end }}
             - --config=/settings/discus.toml
             {{- with .Values.pyroscope.url }}
             - --pyroscope-url={{ . }}
@@ -164,16 +175,26 @@ spec:
             httpGet:
               path: /startupz
               port: admin
-            failureThreshold: 60
-            periodSeconds: 1
+              {{- if .Values.admin.tls.enabled }}
+              scheme: HTTPS
+              {{- end }}
+            {{- toYaml .Values.probes.startup | nindent 12 }}
           readinessProbe:
             httpGet:
               path: /readyz
               port: admin
+              {{- if .Values.admin.tls.enabled }}
+              scheme: HTTPS
+              {{- end }}
+            {{- toYaml .Values.probes.readiness | nindent 12 }}
           livenessProbe:
             httpGet:
               path: /healthz
               port: admin
+              {{- if .Values.admin.tls.enabled }}
+              scheme: HTTPS
+              {{- end }}
+            {{- toYaml .Values.probes.liveness | nindent 12 }}
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -193,6 +214,11 @@ spec:
             - name: settings
               mountPath: /settings
               readOnly: true
+            {{- if and .Values.admin.tls.enabled .Values.admin.tls.secretName }}
+            - name: admin-tls
+              mountPath: /admin-tls
+              readOnly: true
+            {{- end }}
             {{- if .Values.authConfig.secretName }}
             - name: auth-config
               mountPath: /auth
@@ -227,6 +253,11 @@ spec:
         - name: settings
           configMap:
             name: {{ include "discus.fullname" . }}-settings
+        {{- if and .Values.admin.tls.enabled .Values.admin.tls.secretName }}
+        - name: admin-tls
+          secret:
+            secretName: {{ .Values.admin.tls.secretName }}
+        {{- end }}
         {{- with .Values.authConfig.secretName }}
         - name: auth-config
           secret:
@@ -264,7 +295,15 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.topologySpreadConstraints }}
+      {{- if kindIs "invalid" .Values.topologySpreadConstraints }}
       topologySpreadConstraints:
-        {{- toYaml . | nindent 8 }}
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "discus.selectorLabels" . | nindent 14 }}
+      {{- else if .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml .Values.topologySpreadConstraints | nindent 8 }}
       {{- end }}

@@ -237,7 +237,7 @@ spec:
               path: /startupz
               port: 9100
             failureThreshold: 60
-            periodSeconds: 1
+            periodSeconds: 5
           readinessProbe:
             httpGet:
               path: /readyz
@@ -256,6 +256,13 @@ Follow these rules:
   `minReadySeconds` makes one replacement finish before the next one begins.
 - `terminationGracePeriodSeconds` is longer than `--shutdown-timeout-secs`, so the drain ends
   before Kubernetes kills the container.
+- The startup probe budget (`periodSeconds` times `failureThreshold`) is longer than the worst
+  start of a node. Otherwise the kubelet restarts the pod during its handoff, and the next start
+  begins the handoff again. The worst start is the store budget divided by
+  `--handoff-rate-bytes`, plus `--bootstrap-deadline-ms`, plus `--counter-settle-timeout-ms`.
+  With a 2 Gi memory limit and the defaults, that is 1.5 GiB / 32 MiB/s = 48 s, plus 10 s, plus
+  45 s, which is 103 s. The example above gives 300 s. For a 16 Gi limit, the worst start is
+  439 s, so give it about 900 s. The chart sets this budget in `probes.startup`.
 - The service account `discus` needs the Role of the cluster lease above.
 - Mount the node certificate at `/tls`, for example from a cert-manager `Certificate` with the URI
   SAN `spiffe://cluster.local/ns/<namespace>/sa/discus`. Set `--cluster-san` to the same value.
@@ -264,6 +271,11 @@ Follow these rules:
 
 The chart in `charts/discus` creates the resources above and a PodDisruptionBudget. Each release
 publishes the chart with the same version as the image.
+
+By default, the chart spreads the pods over the Kubernetes nodes, with `maxSkew: 1` on
+`kubernetes.io/hostname` and `whenUnsatisfiable: ScheduleAnyway`. So one node failure takes at
+most one replica when there are enough nodes. A list in `topologySpreadConstraints` replaces this
+default, and `[]` turns it off.
 
 Before you install the chart, create a Secret with the keys `ca.crt`, `tls.crt`, and `tls.key`.
 Use a CA that serves only this release and signs no client certificates, because every certificate
@@ -312,6 +324,8 @@ authentication for clients:
 | `authConfig.secretName` | A Secret with the key `auth.toml`, for the flag `--auth-config`. |
 | `aclFile.secretName` | A Secret with the users and their passwords, for the flag `--acl-file`. |
 | `aclFile.key` | The key of that Secret. The default is `users.acl`. |
+| `admin.tls.enabled=true` | The admin port uses TLS (`--admin-tls`), and the probes use HTTPS. |
+| `admin.tls.secretName` | A Secret with the keys `tls.crt` and `tls.key` for the admin port. The default is the certificate of the client listener. |
 
 The node reloads its certificates after the Secrets change, so a rotation needs no restart. See
 [Certificate rotation](security.md#certificate-rotation).

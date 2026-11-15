@@ -10,10 +10,7 @@ async fn select(c: &mut MultiplexedConnection, db: i64) -> redis::RedisResult<()
 }
 
 async fn client(addr: std::net::SocketAddr) -> MultiplexedConnection {
-    common::client_tls::redis_client(&format!("rediss://{addr}"))
-        .get_multiplexed_async_connection()
-        .await
-        .unwrap()
+    common::client_tls::redis_connection(&format!("rediss://{addr}")).await
 }
 
 #[tokio::test]
