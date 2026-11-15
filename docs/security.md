@@ -690,6 +690,9 @@ A connection that used an opaque token also has a recheck time. See
 The node fetches keys from an issuer over HTTPS. For development, `--dev-insecure-oauth2` also
 allows `http` issuer addresses.
 
+The node does not follow a redirect from an identity provider. It reads at most 1 MiB of a
+discovery document, a key set, or an introspection answer. A larger answer is an error.
+
 The node never logs a token. The debug log shows the `sub` and `jti` claims only. The node refuses
 a token that is longer than 16 KiB, before it decodes the token or sends it to an identity
 provider.

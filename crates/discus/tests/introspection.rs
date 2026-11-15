@@ -214,6 +214,36 @@ async fn require_aud_refuses_an_answer_without_aud() {
 }
 
 #[tokio::test]
+async fn the_node_does_not_follow_a_redirect() {
+    let ca = TestCa::new();
+    let idp = MockIdp::start(&ca).await;
+    idp.add_opaque("opaque-1", active(&idp, unix_now() + 300));
+    let secret_file = write_file(&ca, "secret", "secret");
+    let extra = format!(
+        "client_id = \"discus\"\nclient_secret_file = \"{secret_file}\"\n\
+         introspection_url = \"{}/moved\"",
+        idp.issuer
+    );
+    let file = write_file(&ca, "auth.toml", &idp.toml(&ca, &extra));
+    let node = start_oauth2(&file, &[]).await;
+    let r = send(&node, &cmd(&["AUTH", "opaque-1"])).await;
+    assert!(r.starts_with("-WRONGPASS"), "{r:?}");
+    assert_eq!(idp.introspect_calls(), 0);
+}
+
+#[tokio::test]
+async fn an_oversize_answer_is_refused() {
+    let ca = TestCa::new();
+    let idp = MockIdp::start(&ca).await;
+    let mut answer = active(&idp, unix_now() + 300);
+    answer["pad"] = json!("x".repeat(1024 * 1024));
+    idp.add_opaque("opaque-1", answer);
+    let node = node(&ca, &idp, "secret", &[]).await;
+    let r = send(&node, &cmd(&["AUTH", "opaque-1"])).await;
+    assert!(r.starts_with("-WRONGPASS"), "{r:?}");
+}
+
+#[tokio::test]
 async fn the_largest_exp_does_not_overflow() {
     let ca = TestCa::new();
     let idp = MockIdp::start(&ca).await;

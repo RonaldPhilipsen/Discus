@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use serde::Deserialize;
 
-use super::issuer::{check_url, Source};
+use super::issuer::{check_url, read_body, Source};
 use super::{unix_now, Claims, OneOrMany, RawClaims, Reject};
 use crate::security::file::IssuerFile;
 
@@ -154,8 +154,8 @@ impl Introspector {
             .post(&url)
             .basic_auth(&self.client_id, Some(&self.secret))
             .form(&[("token", text), ("token_type_hint", "access_token")]);
-        let answer = match request.send().await {
-            Ok(r) if r.status().is_success() => r.json::<Answer>().await,
+        let body = match request.send().await {
+            Ok(r) if r.status().is_success() => read_body(r).await,
             Ok(r) => {
                 tracing::warn!(status = %r.status(), "introspection refused");
                 return;
@@ -165,9 +165,14 @@ impl Introspector {
                 return;
             }
         };
-        let Ok(answer) = answer else {
-            tracing::warn!("introspection answer does not parse");
-            return;
+        let answer = match body
+            .and_then(|b| serde_json::from_slice::<Answer>(&b).map_err(|e| e.to_string()))
+        {
+            Ok(answer) => answer,
+            Err(e) => {
+                tracing::warn!(error = %e, "introspection answer does not parse");
+                return;
+            }
         };
         let now = unix_now();
         match self.judge(answer, now) {
