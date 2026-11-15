@@ -779,16 +779,10 @@ impl Security {
         let sub = spec.subcommand(cmd);
         let no_perm = || CommandError::NoPerm(spec.rule_name(sub));
         let scopes = conn.auth.scopes(&self.policy);
-        let by_access = scopes.map(|s| match spec.access {
-            Access::Public | Access::Connection => true,
-            Access::Read => s.can_read(),
-            Access::Write => s.can_write(),
-        });
-        // The scopes have no rule for one subcommand. When the scopes alone decide, a subcommand
-        // that shows the users and their password hashes thus needs the admin scope.
-        let admin_ok =
-            !sub.is_some_and(|sub| sub.is_admin()) || scopes.is_some_and(Scopes::is_admin);
-        let by_scopes = by_access == Some(true) && admin_ok;
+        // The access of the command, and the access of what `cmd` runs: a subcommand with its own
+        // entry can need more.
+        let by_access = scopes.map(|s| s.allows(spec.access));
+        let by_scopes = scopes.is_some_and(|s| s.allows(sub.map_or(spec.access, |sub| sub.access)));
         let all = matches!(self.policy, Policy::All(_));
         if !all && by_scopes {
             return Ok(());

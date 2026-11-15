@@ -6,7 +6,6 @@ use std::sync::Arc;
 use super::{sha256, Acl, KeyPattern, User};
 use crate::cluster::route::KeyPerm;
 use crate::command::category::Categories;
-use crate::command::table::{specs, CommandSpec};
 
 pub(super) fn parse(text: &str) -> Result<Acl, String> {
     let mut users: HashMap<String, Arc<User>> = HashMap::new();
@@ -78,8 +77,8 @@ fn apply(user: &mut User, rule: &str) -> Result<(), RuleError> {
         }
         "allkeys" => add_key(user, "*", KeyPerm::READ_WRITE),
         "resetkeys" => user.keys.clear(),
-        "allcommands" => set_all(user, true),
-        "nocommands" => set_all(user, false),
+        "allcommands" => user.commands.set_all(true),
+        "nocommands" => user.commands.set_all(false),
         // Discus has no pub/sub, so channel rules are accepted with no effect (spec, "The file").
         "allchannels" | "resetchannels" => {}
         "reset" => *user = User::new(&user.name),
@@ -139,56 +138,14 @@ fn add_key(user: &mut User, pattern: &str, perm: KeyPerm) {
     });
 }
 
-fn set_all(user: &mut User, allowed: bool) {
-    for spec in specs() {
-        set_command(user, spec, allowed);
-    }
-    user.rules = vec![if allowed { "+@all" } else { "-@all" }.to_owned()];
-}
-
-/// Set the bit of a command and of each of its subcommands.
-fn set_command(user: &mut User, spec: &CommandSpec, allowed: bool) {
-    user.commands.set(spec.id, allowed);
-    for sub in spec.subcommands {
-        user.commands.set(sub.id, allowed);
-    }
-}
-
-/// Keep the rule for `ACL LIST`, in the normal form of Valkey: a new rule replaces an earlier rule
-/// for the same target, and a rule for a command also replaces the rules for its subcommands.
-/// `target` is in lower case.
-fn record(user: &mut User, allowed: bool, target: &str) {
-    user.rules.retain(|rule| {
-        let earlier = &rule[1..];
-        earlier != target
-            && !earlier
-                .strip_prefix(target)
-                .is_some_and(|rest| rest.starts_with('|'))
-    });
-    let sign = if allowed { '+' } else { '-' };
-    user.rules.push(format!("{sign}{target}"));
-}
-
 fn command_rule(user: &mut User, target: &str, allowed: bool) -> Result<(), RuleError> {
     if let Some(category) = target.strip_prefix('@') {
         if category.eq_ignore_ascii_case("all") {
-            set_all(user, allowed);
-            return Ok(());
+            user.commands.set_all(allowed);
+        } else {
+            let category = Categories::parse(category).ok_or(RuleError::UnknownCategory)?;
+            user.commands.set_category(category, allowed);
         }
-        let categories = Categories::parse(category).ok_or(RuleError::UnknownCategory)?;
-        // A subcommand follows its own categories and not those of its command. `+@connection`
-        // thus allows `ACL WHOAMI` and not `ACL LIST`.
-        for spec in specs() {
-            if spec.categories.intersects(categories) {
-                user.commands.set(spec.id, allowed);
-            }
-            for sub in spec.subcommands {
-                if sub.categories.intersects(categories) {
-                    user.commands.set(sub.id, allowed);
-                }
-            }
-        }
-        record(user, allowed, &target.to_ascii_lowercase());
         return Ok(());
     }
     let (name, sub) = match target.split_once('|') {
@@ -197,16 +154,15 @@ fn command_rule(user: &mut User, target: &str, allowed: bool) -> Result<(), Rule
     };
     let spec = crate::command::lookup(name.as_bytes()).ok_or(RuleError::UnknownCommand)?;
     match sub {
-        None => set_command(user, spec, allowed),
+        None => user.commands.set_command(spec, allowed),
         Some(_) if spec.subcommands.is_empty() => return Err(RuleError::Subcommand),
         Some(sub) => {
             let sub = spec
                 .subcommand_named(sub.as_bytes())
                 .ok_or(RuleError::UnknownCommand)?;
-            user.commands.set(sub.id, allowed);
+            user.commands.set_subcommand(spec, sub, allowed);
         }
     }
-    record(user, allowed, &target.to_ascii_lowercase());
     Ok(())
 }
 

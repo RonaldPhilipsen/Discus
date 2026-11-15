@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use crate::command::table::Access;
+
 /// One authentication factor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Factor {
@@ -162,6 +164,16 @@ impl Scopes {
 
     pub fn is_admin(self) -> bool {
         self.0 & Scopes::ADMIN.0 != 0
+    }
+
+    /// True when these scopes are enough for a command or a subcommand with this access.
+    pub fn allows(self, access: Access) -> bool {
+        match access {
+            Access::Public | Access::Connection => true,
+            Access::Read => self.can_read(),
+            Access::Write => self.can_write(),
+            Access::Admin => self.is_admin(),
+        }
     }
 }
 

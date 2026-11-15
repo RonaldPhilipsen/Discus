@@ -21,6 +21,8 @@ pub enum Access {
     Read,
     /// Changes data. Needs `discus.write`.
     Write,
+    /// Shows or changes the users of the node. Needs `discus.admin`. Only a subcommand has it.
+    Admin,
 }
 
 pub type Handler = fn(&Node, &mut ConnState, &Command) -> Result<Value, CommandError>;
@@ -32,24 +34,22 @@ pub struct Subcommand {
     pub name: &'static str,
     /// Complete: the registry adds nothing.
     pub categories: Categories,
+    /// What a login without a user needs from its scopes. The scopes have no rule for one
+    /// subcommand, so this replaces the access of the command.
+    pub access: Access,
     /// A bit of the per-user command set, after the ids of the commands. 0 in a `COMMANDS` array:
     /// only the registry sets it.
     pub id: u16,
 }
 
 impl Subcommand {
-    pub const fn new(name: &'static str, categories: Categories) -> Subcommand {
+    pub const fn new(name: &'static str, categories: Categories, access: Access) -> Subcommand {
         Subcommand {
             name,
             categories,
+            access,
             id: 0,
         }
-    }
-
-    /// A subcommand that shows or changes the users. A login without a user needs `discus.admin`
-    /// for it.
-    pub fn is_admin(&self) -> bool {
-        self.categories.intersects(Categories::ADMIN)
     }
 }
 
@@ -423,9 +423,10 @@ mod tests {
             "LIST", "USERS", "GETUSER", "SETUSER", "DELUSER", "LOAD", "SAVE", "LOG", "DRYRUN",
         ] {
             assert_eq!(cats(name), ["admin", "slow", "dangerous"], "{name}");
-            assert!(sub(name).unwrap().is_admin());
+            assert_eq!(sub(name).unwrap().access, Access::Admin);
         }
         assert_eq!(cats("whoami"), ["slow", "connection"]);
+        assert_eq!(sub("whoami").unwrap().access, Access::Connection);
         assert_eq!(cats("Cat"), ["slow", "connection"]);
         assert_eq!(cats("GENPASS"), ["slow"]);
         assert!(sub("BOGUS").is_none());

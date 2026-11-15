@@ -56,18 +56,18 @@ const ACL_ADMIN: Categories = Categories::ADMIN
 const ACL_OPEN: Categories = Categories::CONNECTION.union(Categories::SLOW);
 
 const ACL_SUBCOMMANDS: &[Subcommand] = &[
-    Subcommand::new("CAT", ACL_OPEN),
-    Subcommand::new("WHOAMI", ACL_OPEN),
-    Subcommand::new("GENPASS", Categories::SLOW),
-    Subcommand::new("LIST", ACL_ADMIN),
-    Subcommand::new("USERS", ACL_ADMIN),
-    Subcommand::new("GETUSER", ACL_ADMIN),
-    Subcommand::new("SETUSER", ACL_ADMIN),
-    Subcommand::new("DELUSER", ACL_ADMIN),
-    Subcommand::new("LOAD", ACL_ADMIN),
-    Subcommand::new("SAVE", ACL_ADMIN),
-    Subcommand::new("LOG", ACL_ADMIN),
-    Subcommand::new("DRYRUN", ACL_ADMIN),
+    Subcommand::new("CAT", ACL_OPEN, Access::Connection),
+    Subcommand::new("WHOAMI", ACL_OPEN, Access::Connection),
+    Subcommand::new("GENPASS", Categories::SLOW, Access::Connection),
+    Subcommand::new("LIST", ACL_ADMIN, Access::Admin),
+    Subcommand::new("USERS", ACL_ADMIN, Access::Admin),
+    Subcommand::new("GETUSER", ACL_ADMIN, Access::Admin),
+    Subcommand::new("SETUSER", ACL_ADMIN, Access::Admin),
+    Subcommand::new("DELUSER", ACL_ADMIN, Access::Admin),
+    Subcommand::new("LOAD", ACL_ADMIN, Access::Admin),
+    Subcommand::new("SAVE", ACL_ADMIN, Access::Admin),
+    Subcommand::new("LOG", ACL_ADMIN, Access::Admin),
+    Subcommand::new("DRYRUN", ACL_ADMIN, Access::Admin),
 ];
 
 type Reply = Result<Value, CommandError>;

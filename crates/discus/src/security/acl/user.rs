@@ -2,15 +2,16 @@ use ctutils::CtEq;
 use discus_resp::Command;
 
 use crate::cluster::route::{key_perms, KeyPerm};
-use crate::command::table::{CommandSpec, Subcommand, MAX_COMMANDS};
+use crate::command::category::Categories;
+use crate::command::table::{specs, CommandSpec, Subcommand, MAX_COMMANDS};
 use crate::command::util::glob_match;
 
-/// One bit for each command id.
+/// One bit for each id of a command or a subcommand.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct CommandSet([u64; MAX_COMMANDS / 64]);
+struct CommandSet([u64; MAX_COMMANDS / 64]);
 
 impl CommandSet {
-    pub fn set(&mut self, id: u16, allowed: bool) {
+    fn set(&mut self, id: u16, allowed: bool) {
         let (word, bit) = (usize::from(id) / 64, id % 64);
         if allowed {
             self.0[word] |= 1 << bit;
@@ -19,8 +20,98 @@ impl CommandSet {
         }
     }
 
-    pub fn contains(&self, id: u16) -> bool {
+    fn contains(&self, id: u16) -> bool {
         self.0[usize::from(id) / 64] >> (id % 64) & 1 == 1
+    }
+}
+
+/// The command rules of a user: the set of allowed commands and subcommands, and the rule text
+/// that gives this set. Every change goes through one method, so the two never differ.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandRules {
+    allowed: CommandSet,
+    /// In the normal form that `ACL LIST` prints. The first rule is `-@all` or `+@all`.
+    text: Vec<String>,
+}
+
+impl Default for CommandRules {
+    /// The rules of a new user: no command.
+    fn default() -> Self {
+        CommandRules {
+            allowed: CommandSet::default(),
+            text: vec!["-@all".to_owned()],
+        }
+    }
+}
+
+impl CommandRules {
+    /// True when the rules allow the command or subcommand with this id.
+    pub fn contains(&self, id: u16) -> bool {
+        self.allowed.contains(id)
+    }
+
+    /// The rules, as `ACL LIST` and `ACL GETUSER` print them.
+    pub fn text(&self) -> String {
+        self.text.join(" ")
+    }
+
+    /// `+@all` or `-@all`: every command and every subcommand.
+    pub fn set_all(&mut self, allowed: bool) {
+        for spec in specs() {
+            self.set_bits(spec, allowed);
+        }
+        self.text = vec![if allowed { "+@all" } else { "-@all" }.to_owned()];
+    }
+
+    /// `+@category` or `-@category`, for one category. A subcommand follows its own categories
+    /// and not those of its command. `+@connection` thus allows `ACL WHOAMI` and not `ACL LIST`.
+    pub fn set_category(&mut self, category: Categories, allowed: bool) {
+        for spec in specs() {
+            if spec.categories.intersects(category) {
+                self.allowed.set(spec.id, allowed);
+            }
+            for sub in spec.subcommands {
+                if sub.categories.intersects(category) {
+                    self.allowed.set(sub.id, allowed);
+                }
+            }
+        }
+        for name in category.names() {
+            self.record(allowed, &format!("@{name}"));
+        }
+    }
+
+    /// `+command` or `-command`: the command and each of its subcommands.
+    pub fn set_command(&mut self, spec: &CommandSpec, allowed: bool) {
+        self.set_bits(spec, allowed);
+        self.record(allowed, &spec.rule_name(None));
+    }
+
+    /// `+command|subcommand` or `-command|subcommand`.
+    pub fn set_subcommand(&mut self, spec: &CommandSpec, sub: &Subcommand, allowed: bool) {
+        self.allowed.set(sub.id, allowed);
+        self.record(allowed, &spec.rule_name(Some(sub)));
+    }
+
+    fn set_bits(&mut self, spec: &CommandSpec, allowed: bool) {
+        self.allowed.set(spec.id, allowed);
+        for sub in spec.subcommands {
+            self.allowed.set(sub.id, allowed);
+        }
+    }
+
+    /// Keep the rule in the normal form of Valkey: a new rule replaces an earlier rule for the
+    /// same target, and a rule for a command also replaces the rules for its subcommands.
+    fn record(&mut self, allowed: bool, target: &str) {
+        self.text.retain(|rule| {
+            let earlier = &rule[1..];
+            earlier != target
+                && !earlier
+                    .strip_prefix(target)
+                    .is_some_and(|rest| rest.starts_with('|'))
+        });
+        let sign = if allowed { '+' } else { '-' };
+        self.text.push(format!("{sign}{target}"));
     }
 }
 
@@ -44,9 +135,7 @@ pub struct User {
     pub enabled: bool,
     pub nopass: bool,
     pub passwords: Vec<[u8; 32]>,
-    pub commands: CommandSet,
-    /// The command rules that give `commands`, in the normal form that `ACL LIST` prints.
-    pub rules: Vec<String>,
+    pub commands: CommandRules,
     pub keys: Vec<KeyPattern>,
 }
 
@@ -70,8 +159,7 @@ impl User {
             enabled: false,
             nopass: false,
             passwords: Vec::new(),
-            commands: CommandSet::default(),
-            rules: vec!["-@all".to_owned()],
+            commands: CommandRules::default(),
             keys: Vec::new(),
         }
     }
@@ -87,7 +175,7 @@ impl User {
 
     /// The command rules, as `ACL LIST` and `ACL GETUSER` print them.
     pub fn commands_text(&self) -> String {
-        self.rules.join(" ")
+        self.commands.text()
     }
 
     /// The key rules, as `ACL LIST` and `ACL GETUSER` print them.
@@ -191,7 +279,7 @@ mod tests {
         u.enabled = true;
         for name in commands {
             u.commands
-                .set(crate::command::lookup(name.as_bytes()).unwrap().id, true);
+                .set_command(crate::command::lookup(name.as_bytes()).unwrap(), true);
         }
         u.keys = keys
             .iter()
