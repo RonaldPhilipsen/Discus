@@ -596,6 +596,12 @@ connections in the TLS handshake, and the listener and the redirect listener sha
 limit, the node accepts a new TCP connection and closes it at once, before the TLS handshake. The
 metric `discus.client.rejected_connections` counts these connections.
 
+Each connection uses one file descriptor. At start, the node raises its soft open file limit to the
+hard limit. If the result is below `--max-clients` plus 1024, the node logs a warning with both
+limits. If `accept` fails, for example at the file limit, the node logs the error and tries again
+after 10 ms. The wait doubles after each further error, up to 1 s, and a success resets it. The
+listener does not stop.
+
 The settings file sets both values too, with the keys `[auth] timeout-secs` and `[clients] max`.
 The chart values are `settings.auth.timeoutSecs` and `settings.clients.max`. The node applies a
 change without a restart. A lower connection limit closes no open connection. The node refuses new
@@ -669,7 +675,9 @@ The node fetches the discovery document of each issuer at startup. Then it fetch
   ready.
 
 The node uses the trust root build feature for HTTPS to the issuer. Set `ca_file` to trust only
-one CA instead.
+one CA instead. If an issuer has no `ca_file` and the trust root store is empty at start, the node
+logs a warning that names the issuer. The node then cannot load the keys of that issuer and does
+not become ready.
 
 ### Expiry
 
@@ -821,6 +829,14 @@ An admin request passes in one of two ways:
 A user of the ACL file never opens the admin routes.
 Without admin credentials, the node answers 401.
 
+The admin port limits its own load, so a flood of connections cannot delay gossip:
+
+- The admin server runs on its own thread, `discus-admin`, apart from gossip.
+- The node takes at most 64 admin connections at once, TLS handshakes included. It closes a
+  connection above the limit at once.
+- A connection gets 5 s to send the headers of its request and 10 s for the TLS handshake.
+- A connection serves one request and then closes. It lives at most 30 s.
+
 Each refused bearer token counts as a failed attempt for its source address, together with the
 failed `AUTH` attempts from that address (see [Failed attempts](#failed-attempts)). When an
 address is over the limit, the node answers 401 to every bearer token from it until the window
@@ -829,7 +845,12 @@ certificate still passes. The admin port takes the source address from the TCP c
 every client behind one proxy shares one limit.
 
 With `--admin-tls`, the admin port uses TLS with `--tls-cert`, `--tls-key`, and
-`--tls-client-ca`. Admin certificate identities go in the `--auth-config` file:
+`--tls-client-ca`. To give the admin port its own certificate, set `--admin-tls-cert` and
+`--admin-tls-key`. The node reloads these files with the other client TLS files. In the chart, set
+`admin.tls.enabled=true`, and optionally `admin.tls.secretName` to a Secret with the keys
+`tls.crt` and `tls.key`. The probes then use HTTPS. The kubelet does not verify the certificate.
+
+Admin certificate identities go in the `--auth-config` file:
 
 ```toml
 [admin]
@@ -872,7 +893,7 @@ identity provider without `ca_file`.
 | `--auth-policy` | required without `--acl-file` | The client authentication policy. See [Authentication policy](#authentication-policy). |
 | `--auth-config` | none | The TOML file with issuers, rules, and admin identities. |
 | `--acl-file` | none | A file with users, passwords, and rules, for the `password` factor. The node reloads it after a change. |
-| `--dev-insecure-oauth2` | off | Allows `http` issuers, and admin bearer tokens on a plaintext admin port. Development only. |
+| `--dev-insecure-oauth2` | off | Allows `http` issuers, and admin bearer tokens on a plaintext admin port. The node logs a warning at start. Development only. |
 | `--auth-clock-skew-secs` | 60 | The clock skew allowed on token times. |
 | `--auth-max-failures-per-connection` | 5 | Failed attempts that close a connection. |
 | `--auth-max-failures-per-source` | 20 | Failed attempts per source in one window. An IPv6 source is a /64 network. |
@@ -880,14 +901,16 @@ identity provider without `ca_file`.
 | `--auth-timeout-secs` | 30 | Seconds that a new connection gets to meet the policy. `0` turns the deadline off. The node applies a change from the settings file. |
 | `--max-clients` | 10000 | Open client connections on both client listeners. `0` means no limit. The node applies a change from the settings file. |
 | `--admin-tls` | off | Serves the admin port over TLS. |
+| `--admin-tls-cert` | `--tls-cert` | The PEM certificate chain of the admin port. Needs `--admin-tls` and `--admin-tls-key`. |
+| `--admin-tls-key` | `--tls-key` | The PEM private key for `--admin-tls-cert`. |
 | `--tls-reload-secs` | 10 | Seconds between checks of the certificate files and the ACL file. `0` turns the reload off. |
 
 ### Certificate rotation
 
-The node checks the files of `--tls-cert`, `--tls-key`, and `--tls-client-ca` every
-`--tls-reload-secs` seconds. If their content changes, the node loads the new files. New
-connections on the client, redirect, and admin ports then use them. Open connections keep the
-certificate of their handshake. You do not have to restart the node.
+The node checks the files of `--tls-cert`, `--tls-key`, `--tls-client-ca`, `--admin-tls-cert`,
+and `--admin-tls-key` every `--tls-reload-secs` seconds. If their content changes, the node loads
+the new files. New connections on the client, redirect, and admin ports then use them. Open
+connections keep the certificate of their handshake. You do not have to restart the node.
 
 If the new files do not load, the node logs a warning and keeps its current certificates. For
 example, this happens when the key does not match the certificate. In Kubernetes, the files of a

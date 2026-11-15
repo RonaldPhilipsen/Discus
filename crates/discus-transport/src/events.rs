@@ -41,6 +41,10 @@ pub struct TransportStats {
     /// they were too large for the shared stream.
     pub large_replies_out: AtomicU64,
     pub requests_out: AtomicU64,
+    /// Inbound connections that got a retry to validate their address.
+    pub retries: AtomicU64,
+    /// Inbound connections refused because too many handshakes were in progress.
+    pub handshakes_refused: AtomicU64,
 }
 
 /// A copy of the counters at one moment.
@@ -53,6 +57,8 @@ pub struct StatsSnapshot {
     pub shared_in: u64,
     pub large_replies_out: u64,
     pub requests_out: u64,
+    pub retries: u64,
+    pub handshakes_refused: u64,
 }
 
 impl TransportStats {
@@ -66,6 +72,8 @@ impl TransportStats {
             shared_in: get(&self.shared_in),
             large_replies_out: get(&self.large_replies_out),
             requests_out: get(&self.requests_out),
+            retries: get(&self.retries),
+            handshakes_refused: get(&self.handshakes_refused),
         }
     }
 

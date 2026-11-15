@@ -287,3 +287,52 @@ async fn a_tls_reload_applies_to_new_handshakes() {
     a.reload_tls(&new.material(TEST_SAN)).unwrap();
     assert_eq!(a.peer(b_id, b.local_addr()).await.unwrap().node_id, b_id);
 }
+
+#[tokio::test]
+async fn an_address_is_validated_with_a_retry_before_the_handshake() {
+    let ca = TestCa::new();
+    let cluster = ClusterId::mint();
+    let (a_id, b_id) = (NodeId::random(), NodeId::random());
+    let (a, _) = start(config(&ca, a_id, cluster)).await;
+    let (b, _) = start(config(&ca, b_id, cluster)).await;
+    assert_eq!(a.peer(b_id, b.local_addr()).await.unwrap().node_id, b_id);
+    let stats = b.stats().snapshot();
+    assert_eq!(stats.retries, 1);
+    assert_eq!(stats.handshake_failures, 0);
+}
+
+#[tokio::test]
+async fn handshakes_over_the_limit_are_refused() {
+    let ca = TestCa::new();
+    let cluster = ClusterId::mint();
+    let (a_id, b_id) = (NodeId::random(), NodeId::random());
+    let (a, _) = start(config(&ca, a_id, cluster)).await;
+    let mut cb = config(&ca, b_id, cluster);
+    cb.max_handshakes = 1;
+    cb.handshake_timeout = Duration::from_secs(30);
+    let (b, _) = start(cb).await;
+    let mut b_events = b.events();
+    // A connection that passes TLS but sends no HELLO holds the only handshake slot.
+    let client = quic_client(ca.material(TEST_SAN).client_config(ALPN_RPC));
+    let stalled = client
+        .connect(b.local_addr(), "discus")
+        .unwrap()
+        .await
+        .unwrap();
+    let err = a.peer(b_id, b.local_addr()).await.unwrap_err();
+    assert!(matches!(err, TransportError::Connect(_)), "{err:?}");
+    assert!(b.stats().snapshot().handshakes_refused >= 1);
+    stalled.close(0u32.into(), b"done");
+    let mut joined = false;
+    for _ in 0..100 {
+        if a.peer(b_id, b.local_addr()).await.is_ok() {
+            joined = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(joined, "the slot frees up after the stalled handshake ends");
+    // An inbound failure without a known peer is not evidence.
+    assert!(b.stats().snapshot().handshake_failures >= 1);
+    assert!(b_events.try_recv().is_err());
+}
