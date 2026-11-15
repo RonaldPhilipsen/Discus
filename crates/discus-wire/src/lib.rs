@@ -29,7 +29,7 @@ mod counter;
 mod message;
 mod resp;
 
-pub use codec::{decode_frame, encode_envelope, encode_frame, DecodeError};
+pub use codec::{decode_frame, decode_frame_shared, encode_envelope, encode_frame, DecodeError};
 pub use counter::{
     decode_counter_snapshot, decode_hints, encode_counter_snapshot, encode_hints, SnapshotEntries,
 };

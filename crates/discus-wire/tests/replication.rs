@@ -10,8 +10,8 @@ use discus_placement::{EpochId, NodeId, Version, NTP64};
 use discus_resp::Value as Resp;
 use discus_store::{DbKey, Entry, Value, ZSet};
 use discus_wire::{
-    decode_frame, fb, Batch, BatchAck, DecodeError, Forward, ForwardMode, ForwardReply, Limits,
-    Message, TraceContext,
+    decode_frame, decode_frame_shared, encode_frame, fb, Batch, BatchAck, DecodeError, Forward,
+    ForwardMode, ForwardReply, Frame, Limits, Message, TraceContext,
 };
 
 fn epoch(g: u64) -> EpochId {
@@ -307,4 +307,38 @@ fn a_short_db_vector_means_database_zero() {
         panic!("not a fetch");
     };
     assert_eq!(keys, [DbKey::new(0, "a")]);
+}
+
+#[test]
+fn a_shared_decode_slices_entry_keys_and_copies_values() {
+    let mut batch = Batch::new(epoch(1));
+    batch.entries.push((
+        DbKey::new(3, "key"),
+        Entry::new(Value::Str(Bytes::from_static(b"value")), None),
+    ));
+    let frame = Bytes::from(encode_frame(&Frame {
+        request_id: 1,
+        trace: TraceContext::default(),
+        message: Message::Replicate(batch),
+    }));
+    let range = frame.as_ptr() as usize..frame.as_ptr() as usize + frame.len();
+    let Message::Replicate(shared) = decode_frame_shared(&frame, &Limits::default())
+        .unwrap()
+        .message
+    else {
+        panic!("not a batch");
+    };
+    let (key, entry) = &shared.entries[0];
+    assert_eq!(*key, DbKey::new(3, "key"));
+    assert!(range.contains(&(key.key.as_ptr() as usize)));
+    let Value::Str(value) = &entry.value else {
+        panic!("not a string");
+    };
+    assert_eq!(&value[..], b"value");
+    assert!(!range.contains(&(value.as_ptr() as usize)));
+    let Message::Replicate(copied) = decode_frame(&frame, &Limits::default()).unwrap().message
+    else {
+        panic!("not a batch");
+    };
+    assert!(!range.contains(&(copied.entries[0].0.key.as_ptr() as usize)));
 }

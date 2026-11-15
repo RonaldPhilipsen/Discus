@@ -7,10 +7,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use discus_placement::{ClusterId, EpochId, NodeId};
 use discus_wire::{
-    caps, decode_frame, encode_frame, DecodeError, Frame, HandshakeCode, HandshakeFailed, Hello,
-    Limits, Message, TraceContext, DEFAULT_MAX_FRAME, HELLO_FRAME_LIMIT,
+    caps, decode_frame, decode_frame_shared, encode_frame, DecodeError, Frame, HandshakeCode,
+    HandshakeFailed, Hello, Limits, Message, TraceContext, DEFAULT_MAX_FRAME, HELLO_FRAME_LIMIT,
 };
 use futures::future::BoxFuture;
 use futures::StreamExt;
@@ -948,7 +949,7 @@ async fn serve_stream(
         Some(Ok(bytes)) if bytes.is_empty() => {
             return serve_shared(inner, conn, peer, send, frames).await;
         }
-        Some(Ok(bytes)) => match decode_request(&inner, &peer, &bytes) {
+        Some(Ok(bytes)) => match decode_request(&inner, &peer, &bytes.freeze()) {
             Ok(request) => request,
             Err(reason) => return reject(&inner, &peer, &mut send, frames.get_mut(), &reason),
         },
@@ -980,7 +981,7 @@ async fn serve_shared(
         };
         let request = match next {
             None => return,
-            Some(Ok(bytes)) => decode_request(&inner, &peer, &bytes),
+            Some(Ok(bytes)) => decode_request(&inner, &peer, &bytes.freeze()),
             Some(Err(e)) => Err(e.to_string()),
         };
         let request = match request {
@@ -1028,12 +1029,14 @@ enum Request {
     Unsupported(Frame),
 }
 
-/// Decode one request frame. `Err` holds why it failed the verifier.
-fn decode_request(inner: &Inner, peer: &PeerInfo, bytes: &[u8]) -> Result<Request, String> {
+/// Decode one request frame. `Err` holds why it failed the verifier. The keys of batch entries
+/// are slices of `bytes`: the store copies a key only when it inserts a new one, so a batch for
+/// existing keys allocates no keys.
+fn decode_request(inner: &Inner, peer: &PeerInfo, bytes: &Bytes) -> Result<Request, String> {
     let limits = Limits {
         max_frame: peer.max_frame,
     };
-    match decode_frame(bytes, &limits) {
+    match decode_frame_shared(bytes, &limits) {
         Ok(frame) => {
             TransportStats::bump(&inner.stats.requests_in);
             Ok(Request::Call(frame))

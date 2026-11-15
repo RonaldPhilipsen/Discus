@@ -467,10 +467,14 @@ fn stored_to<'a>(
     )
 }
 
-fn stored_of(s: fb::StoredEntry<'_>) -> Result<(DbKey, Entry), DecodeError> {
+/// With `frame`, the key is a slice of it, not a copy.
+fn stored_of(s: fb::StoredEntry<'_>, frame: Option<&Bytes>) -> Result<(DbKey, Entry), DecodeError> {
     let key = s
         .key()
-        .map(|k| Bytes::copy_from_slice(k.bytes()))
+        .map(|k| match frame {
+            Some(f) => f.slice_ref(k.bytes()),
+            None => Bytes::copy_from_slice(k.bytes()),
+        })
         .ok_or_else(|| invalid("entry without a key"))?;
     let items = blobs_of(s.items());
     let value = match s.kind() {
@@ -558,10 +562,10 @@ fn batch_to(fbb: &mut FlatBufferBuilder<'_>, b: &Batch) {
     fbb.finish_minimal(t);
 }
 
-fn batch_of(b: fb::EntryBatch<'_>) -> Result<Batch, DecodeError> {
+fn batch_of(b: fb::EntryBatch<'_>, frame: Option<&Bytes>) -> Result<Batch, DecodeError> {
     let mut entries = Vec::new();
     for e in b.entries().into_iter().flatten() {
-        entries.push(stored_of(e)?);
+        entries.push(stored_of(e, frame)?);
     }
     let mut offers = Vec::new();
     for o in b.offers().into_iter().flatten() {
@@ -803,6 +807,17 @@ pub fn encode_frame(frame: &Frame) -> Vec<u8> {
 /// Verify and decode a frame. The verifier runs on the envelope and then on the nested payload
 /// with the depth, table, and size limits of `limits`.
 pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError> {
+    decode(bytes, None, limits)
+}
+
+/// Like [`decode_frame`], but the keys of batch entries are slices of `frame`, so an entry costs
+/// no allocation for its key. A key keeps the whole frame alive: a receiver that keeps a key past
+/// the request must copy it. Values and offer keys are copies.
+pub fn decode_frame_shared(frame: &Bytes, limits: &Limits) -> Result<Frame, DecodeError> {
+    decode(frame, Some(frame), limits)
+}
+
+fn decode(bytes: &[u8], shared: Option<&Bytes>, limits: &Limits) -> Result<Frame, DecodeError> {
     if bytes.len() > limits.max_frame {
         return Err(invalid(format!(
             "frame of {} bytes exceeds the limit of {}",
@@ -889,7 +904,7 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
         }
         T::REPLICATE | T::HINT_REPLAY | T::HANDOFF | T::ENTRIES => {
             let b = root::<fb::EntryBatch>(&opts, payload)?;
-            let b = batch_of(b)?;
+            let b = batch_of(b, shared)?;
             match env.type_() {
                 T::REPLICATE => Message::Replicate(b),
                 T::HINT_REPLAY => Message::HintReplay(b),
