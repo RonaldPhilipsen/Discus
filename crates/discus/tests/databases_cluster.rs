@@ -296,9 +296,16 @@ async fn info_keyspace_lists_each_database() {
     let a = &nodes[0].node;
     fill(a, 0, "zero", 3).await;
     fill(a, 2, "two", 2).await;
+    run_in(a, 2, &["SET", "brief", "v", "EX", "100"]).await;
     let info = text(run_in(a, 0, &["INFO", "keyspace"]).await);
     assert!(info.contains("db0:keys=3,expires=0,avg_ttl=0"), "{info}");
-    assert!(info.contains("db2:keys=2,expires=0,avg_ttl=0"), "{info}");
+    let ttl: u64 = info
+        .split("db2:keys=3,expires=1,avg_ttl=")
+        .nth(1)
+        .and_then(|rest| rest.split("\r\n").next())
+        .and_then(|ms| ms.parse().ok())
+        .unwrap_or_else(|| panic!("{info}"));
+    assert!((1..=100_000).contains(&ttl), "{info}");
     assert!(!info.contains("db1:"), "{info}");
     let discus = text(run_in(a, 0, &["INFO", "discus"]).await);
     assert!(discus.contains("\r\ndatabases:3\r\n"), "{discus}");
