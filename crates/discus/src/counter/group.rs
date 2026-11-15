@@ -476,7 +476,10 @@ impl Group {
         let candidate = if self.lease.is_none() {
             designated && live.is_none()
         } else if let Some(f) = follower {
-            f.silence() >= settings.lease_duration
+            // A contender takes the lease only one full duration after its own first read of
+            // the record (client-go rule), so the follower starts to read after two missed
+            // syncs, not after a full duration of silence.
+            f.silence() >= (2 * settings.lease_renew).min(settings.lease_duration)
         } else if live.is_some() {
             false
         } else {

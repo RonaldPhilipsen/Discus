@@ -100,8 +100,14 @@ annotations `discus.io/address` and `discus.io/cluster-id`.
 The lease matters only for the formation of a cluster. If the API server is down, a running cluster
 keeps serving. A new node that reaches neither a `NORMAL` peer nor the API server stays unready.
 
-After a full cold restart, the old lease expires after 15 s. Then the first node to take it forms
-a new cluster.
+After a full cold restart, the old lease expires 15 s after a node first reads it. Then the first
+node to take it forms a new cluster.
+
+A node judges expiry on its own monotonic clock, as client-go leader election does. It remembers
+the lease record that it read last and the time at which it first read that record. It takes the
+lease only when one full lease duration passes without a change of the record. It never compares
+the renewal time of the holder with its own wall clock, so clock skew between nodes cannot end a
+live lease.
 
 The service account of the pods needs these permissions in its namespace:
 
@@ -529,7 +535,7 @@ restart.
 | `--lease-provider` | `k8s` | `k8s` or `none`. Without the `k8s` build feature, the default is `none`. |
 | `--lease-name` | `discus-cluster` | The name of the cluster lease. |
 | `--lease-namespace` | pod namespace | The namespace of the cluster lease. |
-| `--lease-duration-ms` | 15000 | The lease duration. |
+| `--lease-duration-ms` | 15000 | The lease duration. It must be a whole number of seconds and greater than `--lease-renew-ms`. Otherwise the node does not start. |
 | `--lease-renew-ms` | 5000 | The renewal interval. |
 | `--bootstrap-deadline-ms` | 10000 | Time to look for a `NORMAL` peer before the node tries the lease. |
 | `--gossip-interval-ms` | 1000 | The gossip period: one probe per period. |
@@ -576,7 +582,7 @@ restart.
 | `--counter-timeout-ms` | 1000 | Time that a counter command waits for a leader, a quorum, or a commit. |
 | `--counter-settle-timeout-ms` | 45000 | The longest time that `/startupz` waits for the counter tier after the node turns `NORMAL`. Keep it below the startup probe budget. |
 | `--counter-lease-prefix` | `discus-counter` | The name prefix of the counter group leases. Every member of a cluster must use the same value. |
-| `--counter-lease-duration-ms` | 5000 | The duration of a counter group lease. |
+| `--counter-lease-duration-ms` | 5000 | The duration of a counter group lease. It must be a whole number of seconds and greater than `--counter-lease-renew-ms` plus `--counter-lease-margin-ms`. Otherwise the node does not start. |
 | `--counter-lease-renew-ms` | 1000 | The renewal interval of a counter group lease. |
 | `--counter-lease-margin-ms` | 1000 | A leader stops this long before its lease ends. |
 | `--counter-follower-timeout-ms` | 50 | Time that a leader-follower write waits for the follower. |
@@ -998,11 +1004,12 @@ The Kubernetes `Lease` `<prefix>-<g>` names the leader of group `g`. The value `
 - The leader sends each write to its follower and waits up to `--counter-follower-timeout-ms`
   (default 50 ms) for the acknowledgement. After a timeout, it replies anyway and sends a fresh
   snapshot to the follower later. A new follower starts with a snapshot.
-- Leadership is sticky. When the leader goes silent for one lease duration, the follower tries to
-  take the lease first. The other members wait one more lease duration.
-- A failover takes about one lease duration. It loses the writes that a lagging follower missed.
-  With one node, a node loss loses the counters. In this mode the counters depend on the API
-  server.
+- Leadership is sticky. When the follower misses two syncs from the leader, it starts to read the
+  lease. It takes the lease when one full lease duration passes without a renewal. The other
+  members wait two lease durations without a leader before they read the lease.
+- A failover takes about one lease duration plus two renew intervals. It loses the writes that a
+  lagging follower missed. With one node, a node loss loses the counters. In this mode the
+  counters depend on the API server.
 
 With `--lease-provider none` and with static membership, no lease fences the leader. The epoch
 names the leader: the previous leader, else the previous follower, else the top member by HRW.

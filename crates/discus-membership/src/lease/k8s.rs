@@ -2,16 +2,26 @@
 //! section 6.2). Every write carries the `resourceVersion` of the read, so two nodes never both
 //! win. The holder writes `holderIdentity` and the annotations `discus.io/address` and
 //! `discus.io/cluster-id`.
+//!
+//! A contender judges expiry as client-go leader election does
+//! (`k8s.io/client-go/tools/leaderelection/leaderelection.go`, `tryAcquireOrRenew` and
+//! `isLeaseValid`). It remembers the record it last read and the local monotonic time at which
+//! that record first appeared. The lease is valid until `leaseDurationSeconds` after that time.
+//! The holder's `renewTime` is never compared with the local wall clock, so clock skew between
+//! nodes cannot end a live lease. A node that has not read the record before waits one full
+//! duration from its first read.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use discus_placement::ClusterId;
 use futures::future::BoxFuture;
 use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
-use k8s_openapi::jiff::{SignedDuration, Timestamp};
+use k8s_openapi::jiff::Timestamp;
 use kube::api::{Api, PostParams};
+use parking_lot::Mutex;
 
 use super::{LeaseError, LeaseHolder, LeaseProvider, LeaseState};
 
@@ -19,11 +29,42 @@ const ADDRESS: &str = "discus.io/address";
 const CLUSTER_ID: &str = "discus.io/cluster-id";
 const CONFLICT: u16 = 409;
 
+type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+/// The parts of a record that change on every write. client-go compares the whole raw record.
+/// The `resourceVersion` alone changes on every write, and the holder and the renewal time
+/// cover a server that reuses it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordKey {
+    resource_version: Option<String>,
+    holder: Option<String>,
+    renew_time: Option<Timestamp>,
+}
+
+impl RecordKey {
+    fn of(lease: &Lease) -> RecordKey {
+        let spec = lease.spec.as_ref();
+        RecordKey {
+            resource_version: lease.metadata.resource_version.clone(),
+            holder: spec.and_then(|s| s.holder_identity.clone()),
+            renew_time: spec.and_then(|s| s.renew_time.as_ref()).map(|t| t.0),
+        }
+    }
+}
+
+struct Observed {
+    key: RecordKey,
+    /// The local monotonic time at which this node first read `key`.
+    at: Instant,
+}
+
 pub struct K8sLease {
     api: Api<Lease>,
     name: String,
     duration: Duration,
     timeout: Duration,
+    clock: Clock,
+    observed: Mutex<Option<Observed>>,
 }
 
 fn error(e: impl std::fmt::Display) -> LeaseError {
@@ -41,7 +82,16 @@ impl K8sLease {
             name: name.to_string(),
             duration,
             timeout: duration / 3,
+            clock: Arc::new(Instant::now),
+            observed: Mutex::new(None),
         }
+    }
+
+    /// Judge expiry on `clock` instead of the process monotonic clock.
+    #[cfg(feature = "testing")]
+    pub fn with_clock(mut self, clock: Clock) -> K8sLease {
+        self.clock = clock;
+        self
     }
 
     /// Bound one `acquire_or_renew` call. The client retries an unavailable API server on its
@@ -104,13 +154,16 @@ impl K8sLease {
                 .create(&PostParams::default(), &self.body(me, None))
                 .await
             {
-                Ok(_) => Ok(LeaseState::Held(me.clone())),
+                Ok(stored) => {
+                    self.observe(&stored);
+                    Ok(LeaseState::Held(me.clone()))
+                }
                 Err(e) if is_conflict(&e) => self.reread().await,
                 Err(e) => Err(error(e)),
             };
         };
         let holder = holder_of(&lease);
-        let live = holder.is_some() && !expired(&lease);
+        let live = holder.is_some() && self.observe(&lease);
         match holder {
             Some(h) if live && h.identity != me.identity => {
                 if h.cluster_id == me.cluster_id && me.cluster_id != ClusterId::NIL {
@@ -126,7 +179,10 @@ impl K8sLease {
                     .replace(&self.name, &PostParams::default(), &body)
                     .await
                 {
-                    Ok(_) => Ok(LeaseState::Held(me.clone())),
+                    Ok(stored) => {
+                        self.observe(&stored);
+                        Ok(LeaseState::Held(me.clone()))
+                    }
                     Err(e) if is_conflict(&e) => self.reread().await,
                     Err(e) => Err(error(e)),
                 }
@@ -137,6 +193,7 @@ impl K8sLease {
     /// After a lost race: report the winner.
     async fn reread(&self) -> Result<LeaseState, LeaseError> {
         let lease = self.api.get(&self.name).await.map_err(error)?;
+        self.observe(&lease);
         holder_of(&lease)
             .map(LeaseState::HeldByOther)
             .ok_or_else(|| LeaseError("the lease has no holder after a conflict".into()))
@@ -156,16 +213,29 @@ fn holder_of(lease: &Lease) -> Option<LeaseHolder> {
     })
 }
 
-/// `renewTime + leaseDurationSeconds` is in the past on the local wall clock.
-fn expired(lease: &Lease) -> bool {
-    let Some(spec) = lease.spec.as_ref() else {
-        return true;
-    };
-    let (Some(renewed), Some(secs)) = (spec.renew_time.as_ref(), spec.lease_duration_seconds)
-    else {
-        return true;
-    };
-    renewed.0 + SignedDuration::from_secs(i64::from(secs)) <= Timestamp::now()
+impl K8sLease {
+    /// Record `lease` as read now, and tell whether it is still valid: less than its
+    /// `leaseDurationSeconds` passed on the local monotonic clock since this node first read
+    /// this record. As in client-go, the duration comes from the record, and a missing one is 0.
+    fn observe(&self, lease: &Lease) -> bool {
+        let now = (self.clock)();
+        let key = RecordKey::of(lease);
+        let mut observed = self.observed.lock();
+        let at = match observed.as_ref() {
+            Some(o) if o.key == key => o.at,
+            _ => {
+                *observed = Some(Observed { key, at: now });
+                now
+            }
+        };
+        let secs = lease
+            .spec
+            .as_ref()
+            .and_then(|s| s.lease_duration_seconds)
+            .unwrap_or(0);
+        let duration = Duration::from_secs(u64::try_from(secs).unwrap_or(0));
+        now.saturating_duration_since(at) < duration
+    }
 }
 
 impl LeaseProvider for K8sLease {
