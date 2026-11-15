@@ -749,7 +749,10 @@ directly but never gets `-MOVED`. That setting is for tests.
 ## 9. Hinted handoff
 
 - If the primary cannot deliver a write to a secondary, it records a hint. Causes are a failed
-  connection, a timeout, a peer that is not `NORMAL`, or a queue overflow.
+  connection, a timeout, a peer that is not `NORMAL`, a queue overflow, or a peer that answers but
+  does not store the entry. An acknowledgment counts only the entries that the peer stored. If it
+  counts fewer than the batch carried, the primary offers each key of the batch at its version,
+  and the keys that the peer still asks for become hints. They do not count as acknowledged.
 - Hints live on the primary, keyed by target and key. A hint holds the full entry and its epoch.
   Hints coalesce to the latest entry per key.
 - Bounds are a byte cap and an entry cap per target, a global cap (5% of `maxmemory`), and a

@@ -109,6 +109,11 @@ impl PeerQueue {
         }
     }
 
+    /// The keys of the batch in flight.
+    pub fn inflight(&self) -> Vec<DbKey> {
+        self.state.lock().inflight.iter().cloned().collect()
+    }
+
     /// The batch in flight was acknowledged.
     pub fn acked(&self) {
         self.state.lock().inflight.clear();

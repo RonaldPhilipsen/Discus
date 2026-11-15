@@ -333,3 +333,35 @@ async fn a_former_primary_waits_for_a_secondary_on_a_spent_delete() {
         stall(&others, 0);
     }
 }
+
+/// A secondary that answers a batch but stores none of its entries has not acknowledged the
+/// delete, so the delete must not count it.
+#[tokio::test]
+async fn a_batch_that_the_secondary_refused_is_no_acknowledgment() {
+    let args = &[
+        "--replication-factor",
+        "2",
+        "--replication-timeout-ms",
+        "1000",
+        "--primary-read-prefix",
+        "sess",
+    ];
+    let c = start_cluster(2, args).await;
+    let k = c.key_on(0, "sess");
+    settled(&c, &k).await;
+    let secondary = &c.nodes[1];
+    secondary
+        .node
+        .faults
+        .refuse_apply
+        .store(true, Ordering::Relaxed);
+    let mut conn = c.nodes[0].redis().await;
+    let del: i64 = conn.del(&k).await.unwrap();
+    assert_eq!(del, 1);
+    assert!(!any_tombstone(&[secondary], &k));
+    let replicator = c.nodes[0].node.replicator().unwrap();
+    assert!(
+        !replicator.settled(0, k.as_bytes()),
+        "the refused tombstone counts as delivered"
+    );
+}

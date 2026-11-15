@@ -768,13 +768,26 @@ impl Replicator {
             }
             let mut batch = Batch::new(node.epoch_id());
             batch.entries = fill(&self.store, &q, keys);
+            let sent = batch.entries.len();
             if let Some(label) = &q.label {
-                discus_telemetry::global().replication_batch(label, batch.entries.len() as u64);
+                discus_telemetry::global().replication_batch(label, sent as u64);
             }
             let started = Instant::now();
-            match self.send(&node, q.peer, Message::Replicate(batch)).await {
-                Ok(_) => {
+            let reply = match self.send(&node, q.peer, Message::Replicate(batch)).await {
+                Ok(Message::BatchAck(a)) if a.applied as usize >= sent => Ok(Vec::new()),
+                Ok(Message::BatchAck(_)) => self.unstored(&node, &q).await,
+                Ok(other) => Err(TransportError::Frame(format!(
+                    "a replication batch got message type {}",
+                    other.type_code()
+                ))),
+                Err(e) => Err(e),
+            };
+            match reply {
+                Ok(unstored) => {
                     q.acked();
+                    if !unstored.is_empty() {
+                        self.hint_all(&q, unstored);
+                    }
                     self.bump_progress();
                     self.touch(q.peer);
                     if let Some(label) = &q.label {
@@ -785,16 +798,40 @@ impl Replicator {
                         self.bump_progress();
                     }
                 }
-                Err(TransportError::PeerUnsupported(_)) => {
-                    q.acked();
-                    self.bump_progress();
-                }
                 Err(e) => {
                     tracing::debug!(peer = %q.peer, error = %e, "a replication batch failed");
                     self.hint_all(&q, q.failed());
                     self.bump_progress();
                 }
             }
+        }
+    }
+
+    /// The keys of the batch in flight to `q` that the peer does not hold at their current
+    /// version, after it stored fewer entries than the batch carried. The acknowledgment counts
+    /// only the entries it stored, and an entry that it already held is not stored again, so an
+    /// offer of each key at its version tells the two apart. An entry refused for clock drift or
+    /// for a database that the peer does not hold stays unacknowledged.
+    async fn unstored(
+        &self,
+        node: &Arc<Node>,
+        q: &PeerQueue,
+    ) -> Result<Vec<DbKey>, TransportError> {
+        let mut batch = Batch::new(node.epoch_id());
+        batch.offers = q
+            .inflight()
+            .into_iter()
+            .filter_map(|k| self.store.stored_version(k.db, &k.key).map(|v| (k, v)))
+            .collect();
+        if batch.offers.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self.send(node, q.peer, Message::Handoff(batch)).await? {
+            Message::BatchAck(a) => Ok(a.want),
+            other => Err(TransportError::Frame(format!(
+                "an offer got message type {}",
+                other.type_code()
+            ))),
         }
     }
 
