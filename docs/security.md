@@ -361,7 +361,8 @@ names that the user cannot read, as in Valkey.
 - In every other case, the node treats the value as a token. With introspection, the value then
   goes to the identity provider. Thus a client that sends a password without its username, or
   with a mistyped username, sends that password to the identity provider.
-- A user that is `off` cannot log in.
+- A user that is `off` cannot log in. A connection that logged in before the user became `off`
+  keeps its login, as in Valkey.
 - A second successful `AUTH` on a connection replaces the user.
 - With an `any` policy, a successful `AUTH` replaces the earlier login of the connection. A login
   with a password removes an earlier token, and a login with a token removes an earlier user. A
@@ -929,10 +930,13 @@ The node loads the same content that it compared. If the file has an error, the 
 warning and keeps its users. The node tries the file again at each check, until it loads. After a
 good reload, these rules apply:
 
-- If the user of a connection is gone or `off`, the connection loses its login. Its next command
-  returns `-NOAUTH`, and the node closes the connection. Valkey also closes the connections of a
-  user that `ACL LOAD` removes.
+- If the user of a connection is gone, the connection loses its login. Its next command returns
+  `-NOAUTH`, and the node closes the connection. Valkey also closes the connections of a user that
+  `ACL LOAD` removes.
 - The new rules apply to the next command of each connection.
+- A user that is now `off` cannot log in again. The connections that are logged in keep their
+  login and get the new rules of the user, as in Valkey. To end these connections, remove the
+  user from the file.
 - A changed password keeps the connections that are logged in.
 
 With an `any` policy, another factor can still authenticate the connection, for example a client

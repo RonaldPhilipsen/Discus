@@ -759,7 +759,8 @@ impl Security {
     }
 
     /// After a reload, give the connection the new rules of its user, or drop the login when the
-    /// user is gone or off. A changed password keeps the login, as in Valkey.
+    /// user is gone. As in Valkey, a user that is now `off` or has a new password keeps its open
+    /// logins: `off` only stops a new login.
     fn recheck_user(&self, conn: &mut ConnState) {
         let Some(grant) = &conn.auth.user else { return };
         let current = self.acl_generation.load(Ordering::Acquire);
@@ -769,7 +770,6 @@ impl Security {
         let users = self.acl.as_ref().map(|a| a.load());
         conn.auth.user = users
             .and_then(|acl| acl.user(grant.user.name.as_bytes()).cloned())
-            .filter(|u| u.enabled)
             .map(|user| UserGrant {
                 user,
                 generation: current,
@@ -1151,7 +1151,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_reload_that_turns_a_user_off_ends_its_login() {
+    fn a_reload_that_turns_a_user_off_keeps_its_login_with_the_new_rules() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("users.acl");
         std::fs::write(&file, "user u on >p ~* +@all\n").unwrap();
@@ -1167,14 +1167,17 @@ pub(crate) mod tests {
         conn.auth.user = old_grant;
         assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), no_perm("get"));
 
-        assert!(!conn.closing);
+        // As in Valkey: `off` stops a new login, and an open connection keeps its login and
+        // takes the new rules of the user.
+        std::fs::write(&file, "user u off >p ~* +@connection\n").unwrap();
+        s.reload_acl().unwrap();
+        assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), no_perm("get"));
         std::fs::write(&file, "user u off >p ~* +@all\n").unwrap();
         s.reload_acl().unwrap();
-        assert_eq!(
-            s.authorize(&mut conn, spec(b"GET"), &get),
-            Err(CommandError::NoAuth)
-        );
-        assert!(conn.closing);
+        assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), Ok(()));
+        assert!(!conn.closing);
+        let mut fresh = ConnState::new(2, ConnAuth::default());
+        assert!(s.authenticate(&mut fresh, Some(b"u"), b"p").is_err());
     }
 
     #[test]
@@ -1216,10 +1219,11 @@ pub(crate) mod tests {
             scopes: Scopes::READ_WRITE,
         });
         s.authenticate(&mut conn, Some(b"u"), b"p").unwrap();
-        std::fs::write(&file, "user u off >p ~* +@all\n").unwrap();
+        std::fs::write(&file, "user w on >p ~* +@all\n").unwrap();
         s.reload_acl().unwrap();
         let get = crate::counter::cmd(&["GET", "k"]);
         assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), Ok(()));
+        assert!(conn.auth.user.is_none());
         assert!(!conn.closing);
     }
 
