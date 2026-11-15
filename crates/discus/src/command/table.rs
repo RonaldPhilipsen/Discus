@@ -295,11 +295,21 @@ mod tests {
 
     #[test]
     fn commands_have_the_categories_of_valkey() {
-        assert_eq!(cats(b"GET"), ["read", "string", "slow"]);
+        // The expected values are the replies of `COMMAND INFO` of redis-server 8.10.2.
+        assert_eq!(cats(b"GET"), ["read", "string", "fast"]);
         assert_eq!(cats(b"SET"), ["write", "string", "slow"]);
+        assert_eq!(cats(b"INCR"), ["write", "string", "fast"]);
+        assert_eq!(cats(b"MSET"), ["write", "string", "slow"]);
         assert_eq!(cats(b"DEL"), ["keyspace", "write", "slow"]);
-        assert_eq!(cats(b"HGET"), ["read", "hash", "slow"]);
-        assert_eq!(cats(b"ZADD"), ["write", "sortedset", "slow"]);
+        assert_eq!(cats(b"EXPIRE"), ["keyspace", "write", "fast"]);
+        assert_eq!(cats(b"DBSIZE"), ["keyspace", "read", "fast"]);
+        assert_eq!(cats(b"SCAN"), ["keyspace", "read", "slow"]);
+        assert_eq!(cats(b"HGET"), ["read", "hash", "fast"]);
+        assert_eq!(cats(b"HGETALL"), ["read", "hash", "slow"]);
+        assert_eq!(cats(b"SMEMBERS"), ["read", "set", "slow"]);
+        assert_eq!(cats(b"SISMEMBER"), ["read", "set", "fast"]);
+        assert_eq!(cats(b"ZADD"), ["write", "sortedset", "fast"]);
+        assert_eq!(cats(b"ZRANGE"), ["read", "sortedset", "slow"]);
         assert_eq!(
             cats(b"FLUSHALL"),
             ["keyspace", "write", "slow", "dangerous"]

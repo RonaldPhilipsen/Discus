@@ -13,26 +13,45 @@ use crate::cluster::route::Route;
 use crate::node::{ConnState, Node};
 
 pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec::read("GET", 2, get),
+    CommandSpec::read("GET", 2, get).with_fast(),
     CommandSpec::write("SET", -3, set),
-    CommandSpec::write("GETDEL", 2, getdel).with_reads_old(),
-    CommandSpec::write("GETEX", -2, getex).with_reads_old(),
-    CommandSpec::read("MGET", -2, mget).with_route(Route::MultiRead { sum: false }),
+    CommandSpec::write("GETDEL", 2, getdel)
+        .with_fast()
+        .with_reads_old(),
+    CommandSpec::write("GETEX", -2, getex)
+        .with_fast()
+        .with_reads_old(),
+    CommandSpec::read("MGET", -2, mget)
+        .with_fast()
+        .with_route(Route::MultiRead { sum: false }),
     CommandSpec::write("MSET", -3, mset).with_route(Route::MultiWrite { pairs: true }),
-    CommandSpec::write("INCR", -2, incr).with_reads_old(),
-    CommandSpec::write("DECR", -2, decr).with_reads_old(),
-    CommandSpec::write("INCRBY", -3, incrby).with_reads_old(),
-    CommandSpec::write("DECRBY", -3, decrby).with_reads_old(),
-    CommandSpec::write("INCRBYFLOAT", 3, incrbyfloat).with_reads_old(),
-    CommandSpec::write("APPEND", 3, append),
-    CommandSpec::read("STRLEN", 2, strlen),
+    CommandSpec::write("INCR", -2, incr)
+        .with_fast()
+        .with_reads_old(),
+    CommandSpec::write("DECR", -2, decr)
+        .with_fast()
+        .with_reads_old(),
+    CommandSpec::write("INCRBY", -3, incrby)
+        .with_fast()
+        .with_reads_old(),
+    CommandSpec::write("DECRBY", -3, decrby)
+        .with_fast()
+        .with_reads_old(),
+    CommandSpec::write("INCRBYFLOAT", 3, incrbyfloat)
+        .with_fast()
+        .with_reads_old(),
+    CommandSpec::write("APPEND", 3, append).with_fast(),
+    CommandSpec::read("STRLEN", 2, strlen).with_fast(),
     CommandSpec::write("DEL", -2, del)
         .with_route(Route::MultiWrite { pairs: false })
         .with_categories(Categories::KEYSPACE),
     CommandSpec::read("EXISTS", -2, exists)
+        .with_fast()
         .with_route(Route::MultiRead { sum: true })
         .with_categories(Categories::KEYSPACE),
-    CommandSpec::read("TYPE", 2, type_).with_categories(Categories::KEYSPACE),
+    CommandSpec::read("TYPE", 2, type_)
+        .with_fast()
+        .with_categories(Categories::KEYSPACE),
 ];
 
 type Reply = Result<Value, CommandError>;

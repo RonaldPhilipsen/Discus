@@ -387,6 +387,11 @@ The file is the only source of users. If you copy a Valkey ACL file, change thes
 - Selectors, such as `(~temp:* +get)`, stop the node.
 - Rules for one subcommand, such as `+config|get`, stop the node.
 - Discus has no rule for each database.
+- In Valkey, `ACL`, `CLIENT`, `CLUSTER`, and `CONFIG` have only `@slow`, and each subcommand has
+  its own categories. In Discus, each of these commands has one set of categories.
+- `ACL` and `CLUSTER` are in `@connection`. In Valkey, their subcommands are not in
+  `@connection`.
+- `CLIENT` has the categories of `CLIENT SETNAME`. `CONFIG` has the categories of `CONFIG GET`.
 - A `+` or `-` rule for a command that Discus lacks stops the node. Use category rules.
 - A user never opens the admin port.
 - Discus does not copy users between nodes. Each node reads its own file.

@@ -82,10 +82,11 @@ A Discus node ID has 32 hex digits. A reply adds `00000000` to it, so that clien
 40 digits accept it.
 
 `COMMAND` returns the Redis 7 shape. Each entry has the name, the arity, the flags, the first key,
-the last key, and the step. The flags are `readonly` or `write`. The list of ACL categories holds
-the categories of Valkey. The lists of tips, key specifications, and subcommands are empty.
-`COMMAND INFO <name>` returns the entries of the named commands. `COMMAND GETKEYS` returns the keys
-of a command. `COMMAND COUNT` returns the number of commands. `COMMAND DOCS` returns an empty reply.
+the last key, and the step. The flags are `readonly` or `write`, and `fast` where Valkey sets it.
+The list of ACL categories holds the categories of Valkey. The lists of tips, key specifications,
+and subcommands are empty. `COMMAND INFO <name>` returns the entries of the named commands.
+`COMMAND GETKEYS` returns the keys of a command. `COMMAND COUNT` returns the number of commands.
+`COMMAND DOCS` returns an empty reply.
 
 `INFO` has a `# Cluster` section. It shows `cluster_enabled:1` while the topology commands answer.
 Otherwise it shows `cluster_enabled:0`. Some tools treat a node with `cluster_enabled:1` as a

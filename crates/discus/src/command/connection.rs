@@ -632,7 +632,10 @@ mod tests {
             };
             p[2].clone()
         };
-        assert_eq!(flags("GET"), Value::Array(vec![Value::simple("readonly")]));
+        assert_eq!(
+            flags("GET"),
+            Value::Array(vec![Value::simple("readonly"), Value::simple("fast")])
+        );
         assert_eq!(flags("SET"), Value::Array(vec![Value::simple("write")]));
         assert_eq!(
             flags("SWAPDB"),

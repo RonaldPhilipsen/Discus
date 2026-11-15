@@ -89,7 +89,9 @@ async fn command_info_and_getkeys() {
     let addr = common::start_node(&[]).await;
     let info = common::roundtrip(addr, b"*3\r\n$7\r\nCOMMAND\r\n$4\r\nINFO\r\n$3\r\nget\r\n").await;
     assert!(
-        info.starts_with("*1\r\n*10\r\n$3\r\nget\r\n:2\r\n*1\r\n+readonly\r\n:1\r\n:1\r\n:1\r\n"),
+        info.starts_with(
+            "*1\r\n*10\r\n$3\r\nget\r\n:2\r\n*2\r\n+readonly\r\n+fast\r\n:1\r\n:1\r\n:1\r\n"
+        ),
         "{info:?}"
     );
     let unknown =

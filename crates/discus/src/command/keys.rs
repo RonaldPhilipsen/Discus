@@ -14,15 +14,17 @@ use discus_store::entry::{estimate_size, ENTRY_OVERHEAD};
 use discus_store::Entry;
 
 pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec::write("EXPIRE", 3, expire),
-    CommandSpec::write("PEXPIRE", 3, pexpire),
-    CommandSpec::write("EXPIREAT", 3, expireat),
-    CommandSpec::write("PEXPIREAT", 3, pexpireat),
-    CommandSpec::read("TTL", 2, ttl),
-    CommandSpec::read("PTTL", 2, pttl),
-    CommandSpec::write("PERSIST", 2, persist),
+    CommandSpec::write("EXPIRE", 3, expire).with_fast(),
+    CommandSpec::write("PEXPIRE", 3, pexpire).with_fast(),
+    CommandSpec::write("EXPIREAT", 3, expireat).with_fast(),
+    CommandSpec::write("PEXPIREAT", 3, pexpireat).with_fast(),
+    CommandSpec::read("TTL", 2, ttl).with_fast(),
+    CommandSpec::read("PTTL", 2, pttl).with_fast(),
+    CommandSpec::write("PERSIST", 2, persist).with_fast(),
     CommandSpec::write("RENAME", 3, rename).with_route(Route::Rename),
-    CommandSpec::write("MOVE", 3, move_key).with_reads_old(),
+    CommandSpec::write("MOVE", 3, move_key)
+        .with_fast()
+        .with_reads_old(),
     CommandSpec::write("COPY", -3, copy).with_route(Route::Copy),
     // The flags of Valkey for `COMMAND`. The connection route still answers at the entry node, so
     // it never routes as a write.
@@ -32,7 +34,9 @@ pub const COMMANDS: &[CommandSpec] = &[
         .with_categories(Categories::KEYSPACE.union(Categories::DANGEROUS)),
     CommandSpec::read("SCAN", -2, scan).with_route(Route::Local),
     CommandSpec::read("RANDOMKEY", 1, randomkey).with_route(Route::Local),
-    CommandSpec::read("DBSIZE", 1, dbsize).with_route(Route::Fanout),
+    CommandSpec::read("DBSIZE", 1, dbsize)
+        .with_fast()
+        .with_route(Route::Fanout),
     CommandSpec::write("FLUSHDB", -1, flush)
         .with_route(Route::Broadcast)
         .with_categories(Categories::KEYSPACE.union(Categories::DANGEROUS)),
