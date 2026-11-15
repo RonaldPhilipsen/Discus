@@ -3,6 +3,7 @@
 //! `Security` owns every decision. The server calls it at accept time, the `AUTH` and `HELLO`
 //! handlers call `authenticate`, and the dispatcher calls `authorize` before each command.
 
+pub mod acl;
 pub mod admin;
 pub mod args;
 pub mod file;
