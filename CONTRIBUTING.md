@@ -25,7 +25,12 @@ Run these commands before you open a pull request:
 ```sh
 mise run lint
 mise run test
+mise run deny
 ```
+
+`mise run deny` runs `cargo deny check` with the policy in `deny.toml`. It fails
+when a dependency has a RustSec advisory, a license that is not on the allow
+list, or a source other than crates.io.
 
 ## Releases
 

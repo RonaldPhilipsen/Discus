@@ -41,6 +41,15 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
 
+  # The RustSec advisories, the licenses, and the crate sources, as deny.toml sets them.
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5
+      - run: mise run deny
+
   build-matrix:
     runs-on: ubuntu-latest
     timeout-minutes: 45
