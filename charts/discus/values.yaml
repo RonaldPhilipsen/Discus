@@ -69,7 +69,7 @@ clientTls:
   # With verifyClients: optional or required.
   clientAuth: optional
 
-# The flag --auth-policy, for example all:mtls or all:tls,oauth2. An empty value uses the node
+# The flag --auth-policy, for example all:mtls or all:oauth2. An empty value uses the node
 # default none: every client uses TLS and needs no credentials.
 authPolicy: ""
 authConfig:
@@ -78,7 +78,7 @@ authConfig:
   secretName: ""
 sharedToken:
   # A Secret with the shared token, for the flag --shared-token-file. The node then uses the
-  # policy all:tls,shared_token, unless authPolicy names another policy with shared_token. After
+  # policy all:shared_token, unless authPolicy names another policy with shared_token. After
   # the Secret changes, the node reads the new token without a restart.
   secretName: ""
   # The key of the Secret that holds the token.

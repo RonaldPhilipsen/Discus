@@ -43,8 +43,6 @@ impl std::fmt::Debug for TokenGrant {
 pub struct ConnAuth {
     /// The client address. In `lb` mode it is the address that the PROXY header carries.
     pub peer: Option<IpAddr>,
-    /// The client used TLS.
-    pub tls: bool,
     pub cert: Option<CertGrant>,
     /// The client sent the shared token.
     pub shared: bool,
@@ -63,17 +61,15 @@ impl ConnAuth {
 
     fn has(&self, f: Factor) -> bool {
         match f {
-            Factor::Tls => self.tls,
             Factor::Mtls => self.cert.is_some(),
             Factor::Oauth2 => self.token.is_some(),
             Factor::SharedToken => self.shared,
         }
     }
 
-    /// The scopes that one identity factor grants. `tls` grants nothing.
+    /// The scopes that one factor grants.
     fn grant(&self, f: Factor) -> Option<Scopes> {
         match f {
-            Factor::Tls => None,
             Factor::Mtls => self.cert.as_ref().map(|c| c.scopes),
             Factor::Oauth2 => self.token.as_ref().map(|t| t.scopes),
             Factor::SharedToken => self.shared.then_some(Scopes::READ_WRITE),
@@ -82,7 +78,7 @@ impl ConnAuth {
 
     /// The scopes of the connection, or `None` when the policy is not met.
     ///
-    /// `all` takes the intersection of the identity factors, so the strictest factor wins. `any`
+    /// `all` takes the intersection of the factors, so the strictest factor wins. `any`
     /// takes the union of the factors that are present.
     pub fn scopes(&self, policy: &Policy) -> Option<Scopes> {
         match policy {
@@ -119,14 +115,16 @@ mod tests {
         }
     }
 
+    fn policy(s: &str) -> Policy {
+        Policy::parse(s).unwrap().policy
+    }
+
     #[test]
-    fn tls_alone_never_meets_a_policy() {
-        let a = ConnAuth {
-            tls: true,
-            ..ConnAuth::default()
-        };
-        let p = Policy::parse("all:tls,oauth2").unwrap();
-        assert_eq!(a.scopes(&p), None);
+    fn a_connection_without_credentials_never_meets_a_policy() {
+        let a = ConnAuth::default();
+        for p in ["all:oauth2", "all:tls,oauth2", "any:oauth2"] {
+            assert_eq!(a.scopes(&policy(p)), None, "{p}");
+        }
     }
 
     #[test]
@@ -139,7 +137,7 @@ mod tests {
             token: Some(token(Scopes::READ_WRITE)),
             ..ConnAuth::default()
         };
-        let p = Policy::parse("all:mtls,oauth2").unwrap();
+        let p = policy("all:mtls,oauth2");
         assert_eq!(a.scopes(&p), Some(Scopes::READ));
     }
 
@@ -153,7 +151,7 @@ mod tests {
             token: Some(token(Scopes::ADMIN)),
             ..ConnAuth::default()
         };
-        let p = Policy::parse("any:mtls,oauth2").unwrap();
+        let p = policy("any:mtls,oauth2");
         assert_eq!(a.scopes(&p), Some(Scopes::READ.union(Scopes::ADMIN)));
         assert_eq!(ConnAuth::default().scopes(&p), None);
     }
@@ -164,7 +162,7 @@ mod tests {
             shared: true,
             ..ConnAuth::default()
         };
-        let p = Policy::parse("any:shared_token").unwrap();
+        let p = policy("any:shared_token");
         assert_eq!(a.scopes(&p), Some(Scopes::READ_WRITE));
     }
 }

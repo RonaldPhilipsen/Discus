@@ -314,7 +314,7 @@ The node reloads its certificates after the Secrets change, so a rotation needs 
 
 Without `authPolicy`, the node uses the policy `none`. Each client then uses TLS and needs no
 credentials. For client certificates without tokens, set `authPolicy=all:mtls`. For OAuth 2.0
-tokens, set `authPolicy=all:tls,oauth2` and list the trusted issuers in the `auth.toml` file. See
+tokens, set `authPolicy=all:oauth2` and list the trusted issuers in the `auth.toml` file. See
 [Security](security.md) for the policies.
 
 To run without the redirect listener, set `clusterClients.enabled=false`. The chart then passes no
@@ -1198,7 +1198,7 @@ Follow these requirements:
 - Set `--forward-read-timeout-ms 200`. A read of a listed key makes one attempt and has no
   replica fallback, so the default of 20 ms can fail a read on a busy primary.
 - Use TLS and a shared token between Authelia and Discus. Set `--tls-mode`, `--tls-cert`, and
-  `--tls-key`. Set `--shared-token-file` and `--auth-policy all:tls,shared_token`.
+  `--tls-key`. Set `--shared-token-file` and `--auth-policy all:shared_token`.
 - Set `database_index` to 0.
 - Do not configure the `high_availability` section of `session.redis`, because Discus has no
   Sentinel support. To survive a node loss, point `host` at a load balancer or a DNS name that
@@ -1214,7 +1214,7 @@ discus \
   --tls-mode node \
   --tls-cert /etc/discus/tls.crt \
   --tls-key /etc/discus/tls.key \
-  --auth-policy all:tls,shared_token \
+  --auth-policy all:shared_token \
   --shared-token-file /etc/discus/session-token
 ```
 

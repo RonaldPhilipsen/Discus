@@ -30,7 +30,7 @@ async fn bind_error_without_tls(args: &[&str]) -> String {
 }
 
 #[tokio::test]
-async fn tls_alone_is_not_a_policy() {
+async fn a_policy_that_tls_alone_would_meet_is_refused() {
     let e = bind_error(&[
         "--auth-policy",
         "any:tls,shared_token",
@@ -38,9 +38,9 @@ async fn tls_alone_is_not_a_policy() {
         "x",
     ])
     .await;
-    assert!(e.contains("tls is not an identity"), "{e}");
+    assert!(e.contains("tls is no longer a factor"), "{e}");
     let e = bind_error(&["--auth-policy", "all:tls"]).await;
-    assert!(e.contains("tls is not an identity"), "{e}");
+    assert!(e.contains("use none"), "{e}");
 }
 
 #[tokio::test]

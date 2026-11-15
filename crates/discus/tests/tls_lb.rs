@@ -135,14 +135,14 @@ scopes = ["discus.read"]
 }
 
 #[tokio::test]
-async fn a_v1_header_with_tls_and_the_shared_token_works() {
+async fn a_v1_header_with_the_shared_token_works() {
     let ca = TestCa::new();
     let server = ca.server_cert();
     let lb = ca.client_cert("spiffe://test/lb");
     let mut args = lb_args(&ca, &server, "127.0.0.1/32");
     args.extend([
         "--auth-policy",
-        "all:tls,shared_token",
+        "all:shared_token",
         "--shared-token",
         "s3cret",
     ]);

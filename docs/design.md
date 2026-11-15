@@ -1173,10 +1173,10 @@ line. To move to it, install a new cluster. The cache starts empty.
 
 ### 14.2 Client authentication policy
 
-- The policy lists factors (`tls`, `mtls`, `oauth2`, `shared_token`) and combines them with `any`
-  or `all`. Every client uses TLS. The default policy is `none`, so a client needs no other
-  factor. With a policy that names other factors, a client with `tls` and no other factor gets
-  `-NOAUTH`.
+- The policy lists factors (`mtls`, `oauth2`, `shared_token`) and combines them with `any`
+  or `all`. Every client uses TLS, so TLS is not a factor. The default policy is `none`, so a
+  client needs no factor. With a policy that names factors, a client without them gets
+  `-NOAUTH`. The old factor name `tls` is still accepted in an `all` list and ignored.
 - A shared token grants read-write by default and is meant for simple setups. An mTLS-only client
   gets read-write when no certificate rule exists. With at least one rule, the client gets the
   scope of the first rule that matches its certificate identity. An identity that matches no rule
@@ -1356,7 +1356,7 @@ removes its code and dependencies. Features never change the wire format.
 
 - Without `otel`, there are no metrics or traces. The node still forwards the trace context
   unchanged, so traces stay connected across it.
-- Without `oauth2`, the policy accepts only `tls`, `mtls`, and `shared_token`, and the node does
+- Without `oauth2`, the policy accepts only `mtls` and `shared_token`, and the node does
   not advertise the OAuth 2.0 capability.
 - Without `k8s`, the only lease provider is `none`.
 - If the configuration enables a subsystem that the binary lacks, the node refuses to start and
