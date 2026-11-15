@@ -490,8 +490,12 @@ impl Security {
 
     /// The grant of a verified certificate identity. Without any rule every identity gets
     /// read-write. With rules, an identity that matches none gets no grant, so a typing error in
-    /// a rule never widens access.
+    /// a rule never widens access. An empty identity gets no grant.
     fn cert_grant(&self, identity: String) -> Option<CertGrant> {
+        if identity.is_empty() {
+            tracing::debug!("the certificate identity is empty");
+            return None;
+        }
         let scopes = if self.cert_rules.is_empty() {
             Scopes::READ_WRITE
         } else {
@@ -559,8 +563,8 @@ impl Security {
         }
         let conn = tls.get_ref().1;
         if conn.peer_certificates().is_some_and(|c| !c.is_empty()) {
-            // A verified certificate without a SAN or CN has an empty identity. It meets mtls
-            // unless client_cert rules exist and none matches the empty identity.
+            // A verified certificate without a SAN or CN has an empty identity, which does not
+            // meet mtls.
             let identity = identity::peer_identity(conn).unwrap_or_default();
             tracing::debug!(%identity, "client certificate verified");
             auth.cert = self.cert_grant(identity);

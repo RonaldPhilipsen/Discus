@@ -74,6 +74,8 @@ The node reads the identity of a client certificate in this order:
 2. The first DNS SAN.
 3. The subject CN.
 
+A certificate without any of these has no identity. It does not meet the `mtls` factor.
+
 ### Mode `lb`
 
 In this mode an L4 load balancer accepts the client TLS connection. The load balancer opens a new
@@ -92,7 +94,9 @@ The node accepts PROXY protocol v1 and v2. It reads these values from the header
 - The client address. The node uses it for the failed-attempt limit.
 - The client identity. The node takes it from a custom TLV when `--lb-identity-tlv` names one,
   for example `0xE0`. Otherwise the node takes the CN from the `PP2_TYPE_SSL` TLV, but only when
-  the load balancer says that it verified the client certificate.
+  the load balancer says that it verified the client certificate. If the header has a
+  `PP2_TYPE_SSL` TLV, the custom TLV also counts only when the load balancer verified the client
+  certificate. An empty identity is no identity.
 - Whether the client used TLS. If the `PP2_TYPE_SSL` TLV says that the client did not use TLS, the
   node closes the connection. Configure the load balancer to accept TLS clients only.
 

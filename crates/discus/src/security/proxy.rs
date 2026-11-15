@@ -93,9 +93,11 @@ fn parse(buf: &[u8], identity_tlv: Option<u8>) -> io::Result<ProxyHeader> {
             }
             let mut cn = None;
             let mut custom = None;
+            let mut has_ssl = false;
             for tlv in h.tlvs() {
                 let tlv = tlv.map_err(|e| bad(&e.to_string()))?;
                 if tlv.kind == PP2_TYPE_SSL {
+                    has_ssl = true;
                     cn = ssl(&tlv.value, &mut out)?;
                 } else if Some(tlv.kind) == identity_tlv {
                     let id = std::str::from_utf8(&tlv.value)
@@ -103,7 +105,13 @@ fn parse(buf: &[u8], identity_tlv: Option<u8>) -> io::Result<ProxyHeader> {
                     custom = Some(id.to_string());
                 }
             }
-            out.identity = custom.or(cn.filter(|_| out.client_cert_verified));
+            // An empty value is no identity: a load balancer sends one for a client without a
+            // certificate. When the SSL TLV is present, it decides whether a certificate was
+            // verified, for the custom TLV as well as for the CN.
+            let verified = out.client_cert_verified;
+            out.identity = custom
+                .filter(|id| !id.is_empty() && (verified || !has_ssl))
+                .or(cn.filter(|cn| !cn.is_empty() && verified));
         }
         ppp::HeaderResult::V1(Err(e)) => return Err(bad(&e.to_string())),
         ppp::HeaderResult::V2(Err(e)) => return Err(bad(&e.to_string())),
@@ -200,6 +208,34 @@ mod tests {
         ]))
         .await
         .unwrap();
+        assert_eq!(h.identity.as_deref(), Some("spiffe://x/app"));
+    }
+
+    #[tokio::test]
+    async fn an_empty_identity_tlv_gives_no_identity() {
+        let h = parse(&v2(&[(0xE0, Vec::new())])).await.unwrap();
+        assert_eq!(h.identity, None);
+        let h = parse(&v2(&[
+            (0x20, ssl_tlv(0x01 | 0x02, 0, "cn")),
+            (0xE0, Vec::new()),
+        ]))
+        .await
+        .unwrap();
+        assert_eq!(h.identity.as_deref(), Some("cn"));
+    }
+
+    #[tokio::test]
+    async fn the_custom_tlv_needs_a_verified_certificate_when_the_ssl_tlv_is_present() {
+        let h = parse(&v2(&[
+            (0x20, ssl_tlv(0x01 | 0x02, 1, "cn")),
+            (0xE0, b"spiffe://x/app".to_vec()),
+        ]))
+        .await
+        .unwrap();
+        assert_eq!(h.identity, None);
+        let h = parse(&v2(&[(0xE0, b"spiffe://x/app".to_vec())]))
+            .await
+            .unwrap();
         assert_eq!(h.identity.as_deref(), Some("spiffe://x/app"));
     }
 
