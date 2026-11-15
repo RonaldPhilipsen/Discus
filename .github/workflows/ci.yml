@@ -67,6 +67,10 @@ jobs:
           helm template discus charts/discus --set cluster.tls.secretName=discus-tls
           --set settings.budget.holdMs=1500 | grep -A12 'discus.toml' | grep -q 'hold-ms = 1500'
       - run: >-
+          helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --set settings.clients.max=500 --set settings.auth.timeoutSecs=5
+          | grep -A30 'discus.toml' | grep -A1 '\[clients\]' | grep -q 'max = 500'
+      - run: >-
           ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
           --set settings.budget.holdMs=fast
       - run: >-

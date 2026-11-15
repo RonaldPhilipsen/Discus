@@ -23,7 +23,6 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use bytes::BytesMut;
 use discus_resp::{encode, Command, Limits, Parser, Protocol, Value};
@@ -283,7 +282,7 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     local_addr: Option<SocketAddr>,
     accepted: Instant,
 ) {
-    let timeout = node.config.security.auth_timeout_secs;
+    let timeout = node.live_settings.get().auth_timeout;
     let authenticated = AtomicBool::new(node.security.is_authenticated(&auth));
     let serving = serve_until_closed(
         &mut stream,
@@ -293,10 +292,10 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         local_addr,
         &authenticated,
     );
-    if timeout == 0 || authenticated.load(Ordering::Relaxed) {
+    if timeout.is_zero() || authenticated.load(Ordering::Relaxed) {
         serving.await;
     } else {
-        let deadline = tokio::time::sleep_until(accepted + Duration::from_secs(timeout));
+        let deadline = tokio::time::sleep_until(accepted + timeout);
         tokio::pin!(deadline);
         // Once the policy is met, the deadline costs one atomic load at each wake of the task.
         let expired = std::future::poll_fn(|cx| {

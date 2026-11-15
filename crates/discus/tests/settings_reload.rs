@@ -237,6 +237,44 @@ async fn info_shows_the_settings_file() {
 }
 
 #[tokio::test]
+async fn a_lower_client_limit_refuses_new_connections_and_keeps_the_open_one() {
+    let mut argv = vec![
+        "discus",
+        "--listen",
+        "127.0.0.1:0",
+        "--admin-listen",
+        "127.0.0.1:0",
+    ];
+    let tls = common::client_tls::server_args(&argv);
+    argv.extend(tls.iter().map(String::as_str));
+    let config = discus::Config::load_from(argv).unwrap();
+    let server = discus::Server::bind(config).await.unwrap();
+    let (addr, node) = (server.local_addr(), server.node().clone());
+    let shutdown = CancellationToken::new();
+    let _serve = tokio::spawn(server.run(shutdown.clone()));
+    let _stop = shutdown.drop_guard();
+
+    let client = common::client_tls::redis_client(&format!("rediss://{addr}"));
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let reload =
+        |text: &str| discus::settings::reload::reload(&node.config, &node.live_settings, text, 1);
+
+    assert_eq!(
+        reload("version = 1\n[clients]\nmax = 1\n").unwrap(),
+        ["clients.max"]
+    );
+    assert!(common::client_tls::try_connect(addr).await.is_err());
+    info_discus(&mut conn).await;
+
+    reload("version = 1\n[clients]\nmax = 2\n").unwrap();
+    eventually(
+        "the node did not admit a client below the limit",
+        || async { common::client_tls::try_connect(addr).await.is_ok() },
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn a_running_node_raises_its_count() {
     let net = common::gossip::Net::new();
     let dir = tempfile::tempdir().unwrap();

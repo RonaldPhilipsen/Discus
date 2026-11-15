@@ -700,6 +700,8 @@ fn copy_flag(to: &mut Config, from: &Config, flag: &str) {
         "auth_failure_window_secs" => {
             to.security.auth_failure_window_secs = from.security.auth_failure_window_secs
         }
+        "auth_timeout_secs" => to.security.auth_timeout_secs = from.security.auth_timeout_secs,
+        "max_clients" => to.max_clients = from.max_clients,
         "tls_reload_secs" => to.tls_reload_secs = from.tls_reload_secs,
         "databases" => to.databases = from.databases,
         _ => unreachable!("KEYS names {flag}, which copy_flag does not copy"),
@@ -1145,7 +1147,8 @@ mod tests {
             [reads]\nfrom-replicas = false\n\
             [handoff]\nrate-bytes = 15\n\
             [auth]\nmax-failures-per-connection = 16\nmax-failures-per-source = 17\n\
-            failure-window-secs = 18\n\
+            failure-window-secs = 18\ntimeout-secs = 21\n\
+            [clients]\nmax = 22\n\
             [tls]\nreload-secs = 19\n";
         let config = load_with_file(text, &[]).unwrap();
         assert_eq!(config.forward_read_timeout_ms, 11);
@@ -1157,6 +1160,8 @@ mod tests {
         assert_eq!(config.security.auth_max_failures_per_connection, 16);
         assert_eq!(config.security.auth_max_failures_per_source, 17);
         assert_eq!(config.security.auth_failure_window_secs, 18);
+        assert_eq!(config.security.auth_timeout_secs, 21);
+        assert_eq!(config.max_clients, 22);
         assert_eq!(config.tls_reload_secs, 19);
         assert_eq!(config.databases, 20);
         assert_eq!(config.file_set.len(), crate::settings::KEYS.len());

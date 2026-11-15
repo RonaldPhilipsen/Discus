@@ -742,9 +742,10 @@ impl Node {
     }
 
     /// Take a slot for a connection that a client listener accepted, or `None` when
-    /// `--max-clients` connections hold one. The slot is free again when the guard drops.
+    /// `--max-clients` connections hold one. The slot is free again when the guard drops. A
+    /// reload to a lower limit closes no open connection.
     pub fn admit_client(self: &Arc<Self>) -> Option<ClientSlot> {
-        let max = match self.config.max_clients {
+        let max = match self.live_settings.get().max_clients {
             0 => usize::MAX,
             max => max,
         };
