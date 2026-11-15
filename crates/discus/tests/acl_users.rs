@@ -226,3 +226,70 @@ async fn a_user_without_the_connection_group_cannot_ping() {
     );
     assert_eq!(run(&mut s, &["PING"]).await, "+PONG\r\n");
 }
+
+const READ_ONLY: &str = "-ERR Discus reads its users from the file of --acl-file. \
+                         Change the file, and the node loads it again.\r\n";
+
+#[tokio::test]
+async fn acl_shows_the_user_and_the_categories() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = start_with(&dir).await;
+    let mut s = login(&node, "reader", "read-pass").await;
+
+    assert_eq!(run(&mut s, &["ACL", "WHOAMI"]).await, "$6\r\nreader\r\n");
+    assert_eq!(run(&mut s, &["acl", "whoami"]).await, "$6\r\nreader\r\n");
+
+    let all = run(&mut s, &["ACL", "CAT"]).await;
+    assert!(all.starts_with("*21\r\n$8\r\nkeyspace\r\n"), "{all:?}");
+
+    let dangerous = run(&mut s, &["ACL", "CAT", "dangerous"]).await;
+    assert!(dangerous.contains("$8\r\nflushall\r\n"), "{dangerous:?}");
+    assert!(dangerous.contains("$6\r\nconfig\r\n"), "{dangerous:?}");
+    assert!(!dangerous.contains("get\r\n"), "{dangerous:?}");
+
+    assert_eq!(
+        run(&mut s, &["ACL", "CAT", "nothing"]).await,
+        "-ERR Unknown category 'nothing'\r\n"
+    );
+    assert_eq!(
+        run(&mut s, &["ACL", "CAT", "all"]).await,
+        "-ERR Unknown category 'all'\r\n"
+    );
+
+    for sub in [
+        &["SETUSER", "x", "on"][..],
+        &["DELUSER", "x"],
+        &["LIST"],
+        &["USERS"],
+        &["GETUSER", "reader"],
+        &["LOAD"],
+        &["SAVE"],
+        &["LOG"],
+        &["GENPASS"],
+        &["DRYRUN", "reader", "get", "a"],
+    ] {
+        let mut parts = vec!["ACL"];
+        parts.extend_from_slice(sub);
+        assert_eq!(run(&mut s, &parts).await, READ_ONLY, "{sub:?}");
+    }
+
+    assert_eq!(
+        run(&mut s, &["ACL", "BOGUS"]).await,
+        "-ERR unknown subcommand or wrong number of arguments for 'ACL BOGUS'\r\n"
+    );
+    assert_eq!(
+        run(&mut s, &["ACL", "WHOAMI", "x"]).await,
+        "-ERR unknown subcommand or wrong number of arguments for 'ACL WHOAMI'\r\n"
+    );
+    assert_eq!(
+        run(&mut s, &["ACL", "CAT", "a", "b"]).await,
+        "-ERR unknown subcommand or wrong number of arguments for 'ACL CAT'\r\n"
+    );
+}
+
+#[tokio::test]
+async fn whoami_is_default_without_a_user() {
+    let node = start(&["--auth-policy", "none"]).await;
+    let mut s = connect(node.addr).await;
+    assert_eq!(run(&mut s, &["ACL", "WHOAMI"]).await, "$7\r\ndefault\r\n");
+}

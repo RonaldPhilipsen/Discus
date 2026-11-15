@@ -9,7 +9,7 @@ use discus_telemetry::attrs::TopologyCommand;
 
 use super::category::Categories;
 use super::error::CommandError;
-use super::table::{check, lookup, names, Access, CommandSpec};
+use super::table::{check, lookup, names, specs, Access, CommandSpec};
 use super::util::{glob_match, parse_i64, upper};
 use crate::build;
 use crate::cluster::route::key_args;
@@ -34,6 +34,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::connection("SELECT", 2, select).with_fast(),
     CommandSpec::connection("COMMAND", -1, command),
     CommandSpec::connection("CLIENT", -2, client),
+    CommandSpec::connection("ACL", -2, acl),
     CommandSpec::connection("INFO", -1, info)
         .with_access(Access::Read)
         .with_categories(Categories::DANGEROUS),
@@ -231,6 +232,43 @@ fn client(_: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
         _ => Err(CommandError::Custom(format!(
             "ERR unknown subcommand or wrong number of arguments for 'CLIENT {}'",
             upper(&cmd[1])
+        ))),
+    }
+}
+
+const ACL_READ_ONLY: &str = "ERR Discus reads its users from the file of --acl-file. \
+                             Change the file, and the node loads it again.";
+
+fn acl(_: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+    let bulk = |s: &str| Value::Bulk(Bytes::copy_from_slice(s.as_bytes()));
+    let sub = upper(&cmd[1]);
+    match sub.as_str() {
+        "WHOAMI" if cmd.len() == 2 => Ok(bulk(
+            conn.auth.user.as_ref().map_or("default", |g| &g.user.name),
+        )),
+        "CAT" if cmd.len() == 2 => Ok(Value::Array(
+            Categories::NAMES.iter().map(|(n, _)| bulk(n)).collect(),
+        )),
+        "CAT" if cmd.len() == 3 => {
+            let category =
+                Categories::parse(&String::from_utf8_lossy(&cmd[2])).ok_or_else(|| {
+                    CommandError::Custom(format!(
+                        "ERR Unknown category '{}'",
+                        String::from_utf8_lossy(&cmd[2])
+                    ))
+                })?;
+            Ok(Value::Array(
+                specs()
+                    .iter()
+                    .filter(|spec| spec.categories.intersects(category))
+                    .map(|spec| bulk(&spec.name.to_ascii_lowercase()))
+                    .collect(),
+            ))
+        }
+        "SETUSER" | "DELUSER" | "LIST" | "USERS" | "GETUSER" | "LOAD" | "SAVE" | "LOG"
+        | "GENPASS" | "DRYRUN" => Err(CommandError::Custom(ACL_READ_ONLY.into())),
+        _ => Err(CommandError::Custom(format!(
+            "ERR unknown subcommand or wrong number of arguments for 'ACL {sub}'"
         ))),
     }
 }
