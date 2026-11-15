@@ -4,6 +4,7 @@ use bytes::Bytes;
 use discus_resp::{Command, Value};
 use discus_store::{Entry, Value as Stored};
 
+use super::category::Categories;
 use super::error::CommandError;
 use super::float::{incr_by_float, parse_float_delta};
 use super::table::CommandSpec;
@@ -25,9 +26,13 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::write("INCRBYFLOAT", 3, incrbyfloat),
     CommandSpec::write("APPEND", 3, append),
     CommandSpec::read("STRLEN", 2, strlen),
-    CommandSpec::write("DEL", -2, del).with_route(Route::MultiWrite { pairs: false }),
-    CommandSpec::read("EXISTS", -2, exists).with_route(Route::MultiRead { sum: true }),
-    CommandSpec::read("TYPE", 2, type_),
+    CommandSpec::write("DEL", -2, del)
+        .with_route(Route::MultiWrite { pairs: false })
+        .with_categories(Categories::KEYSPACE),
+    CommandSpec::read("EXISTS", -2, exists)
+        .with_route(Route::MultiRead { sum: true })
+        .with_categories(Categories::KEYSPACE),
+    CommandSpec::read("TYPE", 2, type_).with_categories(Categories::KEYSPACE),
 ];
 
 type Reply = Result<Value, CommandError>;

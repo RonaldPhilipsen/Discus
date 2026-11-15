@@ -7,6 +7,7 @@ use discus_placement::{slot, Epoch};
 use discus_resp::{Command, Protocol, Value};
 use discus_telemetry::attrs::TopologyCommand;
 
+use super::category::Categories;
 use super::error::CommandError;
 use super::table::{check, lookup, names, Access, CommandSpec};
 use super::util::{glob_match, parse_i64, upper};
@@ -19,20 +20,30 @@ use crate::node::{ConnState, Node};
 pub const REDIS_VERSION: &str = "7.2.0";
 
 pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec::connection("PING", -1, ping),
-    CommandSpec::connection("ECHO", 2, echo),
-    CommandSpec::connection("QUIT", -1, quit).with_access(Access::Public),
-    CommandSpec::connection("AUTH", -2, auth).with_access(Access::Public),
-    CommandSpec::connection("HELLO", -1, hello).with_access(Access::Public),
-    CommandSpec::connection("SELECT", 2, select),
+    CommandSpec::connection("PING", -1, ping).with_fast(),
+    CommandSpec::connection("ECHO", 2, echo).with_fast(),
+    CommandSpec::connection("QUIT", -1, quit)
+        .with_access(Access::Public)
+        .with_fast(),
+    CommandSpec::connection("AUTH", -2, auth)
+        .with_access(Access::Public)
+        .with_fast(),
+    CommandSpec::connection("HELLO", -1, hello)
+        .with_access(Access::Public)
+        .with_fast(),
+    CommandSpec::connection("SELECT", 2, select).with_fast(),
     CommandSpec::connection("COMMAND", -1, command),
     CommandSpec::connection("CLIENT", -2, client),
-    CommandSpec::connection("INFO", -1, info).with_access(Access::Read),
-    CommandSpec::connection("CONFIG", -2, config).with_access(Access::Read),
+    CommandSpec::connection("INFO", -1, info)
+        .with_access(Access::Read)
+        .with_categories(Categories::DANGEROUS),
+    CommandSpec::connection("CONFIG", -2, config)
+        .with_access(Access::Read)
+        .with_categories(Categories::ADMIN.union(Categories::DANGEROUS)),
     CommandSpec::connection("CLUSTER", -1, cluster),
-    CommandSpec::connection("READONLY", 1, readonly),
-    CommandSpec::connection("READWRITE", 1, readwrite),
-    CommandSpec::connection("ASKING", 1, asking),
+    CommandSpec::connection("READONLY", 1, readonly).with_fast(),
+    CommandSpec::connection("READWRITE", 1, readwrite).with_fast(),
+    CommandSpec::connection("ASKING", 1, asking).with_fast(),
 ];
 
 type Reply = Result<Value, CommandError>;
@@ -160,7 +171,8 @@ fn command(_: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
 }
 
 /// One `COMMAND` entry in the Redis 7 shape. The flag is `readonly` unless the command changes
-/// data. The ACL categories, tips, key specifications, and subcommands are empty.
+/// data. The ACL categories carry an `@` each. The tips, key specifications, and subcommands are
+/// empty.
 fn command_entry(spec: &CommandSpec) -> Value {
     let flag = if spec.access == Access::Write {
         "write"
@@ -179,7 +191,12 @@ fn command_entry(spec: &CommandSpec) -> Value {
         Value::Integer(first),
         Value::Integer(last),
         Value::Integer(step),
-        Value::Array(vec![]),
+        Value::Array(
+            spec.categories
+                .names()
+                .map(|name| Value::simple(&format!("@{name}")))
+                .collect(),
+        ),
         Value::Array(vec![]),
         Value::Array(vec![]),
         Value::Array(vec![]),
@@ -529,7 +546,7 @@ mod tests {
             Value::Integer(n) => n,
             ref other => panic!("not an integer: {other:?}"),
         };
-        for empty in &parts[6..] {
+        for empty in &parts[7..] {
             assert_eq!(empty, &Value::Array(vec![]));
         }
         (int(3), int(4), int(5))
@@ -551,6 +568,21 @@ mod tests {
         assert_eq!(of("RENAME"), (1, 2, 1));
         assert_eq!(of("GET"), (1, 1, 1));
         assert_eq!(of("PING"), (0, 0, 0));
+    }
+
+    #[test]
+    fn command_info_lists_the_acl_categories() {
+        let Value::Array(entry) = command_entry(lookup(b"FLUSHALL").unwrap()) else {
+            panic!()
+        };
+        assert_eq!(
+            entry[6],
+            Value::Array(
+                ["@keyspace", "@write", "@slow", "@dangerous"]
+                    .map(Value::simple)
+                    .to_vec()
+            )
+        );
     }
 
     #[test]

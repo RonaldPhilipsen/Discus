@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 
 use discus_resp::{Command, Value};
 
+use super::category::Categories;
 use super::error::CommandError;
 use crate::cluster::route::Route;
 use crate::node::{ConnState, Node};
@@ -25,7 +26,7 @@ pub enum Access {
 pub type Handler = fn(&Node, &mut ConnState, &Command) -> Result<Value, CommandError>;
 
 /// One command. A negative arity means "at least |arity|" arguments, counting the name.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct CommandSpec {
     pub name: &'static str,
     pub arity: i32,
@@ -34,6 +35,9 @@ pub struct CommandSpec {
     pub route: Route,
     /// The `fast` flag of `COMMAND`, as Valkey sets it.
     pub fast: bool,
+    /// The position in `specs()`. 0 in a `COMMANDS` array: only the registry sets it.
+    pub id: u16,
+    pub categories: Categories,
 }
 
 impl CommandSpec {
@@ -46,6 +50,8 @@ impl CommandSpec {
             access: Access::Connection,
             route: Route::Connection,
             fast: false,
+            id: 0,
+            categories: Categories::EMPTY,
         }
     }
 
@@ -58,6 +64,8 @@ impl CommandSpec {
             access: Access::Read,
             route: Route::Single { write: false },
             fast: false,
+            id: 0,
+            categories: Categories::EMPTY,
         }
     }
 
@@ -70,6 +78,8 @@ impl CommandSpec {
             access: Access::Write,
             route: Route::Single { write: true },
             fast: false,
+            id: 0,
+            categories: Categories::EMPTY,
         }
     }
 
@@ -84,35 +94,92 @@ impl CommandSpec {
     pub const fn with_fast(self) -> CommandSpec {
         CommandSpec { fast: true, ..self }
     }
+
+    pub const fn with_categories(self, categories: Categories) -> CommandSpec {
+        CommandSpec { categories, ..self }
+    }
 }
+
+/// The ids fit the per-user bit set of the ACL, which has this many bits.
+pub const MAX_COMMANDS: usize = 256;
 
 /// Keyed by the upper-case name bytes, so a lookup needs no UTF-8 check. The names are fixed, so
 /// the map needs no defense against crafted keys and uses a fast hash.
-type Registry = HashMap<&'static [u8], &'static CommandSpec, foldhash::fast::FixedState>;
+type ByName = HashMap<&'static [u8], &'static CommandSpec, foldhash::fast::FixedState>;
+
+struct Registry {
+    specs: &'static [CommandSpec],
+    by_name: ByName,
+}
 
 fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(|| {
-        [
-            super::connection::COMMANDS,
-            super::string::COMMANDS,
-            super::keys::COMMANDS,
-            super::hash::COMMANDS,
-            super::set::COMMANDS,
-            super::zset::COMMANDS,
-        ]
-        .into_iter()
-        .flatten()
-        .map(|spec| (spec.name.as_bytes(), spec))
-        .collect()
+        let modules: [(&[CommandSpec], Categories); 6] = [
+            (super::connection::COMMANDS, Categories::CONNECTION),
+            (super::string::COMMANDS, Categories::STRING),
+            (super::keys::COMMANDS, Categories::KEYSPACE),
+            (super::hash::COMMANDS, Categories::HASH),
+            (super::set::COMMANDS, Categories::SET),
+            (super::zset::COMMANDS, Categories::SORTEDSET),
+        ];
+        let mut all: Vec<CommandSpec> = modules
+            .into_iter()
+            .flat_map(|(specs, module)| {
+                specs.iter().map(move |spec| CommandSpec {
+                    categories: categories_of(spec, module),
+                    ..*spec
+                })
+            })
+            .collect();
+        all.sort_unstable_by_key(|spec| spec.name);
+        assert!(
+            all.len() <= MAX_COMMANDS,
+            "more than {MAX_COMMANDS} commands"
+        );
+        for (i, spec) in all.iter_mut().enumerate() {
+            spec.id = i as u16;
+        }
+        let specs: &'static [CommandSpec] = Vec::leak(all);
+        Registry {
+            specs,
+            by_name: specs
+                .iter()
+                .map(|spec| (spec.name.as_bytes(), spec))
+                .collect(),
+        }
     })
+}
+
+/// `module` is the default of the module of `spec`, for a spec with no explicit categories.
+fn categories_of(spec: &CommandSpec, module: Categories) -> Categories {
+    let mut c = if spec.categories == Categories::EMPTY {
+        module
+    } else {
+        spec.categories
+    };
+    if spec.access == Access::Write {
+        c = c.union(Categories::WRITE);
+    }
+    // INFO and CONFIG read node state, not data. Valkey gives them no @read.
+    if spec.access == Access::Read && spec.route != Route::Connection {
+        c = c.union(Categories::READ);
+    }
+    c.union(if spec.fast {
+        Categories::FAST
+    } else {
+        Categories::SLOW
+    })
+}
+
+/// Every command, sorted by name. `specs()[i].id == i`.
+pub fn specs() -> &'static [CommandSpec] {
+    registry().specs
 }
 
 /// The names of every supported command, sorted.
 pub fn names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = registry().values().map(|spec| spec.name).collect();
-    names.sort_unstable();
-    names
+    registry().specs.iter().map(|spec| spec.name).collect()
 }
 
 /// No command name is longer than this, so a longer name is unknown without a lookup.
@@ -124,7 +191,7 @@ pub fn lookup(name: &[u8]) -> Option<&'static CommandSpec> {
     let upper = buf.get_mut(..name.len())?;
     upper.copy_from_slice(name);
     upper.make_ascii_uppercase();
-    registry().get(&*upper).copied()
+    registry().by_name.get(&*upper).copied()
 }
 
 /// Names that Discus recognizes and rejects on purpose.
@@ -208,5 +275,37 @@ mod tests {
         assert_eq!(access(b"GET"), Access::Read);
         assert_eq!(access(b"SET"), Access::Write);
         assert_eq!(access(b"PING"), Access::Connection);
+    }
+
+    fn cats(name: &[u8]) -> Vec<&'static str> {
+        lookup(name).unwrap().categories.names().collect()
+    }
+
+    #[test]
+    fn commands_have_the_categories_of_valkey() {
+        assert_eq!(cats(b"GET"), ["read", "string", "slow"]);
+        assert_eq!(cats(b"SET"), ["write", "string", "slow"]);
+        assert_eq!(cats(b"DEL"), ["keyspace", "write", "slow"]);
+        assert_eq!(cats(b"HGET"), ["read", "hash", "slow"]);
+        assert_eq!(cats(b"ZADD"), ["write", "sortedset", "slow"]);
+        assert_eq!(
+            cats(b"FLUSHALL"),
+            ["keyspace", "write", "slow", "dangerous"]
+        );
+        assert_eq!(cats(b"SWAPDB"), ["keyspace", "write", "fast", "dangerous"]);
+        assert_eq!(cats(b"PING"), ["fast", "connection"]);
+        assert_eq!(cats(b"INFO"), ["slow", "dangerous"]);
+        assert_eq!(cats(b"CONFIG"), ["admin", "slow", "dangerous"]);
+        assert_eq!(cats(b"CLUSTER"), ["slow", "connection"]);
+    }
+
+    #[test]
+    fn ids_are_the_positions_in_specs() {
+        assert!(specs().len() <= MAX_COMMANDS);
+        for (i, spec) in specs().iter().enumerate() {
+            assert_eq!(usize::from(spec.id), i);
+            assert_eq!(lookup(spec.name.as_bytes()).unwrap().id, spec.id);
+        }
+        assert!(specs().windows(2).all(|w| w[0].name < w[1].name));
     }
 }

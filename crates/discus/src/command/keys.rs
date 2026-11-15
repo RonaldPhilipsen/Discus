@@ -2,6 +2,7 @@
 
 use discus_resp::{Command, Value};
 
+use super::category::Categories;
 use super::error::CommandError;
 use super::table::{Access, CommandSpec};
 use super::util::{admit, check_key, parse_i64, upper};
@@ -27,12 +28,17 @@ pub const COMMANDS: &[CommandSpec] = &[
     // it never routes as a write.
     CommandSpec::connection("SWAPDB", 3, swapdb)
         .with_access(Access::Write)
-        .with_fast(),
+        .with_fast()
+        .with_categories(Categories::KEYSPACE.union(Categories::DANGEROUS)),
     CommandSpec::read("SCAN", -2, scan).with_route(Route::Local),
     CommandSpec::read("RANDOMKEY", 1, randomkey).with_route(Route::Local),
     CommandSpec::read("DBSIZE", 1, dbsize).with_route(Route::Fanout),
-    CommandSpec::write("FLUSHDB", -1, flush).with_route(Route::Broadcast),
-    CommandSpec::write("FLUSHALL", -1, flush).with_route(Route::Broadcast),
+    CommandSpec::write("FLUSHDB", -1, flush)
+        .with_route(Route::Broadcast)
+        .with_categories(Categories::KEYSPACE.union(Categories::DANGEROUS)),
+    CommandSpec::write("FLUSHALL", -1, flush)
+        .with_route(Route::Broadcast)
+        .with_categories(Categories::KEYSPACE.union(Categories::DANGEROUS)),
 ];
 
 type Reply = Result<Value, CommandError>;
