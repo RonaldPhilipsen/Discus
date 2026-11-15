@@ -562,8 +562,8 @@ sequenceDiagram
   no reply, the entry node sends it again only for these idempotent commands: `SET` without `NX` or
   `XX`, `DEL`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `PERSIST`, `MSET`, `HSET`, `HDEL`,
   `SADD`, `SREM`, `ZADD` without `INCR`, and `ZREM`. Every other command, for example `INCR`,
-  `APPEND`, `GETDEL`, `SPOP`, `SET NX`, or the take inside `RENAME`, returns `-TRYAGAIN` once its
-  delivery is in doubt.
+  `APPEND`, `GETDEL`, `SPOP`, `SET NX`, the take inside `RENAME`, or the put inside `COPY` without
+  `REPLACE`, returns `-TRYAGAIN` once its delivery is in doubt.
 
 The diagram shows a held write during a failover.
 
