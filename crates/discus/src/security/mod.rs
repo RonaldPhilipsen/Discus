@@ -481,6 +481,7 @@ impl Security {
         let Some(raw) = conn.auth.token.as_ref().map(|t| t.raw.clone()) else {
             return;
         };
+        let before = self.is_authenticated(&conn.auth);
         o.prefetch(&raw).await;
         match o.check(&raw, oauth2::unix_now()) {
             Ok(c) => {
@@ -494,7 +495,18 @@ impl Security {
             Err(reject) => {
                 tracing::debug!(conn = conn.id, reason = %reject, "token no longer active");
                 conn.auth.token = None;
+                self.close_if_lost(conn, before);
             }
+        }
+    }
+
+    /// Close a connection that met the policy and no longer does, as Valkey closes the
+    /// connections of a user that `ACL LOAD` removes. The connection must not keep the limits of
+    /// an authenticated client.
+    fn close_if_lost(&self, conn: &mut ConnState, before: bool) {
+        if before && !self.is_authenticated(&conn.auth) {
+            tracing::debug!(conn = conn.id, "the login is gone, closing the connection");
+            conn.closing = true;
         }
     }
 
@@ -732,7 +744,7 @@ impl Security {
     }
 
     /// After a reload, give the connection the new rules of its user, or drop the login when the
-    /// user is gone or off. A changed password keeps the login.
+    /// user is gone or off. A changed password keeps the login, as in Valkey.
     fn recheck_user(&self, conn: &mut ConnState) {
         let Some(grant) = &conn.auth.user else { return };
         let current = self.acl_generation.load(Ordering::Acquire);
@@ -784,10 +796,12 @@ impl Security {
         if self.policy == Policy::None || spec.access == Access::Public {
             return Ok(());
         }
+        let before = conn.auth.authenticated(&self.policy);
         #[cfg(feature = "oauth2")]
         self.recheck_token(conn);
         self.recheck_user(conn);
         if !conn.auth.authenticated(&self.policy) {
+            self.close_if_lost(conn, before);
             return Err(CommandError::NoAuth);
         }
         let sub = spec.subcommand(cmd);
@@ -1138,12 +1152,60 @@ pub(crate) mod tests {
         conn.auth.user = old_grant;
         assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), no_perm("get"));
 
+        assert!(!conn.closing);
         std::fs::write(&file, "user u off >p ~* +@all\n").unwrap();
         s.reload_acl().unwrap();
         assert_eq!(
             s.authorize(&mut conn, spec(b"GET"), &get),
             Err(CommandError::NoAuth)
         );
+        assert!(conn.closing);
+    }
+
+    #[test]
+    fn a_reload_closes_the_connections_of_a_removed_user_and_keeps_a_changed_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("users.acl");
+        std::fs::write(&file, "user u on >p ~* +@all\nuser v on >p ~* +@all\n").unwrap();
+        let s = security(&["--acl-file", file.to_str().unwrap()]);
+        let get = crate::counter::cmd(&["GET", "k"]);
+        let login = |user: &[u8]| {
+            let mut conn = ConnState::new(1, ConnAuth::default());
+            s.authenticate(&mut conn, Some(user), b"p").unwrap();
+            conn
+        };
+        let (mut u, mut v) = (login(b"u"), login(b"v"));
+        std::fs::write(&file, "user v on >new ~* +@all\n").unwrap();
+        s.reload_acl().unwrap();
+        assert_eq!(
+            s.authorize(&mut u, spec(b"GET"), &get),
+            Err(CommandError::NoAuth)
+        );
+        assert!(u.closing);
+        assert_eq!(s.authorize(&mut v, spec(b"GET"), &get), Ok(()));
+        assert!(!v.closing);
+    }
+
+    #[test]
+    fn a_lost_user_keeps_a_connection_that_another_factor_authenticates() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("users.acl");
+        std::fs::write(&file, "user u on >p ~* +@all\n").unwrap();
+        let s = Security {
+            policy: Policy::parse("any:password,mtls").unwrap(),
+            ..security(&["--acl-file", file.to_str().unwrap()])
+        };
+        let mut conn = ConnState::new(1, ConnAuth::default());
+        conn.auth.cert = Some(CertGrant {
+            identity: "c".into(),
+            scopes: Scopes::READ_WRITE,
+        });
+        s.authenticate(&mut conn, Some(b"u"), b"p").unwrap();
+        std::fs::write(&file, "user u off >p ~* +@all\n").unwrap();
+        s.reload_acl().unwrap();
+        let get = crate::counter::cmd(&["GET", "k"]);
+        assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), Ok(()));
+        assert!(!conn.closing);
     }
 
     #[test]

@@ -1214,11 +1214,13 @@ line. To move to it, install a new cluster. The cache starts empty.
 - If introspection is enabled, opaque tokens use RFC 7662. Results are cached no longer than the
   token lifetime, and no longer than 300 s. When the result of a connection ends, Discus
   introspects the token again before the next command. A token that is not active, or no answer
-  from the provider, returns `-NOAUTH`. Refused results are cached for 30 s.
+  from the provider, returns `-NOAUTH` and closes the connection. Refused results are cached for
+  30 s.
 - Scopes are `discus.read`, `discus.write`, and `discus.admin`.
 - Discus checks the full token at `AUTH` and after a JWKS refresh. Each command checks only the
-  cached `exp` and `nbf`. An expired token returns `-NOAUTH`, and the client can `AUTH` again on
-  the same connection.
+  cached `exp` and `nbf`. An expired token returns `-NOAUTH` and closes the connection, so the
+  connection does not keep the limits of an authenticated client. A client sends `AUTH` with a new
+  token before the old one expires, or opens a new connection.
 - A node stays unready until it has the JWKS. If the issuer is unreachable, OAuth 2.0 fails closed.
 - OAuth 2.0 requires TLS, except under an explicit development flag.
 - The configuration can list several trusted issuers, each with its own audience and scope rules. A

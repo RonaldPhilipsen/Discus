@@ -103,7 +103,12 @@ async fn a_revoked_token_loses_its_grant_at_the_recheck() {
     let mut wire = cmd(&["GET", "k"]);
     wire.extend(cmd(&["GET", "k"]));
     let r = exchange(&mut s, &wire).await;
-    assert_eq!(r.matches("-NOAUTH").count(), 2, "{r:?}");
+    assert_eq!(r, "-NOAUTH Authentication required.\r\n");
+    assert_eq!(
+        exchange(&mut s, &cmd(&["PING"])).await,
+        "",
+        "the node closed the connection"
+    );
     assert_eq!(idp.introspect_calls(), 2);
 }
 
@@ -130,6 +135,11 @@ async fn an_unreachable_provider_drops_the_grant_at_the_recheck() {
     tokio::time::sleep(PAST_RECHECK).await;
     let r = exchange(&mut s, &cmd(&["GET", "k"])).await;
     assert!(r.starts_with("-NOAUTH"), "{r:?}");
+    assert_eq!(
+        exchange(&mut s, &cmd(&["PING"])).await,
+        "",
+        "the node closed the connection"
+    );
 }
 
 #[tokio::test]

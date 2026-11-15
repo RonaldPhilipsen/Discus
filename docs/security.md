@@ -666,7 +666,7 @@ The node fetches the discovery document of each issuer at startup. Then it fetch
 - A token with an unknown key ID (`kid`) makes the node fetch the keys at once. It does this at
   most once per `jwks_min_refetch_secs` for each issuer.
 - After a fetch, the node checks the token of each open connection again on its next command. A
-  token whose key is gone gets `-NOAUTH`.
+  token whose key is gone gets `-NOAUTH`, and the node closes the connection.
 - If the issuer is unreachable, the node keeps the keys it has. After `jwks_max_stale_secs`
   without a successful fetch, the node refuses every token from that issuer. The node stays
   ready.
@@ -678,7 +678,9 @@ one CA instead.
 
 The node checks the full token at `AUTH` and after a key refresh. For each other command, it
 checks only the `exp` and `nbf` values that it saved. When the token expires, the next command
-returns `-NOAUTH`. The client can send `AUTH` with a new token on the same connection.
+returns `-NOAUTH`, and the node closes the connection. The client opens a new connection and sends
+`AUTH` with a new token. To keep a connection, send `AUTH` with a new token before the old one
+expires.
 
 A connection that used an opaque token also has a recheck time. See
 [Introspection](#introspection).
@@ -720,12 +722,12 @@ that use the same token share one request.
 
 - If the token is still active, the connection keeps its access. The node uses the scopes and
   the `exp` value of the new answer.
-- If the token is not active, the connection loses its access, and the command returns
-  `-NOAUTH`.
-- If the identity provider gives no answer, the connection also loses its access. The node
-  cannot know that the token is still valid, so it fails closed. An outage of the identity
-  provider thus ends the access of every connection with an opaque token within 300 seconds.
-  When the identity provider is back, the client can send `AUTH` again.
+- If the token is not active, the connection loses its access. The command returns `-NOAUTH`,
+  and the node closes the connection.
+- If the identity provider gives no answer, the connection also loses its access, and the node
+  closes it. The node cannot know that the token is still valid, so it fails closed. An outage of
+  the identity provider thus ends the access of every connection with an opaque token within 300
+  seconds. When the identity provider is back, the client can connect and send `AUTH` again.
 
 The node also keeps a refused answer, for 30 seconds. During that time it refuses the same token
 without a request to the identity provider. Thus a token that becomes active later can stay
@@ -909,12 +911,14 @@ warning and keeps its users. The node tries the file again at each check, until 
 good reload, these rules apply:
 
 - If the user of a connection is gone or `off`, the connection loses its login. Its next command
-  returns `-NOAUTH`.
+  returns `-NOAUTH`, and the node closes the connection. Valkey also closes the connections of a
+  user that `ACL LOAD` removes.
 - The new rules apply to the next command of each connection.
 - A changed password keeps the connections that are logged in.
 
 With an `any` policy, another factor can still authenticate the connection, for example a client
-certificate. Then the connection keeps the access of that factor after the user is gone.
+certificate. Then the connection stays open and keeps the access of that factor after the user is
+gone.
 
 Outside Kubernetes, write the new file next to the old file, and then rename it over the old file.
 A file that you write in place can load half written. Then a rule at the end of a line can be
