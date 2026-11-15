@@ -2,6 +2,9 @@
 #![allow(clippy::unwrap_used)]
 mod security_support;
 
+use std::path::Path;
+use std::time::{Duration, Instant};
+
 use security_support::common::client_tls::connect;
 use security_support::{cmd, exchange, send, start, Node, ACL_USERS, NOPERM_KEY as KEY};
 use tokio::net::TcpStream;
@@ -128,4 +131,72 @@ async fn a_second_login_replaces_the_user() {
         "+OK\r\n"
     );
     assert_eq!(run(&mut s, &["SET", "jobs:1", "v"]).await, no_perm("set"));
+}
+
+/// Wait until `ok` is true. The node checks the file every second, so 60 s is generous.
+async fn eventually<F: std::future::Future<Output = bool>>(mut ok: impl FnMut() -> F) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !ok().await {
+        assert!(Instant::now() < deadline, "the node did not reload");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Replace the file with one rename, as Kubernetes does, so the node never reads half a file.
+fn replace(path: &Path, content: &str) {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, content).unwrap();
+    std::fs::rename(&tmp, path).unwrap();
+}
+
+#[tokio::test]
+async fn a_reload_changes_users_on_open_connections() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = start_with(&dir).await;
+    let file = dir.path().join("users.acl");
+    let mut r = login(&node, "reader", "read-pass").await;
+    let mut w = login(&node, "writer", "w1").await;
+    let mut a = login(&node, "admin", "admin-pass").await;
+
+    replace(
+        &file,
+        "\
+user default off
+user admin on >admin-pass ~* +@all
+user reader off >read-pass ~cache:* +@read +@connection
+user writer on >w3 ~jobs:* +@read +@connection
+",
+    );
+    eventually(|| async { send(&node, &cmd(&["AUTH", "writer", "w3"])).await == "+OK\r\n" }).await;
+
+    let denied = run(&mut r, &["PING"]).await;
+    assert!(denied.starts_with("-NOAUTH"), "{denied:?}");
+    assert_eq!(run(&mut w, &["PING"]).await, "+PONG\r\n");
+    assert_eq!(run(&mut w, &["SET", "jobs:1", "v"]).await, no_perm("set"));
+    assert_eq!(run(&mut w, &["GET", "jobs:1"]).await, "$-1\r\n");
+    let old = send(&node, &cmd(&["AUTH", "writer", "w1"])).await;
+    assert!(old.starts_with("-WRONGPASS"), "{old:?}");
+    assert_eq!(run(&mut a, &["PING"]).await, "+PONG\r\n");
+
+    replace(
+        &file,
+        "user default off\nuser admin on >admin-pass ~* +@all\n",
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !run(&mut w, &["PING"]).await.starts_with("-NOAUTH") {
+        assert!(Instant::now() < deadline, "the node did not reload");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_broken_reload_keeps_the_users() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = start_with(&dir).await;
+    replace(&dir.path().join("users.acl"), "usr broken\n");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        send(&node, &cmd(&["AUTH", "reader", "read-pass"])).await,
+        "+OK\r\n"
+    );
 }

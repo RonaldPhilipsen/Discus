@@ -387,7 +387,7 @@ impl Security {
         self.shared_token_file.as_deref()
     }
 
-    /// The file of `--acl-file`.
+    /// The file that [`Security::reload_acl`] reads, with `--acl-file`.
     pub fn acl_file(&self) -> Option<&Path> {
         self.acl_file.as_deref()
     }
@@ -397,6 +397,17 @@ impl Security {
     pub fn reload_shared_token(&self) -> io::Result<()> {
         if let (Some(slot), Some(path)) = (&self.shared_token, &self.shared_token_file) {
             slot.store(Arc::new(read_shared_token(path)?));
+        }
+        Ok(())
+    }
+
+    /// Read the ACL file again. A connection takes its new rules, or loses its login, at its
+    /// next command. On an error, the node keeps its users.
+    pub fn reload_acl(&self) -> io::Result<()> {
+        if let (Some(slot), Some(path)) = (&self.acl, &self.acl_file) {
+            slot.store(Arc::new(Acl::load(path)?));
+            // The users go first, so a connection that sees the new generation sees them too.
+            self.acl_generation.fetch_add(1, Ordering::Release);
         }
         Ok(())
     }
@@ -733,6 +744,24 @@ impl Security {
         }
     }
 
+    /// After a reload, give the connection the new rules of its user, or drop the login when the
+    /// user is gone or off. A changed password keeps the login.
+    fn recheck_user(&self, conn: &mut ConnState) {
+        let Some(grant) = &conn.auth.user else { return };
+        let current = self.acl_generation.load(Ordering::Acquire);
+        if grant.generation == current {
+            return;
+        }
+        let users = self.acl.as_ref().map(|a| a.load());
+        conn.auth.user = users
+            .and_then(|acl| acl.user(grant.user.name.as_bytes()).cloned())
+            .filter(|u| u.enabled)
+            .map(|user| UserGrant {
+                user,
+                generation: current,
+            });
+    }
+
     /// Count a failed attempt and return the generic error. The reason goes to the debug log.
     fn failed(&self, conn: &mut ConnState, reason: &str) -> CommandError {
         conn.auth.failures += 1;
@@ -770,6 +799,7 @@ impl Security {
         }
         #[cfg(feature = "oauth2")]
         self.recheck_token(conn);
+        self.recheck_user(conn);
         if !conn.auth.authenticated(&self.policy) {
             return Err(CommandError::NoAuth);
         }
@@ -925,5 +955,30 @@ pub(crate) mod tests {
             CommandError::NoPerm("set".into()).text(),
             "NOPERM this user has no permissions to run the 'set' command"
         );
+    }
+
+    #[test]
+    fn a_failed_acl_reload_keeps_the_users() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("users.acl");
+        std::fs::write(&file, "user a on >old ~* +@all\n").unwrap();
+        let s = security(&["--acl-file", file.to_str().unwrap()]);
+        let accepts = |password: &[u8]| {
+            let mut conn = ConnState::new(1, ConnAuth::default());
+            s.authenticate(&mut conn, Some(b"a"), password).is_ok()
+        };
+        assert!(accepts(b"old"));
+
+        std::fs::write(&file, "usr a\n").unwrap();
+        assert!(s.reload_acl().is_err());
+        assert!(accepts(b"old"));
+        std::fs::remove_file(&file).unwrap();
+        assert!(s.reload_acl().is_err());
+        assert!(accepts(b"old"));
+
+        std::fs::write(&file, "user a on >new ~* +@all\n").unwrap();
+        s.reload_acl().unwrap();
+        assert!(accepts(b"new"));
+        assert!(!accepts(b"old"));
     }
 }
