@@ -190,6 +190,12 @@ period, 100 ms by default. That is well inside the 500 ms probe timeout.
 On shutdown, the control thread stops after the data runtime finishes its graceful shutdown. So
 the node gossips its departure until the end.
 
+The release profile sets `panic = "abort"`. Nothing watches the handles of the background tasks.
+So a task that panics, for example membership or the replicator, would stop alone, and the node
+would still pass `/healthz`. With abort, a panic in any task or thread stops the process, and
+Kubernetes starts the pod again with an empty store. A panic in one client connection also stops
+the node. Debug and test builds keep unwinding.
+
 ## 5. Placement
 
 The slot of a key follows the Redis Cluster specification:
