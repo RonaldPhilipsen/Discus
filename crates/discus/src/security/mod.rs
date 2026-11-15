@@ -482,7 +482,8 @@ impl Security {
 
     /// True for a command that `prefetch` must see before it runs, and for every command of a
     /// connection whose introspected grant is due for a recheck. A connection without such a
-    /// grant pays only the `Option` test, and one with such a grant pays a clock read.
+    /// grant pays only the `Option` test, and one with such a grant pays a clock read. An `AUTH`
+    /// or `HELLO` with a password policy also pays the password check.
     pub fn wants_prefetch(&self, conn: &ConnState, cmd: &discus_resp::Command) -> bool {
         #[cfg(feature = "oauth2")]
         if self.oauth.is_some() {
@@ -490,8 +491,7 @@ impl Security {
             if recheck_due(conn) {
                 return true;
             }
-            let name = &cmd[0];
-            return name.eq_ignore_ascii_case(b"AUTH") || name.eq_ignore_ascii_case(b"HELLO");
+            return self.token_to_prefetch(cmd).is_some();
         }
         let _ = (conn, cmd);
         false
@@ -505,13 +505,21 @@ impl Security {
         #[cfg(feature = "oauth2-introspection")]
         self.refresh_grant(conn).await;
         #[cfg(feature = "oauth2")]
-        if let (Some(o), Some(token)) = (&self.oauth, token_arg(cmd)) {
+        if let (Some(o), Some(token)) = (&self.oauth, self.token_to_prefetch(cmd)) {
             if conn.auth.peer.is_some_and(|ip| self.limiter.blocked(ip)) {
                 return;
             }
             o.prefetch(token).await;
         }
         let _ = (conn, cmd);
+    }
+
+    /// The token of `AUTH` or `HELLO ... AUTH` that the identity provider may see: none when the
+    /// password path decides the value, because a password must never leave the node.
+    #[cfg(feature = "oauth2")]
+    fn token_to_prefetch<'c>(&self, cmd: &'c discus_resp::Command) -> Option<&'c [u8]> {
+        let (user, value) = credentials_arg(cmd)?;
+        matches!(self.password_path(user, value), PasswordPath::Undecided).then_some(value)
     }
 
     /// Introspect the opaque token of a due grant again, and drop the grant unless the answer
@@ -624,7 +632,8 @@ impl Security {
     }
 
     /// Handle the credentials of `AUTH` or `HELLO ... AUTH`. A user of the ACL file takes the
-    /// password path. Any other `user` is only a hint, except that `OAUTH2` selects OAuth 2.0.
+    /// password path. Any other `user` is only a hint, except that `OAUTH2` selects OAuth 2.0
+    /// and `default` is the form without a name.
     /// The auth attempt metric counts every result (spec §15.4).
     pub fn authenticate(
         &self,
@@ -658,32 +667,15 @@ impl Security {
                 return Err(self.failed(conn, "the source is over its failed-attempt limit"));
             }
         }
-        let oauth2_only = user.is_some_and(|u| u.eq_ignore_ascii_case(b"OAUTH2"));
-        if self.policy.uses(Factor::Password) && !oauth2_only {
-            if let Some(acl) = &self.acl {
-                // Read the generation before the users: `reload_acl` stores the users first and
-                // changes the generation second, so an old user never pairs with a new generation.
-                let generation = self.acl_generation.load(Ordering::Acquire);
-                let acl = acl.load();
-                // Hash before the lookup, so an unknown name costs the same as a wrong password.
-                let hash = acl::sha256(token);
-                let named = user.is_some();
-                match acl.user(user.unwrap_or(b"default")) {
-                    Some(u) if u.accepts(&hash) => {
-                        conn.auth.user = Some(UserGrant {
-                            user: u.clone(),
-                            generation,
-                        });
-                        return Ok(());
-                    }
-                    // The file names this user, so the value is its password and nothing else.
-                    Some(_) if named => {
-                        return Err(self.failed(conn, "wrong password or user is off"))
-                    }
-                    _ => {}
-                }
+        match self.password_path(user, token) {
+            PasswordPath::Accepted(grant) => {
+                conn.auth.user = Some(grant);
+                return Ok(());
             }
+            PasswordPath::Refused => return Err(self.failed(conn, "wrong password or user is off")),
+            PasswordPath::Undecided => {}
         }
+        let oauth2_only = user.is_some_and(|u| u.eq_ignore_ascii_case(b"OAUTH2"));
         if !oauth2_only && self.policy.uses(Factor::SharedToken) {
             if let Some(expected) = &self.shared_token {
                 if bool::from(expected.load().as_bytes().ct_eq(token)) {
@@ -718,6 +710,40 @@ impl Security {
             };
         }
         Err(self.failed(conn, "the token does not match"))
+    }
+
+    /// Decide whether the password path takes the value of `AUTH [user] <value>`. Both
+    /// `check_credentials` and the OAuth 2.0 prefetch use this, so they never disagree, and a value
+    /// that the password path decides never reaches an identity provider.
+    fn password_path(&self, user: Option<&[u8]>, value: &[u8]) -> PasswordPath {
+        let Some(acl) = self
+            .acl
+            .as_ref()
+            .filter(|_| self.policy.uses(Factor::Password))
+        else {
+            return PasswordPath::Undecided;
+        };
+        if user.is_some_and(|u| u.eq_ignore_ascii_case(b"OAUTH2")) {
+            return PasswordPath::Undecided;
+        }
+        // Read the generation before the users: `reload_acl` stores the users first and changes
+        // the generation second, so an old user never pairs with a new generation.
+        let generation = self.acl_generation.load(Ordering::Acquire);
+        let acl = acl.load();
+        // Hash before the lookup, so an unknown name costs the same as a wrong password.
+        let hash = acl::sha256(value);
+        // Most client libraries send `AUTH default <value>` for a credential without a user, so
+        // the exact name `default` is the form without a name. Names are case-sensitive.
+        let named = user.filter(|u| *u != b"default");
+        match acl.user(named.unwrap_or(b"default")) {
+            Some(u) if u.accepts(&hash) => PasswordPath::Accepted(UserGrant {
+                user: u.clone(),
+                generation,
+            }),
+            // The file names this user, so the value is its password and nothing else.
+            Some(_) if named.is_some() => PasswordPath::Refused,
+            _ => PasswordPath::Undecided,
+        }
     }
 
     /// Drop the token grant of a connection when it expired, or when it fails a full check
@@ -843,6 +869,16 @@ impl Security {
     }
 }
 
+/// The result of the password path for one credential.
+enum PasswordPath {
+    /// A user of the file accepts the value.
+    Accepted(UserGrant),
+    /// The file names the user, and the value is not its password.
+    Refused,
+    /// The password path does not decide, and the value goes on to the other factors.
+    Undecided,
+}
+
 /// True when the connection holds an introspected grant whose answer ended. Only such a grant
 /// reads the clock.
 #[cfg(feature = "oauth2-introspection")]
@@ -854,13 +890,14 @@ fn recheck_due(conn: &ConnState) -> bool {
         .is_some_and(|at| oauth2::unix_now() > at)
 }
 
-/// The token of `AUTH [user] <token>` or `HELLO ... AUTH <user> <token>`.
+/// The user and the value of `AUTH [user] <value>` or `HELLO ... AUTH <user> <value>`.
 #[cfg(feature = "oauth2")]
-fn token_arg(cmd: &discus_resp::Command) -> Option<&[u8]> {
+fn credentials_arg(cmd: &discus_resp::Command) -> Option<(Option<&[u8]>, &[u8])> {
     let name = &cmd[0];
     if name.eq_ignore_ascii_case(b"AUTH") {
         return match cmd.len() {
-            2 | 3 => Some(&cmd[cmd.len() - 1]),
+            2 => Some((None, &cmd[1])),
+            3 => Some((Some(&cmd[1]), &cmd[2])),
             _ => None,
         };
     }
@@ -870,7 +907,7 @@ fn token_arg(cmd: &discus_resp::Command) -> Option<&[u8]> {
     }
     (1..cmd.len())
         .find(|&i| cmd[i].eq_ignore_ascii_case(b"AUTH") && i + 2 < cmd.len())
-        .map(|i| &cmd[i + 2][..])
+        .map(|i| (Some(&cmd[i + 1][..]), &cmd[i + 2][..]))
 }
 
 #[cfg(test)]

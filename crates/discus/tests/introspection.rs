@@ -6,7 +6,9 @@ mod security_support;
 use std::time::Duration;
 
 use security_support::idp::{unix_now, MockIdp};
-use security_support::{cmd, exchange, send, start_oauth2, write_file, Node, TestCa};
+use security_support::{
+    cmd, exchange, send, start, start_oauth2, wait_status, write_file, Node, TestCa, ACL_USERS,
+};
 use serde_json::json;
 
 async fn node(ca: &TestCa, idp: &MockIdp, secret: &str, args: &[&str]) -> Node {
@@ -162,4 +164,61 @@ async fn jwts_still_verify_locally() {
     let r = send(&node, &cmd(&["AUTH", &idp.token("discus.read")])).await;
     assert_eq!(r, "+OK\r\n");
     assert_eq!(idp.introspect_calls(), 0);
+}
+
+/// A node with the policy `any:password,oauth2`, an issuer with introspection, and the users of
+/// `acl`.
+async fn mixed_node(ca: &TestCa, idp: &MockIdp, acl: &str) -> Node {
+    let secret_file = write_file(ca, "secret", "secret");
+    let extra = format!("client_id = \"discus\"\nclient_secret_file = \"{secret_file}\"");
+    let file = write_file(ca, "auth.toml", &idp.toml(ca, &extra));
+    let acl = write_file(ca, "users.acl", acl);
+    let node = start(&[
+        "--auth-policy",
+        "any:password,oauth2",
+        "--dev-insecure-oauth2",
+        "--auth-config",
+        &file,
+        "--acl-file",
+        &acl,
+        "--auth-max-failures-per-source",
+        "1000000",
+    ])
+    .await;
+    assert!(
+        wait_status(node.admin, "/readyz", 200, Duration::from_secs(60)).await,
+        "the node never became ready"
+    );
+    node
+}
+
+#[tokio::test]
+async fn a_password_never_reaches_the_provider() {
+    let ca = TestCa::new();
+    let idp = MockIdp::start(&ca).await;
+    idp.add_opaque("opaque-1", active(&idp, unix_now() + 300));
+    let acl = format!("{ACL_USERS}user default on >default-pass ~* +@all\n").replacen(
+        "user default off\n",
+        "",
+        1,
+    );
+    let node = mixed_node(&ca, &idp, &acl).await;
+
+    for (parts, reply) in [
+        (&["AUTH", "reader", "read-pass"][..], "+OK"),
+        (&["AUTH", "reader", "wrong"], "-WRONGPASS"),
+        (&["AUTH", "gone", "gone-pass"], "-WRONGPASS"),
+        (&["AUTH", "default-pass"], "+OK"),
+        (&["AUTH", "default", "default-pass"], "+OK"),
+        (&["HELLO", "3", "AUTH", "reader", "read-pass"], "%"),
+        (&["HELLO", "3", "AUTH", "default", "default-pass"], "%"),
+    ] {
+        let r = send(&node, &cmd(parts)).await;
+        assert!(r.starts_with(reply), "{parts:?}: {r:?}");
+    }
+    assert_eq!(idp.introspect_calls(), 0);
+
+    let r = send(&node, &cmd(&["AUTH", "someone", "opaque-1"])).await;
+    assert_eq!(r, "+OK\r\n");
+    assert_eq!(idp.introspect_calls(), 1);
 }
