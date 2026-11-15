@@ -287,3 +287,74 @@ async fn a_flush_clears_every_owner() {
     }
     assert_eq!(rep.hints(c.nodes[2].id), 0);
 }
+
+/// An `MGET` part whose first owner does not answer goes to the next owner of its keys, as a
+/// single-key read does.
+#[tokio::test]
+async fn a_multi_key_read_falls_over_to_the_next_owner() {
+    let c = start_cluster_with(3, |_| {
+        vec![
+            "--replication-factor".into(),
+            "2".into(),
+            "--forward-read-timeout-ms".into(),
+            "300".into(),
+        ]
+    })
+    .await;
+    let entry = &c.nodes[0];
+    let (b, other) = (c.nodes[1].id, c.nodes[2].id);
+    // Keys that only the other two nodes own, with each of them as the primary of some.
+    let keys: Vec<String> = (0..)
+        .map(|i| format!("mf:{i}"))
+        .filter(|k| !entry.node.owners(k.as_bytes()).contains(&entry.id))
+        .take(20)
+        .collect();
+    let primaries: std::collections::HashSet<_> =
+        keys.iter().map(|k| entry.primary(k.as_bytes())).collect();
+    assert!(primaries.contains(&b) && primaries.contains(&other));
+    // The writes go through another connection, so the reads have no write set that sends
+    // them to the primary.
+    let mut writer = entry.redis().await;
+    for k in &keys {
+        let _: () = writer.set(k, format!("v:{k}")).await.unwrap();
+    }
+    let mut conn = entry.redis().await;
+    let all_there = common::gossip::wait_until(Duration::from_secs(5), || {
+        keys.iter()
+            .all(|k| c.nodes[1].holds(k.as_bytes()) && c.nodes[2].holds(k.as_bytes()))
+    });
+    assert!(all_there.await);
+    c.nodes[1]
+        .node
+        .faults
+        .stall_forwards
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let want: Vec<Option<String>> = keys.iter().map(|k| Some(format!("v:{k}"))).collect();
+    for _ in 0..4 {
+        let got: Vec<Option<String>> = conn.mget(&keys).await.unwrap();
+        assert_eq!(got, want);
+    }
+}
+
+/// An error that a part returns, such as `-OOM`, reaches the client as it is. Only a transport
+/// failure becomes `-TRYAGAIN`.
+#[tokio::test]
+async fn a_part_error_passes_through() {
+    let c = start_cluster_with(3, |i| {
+        if i == 2 {
+            vec!["--max-memory".into(), "65536".into()]
+        } else {
+            Vec::new()
+        }
+    })
+    .await;
+    let mut a = c.nodes[0].redis().await;
+    let on_a = c.key_on(0, "oa");
+    let on_c = c.key_on(2, "oc");
+    let big = "x".repeat(100_000);
+    let err = a
+        .mset::<_, _, ()>(&[(on_a.as_str(), "1"), (on_c.as_str(), big.as_str())])
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("OOM"), "{err}");
+}

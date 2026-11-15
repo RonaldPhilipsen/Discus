@@ -162,7 +162,7 @@ flowchart LR
 
 ### 4.1 Threads and runtimes
 
-A node runs two tokio runtimes.
+A node runs three tokio runtimes.
 
 The data runtime is multi-threaded. It runs client connections, forwards, replication, handoff,
 Raft, and the store. Its `on_thread_start` hook raises the nice value of each worker thread by
@@ -175,8 +175,13 @@ runs these tasks:
 
 - The membership tick, the evidence reader, lease renewal, and DNS discovery.
 - Outbound and inbound gossip, and the gossip QUIC endpoint.
-- The admin server. `/healthz`, `/startupz`, and `/readyz` read node state only and run here.
-  Handlers under `/admin/` send their work to the data runtime.
+
+The admin server runs on a second current-thread runtime, on the thread `discus-admin`, at
+nice 0. So a flood of admin connections or admin TLS handshakes never delays gossip.
+`/healthz`, `/startupz`, and `/readyz` read node state only and run there. Handlers under
+`/admin/` send their work to the data runtime. The admin server takes at most 64 connections at
+once, TLS handshakes included, and closes a connection above the limit. A connection gets 5 s for
+its request headers, serves one request, and lives at most 30 s.
 
 The control thread never runs store work. Membership work that touches the store, for example
 epoch adoption, goes to the data runtime through a stored `tokio::runtime::Handle`. Membership
@@ -187,8 +192,14 @@ thread too. The nice value decides only which thread runs first inside the quota
 thread uses little CPU, so it runs early in each period. Its worst-case wait is about one quota
 period, 100 ms by default. That is well inside the 500 ms probe timeout.
 
-On shutdown, the control thread stops after the data runtime finishes its graceful shutdown. So
-the node gossips its departure until the end.
+On shutdown, the control and admin threads stop after the data runtime finishes its graceful
+shutdown. So the node gossips its departure until the end.
+
+The release profile sets `panic = "abort"`. Nothing watches the handles of the background tasks.
+So a task that panics, for example membership or the replicator, would stop alone, and the node
+would still pass `/healthz`. With abort, a panic in any task or thread stops the process, and
+Kubernetes starts the pod again with an empty store. A panic in one client connection also stops
+the node. Debug and test builds keep unwinding.
 
 ## 5. Placement
 
@@ -235,8 +246,9 @@ the owner of a key. It cannot compute HRW over the members.
   epoch with `generation = max(seen) + 1` and itself as origin. Every other node waits longer: three
   gossip periods, plus one period for each doubling of the cluster size. If no epoch that shows the
   change arrived by then, that node builds. Two nodes therefore build at once only in rare cases,
-  for example when a partition makes them disagree about who is alive. The higher epoch wins. A
-  losing creator applies its change again in the next epoch.
+  for example when a partition makes them disagree about who is alive. The higher epoch wins, except
+  for the epoch of the smaller side after a partition (§6.3). A losing creator applies its change
+  again in the next epoch.
 - Nodes can briefly compute different owner sets. Forwarding carries the epoch and a 2-hop budget,
   and previous-epoch fallback covers the gap. The invariant is one primary per key per epoch.
 - A node keeps every epoch that a pending handoff references, and at least the last four. A rolling
@@ -262,10 +274,15 @@ replica after a death starts cold.
   unchanged range costs one CRC16 and no HRW.
 - Scans are rate-limited, run in the background behind a snapshot watermark, and respect
   `maxmemory`. A scan is O(dataset) per surviving owner.
-- Previous-epoch fallback: while its handoff is incomplete, a new owner that misses a key asks the
-  previous owners that are not current owners. The fallback ends in three cases: the handoff
-  completes, the handoff is abandoned after bounded retries, or the previous owners leave. After
-  that, a miss is a miss and the key refills lazily.
+- Previous-epoch fallback: while its handoff is incomplete, a new owner that misses a key on a
+  write or a read asks the previous owners of the key before it runs the command. It asks only the
+  previous owners that the current epoch still lists and that have not finished their part of the
+  handoff, the old primary first. A previous owner that is still a current owner counts too. After
+  a join to a cluster with fewer nodes than the replication factor, every previous owner stays an
+  owner, and until its scan arrives it holds the only copy of the value. The local parts of
+  multi-key commands and tracked reads use the same fallback. The fallback ends in three cases:
+  the handoff completes, the handoff is abandoned after bounded retries, or the previous owners
+  leave. After that, a miss is a miss and the key refills lazily.
 
 Because of this fallback, a new owner can serve a key before its entry arrives. No slot is ever
 half moved from the view of a client, so Discus never sends `-ASK`.
@@ -281,7 +298,7 @@ sequenceDiagram
     O->>O: scan from lowest pending epoch to e+1
     O->>N: HANDOFF stream of the entries N gained
     N->>N: apply an entry only if its HLC is newer
-    Note over N,Q: while the handoff is incomplete, a miss on N asks Q first
+    Note over N,Q: while the handoff is incomplete, a miss on N asks the previous owners first
     N->>Q: GET on a miss
     Q-->>N: entry or miss
     N-->>O: handoff acknowledged
@@ -349,16 +366,33 @@ A Kubernetes `Lease` makes sure that only one node forms a new cluster.
   outside Kubernetes. Seeds point at the gossip port.
 - A starting node looks for a `NORMAL` peer until the bootstrap deadline (default 10 s). If it
   finds one, it announces `JOINING`, receives the epoch and the HLC maximum, takes its handoff, and
-  becomes `NORMAL`.
+  becomes `NORMAL`. The responder leaves out of that maximum any HLC that a member sent beyond the
+  drift bound of the responder's own clock, and it logs that member. One fast clock therefore does
+  not block every join.
 - If it finds none, it tries to acquire the `Lease` `discus-cluster` (`coordination.k8s.io/v1`) in
   its namespace. If the lease is unheld or expired, acquisition can succeed. The `resourceVersion`
   precondition makes it exclusive. The winner mints the `cluster_id`, creates epoch `(1, self)`,
   sets its HLC from the wall clock, creates the counter groups, and serves. A loser reads the holder
   address from the `discus.io/address` annotation, adds it as a seed, and keeps looking.
+- Only a `NORMAL` member counts as a found peer. A seeker that still carries the ID of a lost
+  cluster does not stop formation, and it does not take part in a merge (§6.3).
+- A rejoining node that finds no `NORMAL` member until the bootstrap deadline gives up the
+  cluster. It discards its store and counters, keeps the addresses that it knows as seeds, and
+  seeks like a new node. If it held the lease before, it forms a cluster only after the lease
+  duration, so its old hold cannot let it form a second cluster beside a live one.
 - Every `NORMAL` member runs acquire-or-renew (duration 15 s, renew every 5 s), so a live cluster
   always holds the lease. The holder writes `holderIdentity`, `discus.io/address`, and
   `discus.io/cluster-id`. After a full cold restart, the lease expires and the first node to
   acquire it forms a new cluster.
+- A node judges expiry as client-go leader election does. It remembers the record that it read
+  last (`resourceVersion`, holder, `renewTime`) and the time on its own monotonic clock at which
+  it first read that record. The lease is expired only when one full `leaseDurationSeconds` passes
+  on that clock without a change of the record. A node never compares `renewTime` with its own
+  wall clock, so clock skew between nodes cannot end a live lease. A node that starts fresh waits
+  one full duration after its first read.
+- The `Lease` object stores the duration in whole seconds. A node refuses to start with a lease
+  duration that is not a whole number of seconds, or that is not greater than the renew interval.
+  For a counter lease, the duration must be greater than the renew interval plus the margin.
 - The lease matters only for formation. If the API server is unreachable, a running cluster keeps
   serving. A node that reaches neither a `NORMAL` peer nor the API server stays unready.
 - The lease provider `none` (outside Kubernetes) forms a cluster alone after the deadline. It
@@ -390,10 +424,32 @@ flowchart TD
 Split-brain is accepted for normal keys. Both sides of a partition serve, promote primaries, and
 create epochs that mark the other side `DEAD`.
 
-- On heal, the higher epoch wins. A node that is not `NORMAL` in an adopted epoch increments its
-  incarnation and rejoins as `JOINING` with a handoff. It discards its counter state. If it was away
-  for less than the tombstone TTL, it keeps its cache store. HLC last-write-wins resolves the
-  conflicting writes.
+- A partitioned node marks the other side dead one member at a time and builds one epoch for each
+  death. The smaller side therefore often holds the higher epoch at the heal. So the larger side
+  wins, and the epoch ID decides only between sides of equal size:
+  - A `NORMAL` node counts the `NORMAL` members of its current epoch that it does not see as
+    `DEAD`, itself included. It refuses a higher epoch that has fewer `NORMAL` members than that
+    count and that drops the node or lists a member that the node holds back.
+  - A node that refuses an epoch builds an epoch from its own, with a generation above the refused
+    one. It holds back the members that are `NORMAL` in the refused epoch but not in its own. It
+    adds them again only after they hold its current epoch or stop being `NORMAL`.
+  - A node that receives a lower epoch that does not list it, with more `NORMAL` members than its
+    own count, holds back the members of that epoch in the same way. It does not take them into
+    its own epochs before an epoch of the larger side arrives.
+  - A refusal needs an epoch that is smaller than the live part of the own epoch, and that part is
+    never larger than the own epoch. Two nodes therefore never refuse the epochs of each other,
+    and the exchange ends.
+  - A side that lost members to a real crash keeps serving. The rule compares sides only when
+    they meet again.
+- On heal, the higher epoch that a node does not refuse wins. A node that is not `NORMAL` in an
+  adopted epoch increments its incarnation and rejoins as `JOINING` with a handoff. It discards its
+  counter state. If it was away for less than the tombstone TTL, it keeps its cache store. HLC
+  last-write-wins resolves the conflicting writes.
+- The deaths that a partitioned node decided alone reach the other side at the heal. A `DEAD` rumor
+  that a node hears from another node, about a member that it holds alive at the same incarnation,
+  makes that member `SUSPECT` only. The member then has the normal suspicion timeout to refute it. A
+  rumor about the sender itself, such as the death in its `LEAVE`, counts as first-hand. A node that
+  rejoins forgets its `DEAD` records, and a `DEAD` rumor about an unknown node creates no record.
 - If two clusters formed independently, the cluster whose `cluster_id` matches the lease wins.
   Without lease access, the larger cluster wins, then the higher `cluster_id`. The losing nodes
   discard their store and counters and rejoin.
@@ -521,10 +577,12 @@ sequenceDiagram
 ### 7.3 Multi-key commands
 
 - `MGET` groups keys by owner, fans out, and merges the replies in order. The keys of one slot
-  always share a target.
-- `MSET` and multi-key `DEL` fan out and are not atomic. If any part fails, the command returns
-  `-TRYAGAIN` and the other parts stay applied. A retry of the whole command is safe. If the node
-  cannot know whether a part applied, the reply says so.
+  always share a target. If a part gets no answer, its keys go to their next owner, as for a
+  single-key read.
+- `MSET` and multi-key `DEL` fan out and are not atomic. If a part gets no answer, the command
+  returns `-TRYAGAIN` and the other parts stay applied. A retry of the whole command is safe. If
+  the node cannot know whether a part applied, the reply says so. If a part returns an error, such
+  as `-OOM`, the command returns that error.
 - `SCAN` and `RANDOMKEY` are local to the entry node. `DBSIZE` is a fan-out estimate. `FLUSHDB` and
   `FLUSHALL` broadcast best-effort.
 - On a redirect connection, a command with all keys in one slot acts like a single-key command. A
@@ -555,8 +613,8 @@ sequenceDiagram
   no reply, the entry node sends it again only for these idempotent commands: `SET` without `NX` or
   `XX`, `DEL`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `PERSIST`, `MSET`, `HSET`, `HDEL`,
   `SADD`, `SREM`, `ZADD` without `INCR`, and `ZREM`. Every other command, for example `INCR`,
-  `APPEND`, `GETDEL`, `SPOP`, `SET NX`, or the take inside `RENAME`, returns `-TRYAGAIN` once its
-  delivery is in doubt.
+  `APPEND`, `GETDEL`, `SPOP`, `SET NX`, the take inside `RENAME`, or the put inside `COPY` without
+  `REPLACE`, returns `-TRYAGAIN` once its delivery is in doubt.
 
 The diagram shows a held write during a failover.
 
@@ -710,7 +768,10 @@ directly but never gets `-MOVED`. That setting is for tests.
 - Before it becomes `NORMAL`, a joining node sets its HLC to at least the cluster maximum it
   receives. If a `NORMAL` peer is reachable but does not answer, the node does not serve writes.
   Only the bootstrap node starts from the wall clock.
-- Deletes write tombstones. The cache eviction policy does not evict tombstones. They use a
+- Deletes write tombstones. As in Valkey, `SET` and `GETEX` with a deadline at or before now are
+  deletes, so they write tombstones too. A replica that receives a newer entry that already
+  expired replaces its older entry with a tombstone. The cache eviction policy does not evict
+  tombstones. They use a
   separate reserve. If the reserve is full, the node evicts normal entries first. Then it drops the
   oldest tombstones and marks the shard `needs_refill`, so a rejoin discards that shard.
 - TTLs replicate as an absolute deadline in Unix milliseconds. Expiry is lazy on access plus a
@@ -728,22 +789,30 @@ directly but never gets `-MOVED`. That setting is for tests.
   hints (§9).
 - Read repair is miss-driven. A replica that misses asks the primary or another replica and stores
   what it finds. Hits are not compared across replicas.
-- A promoted primary exchanges per-shard HLC digests with the other replicas once and pulls newer
-  entries. Continuous anti-entropy is out of scope.
+- A promoted primary exchanges per-bucket HLC digests with the other replicas once and pulls newer
+  entries. A reply carries whole buckets up to 16 MiB. While a reply reaches that limit, the
+  primary sends another round for the remaining buckets. The exchange has its own timeout, which
+  grows with the size of the store, and a failed round is tried again up to five times.
+  Continuous anti-entropy is out of scope.
 - Repair treats tombstones as entries, so repair cannot bring back a deleted key.
 - A replica that was unreachable for longer than the tombstone TTL discards its store on rejoin.
 
 ## 9. Hinted handoff
 
 - If the primary cannot deliver a write to a secondary, it records a hint. Causes are a failed
-  connection, a timeout, a peer that is not `NORMAL`, or a queue overflow.
+  connection, a timeout, a peer that is not `NORMAL`, a queue overflow, or a peer that answers but
+  does not store the entry. An acknowledgment counts only the entries that the peer stored. If it
+  counts fewer than the batch carried, the primary offers each key of the batch at its version,
+  and the keys that the peer still asks for become hints. They do not count as acknowledged.
 - Hints live on the primary, keyed by target and key. A hint holds the full entry and its epoch.
   Hints coalesce to the latest entry per key.
 - Bounds are a byte cap and an entry cap per target, a global cap (5% of `maxmemory`), and a
   maximum age equal to the tombstone TTL. The oldest hints are evicted and counted.
-- Replay starts in two cases: the target is `NORMAL` and reconnected, or the queue of a lagging peer
-  drains below a low-water mark. The primary sends `HINT_REPLAY` batches in HLC order and waits for
-  an acknowledgment per batch. The target applies only newer entries.
+- Replay starts in three cases: the target is `NORMAL` and reconnected, the queue of a lagging peer
+  drains below a low-water mark, or the once-per-second tick finds hints for a target whose queue is
+  up. The primary sends `HINT_REPLAY` batches in HLC order and waits for an acknowledgment per
+  batch. The target applies only newer entries. A hint that the target answers but does not store
+  stays for the next tick.
 - A `DEAD` target never returns, so its hints are dropped. Hints cover transient unreachability and
   slow peers, not restarts.
 - On every epoch change, the primary drops the hints whose target no longer owns the key.
@@ -761,7 +830,7 @@ flowchart TD
     sent{"delivered?"}
     apply["secondary applies the entry if its HLC is newer"]
     hint["record a hint: target, key, entry, epoch"]
-    ready{"target NORMAL and reconnected, or queue below the low-water mark?"}
+    ready{"target NORMAL and reconnected, queue below the low-water mark, or tick with the queue up?"}
     replay["HINT_REPLAY batches in HLC order"]
     drop["drop the hint"]
     refill["mark the refill bucket needs_refill"]
@@ -795,8 +864,9 @@ two-voter Raft group cannot survive a loss, so small clusters use leader-followe
 - The `Lease` `discus-counter-<g>` names the leader (duration 5 s, renew every 1 s).
 - The leader serves only while its lease is valid by its own monotonic clock, minus a 1 s margin.
   Otherwise it returns `-TRYAGAIN`. Two leaders never serve one group at the same time.
-- Leadership is sticky. When the lease expires, the follower tries to acquire it first. Other
-  members wait one more lease duration.
+- Leadership is sticky. After two missed syncs, the follower starts to read the lease, and it
+  takes the lease when the lease expires. Other members wait two lease durations without a leader
+  before they read it.
 - A node without counter state asks the other members before it takes the lease. A follower, or a
   Raft replica, that holds the state of the group answers so. The node then waits two lease
   durations for that member to take over. After the wait it starts empty in a regime above the
@@ -811,9 +881,9 @@ two-voter Raft group cannot survive a loss, so small clusters use leader-followe
 - One `COUNTER_SYNC` carries at most 512 ops and 4 MiB of commands. A snapshot above 4 MiB goes in
   parts of 4 MiB, the last part with a final flag, to a follower with the capability bit
   `COUNTER_CHUNKS`. A follower without the bit gets the snapshot in one frame, as before.
-- Failover takes about one lease duration and loses the increments that a lagging follower missed.
-  With one node, a node loss loses the counters. Counter availability in this mode depends on the
-  API server.
+- Failover takes about one lease duration plus two renew intervals and loses the increments that a
+  lagging follower missed. With one node, a node loss loses the counters. Counter availability in
+  this mode depends on the API server.
 - With the lease provider `none`, the epoch names the leader: the previous leader, else the
   previous follower, else the top member by HRW. This mode cannot fence a leader and is for
   development only.
@@ -956,14 +1026,16 @@ steps in reverse.
   the limit, the node evicts normal entries, then the oldest hints, then the oldest tombstones with
   `needs_refill`. It never evicts counter state or write sets. Counters return `-OOM`, and write
   sets are bounded at admission.
-- Eviction is sampled approximate LRU per shard. Replicas evict independently, and read repair
-  covers the resulting misses.
-- Expiry has no timer per key (§8.1). The sampled sweep keeps a cursor per shard, so repeated sweeps
-  cover the whole shard.
+- Eviction is sampled approximate LRU per shard. A sample is a run of hash buckets from a random
+  bucket, as in Valkey, so it costs the buckets that it reads. Replicas evict independently, and
+  read repair covers the resulting misses.
+- Expiry has no timer per key (§8.1). The sampled sweep keeps a cursor of a database and a bucket
+  index per shard, so repeated sweeps cover the whole shard, and a sweep reads only its sample.
 - The default limits are 64 KiB per key, 64 MiB per value, and 10000 in-flight commands per
   connection. A connection over the pipeline limit is not read until replies drain.
 - A node serves at most 10000 client connections (`--max-clients`), counted from the accept. It
-  closes a connection over the limit before the TLS handshake.
+  closes a connection over the limit before the TLS handshake. An `accept` error never stops a
+  listener. The node waits from 10 ms up to 1 s and accepts again.
 - There is no persistence.
 
 ## 12. Protocol surface
@@ -1131,10 +1203,22 @@ same owners in every database.
   replies behind it. The acceptor runs at most the stream limit of requests from one shared stream
   at the same time. A frame that fails the verifier resets the shared stream, and the dialer sends
   later requests on streams of their own.
+- The queues of the shared stream are bounded. On the dialer, at most 4 MiB of requests wait to be
+  written, and a request whose caller stopped waiting is dropped before it goes out. On the
+  acceptor, a request keeps its place in the stream limit until its reply was written.
 - Allow at most 1024 concurrent streams per connection. Flow-control windows provide backpressure.
 - 0-RTT is off, because 0-RTT data can be replayed.
+- An endpoint sends a QUIC retry to a new connection from an address that it did not validate. A
+  peer then proves that it receives at its address before the TLS handshake starts. This adds one
+  round trip to a new connection. At most 256 inbound handshakes run at the same time. Above that
+  limit, the endpoint refuses the connection. A failed inbound handshake is not evidence for the
+  failure detector, because the dialer is not a known peer.
 - If an address changes, use connection migration. Configure idle timeout, keep-alive, and a
   handshake timeout. A failed handshake, a reset, or a forward timeout feeds the failure detector.
+- The timeout of a request also covers the wait for its connection. A request that times out
+  before its connection is ready was not sent. The dial goes on, and later requests use its
+  connection. The pool keeps a failed dial for at most 1 s or the handshake timeout. In that time,
+  requests to the peer fail at once with the same error and do not dial again.
 
 ### 13.2 Messages
 
@@ -1324,7 +1408,7 @@ access for clients sets `clusterClients.enabled=false`.
 
 ### 15.2 Health
 
-- `/healthz` is liveness. It runs on the control thread, so it answers on an overloaded node.
+- `/healthz` is liveness. It runs on the admin thread, so it answers on an overloaded node.
 - `/startupz` passes after three conditions: the node is `NORMAL`, the store is ready, and the
   counter tier is settled. Settled means the node is a voter in every Raft group that targets it, or
   holds a current snapshot as follower. A rollout therefore waits for the counters before it
@@ -1338,8 +1422,9 @@ access for clients sets `clusterClients.enabled=false`.
 - Drain marks the node `LEAVING` and unready. The node keeps serving existing connections and acts
   as a handoff source until the shutdown deadline. It keeps its Raft voter slots from the start of
   the drain, also before the epoch that marks it `LEAVING` arrives. The deadline must cover the
-  handoff and the Raft moves. Then the node flushes its queues and leaves gossip. Keys not copied in
-  time refill as misses.
+  handoff and the Raft moves. Then the node flushes its queues, waits for the batches in flight, and
+  leaves gossip. Before it closes its transports, it waits once more for the writes that arrived
+  during the departure, within the same deadline. Keys not copied in time refill as misses.
 - Cluster clients move away before the node stops, because it leaves placement first (§7.6).
 - A restarted pod is a new, cold node. Use `maxSurge` so the new pod joins before the old pod
   drains, and `minReadySeconds` so one replacement finishes before the next begins.
@@ -1416,6 +1501,10 @@ from one feature. Cluster mTLS and client mTLS always use the configured CA.
 | --- | --- | --- |
 | `roots-system` | on | The system trust store, through `rustls-native-certs`. |
 | `roots-webpki` | off | The Mozilla roots compiled in through `webpki-roots`, for scratch or distroless images. |
+
+The release image starts from `scratch` and copies the CA bundle of the build image, so
+`roots-system` finds roots there. At start, the node logs a warning when the store is empty and an
+issuer or the OTLP endpoint uses it.
 
 Exactly one TLS backend and one trust root feature must be on, or the build fails. The startup log
 and `INFO` list the enabled features.

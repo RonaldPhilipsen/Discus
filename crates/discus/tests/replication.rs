@@ -90,6 +90,49 @@ async fn a_delete_replicates_as_a_tombstone() {
     );
 }
 
+/// Valkey turns `SET` and `GETEX` with a deadline in the past into a delete. The older value
+/// must then be gone on every owner, not only on the primary.
+#[tokio::test]
+async fn a_deadline_in_the_past_deletes_on_every_owner() {
+    let c = start_cluster(3, RF3).await;
+    let mut client = c.nodes[0].redis().await;
+    for (i, cmd) in ["SET", "GETEX"].iter().enumerate() {
+        let key = c.key_on(i, "past");
+        let _: () = client.set(&key, "old").await.unwrap();
+        let primary = c.by_id(c.nodes[0].primary(key.as_bytes()));
+        let first = version(primary, &key).unwrap();
+        assert!(
+            wait_until(Duration::from_secs(5), || c.nodes.iter().all(|n| version(
+                n, &key
+            ) == Some(
+                first
+            )))
+            .await
+        );
+        let mut past = redis::cmd(cmd);
+        past.arg(&key);
+        if *cmd == "SET" {
+            past.arg("new");
+        }
+        let _: redis::Value = past
+            .arg("PXAT")
+            .arg(1)
+            .query_async(&mut client)
+            .await
+            .unwrap();
+        assert!(
+            !primary.holds(key.as_bytes()),
+            "{cmd} kept the key on the primary"
+        );
+        let gone = wait_until(Duration::from_secs(5), || {
+            c.nodes
+                .iter()
+                .all(|n| !n.holds(key.as_bytes()) && version(n, &key).is_some_and(|v| v > first))
+        });
+        assert!(gone.await, "{cmd} left the old value on an owner");
+    }
+}
+
 #[tokio::test]
 async fn replicas_serve_reads_by_default() {
     let c = start_cluster(3, RF3).await;

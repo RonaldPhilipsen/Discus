@@ -60,8 +60,9 @@ fn class_match(pat: &[u8], c: u8) -> Option<usize> {
             i += 1;
         }
     }
-    // `i` is at the closing bracket, or at the end of an unterminated class.
-    (hit != negate).then_some(i + 1)
+    // `i` is at the closing bracket, or at the end of an unterminated class, which Valkey ends
+    // at the end of the pattern.
+    (hit != negate).then_some((i + 1).min(pat.len()))
 }
 
 #[cfg(test)]
@@ -82,5 +83,15 @@ mod tests {
         assert!(glob_match(b"*a*b*", b"xxaxxbxx"));
         assert!(glob_match(b"", b""));
         assert!(!glob_match(b"", b"x"));
+    }
+
+    /// redis-server 8.10.2: an unterminated class takes the rest of the pattern as its members.
+    #[test]
+    fn an_unterminated_class_ends_the_pattern() {
+        assert!(glob_match(b"[a", b"a"));
+        assert!(glob_match(b"[a?", b"a"));
+        assert!(!glob_match(b"[a?", b"ab"));
+        assert!(!glob_match(b"a[", b"a"));
+        assert!(!glob_match(b"[", b"a"));
     }
 }

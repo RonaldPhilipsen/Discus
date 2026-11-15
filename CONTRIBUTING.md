@@ -56,3 +56,41 @@ new push to the pull request publishes the next number: `0.5.0-rc1`, then
 
 When semVersie looks for the last release, it skips prerelease tags. Thus the
 merge of the pull request releases `0.5.0`.
+
+A release candidate waits for CI. The job `Wait for CI` waits until the CI run
+of the head commit of the pull request completes. When that run fails, the
+release workflow stops, and it publishes no image, chart, tag, or release.
+
+### Verify a release
+
+Each image has an SBOM (a list of the software in the image) and a provenance
+attestation (a record of how the image was built). The release workflow signs
+both images and the chart with cosign keyless signing. Keyless signing uses no
+private key. Sigstore gives the workflow a short-lived certificate for its
+GitHub identity, and it records each signature in a public log. Older
+releases have no signature.
+
+To verify a release, use cosign 3. The certificate identity is the release
+workflow on `main`:
+
+```sh
+workflow=https://github.com/RonaldPhilipsen/Discus/.github/workflows/release.yaml
+issuer=https://token.actions.githubusercontent.com
+cosign verify ghcr.io/ronaldphilipsen/discus:0.7.1 \
+  --certificate-identity "$workflow@refs/heads/main" --certificate-oidc-issuer "$issuer"
+cosign verify ghcr.io/ronaldphilipsen/charts/discus:0.7.1 \
+  --certificate-identity "$workflow@refs/heads/main" --certificate-oidc-issuer "$issuer"
+```
+
+The image with the suffix `-pyroscope` uses the same command. A release
+candidate runs in a pull request, so its identity ends in
+`@refs/pull/<number>/merge`. To verify a release candidate, use the number of
+the pull request, for example `@refs/pull/97/merge`.
+
+To read the SBOM or the provenance of an image, use `docker buildx imagetools`:
+
+```sh
+image=ghcr.io/ronaldphilipsen/discus:0.7.1
+docker buildx imagetools inspect "$image" --format '{{ json .SBOM }}'
+docker buildx imagetools inspect "$image" --format '{{ json .Provenance }}'
+```

@@ -100,10 +100,19 @@ annotations `discus.io/address` and `discus.io/cluster-id`.
 The lease matters only for the formation of a cluster. If the API server is down, a running cluster
 keeps serving. A new node that reaches neither a `NORMAL` peer nor the API server stays unready.
 
-After a full cold restart, the old lease expires after 15 s. Then the first node to take it forms
-a new cluster.
+After a full cold restart, the old lease expires 15 s after a node first reads it. Then the first
+node to take it forms a new cluster.
 
-The service account of the pods needs these permissions in its namespace:
+A node judges expiry on its own monotonic clock, as client-go leader election does. It remembers
+the lease record that it read last and the time at which it first read that record. It takes the
+lease only when one full lease duration passes without a change of the record. It never compares
+the renewal time of the holder with its own wall clock, so clock skew between nodes cannot end a
+live lease.
+
+The service account of the pods needs these permissions in its namespace. The node uses the
+cluster lease `--lease-name` and one lease per counter group, `<--counter-lease-prefix>-<g>` for
+`g` from 0 to `--counter-groups` minus 1. Kubernetes cannot limit `create` to a name, so only `get`
+and `update` list the names. This example has the default 8 groups:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -113,7 +122,20 @@ metadata:
 rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    verbs: ["get", "create", "update"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "update"]
+    resourceNames:
+      - discus-cluster
+      - discus-counter-0
+      - discus-counter-1
+      - discus-counter-2
+      - discus-counter-3
+      - discus-counter-4
+      - discus-counter-5
+      - discus-counter-6
+      - discus-counter-7
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -237,7 +259,7 @@ spec:
               path: /startupz
               port: 9100
             failureThreshold: 60
-            periodSeconds: 1
+            periodSeconds: 5
           readinessProbe:
             httpGet:
               path: /readyz
@@ -256,6 +278,13 @@ Follow these rules:
   `minReadySeconds` makes one replacement finish before the next one begins.
 - `terminationGracePeriodSeconds` is longer than `--shutdown-timeout-secs`, so the drain ends
   before Kubernetes kills the container.
+- The startup probe budget (`periodSeconds` times `failureThreshold`) is longer than the worst
+  start of a node. Otherwise the kubelet restarts the pod during its handoff, and the next start
+  begins the handoff again. The worst start is the store budget divided by
+  `--handoff-rate-bytes`, plus `--bootstrap-deadline-ms`, plus `--counter-settle-timeout-ms`.
+  With a 2 Gi memory limit and the defaults, that is 1.5 GiB / 32 MiB/s = 48 s, plus 10 s, plus
+  45 s, which is 103 s. The example above gives 300 s. For a 16 Gi limit, the worst start is
+  439 s, so give it about 900 s. The chart sets this budget in `probes.startup`.
 - The service account `discus` needs the Role of the cluster lease above.
 - Mount the node certificate at `/tls`, for example from a cert-manager `Certificate` with the URI
   SAN `spiffe://cluster.local/ns/<namespace>/sa/discus`. Set `--cluster-san` to the same value.
@@ -264,6 +293,11 @@ Follow these rules:
 
 The chart in `charts/discus` creates the resources above and a PodDisruptionBudget. Each release
 publishes the chart with the same version as the image.
+
+By default, the chart spreads the pods over the Kubernetes nodes, with `maxSkew: 1` on
+`kubernetes.io/hostname` and `whenUnsatisfiable: ScheduleAnyway`. So one node failure takes at
+most one replica when there are enough nodes. A list in `topologySpreadConstraints` replaces this
+default, and `[]` turns it off.
 
 Before you install the chart, create a Secret with the keys `ca.crt`, `tls.crt`, and `tls.key`.
 Use a CA that serves only this release and signs no client certificates, because every certificate
@@ -312,6 +346,8 @@ authentication for clients:
 | `authConfig.secretName` | A Secret with the key `auth.toml`, for the flag `--auth-config`. |
 | `aclFile.secretName` | A Secret with the users and their passwords, for the flag `--acl-file`. |
 | `aclFile.key` | The key of that Secret. The default is `users.acl`. |
+| `admin.tls.enabled=true` | The admin port uses TLS (`--admin-tls`), and the probes use HTTPS. |
+| `admin.tls.secretName` | A Secret with the keys `tls.crt` and `tls.key` for the admin port. The default is the certificate of the client listener. |
 
 The node reloads its certificates after the Secrets change, so a rotation needs no restart. See
 [Certificate rotation](security.md#certificate-rotation).
@@ -515,7 +551,7 @@ restart.
 | `--lease-provider` | `k8s` | `k8s` or `none`. Without the `k8s` build feature, the default is `none`. |
 | `--lease-name` | `discus-cluster` | The name of the cluster lease. |
 | `--lease-namespace` | pod namespace | The namespace of the cluster lease. |
-| `--lease-duration-ms` | 15000 | The lease duration. |
+| `--lease-duration-ms` | 15000 | The lease duration. It must be a whole number of seconds and greater than `--lease-renew-ms`. Otherwise the node does not start. |
 | `--lease-renew-ms` | 5000 | The renewal interval. |
 | `--bootstrap-deadline-ms` | 10000 | Time to look for a `NORMAL` peer before the node tries the lease. |
 | `--gossip-interval-ms` | 1000 | The gossip period: one probe per period. |
@@ -562,7 +598,7 @@ restart.
 | `--counter-timeout-ms` | 1000 | Time that a counter command waits for a leader, a quorum, or a commit. |
 | `--counter-settle-timeout-ms` | 45000 | The longest time that `/startupz` waits for the counter tier after the node turns `NORMAL`. Keep it below the startup probe budget. |
 | `--counter-lease-prefix` | `discus-counter` | The name prefix of the counter group leases. Every member of a cluster must use the same value. |
-| `--counter-lease-duration-ms` | 5000 | The duration of a counter group lease. |
+| `--counter-lease-duration-ms` | 5000 | The duration of a counter group lease. It must be a whole number of seconds and greater than `--counter-lease-renew-ms` plus `--counter-lease-margin-ms`. Otherwise the node does not start. |
 | `--counter-lease-renew-ms` | 1000 | The renewal interval of a counter group lease. |
 | `--counter-lease-margin-ms` | 1000 | A leader stops this long before its lease ends. |
 | `--counter-follower-timeout-ms` | 50 | Time that a leader-follower write waits for the follower. |
@@ -984,11 +1020,12 @@ The Kubernetes `Lease` `<prefix>-<g>` names the leader of group `g`. The value `
 - The leader sends each write to its follower and waits up to `--counter-follower-timeout-ms`
   (default 50 ms) for the acknowledgement. After a timeout, it replies anyway and sends a fresh
   snapshot to the follower later. A new follower starts with a snapshot.
-- Leadership is sticky. When the leader goes silent for one lease duration, the follower tries to
-  take the lease first. The other members wait one more lease duration.
-- A failover takes about one lease duration. It loses the writes that a lagging follower missed.
-  With one node, a node loss loses the counters. In this mode the counters depend on the API
-  server.
+- Leadership is sticky. When the follower misses two syncs from the leader, it starts to read the
+  lease. It takes the lease when one full lease duration passes without a renewal. The other
+  members wait two lease durations without a leader before they read the lease.
+- A failover takes about one lease duration plus two renew intervals. It loses the writes that a
+  lagging follower missed. With one node, a node loss loses the counters. In this mode the
+  counters depend on the API server.
 
 With `--lease-provider none` and with static membership, no lease fences the leader. The epoch
 names the leader: the previous leader, else the previous follower, else the top member by HRW.
@@ -1070,6 +1107,7 @@ Linearizability does not hold across it, and Discus does not automate it:
 1. Stop the clients that write counter keys.
 2. Read every counter key with `GET` and `PTTL`, and save the values.
 3. Restart every node with the new `--counter-groups`. A full cold restart clears the counters.
+   With the chart, set `counterGroups`. The chart then also gives the Role the new lease names.
 4. Write the saved values back with `SET` and `PX`.
 5. Start the clients again.
 

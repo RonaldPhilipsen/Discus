@@ -156,6 +156,49 @@ async fn a_non_admin_certificate_is_refused() {
 }
 
 #[tokio::test]
+async fn the_admin_port_can_use_its_own_certificate() {
+    let ca = TestCa::new();
+    let server = ca.server_cert();
+    let admin_ca = TestCa::new();
+    let admin = admin_ca.server_cert();
+    let file = write_file(&ca, "auth.toml", ADMIN_TOML);
+    let mut args = admin_tls_args(&ca, &server, &file);
+    args.extend([
+        "--admin-tls-cert",
+        admin.cert_str(),
+        "--admin-tls-key",
+        admin.key_str(),
+    ]);
+    let node = start(&args).await;
+    assert!(tls_connect(node.admin, &ca, None).await.is_err());
+    let mut s = tls_connect(node.admin, &admin_ca, None).await.unwrap();
+    assert_eq!(raw_get(&mut s, "/healthz", None).await.0, 200);
+    // The client listener keeps its own certificate.
+    assert!(tls_connect(node.addr, &ca, None).await.is_ok());
+}
+
+#[tokio::test]
+async fn an_admin_certificate_needs_its_key_and_admin_tls() {
+    let ca = TestCa::new();
+    let admin = ca.server_cert();
+    let e = try_start(&["--admin-tls", "--admin-tls-cert", admin.cert_str()])
+        .await
+        .err()
+        .unwrap();
+    assert!(e.contains("--admin-tls-key"), "{e}");
+    let e = try_start(&[
+        "--admin-tls-cert",
+        admin.cert_str(),
+        "--admin-tls-key",
+        admin.key_str(),
+    ])
+    .await
+    .err()
+    .unwrap();
+    assert!(e.contains("--admin-tls"), "{e}");
+}
+
+#[tokio::test]
 async fn admin_identities_need_admin_tls() {
     let ca = TestCa::new();
     let file = write_file(&ca, "auth.toml", ADMIN_TOML);

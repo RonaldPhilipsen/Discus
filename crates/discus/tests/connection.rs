@@ -122,3 +122,52 @@ async fn command_info_and_getkeys() {
     .await;
     assert!(none.starts_with("-ERR"), "{none:?}");
 }
+
+/// Under RESP3, `SMEMBERS` and `SPOP` with a count reply with a set (`~`), as redis-server 8.10.2
+/// does. `SRANDMEMBER` with a count and `HKEYS` keep an array.
+#[tokio::test]
+async fn set_replies_are_sets_under_resp3() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let addr = common::start_node(&[]).await;
+    let mut s = common::client_tls::connect(addr).await;
+    let mut wire = Vec::new();
+    for parts in [
+        &["SADD", "s", "a"][..],
+        &["HSET", "h", "f", "v"],
+        &["HELLO", "3"],
+    ] {
+        wire.extend_from_slice(&discus_wire::encode_command(&common::cmd(parts)));
+    }
+    s.write_all(&wire).await.unwrap();
+    let mut buf = vec![0u8; 4096];
+    let mut got = Vec::new();
+    while !got.ends_with(b"modules\r\n*0\r\n") {
+        let n = s.read(&mut buf).await.unwrap();
+        assert!(n > 0, "closed: {:?}", String::from_utf8_lossy(&got));
+        got.extend_from_slice(&buf[..n]);
+    }
+    let mut wire = Vec::new();
+    for parts in [
+        &["SMEMBERS", "s"][..],
+        &["SRANDMEMBER", "s", "1"],
+        &["HKEYS", "h"],
+        &["SMEMBERS", "none"],
+        &["SPOP", "none", "2"],
+        &["SPOP", "s", "1"],
+        &["HELLO", "2"],
+    ] {
+        wire.extend_from_slice(&discus_wire::encode_command(&common::cmd(parts)));
+    }
+    wire.extend_from_slice(&discus_wire::encode_command(&common::cmd(&[
+        "SMEMBERS", "none",
+    ])));
+    s.write_all(&wire).await.unwrap();
+    let want = b"~1\r\n$1\r\na\r\n*1\r\n$1\r\na\r\n*1\r\n$1\r\nf\r\n~0\r\n~0\r\n~1\r\n$1\r\na\r\n";
+    let mut got = Vec::new();
+    while !got.ends_with(b"*0\r\n") || got.len() < want.len() {
+        let n = s.read(&mut buf).await.unwrap();
+        assert!(n > 0, "closed: {:?}", String::from_utf8_lossy(&got));
+        got.extend_from_slice(&buf[..n]);
+    }
+    assert!(got.starts_with(want), "{:?}", String::from_utf8_lossy(&got));
+}

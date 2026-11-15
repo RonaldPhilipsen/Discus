@@ -63,6 +63,10 @@ impl Host for NodeHost {
             .is_some_and(|n| n.hlc.set_floor(NTP64(floor)).is_ok())
     }
 
+    fn hlc_limit(&self) -> u64 {
+        self.node.upgrade().map_or(0, |n| n.hlc.limit().as_u64())
+    }
+
     fn lease_cluster(&self) -> Option<ClusterId> {
         self.lease_cluster
     }

@@ -194,7 +194,8 @@ pub struct Config {
     /// The namespace of the cluster lease. Default: the service account namespace.
     #[arg(long)]
     pub lease_namespace: Option<String>,
-    /// The lease duration, in milliseconds.
+    /// The lease duration, in milliseconds. A whole number of seconds, greater than
+    /// `--lease-renew-ms`.
     #[arg(long, default_value_t = 15_000)]
     pub lease_duration_ms: u64,
     /// The lease renewal interval, in milliseconds.
@@ -314,7 +315,8 @@ pub struct Config {
     /// Every member of a cluster uses the same value, and each cluster in a namespace its own.
     #[arg(long, default_value = "discus-counter")]
     pub counter_lease_prefix: String,
-    /// The duration of a counter group lease, in milliseconds.
+    /// The duration of a counter group lease, in milliseconds. A whole number of seconds,
+    /// greater than `--counter-lease-renew-ms` plus `--counter-lease-margin-ms`.
     #[arg(long, default_value_t = 5_000)]
     pub counter_lease_duration_ms: u64,
     /// The renewal interval of a counter group lease, in milliseconds.
@@ -527,6 +529,7 @@ impl Config {
             suspicion_min_ms: self.suspicion_min_ms,
             suspicion_max_ms: self.suspicion_max_ms,
             bootstrap_deadline_ms: self.bootstrap_deadline_ms,
+            lease_duration_ms: self.lease_duration_ms,
             lower_databases: self.lower_databases,
             ..discus_membership::SwimConfig::default()
         }
@@ -563,6 +566,19 @@ impl Config {
         }
         if self.gossip_enabled() {
             self.swim().validate()?;
+            lease_timing(
+                ("--lease-duration-ms", self.lease_duration_ms),
+                ("--lease-renew-ms", self.lease_renew_ms),
+                None,
+            )?;
+            lease_timing(
+                (
+                    "--counter-lease-duration-ms",
+                    self.counter_lease_duration_ms,
+                ),
+                ("--counter-lease-renew-ms", self.counter_lease_renew_ms),
+                Some(("--counter-lease-margin-ms", self.counter_lease_margin_ms)),
+            )?;
             if self.lease_provider == LeaseKind::K8s && !cfg!(feature = "k8s") {
                 return Err("--lease-provider k8s needs the k8s build feature. \
                     Use --lease-provider none outside Kubernetes"
@@ -775,6 +791,31 @@ fn parse_weight(s: &str) -> Result<f64, String> {
         .ok_or_else(|| "the weight is a finite number greater than zero".into())
 }
 
+/// The `Lease` object stores its duration in whole seconds, and a contender waits that long on
+/// its own clock. A holder must renew, and stop serving at its margin, before the duration ends.
+fn lease_timing(
+    duration: (&str, u64),
+    renew: (&str, u64),
+    margin: Option<(&str, u64)>,
+) -> Result<(), String> {
+    let (flag, ms) = duration;
+    if ms == 0 || ms % 1000 != 0 {
+        return Err(format!(
+            "{flag} must be a whole number of seconds above 0, because the Kubernetes lease \
+            stores whole seconds"
+        ));
+    }
+    let after = margin.map_or(0, |(_, m)| m);
+    if ms <= renew.1.saturating_add(after) {
+        let what = match margin {
+            Some((m, _)) => format!("{} plus {m}", renew.0),
+            None => renew.0.to_string(),
+        };
+        return Err(format!("{flag} must be greater than {what}"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -834,6 +875,76 @@ mod tests {
         let config = Config::parse_from(["discus"]).unwrap();
         assert_eq!(config.forward_read_timeout_ms, 500);
         assert_eq!(config.forward_write_timeout_ms, 2000);
+    }
+
+    fn gossip_args(extra: &[&str]) -> Vec<String> {
+        let mut argv: Vec<String> = [
+            "discus",
+            "--peer",
+            "10.0.0.1:7379",
+            "--cluster-ca",
+            "ca.pem",
+            "--cluster-cert",
+            "cert.pem",
+            "--cluster-key",
+            "key.pem",
+            "--lease-provider",
+            "none",
+        ]
+        .map(String::from)
+        .to_vec();
+        argv.extend(extra.iter().map(|s| s.to_string()));
+        argv
+    }
+
+    #[test]
+    fn lease_durations_must_be_whole_seconds_above_renew_and_margin() {
+        let check = |extra: &[&str]| Config::parse_from(gossip_args(extra)).unwrap().validate();
+        check(&[]).unwrap();
+        let refused = [
+            (&["--lease-duration-ms", "15500"][..], "--lease-duration-ms"),
+            (&["--lease-duration-ms", "0"][..], "--lease-duration-ms"),
+            (
+                &["--lease-duration-ms", "5000", "--lease-renew-ms", "5000"][..],
+                "--lease-renew-ms",
+            ),
+            (
+                &["--counter-lease-duration-ms", "1900"][..],
+                "--counter-lease-duration-ms",
+            ),
+            (
+                &[
+                    "--counter-lease-duration-ms",
+                    "2000",
+                    "--counter-lease-renew-ms",
+                    "1000",
+                    "--counter-lease-margin-ms",
+                    "1000",
+                ][..],
+                "--counter-lease-margin-ms",
+            ),
+        ];
+        for (extra, flag) in refused {
+            let err = check(extra).unwrap_err();
+            assert!(err.contains(flag), "{extra:?}: {err}");
+        }
+        check(&[
+            "--counter-lease-duration-ms",
+            "2000",
+            "--counter-lease-renew-ms",
+            "300",
+            "--counter-lease-margin-ms",
+            "500",
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn lease_flags_are_not_checked_without_gossip() {
+        Config::parse_from(["discus", "--counter-lease-renew-ms", "600000"])
+            .unwrap()
+            .validate()
+            .unwrap();
     }
 
     #[test]

@@ -75,11 +75,15 @@ impl Host for SimHost {
     }
 
     fn set_hlc_floor(&mut self, floor: u64) -> bool {
-        if floor > self.wall() + 1000 {
+        if floor > self.hlc_limit() {
             return false;
         }
         self.hlc = self.hlc.max(floor);
         true
+    }
+
+    fn hlc_limit(&self) -> u64 {
+        self.wall() + 1000
     }
 
     fn lease_cluster(&self) -> Option<ClusterId> {
@@ -599,10 +603,12 @@ impl Sim {
                 SimLease::None => Ok(LeaseState::Held(me.clone())),
                 SimLease::Memory(l) => l.acquire_or_renew(&me).now_or_never().unwrap(),
             };
-            if let (Ok(LeaseState::Held(h) | LeaseState::HeldByOther(h)), SimLease::Memory(_)) =
-                (&result, &self.lease)
-            {
-                node.host.lease_cluster = Some(h.cluster_id);
+            match (&result, &self.lease) {
+                (Ok(LeaseState::Held(h) | LeaseState::HeldByOther(h)), SimLease::Memory(_)) => {
+                    node.host.lease_cluster = Some(h.cluster_id);
+                }
+                (Err(_), _) => node.host.lease_cluster = None,
+                _ => {}
             }
             let before = node.swim.cluster_id();
             node.host.now = now;
