@@ -262,10 +262,15 @@ replica after a death starts cold.
   unchanged range costs one CRC16 and no HRW.
 - Scans are rate-limited, run in the background behind a snapshot watermark, and respect
   `maxmemory`. A scan is O(dataset) per surviving owner.
-- Previous-epoch fallback: while its handoff is incomplete, a new owner that misses a key asks the
-  previous owners that are not current owners. The fallback ends in three cases: the handoff
-  completes, the handoff is abandoned after bounded retries, or the previous owners leave. After
-  that, a miss is a miss and the key refills lazily.
+- Previous-epoch fallback: while its handoff is incomplete, a new owner that misses a key on a
+  write or a read asks the previous owners of the key before it runs the command. It asks only the
+  previous owners that the current epoch still lists and that have not finished their part of the
+  handoff, the old primary first. A previous owner that is still a current owner counts too. After
+  a join to a cluster with fewer nodes than the replication factor, every previous owner stays an
+  owner, and until its scan arrives it holds the only copy of the value. The local parts of
+  multi-key commands and tracked reads use the same fallback. The fallback ends in three cases:
+  the handoff completes, the handoff is abandoned after bounded retries, or the previous owners
+  leave. After that, a miss is a miss and the key refills lazily.
 
 Because of this fallback, a new owner can serve a key before its entry arrives. No slot is ever
 half moved from the view of a client, so Discus never sends `-ASK`.
@@ -281,7 +286,7 @@ sequenceDiagram
     O->>O: scan from lowest pending epoch to e+1
     O->>N: HANDOFF stream of the entries N gained
     N->>N: apply an entry only if its HLC is newer
-    Note over N,Q: while the handoff is incomplete, a miss on N asks Q first
+    Note over N,Q: while the handoff is incomplete, a miss on N asks the previous owners first
     N->>Q: GET on a miss
     Q-->>N: entry or miss
     N-->>O: handoff acknowledged

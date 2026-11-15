@@ -661,3 +661,111 @@ async fn the_drop_keeps_a_database_that_the_owners_do_not_hold() {
     );
     assert_eq!(held(old, &lost), 0);
 }
+
+/// A node joins a cluster smaller than the replication factor, so every old owner stays a
+/// current owner. While the handoff scans of the old owners wait, the joiner is the primary of
+/// some keys and holds none of them. Its writes and reads must still start from the old values.
+/// Every read goes to the primary, so a multi-key read splits by primary.
+#[tokio::test]
+async fn a_new_primary_sees_the_old_values_during_its_handoff() {
+    let net = Net::new();
+    let args = ["--replication-factor", "3", "--read-from-replicas", "false"];
+    let nodes = net.start_agreed(2, &args).await;
+    let mut c = nodes[0].redis().await;
+    let count = 60;
+    let mut keys = Vec::new();
+    for i in 0..count {
+        let (cnt, s, h) = (format!("cnt{i}"), format!("str{i}"), format!("h{i}"));
+        let _: () = c.set(&cnt, 5).await.unwrap();
+        let _: () = c.set(&s, "ab").await.unwrap();
+        let _: () = c.hset(&h, "f1", "v1").await.unwrap();
+        keys.extend([cnt, s, h]);
+    }
+    assert!(
+        wait_until(FORM, || nodes
+            .iter()
+            .all(|n| keys.iter().all(|k| n.holds(k.as_bytes()))))
+        .await,
+        "the keys did not reach both nodes"
+    );
+    for n in &nodes {
+        n.node.faults.hold_scan.store(true, Ordering::Relaxed);
+    }
+    let joiner = net.start(&[nodes[0].cluster_addr], &args).await;
+    let all: Vec<&GossipNode> = nodes.iter().chain([&joiner]).collect();
+    wait_agreed(&all, FORM).await;
+    let rep = joiner.node.replicator().unwrap();
+    assert!(rep.handoff_pending());
+    let mine = |prefix: &str| -> Vec<String> {
+        (0..count)
+            .map(|i| format!("{prefix}{i}"))
+            .filter(|k| joiner.primary(k.as_bytes()) == joiner.id)
+            .collect()
+    };
+    let (cnts, strs, hashes) = (mine("cnt"), mine("str"), mine("h"));
+    assert!(cnts.len() >= 4 && strs.len() >= 3 && !hashes.is_empty());
+    assert!(keys.iter().all(|k| !joiner.holds(k.as_bytes())));
+
+    let mut j = joiner.redis().await;
+    let n: i64 = j.incr(&cnts[0], 1).await.unwrap();
+    assert_eq!(n, 6, "INCR started from an empty slot");
+    let len: i64 = j.append(&strs[0], "c").await.unwrap();
+    assert_eq!(len, 3, "APPEND started from an empty slot");
+    let set: Option<String> = redis::cmd("SET")
+        .arg(&strs[1])
+        .arg("new")
+        .arg("NX")
+        .query_async(&mut j)
+        .await
+        .unwrap();
+    assert_eq!(set, None, "SET NX wrote over an existing key");
+    let _: () = j.hset(&hashes[0], "f2", "v2").await.unwrap();
+    let fields: i64 = j.hlen(&hashes[0]).await.unwrap();
+    assert_eq!(fields, 2, "HSET made a new hash");
+    let v: Option<String> = j.get(&strs[2]).await.unwrap();
+    assert_eq!(v.as_deref(), Some("ab"), "a primary read missed");
+    // The joiner is the primary of every key, so the command runs inline.
+    let vs: Vec<Option<String>> = j.mget(&cnts[1..3]).await.unwrap();
+    assert_eq!(vs, vec![Some("5".into()), Some("5".into())], "MGET missed");
+    // One key of another primary makes the keys of the joiner one part of the command.
+    let other = (0..count)
+        .map(|i| format!("cnt{i}"))
+        .find(|k| joiner.primary(k.as_bytes()) != joiner.id)
+        .unwrap();
+    let vs: Vec<Option<String>> = j.mget(&[cnts[3].clone(), other]).await.unwrap();
+    assert_eq!(
+        vs,
+        vec![Some("5".into()), Some("5".into())],
+        "a part missed"
+    );
+
+    for n in &nodes {
+        n.node.faults.hold_scan.store(false, Ordering::Relaxed);
+    }
+    assert!(wait_until(Duration::from_secs(30), || !rep.handoff_pending()).await);
+    let str_of = |n: &GossipNode, k: &str| {
+        n.node
+            .store
+            .read(0, k.as_bytes(), |e| match e.map(|e| &e.value) {
+                Some(discus_store::Value::Str(b)) => Some(b.clone()),
+                _ => None,
+            })
+    };
+    let fields_of = |n: &GossipNode, k: &str| {
+        n.node
+            .store
+            .read(0, k.as_bytes(), |e| match e.map(|e| &e.value) {
+                Some(discus_store::Value::Hash(h)) => h.len(),
+                _ => 0,
+            })
+    };
+    let settled = wait_until(FORM, || {
+        all.iter().all(|n| {
+            str_of(n, &cnts[0]).as_deref() == Some(&b"6"[..])
+                && str_of(n, &strs[0]).as_deref() == Some(&b"abc"[..])
+                && str_of(n, &strs[1]).as_deref() == Some(&b"ab"[..])
+                && fields_of(n, &hashes[0]) == 2
+        })
+    });
+    assert!(settled.await, "the owners do not hold the written values");
+}

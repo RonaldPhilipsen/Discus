@@ -313,9 +313,11 @@ impl Replicator {
     }
 
     /// The previous owners of `key` to ask on a miss while a handoff toward this node is
-    /// incomplete: the old owners that are not current owners, that the current epoch still
-    /// lists, and that have not finished their part. `owners` are the current owners of `key`.
-    pub fn fallback_sources(&self, node: &Node, key: &[u8], owners: &[NodeId]) -> Vec<NodeId> {
+    /// incomplete: the old owners that the current epoch still lists and that have not finished
+    /// their part, the old primary first. An old owner that is still a current owner counts too:
+    /// after a join to a cluster smaller than the replication factor, every old owner stays, and
+    /// it is the only holder of the value until its scan reaches this node.
+    pub fn fallback_sources(&self, node: &Node, key: &[u8]) -> Vec<NodeId> {
         if self.handoff.lock().incoming.is_empty() {
             return Vec::new();
         }
@@ -325,11 +327,7 @@ impl Replicator {
         let mut out = Vec::new();
         for inc in &st.incoming {
             for o in inc.old.owners(key, self.settings.rf) {
-                if !owners.contains(&o)
-                    && inc.sources.contains(&o)
-                    && current.member(o).is_some()
-                    && !out.contains(&o)
-                {
+                if inc.sources.contains(&o) && current.member(o).is_some() && !out.contains(&o) {
                     out.push(o);
                 }
             }

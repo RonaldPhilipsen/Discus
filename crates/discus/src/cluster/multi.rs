@@ -10,7 +10,7 @@ use futures::future::join_all;
 use super::route::{key_args, Route};
 use super::writeset::SetKey;
 use super::{
-    allowed, candidates, forward, hold, local, local_acked, spent, Dispatch, Failure, Hop, Job,
+    allowed, candidates, forward, hold, local, local_part, spent, Dispatch, Failure, Hop, Job,
     Reply,
 };
 use std::time::Instant;
@@ -65,7 +65,11 @@ async fn run_group(
     write: bool,
 ) -> Option<Reply> {
     if g.target == node.id {
-        return Some(local_acked(node, spec, db, g.cmd.clone()).finish().await);
+        return Some(
+            local_part(node, spec, db, g.cmd.clone(), write)
+                .finish()
+                .await,
+        );
     }
     if allowed(node, hop, vec![g.target]).is_empty() {
         let Some(keys) = key_args(spec.route, &g.cmd) else {
@@ -220,7 +224,7 @@ pub fn multi(
         }
     };
     if groups.iter().all(|g| g.target == node.id) {
-        return local_acked(node, spec, db, cmd.clone())
+        return local_part(node, spec, db, cmd.clone(), write)
             .then(node, move |node, reply| note(node, &cmd, reply));
     }
     let node = node.clone();
