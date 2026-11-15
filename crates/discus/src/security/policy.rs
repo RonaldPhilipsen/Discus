@@ -5,8 +5,6 @@ use std::fmt;
 /// One authentication factor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Factor {
-    /// The client connection uses TLS. Never an identity on its own.
-    Tls,
     /// The client presented a verified certificate.
     Mtls,
     /// The client sent a valid OAuth 2.0 token.
@@ -18,7 +16,6 @@ pub enum Factor {
 impl Factor {
     pub fn name(self) -> &'static str {
         match self {
-            Factor::Tls => "tls",
             Factor::Mtls => "mtls",
             Factor::Oauth2 => "oauth2",
             Factor::SharedToken => "shared_token",
@@ -26,21 +23,16 @@ impl Factor {
     }
 
     fn parse(s: &str) -> Option<Factor> {
-        [
-            Factor::Tls,
-            Factor::Mtls,
-            Factor::Oauth2,
-            Factor::SharedToken,
-        ]
-        .into_iter()
-        .find(|f| f.name() == s)
+        [Factor::Mtls, Factor::Oauth2, Factor::SharedToken]
+            .into_iter()
+            .find(|f| f.name() == s)
     }
 }
 
 /// How the factors of a connection combine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Policy {
-    /// Every TLS client is authenticated, with read-write access. The default without a shared token.
+    /// Every TLS client is authenticated, with read-write access.
     None,
     /// At least one factor.
     Any(Vec<Factor>),
@@ -48,53 +40,68 @@ pub enum Policy {
     All(Vec<Factor>),
 }
 
+/// The result of `Policy::parse`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Parsed {
+    pub policy: Policy,
+    /// The list named the old factor `tls`, and the parser dropped it.
+    pub dropped_tls: bool,
+}
+
 impl Policy {
     /// Parse `none`, `any:<factor>,<factor>`, or `all:<factor>,<factor>`.
-    pub fn parse(s: &str) -> Result<Policy, String> {
+    ///
+    /// Every client uses TLS, so `tls` is no longer a factor. Old configurations still name it:
+    /// `all:` drops it, and `any:` rejects it, because `tls` alone would meet that policy.
+    pub fn parse(s: &str) -> Result<Parsed, String> {
         let s = s.trim();
         if s == "none" {
-            return Ok(Policy::None);
+            return Ok(Parsed {
+                policy: Policy::None,
+                dropped_tls: false,
+            });
         }
         let (kind, list) = s.split_once(':').ok_or_else(|| {
             format!("--auth-policy {s:?}: use none, any:<factors>, or all:<factors>")
         })?;
         let mut factors = Vec::new();
+        let mut dropped_tls = false;
         for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+            if name == "tls" {
+                dropped_tls = true;
+                continue;
+            }
             let f = Factor::parse(name).ok_or_else(|| {
-                format!(
-                    "--auth-policy: unknown factor {name:?}, use tls, mtls, oauth2, or shared_token"
-                )
+                format!("--auth-policy: unknown factor {name:?}, use mtls, oauth2, or shared_token")
             })?;
             if !factors.contains(&f) {
                 factors.push(f);
             }
         }
-        if factors.is_empty() {
-            return Err("--auth-policy: list at least one factor".into());
-        }
-        let policy = match kind {
-            "any" => Policy::Any(factors),
-            "all" => Policy::All(factors),
+        let combine = match kind {
+            "any" => Policy::Any,
+            "all" => Policy::All,
             _ => {
                 return Err(format!(
                     "--auth-policy: unknown combinator {kind:?}, use any or all"
                 ))
             }
         };
-        let tls_alone = match &policy {
-            Policy::Any(f) => f.contains(&Factor::Tls),
-            Policy::All(f) => f == &[Factor::Tls],
-            Policy::None => false,
-        };
-        if tls_alone {
+        if dropped_tls && (kind == "any" || factors.is_empty()) {
             return Err(
-                "--auth-policy: tls is not an identity, so tls alone cannot authenticate a \
-                 client. Every client uses TLS, so use none for TLS without credentials, or \
-                 combine tls with all:, for example all:tls,oauth2"
+                "--auth-policy: tls is no longer a factor, because every client uses TLS, so \
+                 this policy would let every client in. For TLS without credentials, use none. \
+                 To ask for credentials, remove tls from the list"
                     .into(),
             );
         }
-        Ok(policy)
+        if factors.is_empty() {
+            return Err("--auth-policy: list at least one factor".into());
+        }
+        Ok(Parsed {
+            policy: combine(factors),
+            dropped_tls,
+        })
     }
 
     pub fn uses(&self, factor: Factor) -> bool {
@@ -192,22 +199,40 @@ impl Scopes {
 mod tests {
     use super::*;
 
+    fn parse(s: &str) -> Policy {
+        let parsed = Policy::parse(s).unwrap();
+        assert!(!parsed.dropped_tls, "{s}");
+        parsed.policy
+    }
+
     #[test]
     fn policies_parse_and_print() {
-        let p = Policy::parse("all:tls,oauth2").unwrap();
-        assert_eq!(p, Policy::All(vec![Factor::Tls, Factor::Oauth2]));
-        assert_eq!(p.to_string(), "all:tls,oauth2");
-        assert_eq!(Policy::parse("none").unwrap(), Policy::None);
-        assert!(Policy::parse("any:mtls,oauth2").unwrap().uses(Factor::Mtls));
+        let p = parse("all:mtls,oauth2");
+        assert_eq!(p, Policy::All(vec![Factor::Mtls, Factor::Oauth2]));
+        assert_eq!(p.to_string(), "all:mtls,oauth2");
+        assert_eq!(parse("none"), Policy::None);
+        assert!(parse("any:mtls,oauth2").uses(Factor::Mtls));
         assert!(Policy::parse("some:mtls").is_err());
+        assert!(Policy::parse("some:tls,mtls").is_err());
         assert!(Policy::parse("any:").is_err());
     }
 
     #[test]
-    fn tls_alone_is_rejected() {
-        assert!(Policy::parse("all:tls").is_err());
-        assert!(Policy::parse("any:tls,oauth2").is_err());
-        assert!(Policy::parse("all:tls,mtls").is_ok());
+    fn the_old_tls_factor_is_dropped_from_all() {
+        for old in ["all:tls,oauth2", "all:oauth2,tls", "all: tls , oauth2,tls"] {
+            let parsed = Policy::parse(old).unwrap();
+            assert!(parsed.dropped_tls, "{old}");
+            assert_eq!(parsed.policy, parse("all:oauth2"), "{old}");
+            assert_eq!(parsed.policy.to_string(), "all:oauth2");
+        }
+    }
+
+    #[test]
+    fn a_policy_that_tls_alone_would_meet_is_rejected() {
+        for bad in ["all:tls", "any:tls", "any:tls,oauth2", "any:oauth2,tls"] {
+            let e = Policy::parse(bad).unwrap_err();
+            assert!(e.contains("use none"), "{bad}: {e}");
+        }
     }
 
     #[test]

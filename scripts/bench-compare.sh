@@ -55,7 +55,7 @@ start() {
         --listen "127.0.0.1:$port" \
         --admin-listen "127.0.0.1:$((port + 1000))" \
         --cluster-listen "127.0.0.1:$((port + 2000))" \
-        --lease-provider none --bootstrap-deadline-ms 500 >"$out/discus.log" 2>&1 &
+        --lease-provider none --bootstrap-deadline-ms 500 --auth-policy none >"$out/discus.log" 2>&1 &
       pid=$!
       ;;
     redis) container "$redis_image" redis-server ;;

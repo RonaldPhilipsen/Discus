@@ -55,6 +55,8 @@ if image and image.startswith("docker.io/valkey/"):
              "--appendonly", "no", *extra]
 else:
     args += ["--listen", f"127.0.0.1:{PORT}", "--admin-listen", f"127.0.0.1:{ADMIN}", *extra]
+    if "--auth-policy" not in extra and "--shared-token" not in extra:
+        args += ["--auth-policy", "none"]
 if mode == "on":
     args += ["--pyroscope-url", f"http://127.0.0.1:{PYRO}"]
 env = dict(os.environ, TMPDIR=tempfile.mkdtemp(dir=WORK))

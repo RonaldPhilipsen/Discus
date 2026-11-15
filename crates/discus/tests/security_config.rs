@@ -30,7 +30,7 @@ async fn bind_error_without_tls(args: &[&str]) -> String {
 }
 
 #[tokio::test]
-async fn tls_alone_is_not_a_policy() {
+async fn a_policy_that_tls_alone_would_meet_is_refused() {
     let e = bind_error(&[
         "--auth-policy",
         "any:tls,shared_token",
@@ -38,9 +38,9 @@ async fn tls_alone_is_not_a_policy() {
         "x",
     ])
     .await;
-    assert!(e.contains("tls is not an identity"), "{e}");
+    assert!(e.contains("tls is no longer a factor"), "{e}");
     let e = bind_error(&["--auth-policy", "all:tls"]).await;
-    assert!(e.contains("tls is not an identity"), "{e}");
+    assert!(e.contains("use none"), "{e}");
 }
 
 #[tokio::test]
@@ -110,6 +110,22 @@ async fn a_node_without_a_client_certificate_refuses_to_start() {
     assert!(e.contains("--tls-cert"), "{e}");
     let e = bind_error_without_tls(&["--tls-mode", "lb", "--auth-policy", "none"]).await;
     assert!(e.contains("--tls-cert"), "{e}");
+}
+
+#[tokio::test]
+async fn a_node_without_a_policy_refuses_to_start() {
+    // Naming the flag keeps the helper from adding the policy `none`.
+    let tls = common::client_tls::server_args(&["--auth-policy"]);
+    let args: Vec<&str> = tls.iter().map(String::as_str).collect();
+    let e = bind_error_without_tls(&args).await;
+    assert!(e.contains("--auth-policy none"), "{e}");
+}
+
+#[tokio::test]
+async fn an_explicit_none_policy_starts() {
+    common::try_start_full(&["--auth-policy", "none"])
+        .await
+        .expect("the node starts");
 }
 
 #[test]

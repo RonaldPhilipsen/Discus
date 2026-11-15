@@ -266,21 +266,32 @@ The chart in `charts/discus` creates the resources above and a PodDisruptionBudg
 publishes the chart with the same version as the image.
 
 Before you install the chart, create a Secret with the keys `ca.crt`, `tls.crt`, and `tls.key`.
-Use a CA that serves only this release, because every certificate from the CA is a member of the
-cluster. Then install the chart:
+Use a CA that serves only this release and signs no client certificates, because every certificate
+from the CA is a member of the cluster. Then install the chart:
 
 ```bash
 helm install <release> oci://ghcr.io/ronaldphilipsen/charts/discus \
   --version <version> \
   --namespace <namespace> \
-  --set cluster.tls.secretName=<secret>
+  --set cluster.tls.secretName=<secret> \
+  --set authPolicy=<policy>
 ```
 
-The chart does not require a URI SAN by default. To require a SPIFFE identity, set
-`cluster.san.enabled=true`. The certificate must then carry the URI SAN
+The chart refuses to install without `authPolicy`. The client values below tell which policy to
+set.
+
+The chart does not require a URI SAN by default. To require one on every peer certificate, set
+`cluster.san.enabled=true`. The certificate of each node must then carry the URI SAN
 `spiffe://cluster.local/ns/<namespace>/sa/<account>`. The value `<account>` is the service account
 of the release. By default, it is the full name of the release, for example `discus` or
-`blue-discus`. To require a different URI, set `cluster.san.value`.
+`blue-discus`. The URI is a name in the certificate only, so you need no SPIFFE or SPIRE
+installation. With cert-manager, put the URI in the field `uris` of the `Certificate`. To require
+a different URI, set `cluster.san.value`. Client certificates never need this URI.
+
+Without the URI SAN test, every certificate from the cluster CA is a member of the cluster, and a
+member needs no client authorization. So the chart refuses `clientTls.verifyClients=true` when the
+client CA is the cluster CA and the test is off. In that case, set `clientTls.clientCaSecretName`
+to a Secret with a separate client CA, or set `cluster.san.enabled=true`.
 
 You can install more than one release in a namespace. The chart gives each release its own lease
 names, so each release is a separate cluster. Use a different CA for each release, or require a
@@ -294,10 +305,10 @@ authentication for clients:
 | Value | Effect |
 | --- | --- |
 | `clientTls.secretName` | A Secret with the keys `tls.crt` and `tls.key`. The default is `cluster.tls.secretName`. |
-| `clientTls.verifyClients=true` | The node asks for client certificates and verifies them against the key `ca.crt` of the Secret. |
+| `clientTls.verifyClients=true` | The node asks for client certificates and verifies them against the key `ca.crt` of the Secret. If that Secret is `cluster.tls.secretName`, the chart requires `clientTls.clientCaSecretName` or `cluster.san.enabled=true`. |
 | `clientTls.clientAuth` | `optional` or `required`. The default is `optional`. |
 | `clientTls.clientCaSecretName` | A Secret with the key `ca.crt` for client certificates. The default is the Secret of `clientTls.secretName`. Use it with a public server certificate and a private CA for clients. |
-| `authPolicy` | The flag `--auth-policy`, for example `all:mtls`. |
+| `authPolicy` | The flag `--auth-policy`, for example `all:mtls`. Required. |
 | `authConfig.secretName` | A Secret with the key `auth.toml`, for the flag `--auth-config`. |
 | `sharedToken.secretName` | A Secret with the shared token, for the flag `--shared-token-file`. |
 | `sharedToken.key` | The key of that Secret. The default is `token`. |
@@ -305,9 +316,11 @@ authentication for clients:
 The node reloads its certificates after the Secrets change, so a rotation needs no restart. See
 [Certificate rotation](security.md#certificate-rotation).
 
-Without `authPolicy`, the node uses the policy `none`. Each client then uses TLS and needs no
-credentials. For client certificates without tokens, set `authPolicy=all:mtls`. For OAuth 2.0
-tokens, set `authPolicy=all:tls,oauth2` and list the trusted issuers in the `auth.toml` file. See
+The chart has no default for `authPolicy`, and it fails with a message when the value is empty.
+With `authPolicy=none`, each client uses TLS and needs no credentials. Every client that can
+reach the port then gets read and write access. For client certificates without tokens, set
+`authPolicy=all:mtls`. For OAuth 2.0
+tokens, set `authPolicy=all:oauth2` and list the trusted issuers in the `auth.toml` file. See
 [Security](security.md) for the policies.
 
 To run without the redirect listener, set `clusterClients.enabled=false`. The chart then passes no
@@ -1199,7 +1212,7 @@ Follow these requirements:
 - Set `--forward-read-timeout-ms 200`. A read of a listed key makes one attempt and has no
   replica fallback, so the default of 20 ms can fail a read on a busy primary.
 - Use TLS and a shared token between Authelia and Discus. Set `--tls-mode`, `--tls-cert`, and
-  `--tls-key`. Set `--shared-token-file` and `--auth-policy all:tls,shared_token`.
+  `--tls-key`. Set `--shared-token-file` and `--auth-policy all:shared_token`.
 - Set `database_index` to 0.
 - Do not configure the `high_availability` section of `session.redis`, because Discus has no
   Sentinel support. To survive a node loss, point `host` at a load balancer or a DNS name that
@@ -1215,7 +1228,7 @@ discus \
   --tls-mode node \
   --tls-cert /etc/discus/tls.crt \
   --tls-key /etc/discus/tls.key \
-  --auth-policy all:tls,shared_token \
+  --auth-policy all:shared_token \
   --shared-token-file /etc/discus/session-token
 ```
 
