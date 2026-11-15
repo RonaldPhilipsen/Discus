@@ -40,6 +40,13 @@ impl Acl {
         self.users.get(std::str::from_utf8(name).ok()?)
     }
 
+    /// Every user, sorted by name.
+    pub fn users(&self) -> Vec<&Arc<User>> {
+        let mut users: Vec<&Arc<User>> = self.users.values().collect();
+        users.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        users
+    }
+
     pub fn len(&self) -> usize {
         self.users.len()
     }

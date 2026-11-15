@@ -254,7 +254,8 @@ These are the rules:
 | `%R~pattern`, `%W~pattern`, `%RW~pattern` | Read access, write access, or both. |
 | `allkeys` | The same as `~*`. |
 | `resetkeys` | Removes every key pattern. |
-| `+command`, `-command` | Allows or denies one command. |
+| `+command`, `-command` | Allows or denies one command, with all of its subcommands. |
+| `+acl\|subcommand`, `-acl\|subcommand` | Allows or denies one subcommand of `ACL`, such as `+acl\|list`. |
 | `+@category`, `-@category` | Allows or denies every command of a category. `@all` is every command. |
 | `allcommands`, `nocommands` | The same as `+@all` and `-@all`. |
 | `&pattern`, `allchannels`, `resetchannels` | Accepted, with no effect. Discus has no pub/sub. |
@@ -293,7 +294,7 @@ password, and the error goes to the log. These are the forms:
 - `line 3: unknown rule at word 5`
 - `line 3: unknown command at word 5`
 - `line 3: unknown category at word 5`
-- `line 3: rules for one subcommand are not supported (word 5)`
+- `line 3: this command has no rules for one subcommand (word 5)`
 
 The first word of a line is `user`, and the second word is the name. Thus the first rule is word 3.
 An error for the name shows the name.
@@ -401,15 +402,18 @@ A key that the rules deny returns this error. The text never names the key:
 The file is the only source of users. If you copy a Valkey ACL file, change these items:
 
 - `ACL SETUSER`, `DELUSER`, `LOAD`, `SAVE`, `LOG`, `GENPASS`, and `DRYRUN` return an error.
-- `ACL LIST`, `USERS`, and `GETUSER` return an error. They show password hashes, and Discus has no
-  rule for one subcommand to limit them. Read the Secret instead.
 - Selectors, such as `(~temp:* +get)`, stop the node.
-- Rules for one subcommand, such as `+config|get`, stop the node.
+- Only `ACL` has rules for one subcommand. A rule for a subcommand of a different command, such as
+  `+config|get`, stops the node.
 - Discus has no rule for each database.
-- In Valkey, `ACL`, `CLIENT`, `CLUSTER`, and `CONFIG` have only `@slow`, and each subcommand has
-  its own categories. In Discus, each of these commands has one set of categories.
-- `ACL` and `CLUSTER` are in `@connection`. In Valkey, their subcommands are not in
-  `@connection`.
+- In Valkey, `CLIENT`, `CLUSTER`, and `CONFIG` have only `@slow`, and each subcommand has its own
+  categories. In Discus, each of these commands has one set of categories.
+- `ACL`, `ACL WHOAMI`, `ACL CAT`, and `CLUSTER` are in `@connection`. In Valkey, they are not.
+- A category rule sets each subcommand of `ACL` by the categories of the subcommand. In Valkey,
+  `+@slow` allows every subcommand of `ACL`, because `ACL` itself is in `@slow`.
+- `ACL LIST` and `ACL GETUSER` do not show the flag `sanitize-payload` and show no channel rules
+  other than `resetchannels`.
+- `ACL LIST` and `ACL USERS` show the user `default` only when the file names it.
 - `CLIENT` has the categories of `CLIENT SETNAME`. `CONFIG` has the categories of `CONFIG GET`.
 - A `+` or `-` rule for a command that Discus lacks stops the node. Use category rules.
 - The rule words, such as `on` and `nopass`, are case-sensitive. Command names and category names
@@ -420,7 +424,44 @@ The file is the only source of users. If you copy a Valkey ACL file, change thes
 - A user never opens the admin port.
 - Discus does not copy users between nodes. Each node reads its own file.
 
-`ACL WHOAMI` and `ACL CAT` work. A user needs a rule that allows `ACL` to run them.
+#### The ACL command
+
+`ACL WHOAMI` returns the name of the user of the connection. `ACL CAT` lists the categories, and
+`ACL CAT <category>` lists the commands of one category. These two subcommands are in
+`@connection`.
+
+Three subcommands show the users of the node:
+
+| Subcommand | Reply |
+| --- | --- |
+| `ACL USERS` | The names of the users, in sorted order. |
+| `ACL LIST` | One line for each user, in the format of the ACL file, with the password hashes. |
+| `ACL GETUSER <name>` | The flags, the password hashes, the command rules, and the key rules of one user. |
+
+> [!WARNING]
+> Give these three subcommands only to an administrator. The password hashes have no salt, so a
+> person who reads a hash can find a weak password.
+
+The three subcommands are in `@admin` and `@dangerous`, as in Valkey. These rules decide who can
+run them:
+
+- A user with `+@all` can run them. Add `-@admin` or `-@dangerous` after `+@all` to deny them.
+- `+@connection` does not allow them.
+- A rule for one subcommand allows or denies one of them, for example `+acl|users` or
+  `-acl|getuser`.
+- `+acl` allows every subcommand of `ACL`, and `-acl` denies every subcommand.
+- A connection without a user of the file, such as a login with a certificate or a token, needs
+  the scope `discus.admin`.
+
+A denied subcommand returns this error:
+
+```text
+-NOPERM this user has no permissions to run the 'acl|list' command
+```
+
+The node prints the command rules of a user in a normal form. It starts with `-@all` or `+@all`,
+and a later rule replaces an earlier rule for the same command or category. Each node shows the
+users of its own file. During a change of the Secret, two nodes can thus give different replies.
 
 #### In Kubernetes
 

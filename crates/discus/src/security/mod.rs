@@ -405,6 +405,11 @@ impl Security {
         Ok(())
     }
 
+    /// The current users, with `--acl-file`.
+    pub fn acl(&self) -> Option<Arc<Acl>> {
+        self.acl.as_ref().map(|slot| slot.load_full())
+    }
+
     /// Read the ACL file again. A connection takes its new rules, or loses its login, at its
     /// next command. On an error, the node keeps its users.
     pub fn reload_acl(&self) -> io::Result<()> {
@@ -836,11 +841,18 @@ impl Security {
         if !conn.auth.authenticated(&self.policy) {
             return Err(CommandError::NoAuth);
         }
-        let no_perm = || CommandError::NoPerm(spec.name.to_ascii_lowercase());
-        let by_scopes = conn.auth.scopes(&self.policy).map(|s| match spec.access {
-            Access::Public | Access::Connection => true,
-            Access::Read => s.can_read(),
-            Access::Write => s.can_write(),
+        let sub = spec.subcommand(cmd);
+        let no_perm = || CommandError::NoPerm(spec.rule_name(sub));
+        // The scopes have no rule for one subcommand. A subcommand that shows the users and their
+        // password hashes thus needs the admin scope.
+        let needs_admin = sub.is_some_and(|sub| sub.is_admin());
+        let by_scopes = conn.auth.scopes(&self.policy).map(|s| {
+            let allowed = match spec.access {
+                Access::Public | Access::Connection => true,
+                Access::Read => s.can_read(),
+                Access::Write => s.can_write(),
+            };
+            allowed && (!needs_admin || s.is_admin())
         });
         let by_user = match &conn.auth.user {
             Some(g) if self.policy.uses(Factor::Password) => {
@@ -1142,5 +1154,35 @@ pub(crate) mod tests {
             s.authorize(&mut conn, spec(b"GET"), &get),
             Err(CommandError::NoAuth)
         );
+    }
+
+    #[test]
+    fn a_login_without_a_user_needs_the_admin_scope_to_show_the_users() {
+        let s = Security {
+            policy: Policy::Any(vec![Factor::Mtls]),
+            ..security(&["--shared-token", "x"])
+        };
+        let run = |scopes: Scopes, parts: &[&str]| {
+            let mut conn = ConnState::new(1, ConnAuth::default());
+            conn.auth.cert = Some(CertGrant {
+                identity: "c".into(),
+                scopes,
+            });
+            s.authorize(&mut conn, spec(b"ACL"), &crate::counter::cmd(parts))
+        };
+        let no_perm = |name: &str| Err(CommandError::NoPerm(name.into()));
+
+        let rw = Scopes::READ_WRITE;
+        assert_eq!(run(rw, &["ACL", "WHOAMI"]), Ok(()));
+        assert_eq!(run(rw, &["ACL", "CAT"]), Ok(()));
+        assert_eq!(run(rw, &["ACL", "BOGUS"]), Ok(()));
+        assert_eq!(run(rw, &["ACL", "LIST"]), no_perm("acl|list"));
+        assert_eq!(run(rw, &["acl", "users"]), no_perm("acl|users"));
+        assert_eq!(run(rw, &["ACL", "GETUSER", "u"]), no_perm("acl|getuser"));
+        assert_eq!(run(rw, &["ACL", "SETUSER", "u"]), no_perm("acl|setuser"));
+
+        let admin = Scopes::READ.union(Scopes::ADMIN);
+        assert_eq!(run(admin, &["ACL", "LIST"]), Ok(()));
+        assert_eq!(run(admin, &["ACL", "GETUSER", "u"]), Ok(()));
     }
 }

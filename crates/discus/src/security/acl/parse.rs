@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::{sha256, Acl, KeyPattern, User};
 use crate::cluster::route::KeyPerm;
 use crate::command::category::Categories;
-use crate::command::table::specs;
+use crate::command::table::{specs, CommandSpec};
 
 pub(super) fn parse(text: &str) -> Result<Acl, String> {
     let mut users: HashMap<String, Arc<User>> = HashMap::new();
@@ -68,7 +68,7 @@ fn parse_line(line: &str, seen: &HashMap<String, Arc<User>>) -> Result<User, Str
             RuleError::UnknownCommand => format!("unknown command at word {word}"),
             RuleError::UnknownCategory => format!("unknown category at word {word}"),
             RuleError::Subcommand => {
-                format!("rules for one subcommand are not supported (word {word})")
+                format!("this command has no rules for one subcommand (word {word})")
             }
             RuleError::Invalid(message) => message,
         })?;
@@ -153,8 +153,32 @@ fn add_key(user: &mut User, pattern: &str, perm: KeyPerm) {
 
 fn set_all(user: &mut User, allowed: bool) {
     for spec in specs() {
-        user.commands.set(spec.id, allowed);
+        set_command(user, spec, allowed);
     }
+    user.rules = vec![if allowed { "+@all" } else { "-@all" }.to_owned()];
+}
+
+/// Set the bit of a command and of each of its subcommands.
+fn set_command(user: &mut User, spec: &CommandSpec, allowed: bool) {
+    user.commands.set(spec.id, allowed);
+    for sub in spec.subcommands {
+        user.commands.set(sub.id, allowed);
+    }
+}
+
+/// Keep the rule for `ACL LIST`, in the normal form of Valkey: a new rule replaces an earlier rule
+/// for the same target, and a rule for a command also replaces the rules for its subcommands.
+/// `target` is in lower case.
+fn record(user: &mut User, allowed: bool, target: &str) {
+    user.rules.retain(|rule| {
+        let earlier = &rule[1..];
+        earlier != target
+            && !earlier
+                .strip_prefix(target)
+                .is_some_and(|rest| rest.starts_with('|'))
+    });
+    let sign = if allowed { '+' } else { '-' };
+    user.rules.push(format!("{sign}{target}"));
 }
 
 fn command_rule(user: &mut User, target: &str, allowed: bool) -> Result<(), RuleError> {
@@ -164,19 +188,39 @@ fn command_rule(user: &mut User, target: &str, allowed: bool) -> Result<(), Rule
             return Ok(());
         }
         let categories = Categories::parse(category).ok_or(RuleError::UnknownCategory)?;
-        for spec in specs()
-            .iter()
-            .filter(|s| s.categories.intersects(categories))
-        {
-            user.commands.set(spec.id, allowed);
+        // A subcommand follows its own categories and not those of its command. `+@connection`
+        // thus allows `ACL WHOAMI` and not `ACL LIST`.
+        for spec in specs() {
+            if spec.categories.intersects(categories) {
+                user.commands.set(spec.id, allowed);
+            }
+            for sub in spec.subcommands {
+                if sub.categories.intersects(categories) {
+                    user.commands.set(sub.id, allowed);
+                }
+            }
         }
+        record(user, allowed, &target.to_ascii_lowercase());
         return Ok(());
     }
-    if target.contains('|') {
-        return Err(RuleError::Subcommand);
+    let (name, sub) = match target.split_once('|') {
+        Some((name, sub)) => (name, Some(sub)),
+        None => (target, None),
+    };
+    let spec = crate::command::lookup(name.as_bytes()).ok_or(RuleError::UnknownCommand)?;
+    match sub {
+        None => set_command(user, spec, allowed),
+        Some(_) if spec.subcommands.is_empty() => return Err(RuleError::Subcommand),
+        Some(sub) => {
+            let sub = spec
+                .subcommands
+                .iter()
+                .find(|s| s.name.eq_ignore_ascii_case(sub))
+                .ok_or(RuleError::UnknownCommand)?;
+            user.commands.set(sub.id, allowed);
+        }
     }
-    let spec = crate::command::lookup(target.as_bytes()).ok_or(RuleError::UnknownCommand)?;
-    user.commands.set(spec.id, allowed);
+    record(user, allowed, &target.to_ascii_lowercase());
     Ok(())
 }
 
@@ -226,6 +270,89 @@ mod tests {
         let u = one("user u allcommands -GET nocommands +@read -hget");
         assert!(allows(&u, "GET") && !allows(&u, "HGET") && !allows(&u, "SET"));
         assert!(!allows(&one("user u +@pubsub"), "GET"));
+    }
+
+    fn allows_sub(u: &User, sub: &str) -> bool {
+        let spec = crate::command::lookup(b"ACL").unwrap();
+        let entry = spec.subcommands.iter().find(|s| s.name == sub).unwrap();
+        u.commands.contains(entry.id)
+    }
+
+    #[test]
+    fn subcommand_rules_set_one_subcommand() {
+        let u = one("user u +acl|list");
+        assert!(allows_sub(&u, "LIST") && !allows_sub(&u, "USERS") && !allows(&u, "ACL"));
+        let u = one("user u +ACL -Acl|GetUser");
+        assert!(allows(&u, "ACL") && allows_sub(&u, "LIST") && allows_sub(&u, "WHOAMI"));
+        assert!(!allows_sub(&u, "GETUSER"));
+        let u = one("user u +acl|list -acl");
+        assert!(!allows(&u, "ACL") && !allows_sub(&u, "LIST"));
+    }
+
+    #[test]
+    fn a_subcommand_follows_its_own_categories() {
+        let u = one("user u +@connection");
+        assert!(allows(&u, "ACL") && allows_sub(&u, "WHOAMI") && allows_sub(&u, "CAT"));
+        assert!(!allows_sub(&u, "LIST") && !allows_sub(&u, "USERS"));
+        assert!(!allows_sub(&u, "GETUSER") && !allows_sub(&u, "GENPASS"));
+        let u = one("user u +@slow");
+        assert!(allows_sub(&u, "GENPASS") && allows_sub(&u, "LIST"));
+        for line in ["user u +@all -@admin", "user u +@all -@dangerous"] {
+            let u = one(line);
+            assert!(
+                allows_sub(&u, "WHOAMI") && !allows_sub(&u, "LIST"),
+                "{line}"
+            );
+            assert!(
+                !allows_sub(&u, "GETUSER") && !allows_sub(&u, "USERS"),
+                "{line}"
+            );
+        }
+        let u = one("user u +@admin");
+        assert!(allows_sub(&u, "LIST") && !allows(&u, "ACL") && !allows_sub(&u, "WHOAMI"));
+        let u = one("user u allcommands");
+        assert!(allows_sub(&u, "LIST") && allows(&u, "ACL"));
+        assert!(!allows_sub(&one("user u allcommands nocommands"), "LIST"));
+    }
+
+    #[test]
+    fn the_command_rules_have_the_normal_form_of_valkey() {
+        // The expected texts are the replies of `ACL LIST` of redis-server 8.10.2.
+        let rules = |line: &str| one(line).commands_text();
+        assert_eq!(rules("user u"), "-@all");
+        assert_eq!(
+            rules("user u +@read -get +acl|whoami +acl -acl|list +GET"),
+            "-@all +@read +acl -acl|list +get"
+        );
+        assert_eq!(rules("user u allcommands -@dangerous"), "+@all -@dangerous");
+        assert_eq!(
+            rules("user u +get -get +get +@read -@Read +set"),
+            "-@all +get -@read +set"
+        );
+        assert_eq!(rules("user u +get +@all nocommands +set"), "-@all +set");
+    }
+
+    #[test]
+    fn the_line_of_a_user_gives_the_user_again() {
+        let hash = hex::encode(sha256(b"pw"));
+        for (rules, line) in [
+            ("", "user u off resetchannels -@all"),
+            (
+                "on nopass allkeys allcommands -@dangerous",
+                "user u on nopass ~* resetchannels +@all -@dangerous",
+            ),
+            (
+                "on >pw ~a:* %R~b:* %W~c %RW~d +@read -get +acl -acl|list +@connection -ping",
+                &format!(
+                    "user u on #{hash} ~a:* %R~b:* %W~c ~d resetchannels -@all +@read -get +acl \
+                     -acl|list +@connection -ping"
+                ),
+            ),
+        ] {
+            let user = one(&format!("user u {rules}"));
+            assert_eq!(user.line(), line);
+            assert_eq!(*one(&user.line()), *user, "{rules}");
+        }
     }
 
     #[test]
@@ -306,7 +433,15 @@ mod tests {
         );
         assert_eq!(
             error("user a on +config|get"),
-            "line 1: rules for one subcommand are not supported (word 4)"
+            "line 1: this command has no rules for one subcommand (word 4)"
+        );
+        assert_eq!(
+            error("user a on +acl|bogus"),
+            "line 1: unknown command at word 4"
+        );
+        assert_eq!(
+            error("user a on +acl|list|x"),
+            "line 1: unknown command at word 4"
         );
         for rule in [
             "<pass",
@@ -328,10 +463,7 @@ mod tests {
             ("user a on >my pass", "line 1: unknown rule at word 5"),
             ("user a on >my -pass", "line 1: unknown command at word 5"),
             ("user a on >my -@pass", "line 1: unknown category at word 5"),
-            (
-                "user a on >my +pa|ss",
-                "line 1: rules for one subcommand are not supported (word 5)",
-            ),
+            ("user a on >my +pa|ss", "line 1: unknown command at word 5"),
         ] {
             let e = error(line);
             assert_eq!(e, expected);

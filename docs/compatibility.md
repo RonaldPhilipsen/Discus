@@ -11,7 +11,7 @@ features from that value.
 
 | Family | Commands |
 | --- | --- |
-| Connection | `PING`, `ECHO`, `QUIT`, `AUTH`, `HELLO` (RESP2 and RESP3), `SELECT` (every database), `COMMAND` (`COUNT`, `INFO`, `GETKEYS`, and the full list), `READONLY`, `READWRITE`, `ASKING`, `CLUSTER` (see below), `ACL` (`WHOAMI`, `CAT`), `CLIENT` (`SETNAME`, `GETNAME`, `ID`, `SETINFO`), `INFO`, `CONFIG GET` (`maxmemory`, `databases`, `maxclients`) |
+| Connection | `PING`, `ECHO`, `QUIT`, `AUTH`, `HELLO` (RESP2 and RESP3), `SELECT` (every database), `COMMAND` (`COUNT`, `INFO`, `GETKEYS`, and the full list), `READONLY`, `READWRITE`, `ASKING`, `CLUSTER` (see below), `ACL` (`WHOAMI`, `CAT`, `LIST`, `USERS`, `GETUSER`), `CLIENT` (`SETNAME`, `GETNAME`, `ID`, `SETINFO`), `INFO`, `CONFIG GET` (`maxmemory`, `databases`, `maxclients`) |
 | Strings | `GET`, `SET` (`EX`, `PX`, `EXAT`, `PXAT`, `NX`, `XX`, `KEEPTTL`, `GET`), `GETDEL`, `GETEX`, `MGET`, `MSET`, `INCR`, `DECR`, `INCRBY`, `DECRBY`, `INCRBYFLOAT`, `APPEND`, `STRLEN` |
 | Keys and expiry | `DEL`, `EXISTS`, `TYPE`, `RENAME`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `MOVE`, `COPY` (`DB`, `REPLACE`), `SCAN` (`MATCH`, `COUNT`), `RANDOMKEY`, `DBSIZE`, `FLUSHDB`, `FLUSHALL` |
 | Hashes | `HSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HINCRBY`, `HKEYS`, `HVALS` |
@@ -162,10 +162,12 @@ not allow returns `-NOPERM this user has no permissions to run the '<command>' c
 token turns the next command into `-NOAUTH`, and the client can send `AUTH` again on the same
 connection.
 
-The users come from the file of `--acl-file`. `ACL WHOAMI` and `ACL CAT` work. These `ACL`
-subcommands return an error: `SETUSER`, `DELUSER`, `LIST`, `USERS`, `GETUSER`, `LOAD`, `SAVE`,
-`LOG`, `GENPASS`, and `DRYRUN`. Discus refuses selectors and rules for one subcommand, such as
-`+config|get`, in the file. It also refuses a `+` or `-` rule for a command that it lacks.
+The users come from the file of `--acl-file`. `ACL WHOAMI`, `ACL CAT`, `ACL LIST`, `ACL USERS`,
+and `ACL GETUSER` work. `ACL LIST`, `ACL USERS`, and `ACL GETUSER` are in `@admin`, as in Valkey.
+These `ACL` subcommands return an error: `SETUSER`, `DELUSER`, `LOAD`, `SAVE`, `LOG`, `GENPASS`,
+and `DRYRUN`. The file can hold a rule for one subcommand of `ACL`, such as `+acl|list`. Discus
+refuses selectors and rules for a subcommand of a different command, such as `+config|get`. It
+also refuses a `+` or `-` rule for a command that it lacks.
 
 See [security.md](security.md) for TLS, the authentication policy, scopes, and the admin port.
 

@@ -45,6 +45,8 @@ pub struct User {
     pub nopass: bool,
     pub passwords: Vec<[u8; 32]>,
     pub commands: CommandSet,
+    /// The command rules that give `commands`, in the normal form that `ACL LIST` prints.
+    pub rules: Vec<String>,
     pub keys: Vec<KeyPattern>,
 }
 
@@ -69,8 +71,59 @@ impl User {
             nopass: false,
             passwords: Vec::new(),
             commands: CommandSet::default(),
+            rules: vec!["-@all".to_owned()],
             keys: Vec::new(),
         }
+    }
+
+    /// The flags of `ACL GETUSER`.
+    pub fn flags(&self) -> Vec<&'static str> {
+        let mut flags = vec![if self.enabled { "on" } else { "off" }];
+        if self.nopass {
+            flags.push("nopass");
+        }
+        flags
+    }
+
+    /// The command rules, as `ACL LIST` and `ACL GETUSER` print them.
+    pub fn commands_text(&self) -> String {
+        self.rules.join(" ")
+    }
+
+    /// The key rules, as `ACL LIST` and `ACL GETUSER` print them.
+    pub fn keys_text(&self) -> String {
+        let rules: Vec<String> = self
+            .keys
+            .iter()
+            .map(|key| {
+                let prefix = match key.perm {
+                    KeyPerm::READ => "%R~",
+                    KeyPerm::WRITE => "%W~",
+                    _ => "~",
+                };
+                format!("{prefix}{}", String::from_utf8_lossy(&key.pattern))
+            })
+            .collect();
+        rules.join(" ")
+    }
+
+    /// The line of `ACL LIST`. It is a valid line of the ACL file, with the password hashes, and
+    /// it gives this user again.
+    pub fn line(&self) -> String {
+        let mut words = vec!["user".to_owned(), self.name.clone()];
+        words.extend(self.flags().into_iter().map(str::to_owned));
+        words.extend(
+            self.passwords
+                .iter()
+                .map(|hash| format!("#{}", hex::encode(hash))),
+        );
+        if !self.keys.is_empty() {
+            words.push(self.keys_text());
+        }
+        // Discus has no pub/sub, so every user has the channel state of a new Valkey user.
+        words.push("resetchannels".to_owned());
+        words.push(self.commands_text());
+        words.join(" ")
     }
 
     /// True when the user is on and `hash` is the SHA-256 of one of its passwords, or the user
@@ -87,12 +140,14 @@ impl User {
         found || self.nopass
     }
 
-    /// Check the command rule, then every key of `cmd`.
+    /// Check the command rule, then every key of `cmd`. A subcommand with its own entry, such as
+    /// `ACL LIST`, uses its own rule.
     ///
     /// Each key needs one pattern that matches it and grants the whole access. Two patterns do not
     /// add up: `%R~x` and `%W~x` together do not allow `INCR x`. This is the rule of Valkey.
     pub fn check(&self, spec: &CommandSpec, cmd: &Command) -> Result<(), Denied> {
-        if !self.commands.contains(spec.id) {
+        let id = spec.subcommand(cmd).map_or(spec.id, |sub| sub.id);
+        if !self.commands.contains(id) {
             return Err(Denied::Command);
         }
         for (key, needed) in key_perms(spec, cmd) {

@@ -25,6 +25,34 @@ pub enum Access {
 
 pub type Handler = fn(&Node, &mut ConnState, &Command) -> Result<Value, CommandError>;
 
+/// One subcommand with its own ACL rule, such as `acl|list`.
+#[derive(Debug, Clone, Copy)]
+pub struct Subcommand {
+    /// In upper case, without the name of its command.
+    pub name: &'static str,
+    /// Complete: the registry adds nothing.
+    pub categories: Categories,
+    /// A bit of the per-user command set, after the ids of the commands. 0 in a `COMMANDS` array:
+    /// only the registry sets it.
+    pub id: u16,
+}
+
+impl Subcommand {
+    pub const fn new(name: &'static str, categories: Categories) -> Subcommand {
+        Subcommand {
+            name,
+            categories,
+            id: 0,
+        }
+    }
+
+    /// A subcommand that shows or changes the users. A login without a user needs `discus.admin`
+    /// for it.
+    pub fn is_admin(&self) -> bool {
+        self.categories.intersects(Categories::ADMIN)
+    }
+}
+
 /// One command. A negative arity means "at least |arity|" arguments, counting the name.
 #[derive(Debug, Clone, Copy)]
 pub struct CommandSpec {
@@ -40,6 +68,9 @@ pub struct CommandSpec {
     pub categories: Categories,
     /// A write command that also returns or uses the old value of its key.
     pub reads_old: bool,
+    /// The subcommands that have their own ACL rule. A subcommand without an entry uses the rule
+    /// of the command.
+    pub subcommands: &'static [Subcommand],
 }
 
 impl CommandSpec {
@@ -55,6 +86,7 @@ impl CommandSpec {
             id: 0,
             reads_old: false,
             categories: Categories::EMPTY,
+            subcommands: &[],
         }
     }
 
@@ -70,6 +102,7 @@ impl CommandSpec {
             id: 0,
             reads_old: false,
             categories: Categories::EMPTY,
+            subcommands: &[],
         }
     }
 
@@ -85,6 +118,7 @@ impl CommandSpec {
             id: 0,
             reads_old: false,
             categories: Categories::EMPTY,
+            subcommands: &[],
         }
     }
 
@@ -110,9 +144,35 @@ impl CommandSpec {
     pub const fn with_categories(self, categories: Categories) -> CommandSpec {
         CommandSpec { categories, ..self }
     }
+
+    pub const fn with_subcommands(self, subcommands: &'static [Subcommand]) -> CommandSpec {
+        CommandSpec {
+            subcommands,
+            ..self
+        }
+    }
+
+    /// The entry of the subcommand that `cmd` names, when it has one.
+    pub fn subcommand(&self, cmd: &Command) -> Option<&'static Subcommand> {
+        let name = cmd.get(1)?;
+        self.subcommands
+            .iter()
+            .find(|sub| sub.name.as_bytes().eq_ignore_ascii_case(name))
+    }
+
+    /// The name in an ACL rule and in a `NOPERM` error: `get`, or `acl|list` with `sub`.
+    pub fn rule_name(&self, sub: Option<&Subcommand>) -> String {
+        let mut name = self.name.to_ascii_lowercase();
+        if let Some(sub) = sub {
+            name.push('|');
+            name.push_str(&sub.name.to_ascii_lowercase());
+        }
+        name
+    }
 }
 
-/// The ids fit the per-user bit set of the ACL, which has this many bits.
+/// The ids of the commands and of the subcommands fit the per-user bit set of the ACL, which has
+/// this many bits.
 pub const MAX_COMMANDS: usize = 256;
 
 /// Keyed by the upper-case name bytes, so a lookup needs no UTF-8 check. The names are fixed, so
@@ -145,13 +205,28 @@ fn registry() -> &'static Registry {
             })
             .collect();
         all.sort_unstable_by_key(|spec| spec.name);
-        assert!(
-            all.len() <= MAX_COMMANDS,
-            "more than {MAX_COMMANDS} commands"
-        );
         for (i, spec) in all.iter_mut().enumerate() {
             spec.id = i as u16;
         }
+        let mut next = all.len();
+        for spec in all.iter_mut().filter(|spec| !spec.subcommands.is_empty()) {
+            let subs: Vec<Subcommand> = spec
+                .subcommands
+                .iter()
+                .map(|sub| {
+                    next += 1;
+                    Subcommand {
+                        id: (next - 1) as u16,
+                        ..*sub
+                    }
+                })
+                .collect();
+            spec.subcommands = Vec::leak(subs);
+        }
+        assert!(
+            next <= MAX_COMMANDS,
+            "more than {MAX_COMMANDS} commands and subcommands"
+        );
         let specs: &'static [CommandSpec] = Vec::leak(all);
         Registry {
             specs,
@@ -329,5 +404,41 @@ mod tests {
             assert_eq!(lookup(spec.name.as_bytes()).unwrap().id, spec.id);
         }
         assert!(specs().windows(2).all(|w| w[0].name < w[1].name));
+    }
+
+    #[test]
+    fn subcommands_have_their_own_ids_and_categories() {
+        // The expected categories are the replies of `COMMAND INFO acl` of redis-server 8.10.2.
+        // `WHOAMI` and `CAT` are also in `@connection`, as the command `ACL` is in Discus.
+        let acl = lookup(b"ACL").unwrap();
+        let sub = |name: &str| {
+            let cmd: Command = vec!["ACL".into(), bytes::Bytes::copy_from_slice(name.as_bytes())];
+            acl.subcommand(&cmd)
+        };
+        let cats = |name: &str| sub(name).unwrap().categories.names().collect::<Vec<_>>();
+        for name in [
+            "LIST", "USERS", "GETUSER", "SETUSER", "DELUSER", "LOAD", "SAVE", "LOG", "DRYRUN",
+        ] {
+            assert_eq!(cats(name), ["admin", "slow", "dangerous"], "{name}");
+            assert!(sub(name).unwrap().is_admin());
+        }
+        assert_eq!(cats("whoami"), ["slow", "connection"]);
+        assert_eq!(cats("Cat"), ["slow", "connection"]);
+        assert_eq!(cats("GENPASS"), ["slow"]);
+        assert!(sub("BOGUS").is_none());
+        assert!(acl.subcommand(&vec!["ACL".into()]).is_none());
+        assert_eq!(acl.rule_name(sub("LIST")), "acl|list");
+        assert_eq!(acl.rule_name(None), "acl");
+
+        let mut ids: Vec<u16> = specs()
+            .iter()
+            .flat_map(|spec| spec.subcommands.iter().map(|sub| sub.id))
+            .collect();
+        assert!(ids.iter().all(|id| usize::from(*id) >= specs().len()));
+        assert!(ids.iter().all(|id| usize::from(*id) < MAX_COMMANDS));
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), acl.subcommands.len());
+        assert!(lookup(b"GET").unwrap().subcommands.is_empty());
     }
 }

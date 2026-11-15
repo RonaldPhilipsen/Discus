@@ -9,7 +9,7 @@ use discus_telemetry::attrs::TopologyCommand;
 
 use super::category::Categories;
 use super::error::CommandError;
-use super::table::{check, lookup, names, specs, Access, CommandSpec};
+use super::table::{check, lookup, names, specs, Access, CommandSpec, Subcommand};
 use super::util::{glob_match, parse_i64, upper};
 use crate::build;
 use crate::cluster::route::key_args;
@@ -34,7 +34,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::connection("SELECT", 2, select).with_fast(),
     CommandSpec::connection("COMMAND", -1, command),
     CommandSpec::connection("CLIENT", -2, client),
-    CommandSpec::connection("ACL", -2, acl),
+    CommandSpec::connection("ACL", -2, acl).with_subcommands(ACL_SUBCOMMANDS),
     CommandSpec::connection("INFO", -1, info)
         .with_access(Access::Read)
         .with_categories(Categories::DANGEROUS),
@@ -45,6 +45,29 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::connection("READONLY", 1, readonly).with_fast(),
     CommandSpec::connection("READWRITE", 1, readwrite).with_fast(),
     CommandSpec::connection("ASKING", 1, asking).with_fast(),
+];
+
+/// The categories of Valkey for the subcommands that show or change the users.
+const ACL_ADMIN: Categories = Categories::ADMIN
+    .union(Categories::SLOW)
+    .union(Categories::DANGEROUS);
+
+/// `ACL` is in `@connection` in Discus, and so are the two subcommands that show no user data.
+const ACL_OPEN: Categories = Categories::CONNECTION.union(Categories::SLOW);
+
+const ACL_SUBCOMMANDS: &[Subcommand] = &[
+    Subcommand::new("CAT", ACL_OPEN),
+    Subcommand::new("WHOAMI", ACL_OPEN),
+    Subcommand::new("GENPASS", Categories::SLOW),
+    Subcommand::new("LIST", ACL_ADMIN),
+    Subcommand::new("USERS", ACL_ADMIN),
+    Subcommand::new("GETUSER", ACL_ADMIN),
+    Subcommand::new("SETUSER", ACL_ADMIN),
+    Subcommand::new("DELUSER", ACL_ADMIN),
+    Subcommand::new("LOAD", ACL_ADMIN),
+    Subcommand::new("SAVE", ACL_ADMIN),
+    Subcommand::new("LOG", ACL_ADMIN),
+    Subcommand::new("DRYRUN", ACL_ADMIN),
 ];
 
 type Reply = Result<Value, CommandError>;
@@ -239,10 +262,46 @@ fn client(_: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
 const ACL_READ_ONLY: &str = "ERR Discus reads its users from the file of --acl-file. \
                              Change the file, and the node loads it again.";
 
-fn acl(_: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
+const ACL_NO_FILE: &str = "ERR This node has no users, because --acl-file is not set.";
+
+fn acl(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     let bulk = |s: &str| Value::Bulk(Bytes::copy_from_slice(s.as_bytes()));
+    let users = || {
+        node.security
+            .acl()
+            .ok_or_else(|| CommandError::Custom(ACL_NO_FILE.into()))
+    };
     let sub = upper(&cmd[1]);
     match sub.as_str() {
+        "LIST" if cmd.len() == 2 => Ok(Value::Array(
+            users()?.users().iter().map(|u| bulk(&u.line())).collect(),
+        )),
+        "USERS" if cmd.len() == 2 => Ok(Value::Array(
+            users()?.users().iter().map(|u| bulk(&u.name)).collect(),
+        )),
+        "GETUSER" if cmd.len() == 3 => Ok(match users()?.user(&cmd[2]) {
+            None => Value::Null,
+            Some(user) => Value::Map(vec![
+                (
+                    bulk("flags"),
+                    Value::Array(user.flags().into_iter().map(bulk).collect()),
+                ),
+                (
+                    bulk("passwords"),
+                    Value::Array(
+                        user.passwords
+                            .iter()
+                            .map(|hash| bulk(&hex::encode(hash)))
+                            .collect(),
+                    ),
+                ),
+                (bulk("commands"), bulk(&user.commands_text())),
+                (bulk("keys"), bulk(&user.keys_text())),
+                // Discus has no pub/sub and no selectors.
+                (bulk("channels"), bulk("")),
+                (bulk("selectors"), Value::Array(vec![])),
+            ]),
+        }),
         "WHOAMI" if cmd.len() == 2 => Ok(bulk(
             conn.auth.user.as_ref().map_or("default", |g| &g.user.name),
         )),
@@ -260,13 +319,22 @@ fn acl(_: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
             Ok(Value::Array(
                 specs()
                     .iter()
-                    .filter(|spec| spec.categories.intersects(category))
-                    .map(|spec| bulk(&spec.name.to_ascii_lowercase()))
+                    .flat_map(|spec| {
+                        let subs = spec
+                            .subcommands
+                            .iter()
+                            .map(move |sub| (Some(sub), sub.categories));
+                        std::iter::once((None, spec.categories))
+                            .chain(subs)
+                            .filter(|(_, categories)| categories.intersects(category))
+                            .map(|(sub, _)| bulk(&spec.rule_name(sub)))
+                    })
                     .collect(),
             ))
         }
-        "SETUSER" | "DELUSER" | "LIST" | "USERS" | "GETUSER" | "LOAD" | "SAVE" | "LOG"
-        | "GENPASS" | "DRYRUN" => Err(CommandError::Custom(ACL_READ_ONLY.into())),
+        "SETUSER" | "DELUSER" | "LOAD" | "SAVE" | "LOG" | "GENPASS" | "DRYRUN" => {
+            Err(CommandError::Custom(ACL_READ_ONLY.into()))
+        }
         _ => Err(CommandError::Custom(format!(
             "ERR unknown subcommand or wrong number of arguments for 'ACL {sub}'"
         ))),
