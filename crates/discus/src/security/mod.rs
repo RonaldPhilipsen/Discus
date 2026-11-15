@@ -662,9 +662,10 @@ impl Security {
         let acl = acl.load();
         // Hash before the lookup, so an unknown name costs the same as a wrong password.
         let hash = acl::sha256(value);
-        // Most client libraries send `AUTH default <value>` for a credential without a user, so
-        // the exact name `default` is the form without a name. Names are case-sensitive.
-        let named = user.filter(|u| *u != b"default");
+        // Most client libraries send `AUTH default <value>` for a credential without a user, and
+        // some send an empty name. The exact name `default` and the empty name are thus the form
+        // without a name. Names are case-sensitive.
+        let named = user.filter(|u| !u.is_empty() && *u != b"default");
         match acl.user(named.unwrap_or(b"default")) {
             Some(u) if u.accepts(&hash) => PasswordPath::Accepted(UserGrant {
                 user: u.clone(),
