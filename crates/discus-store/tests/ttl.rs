@@ -49,3 +49,45 @@ fn repeated_sweeps_eventually_cover_every_expired_entry() {
     assert_eq!(s.len(), 0);
     assert_eq!(s.used_memory(), 0);
 }
+
+/// The sweep reaches every expired key of every database, while inserts grow the maps between
+/// calls and removals empty buckets behind the cursor.
+#[test]
+fn sweeps_reach_every_expired_key_while_the_maps_change() {
+    let clock = Arc::new(ManualClock::new(0));
+    let cfg = StoreConfig {
+        shards: 2,
+        max_memory: 1 << 30,
+        ..StoreConfig::default()
+    };
+    let s = Store::new(cfg, clock.clone());
+    for db in [0, 3, 7] {
+        for i in 0..300 {
+            s.write(db, format!("e{i}").as_bytes(), Version::zero(), |slot| {
+                slot.set(Some(Entry::new(Value::Str("v".into()), Some(5))));
+            });
+        }
+    }
+    clock.advance(10);
+    let mut round = 0;
+    while s.len() > 20 * round && round < 400 {
+        s.sweep_expired(7);
+        for i in 0..20 {
+            s.write(
+                round as u32 % 8,
+                format!("live{round}:{i}").as_bytes(),
+                Version::zero(),
+                |slot| {
+                    slot.set(Some(Entry::new(Value::Str("v".into()), None)));
+                },
+            );
+        }
+        round += 1;
+    }
+    assert_eq!(
+        s.len(),
+        20 * round,
+        "expired keys left after {round} rounds"
+    );
+    assert!(round < 400);
+}

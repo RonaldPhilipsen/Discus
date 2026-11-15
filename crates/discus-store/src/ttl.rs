@@ -1,7 +1,6 @@
 //! Active expiry: a sampled sweep, never a walk of a whole shard.
 
 use std::future::Future;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -9,16 +8,21 @@ use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::store::SweepCursor;
 use crate::Store;
+
+/// The most buckets that one sweep call reads per sample that it asks for.
+const BUCKETS_PER_SAMPLE: usize = 16;
 
 impl Store {
     /// Sample up to `samples_per_shard` entries in each shard and remove the expired ones, and
     /// remove every expired tombstone. Both cover every database. Returns the number of entries
-    /// removed. Each shard keeps a cursor over its databases in order and then over each map, so
-    /// repeated sweeps cover the whole shard over time.
+    /// removed. Each shard keeps a cursor of a database and a bucket index, so repeated sweeps
+    /// cover the whole shard over time, and a call reads only the buckets of its sample.
     ///
-    /// The sample skips over the cursor position each call, which is O(cursor) per shard. A later
-    /// plan can replace the map with an indexed one if this shows up in profiles.
+    /// A removal moves no other entry, so the cursor stays in place. A map that grows during a
+    /// round can move an entry behind the cursor, and the next round reads it. A sparse map stops
+    /// a call after `BUCKETS_PER_SAMPLE` buckets per sample, and the next call continues there.
     pub fn sweep_expired(&self, samples_per_shard: usize) -> usize {
         let now = self.clock.now_ms();
         let mut removed_total = 0;
@@ -33,22 +37,29 @@ impl Store {
                     removed_total += 1;
                 }
             }
-            let start = shard.cursor.load(Ordering::Relaxed);
-            let mut seen = 0;
+            let cursor = guard.sweep;
+            let limit = samples_per_shard.saturating_mul(BUCKETS_PER_SAMPLE);
+            let (mut seen, mut read) = (0, 0);
+            let mut next = None;
             let mut expired: Vec<(u32, Bytes)> = Vec::new();
-            for (db, k, e) in guard.entries().skip(start).take(samples_per_shard) {
-                seen += 1;
-                if e.is_expired(now) {
-                    expired.push((db, k.clone()));
+            'walk: for (db, d) in guard.dbs.iter().filter(|(db, _)| *db >= cursor.db) {
+                let from = if *db == cursor.db { cursor.bucket } else { 0 };
+                for bucket in from..d.map.num_buckets() {
+                    if seen == samples_per_shard || read == limit {
+                        next = Some(SweepCursor { db: *db, bucket });
+                        break 'walk;
+                    }
+                    read += 1;
+                    if let Some((k, e)) = d.map.bucket(bucket) {
+                        seen += 1;
+                        if e.is_expired(now) {
+                            expired.push((*db, k.clone()));
+                        }
+                    }
                 }
             }
-            // A short sample means the end of the shard: start over next time.
-            let next = if seen < samples_per_shard {
-                0
-            } else {
-                start + seen - expired.len()
-            };
-            shard.cursor.store(next, Ordering::Relaxed);
+            // The end of the shard: start over next time.
+            guard.sweep = next.unwrap_or_default();
             for (db, k) in expired {
                 if self.take(&mut guard, db, &k).is_some() {
                     removed_total += 1;

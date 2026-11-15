@@ -943,10 +943,11 @@ steps in reverse.
   the limit, the node evicts normal entries, then the oldest hints, then the oldest tombstones with
   `needs_refill`. It never evicts counter state or write sets. Counters return `-OOM`, and write
   sets are bounded at admission.
-- Eviction is sampled approximate LRU per shard. Replicas evict independently, and read repair
-  covers the resulting misses.
-- Expiry has no timer per key (§8.1). The sampled sweep keeps a cursor per shard, so repeated sweeps
-  cover the whole shard.
+- Eviction is sampled approximate LRU per shard. A sample is a run of hash buckets from a random
+  bucket, as in Valkey, so it costs the buckets that it reads. Replicas evict independently, and
+  read repair covers the resulting misses.
+- Expiry has no timer per key (§8.1). The sampled sweep keeps a cursor of a database and a bucket
+  index per shard, so repeated sweeps cover the whole shard, and a sweep reads only its sample.
 - The default limits are 64 KiB per key, 64 MiB per value, and 10000 in-flight commands per
   connection. A connection over the pipeline limit is not read until replies drain.
 - A node serves at most 10000 client connections (`--max-clients`), counted from the accept. It

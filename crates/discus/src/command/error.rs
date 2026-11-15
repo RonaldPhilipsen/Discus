@@ -1,12 +1,16 @@
 //! Command errors and their wire text.
 
+use bytes::Bytes;
 use discus_resp::Value;
+
+use super::util::{c_prefix, error_text, ERROR_TEXT_BYTES};
 
 use crate::cluster::redirect::Endpoint;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandError {
-    UnknownCommand(String),
+    /// The name, and the quoted start of the arguments (empty when there are none).
+    UnknownCommand(String, String),
     WrongArity(String),
     Syntax,
     NoSuchKey,
@@ -37,9 +41,32 @@ pub enum CommandError {
 }
 
 impl CommandError {
+    /// The error for `cmd`, whose name is not a command, with the text of Valkey.
+    pub fn unknown_command(cmd: &[Bytes]) -> CommandError {
+        // Valkey stops adding arguments once the quoted text reaches the limit.
+        let mut args = Vec::new();
+        for arg in &cmd[1..] {
+            let Some(room) = ERROR_TEXT_BYTES.checked_sub(args.len()).filter(|r| *r > 0) else {
+                break;
+            };
+            args.push(b'\'');
+            args.extend_from_slice(c_prefix(arg, room));
+            args.extend_from_slice(b"' ");
+        }
+        CommandError::UnknownCommand(
+            error_text(&cmd[0]),
+            String::from_utf8_lossy(&args).into_owned(),
+        )
+    }
+
     pub fn text(&self) -> String {
         match self {
-            CommandError::UnknownCommand(n) => format!("ERR unknown command '{n}'"),
+            CommandError::UnknownCommand(n, args) if args.is_empty() => {
+                format!("ERR unknown command '{n}'")
+            }
+            CommandError::UnknownCommand(n, args) => {
+                format!("ERR unknown command '{n}', with args beginning with: {args}")
+            }
             CommandError::WrongArity(n) => {
                 format!(
                     "ERR wrong number of arguments for '{}' command",
