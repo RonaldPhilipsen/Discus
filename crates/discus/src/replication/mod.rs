@@ -895,7 +895,8 @@ impl Replicator {
             else {
                 return false;
             };
-            if !entries.is_empty() {
+            // A page of large values can pass the frame limit, so it goes in batches by bytes.
+            for entries in by_bytes(entries, BATCH_BYTES) {
                 let mut batch = Batch::new(epoch.id());
                 batch.entries = entries;
                 if let Err(e) = self.send(node, peer, Message::HintReplay(batch)).await {
@@ -1166,6 +1167,27 @@ impl RefillPage {
     }
 }
 
+/// Split `entries` in order into batches of at most `limit` bytes. An entry larger than `limit`
+/// goes alone.
+fn by_bytes(entries: Vec<(DbKey, Entry)>, limit: u64) -> Vec<Vec<(DbKey, Entry)>> {
+    let mut out: Vec<Vec<(DbKey, Entry)>> = Vec::new();
+    let mut bytes = 0;
+    for (k, e) in entries {
+        let size = discus_store::estimate_size(&k.key, &e);
+        match out.last_mut() {
+            Some(last) if bytes + size <= limit => {
+                bytes += size;
+                last.push((k, e));
+            }
+            _ => {
+                bytes = size;
+                out.push(vec![(k, e)]);
+            }
+        }
+    }
+    out
+}
+
 /// The current entries of `keys` for one replication batch, up to about [`BATCH_BYTES`]. The
 /// keys past the limit go back to `q`, so acknowledging the batch does not drop them.
 fn fill(store: &Store, q: &PeerQueue, keys: Vec<DbKey>) -> Vec<(DbKey, Entry)> {
@@ -1342,6 +1364,32 @@ mod tests {
         got.sort();
         want.sort();
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn a_refill_page_goes_in_batches_by_bytes() {
+        let entry = |n: usize| {
+            let key = DbKey::new(0, Bytes::from(format!("k{n}")));
+            let value = Value::Str(Bytes::from(vec![b'x'; n]));
+            (key, Entry::new(value, None))
+        };
+        let sizes = [100, 100, 5000, 100, 300, 300, 300];
+        let entries: Vec<(DbKey, Entry)> = sizes.iter().map(|n| entry(*n)).collect();
+        let limit = discus_store::estimate_size(&entries[4].0.key, &entries[4].1) * 2;
+        let batches = by_bytes(entries.clone(), limit);
+        let flat: Vec<DbKey> = batches.iter().flatten().map(|(k, _)| k.clone()).collect();
+        let want: Vec<DbKey> = entries.iter().map(|(k, _)| k.clone()).collect();
+        assert_eq!(flat, want);
+        for b in &batches {
+            let bytes: u64 = b
+                .iter()
+                .map(|(k, e)| discus_store::estimate_size(&k.key, e))
+                .sum();
+            assert!(b.len() == 1 || bytes <= limit, "{bytes}");
+        }
+        assert!(batches
+            .iter()
+            .any(|b| b.len() == 1 && b[0].0 == entries[2].0));
     }
 
     #[test]

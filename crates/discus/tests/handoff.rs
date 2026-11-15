@@ -769,3 +769,28 @@ async fn a_new_primary_sees_the_old_values_during_its_handoff() {
     });
     assert!(settled.await, "the owners do not hold the written values");
 }
+
+/// The scan reads 256 entries per page. Large values on one page must still go out in batches
+/// that fit the frame limit, or the batch fails on each attempt and the target is abandoned.
+#[tokio::test]
+async fn a_page_of_large_values_fits_the_frame_limit() {
+    let net = Net::new();
+    let args = ["--cluster-max-frame-bytes", "2097152"];
+    let nodes = net.start_agreed(2, &args).await;
+    let mut c = nodes[0].redis().await;
+    let big = "x".repeat(300_000);
+    let keys: Vec<String> = (0..60).map(|i| format!("big{i}")).collect();
+    for k in &keys {
+        let _: () = c.set(k, &big).await.unwrap();
+    }
+    let joiner = net.start(&[nodes[0].cluster_addr], &args).await;
+    assert!(started(&joiner).await);
+    let mine: Vec<&String> = keys
+        .iter()
+        .filter(|k| joiner.primary(k.as_bytes()) == joiner.id)
+        .collect();
+    assert!(mine.len() > 7, "{} keys moved", mine.len());
+    for k in mine {
+        assert!(joiner.holds(k.as_bytes()), "{k} missing");
+    }
+}
