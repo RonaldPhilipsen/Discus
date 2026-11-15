@@ -24,10 +24,13 @@ pub(super) fn parse(text: &str) -> Result<Acl, String> {
     Ok(Acl { users })
 }
 
-/// An unknown rule is reported by position only, because a mistyped password rule would put the
-/// password into the error and the log.
+/// A rule error gives the position of the rule and never its text, because a mistyped password
+/// rule would put the password into the error and the log (spec "The file").
 enum RuleError {
     Unknown,
+    UnknownCommand,
+    UnknownCategory,
+    Subcommand,
     Invalid(String),
 }
 
@@ -59,8 +62,14 @@ fn parse_line(line: &str, seen: &HashMap<String, Arc<User>>) -> Result<User, Str
     }
     let mut user = User::new(name);
     for (index, rule) in words.enumerate() {
+        let word = index + 3;
         apply(&mut user, rule).map_err(|e| match e {
-            RuleError::Unknown => format!("unknown rule at word {}", index + 3),
+            RuleError::Unknown => format!("unknown rule at word {word}"),
+            RuleError::UnknownCommand => format!("unknown command at word {word}"),
+            RuleError::UnknownCategory => format!("unknown category at word {word}"),
+            RuleError::Subcommand => {
+                format!("rules for one subcommand are not supported (word {word})")
+            }
             RuleError::Invalid(message) => message,
         })?;
     }
@@ -119,9 +128,9 @@ fn apply_prefixed(user: &mut User, rule: &str) -> Result<(), RuleError> {
     } else if rule.starts_with('&') {
         // Accepted with no effect, as `allchannels` is.
     } else if let Some(target) = rule.strip_prefix('+') {
-        command_rule(user, rule, target, true)?;
+        command_rule(user, target, true)?;
     } else if let Some(target) = rule.strip_prefix('-') {
-        command_rule(user, rule, target, false)?;
+        command_rule(user, target, false)?;
     } else {
         return Err(RuleError::Unknown);
     }
@@ -148,14 +157,13 @@ fn set_all(user: &mut User, allowed: bool) {
     }
 }
 
-fn command_rule(user: &mut User, rule: &str, target: &str, allowed: bool) -> Result<(), String> {
+fn command_rule(user: &mut User, target: &str, allowed: bool) -> Result<(), RuleError> {
     if let Some(category) = target.strip_prefix('@') {
         if category.eq_ignore_ascii_case("all") {
             set_all(user, allowed);
             return Ok(());
         }
-        let categories =
-            Categories::parse(category).ok_or_else(|| format!("unknown category {category:?}"))?;
+        let categories = Categories::parse(category).ok_or(RuleError::UnknownCategory)?;
         for spec in specs()
             .iter()
             .filter(|s| s.categories.intersects(categories))
@@ -165,12 +173,9 @@ fn command_rule(user: &mut User, rule: &str, target: &str, allowed: bool) -> Res
         return Ok(());
     }
     if target.contains('|') {
-        return Err(format!(
-            "rules for one subcommand are not supported: {rule:?}"
-        ));
+        return Err(RuleError::Subcommand);
     }
-    let spec = crate::command::lookup(target.as_bytes())
-        .ok_or_else(|| format!("unknown command {target:?}"))?;
+    let spec = crate::command::lookup(target.as_bytes()).ok_or(RuleError::UnknownCommand)?;
     user.commands.set(spec.id, allowed);
     Ok(())
 }
@@ -286,19 +291,22 @@ mod tests {
             error("user oauth2 on"),
             "line 1: the name \"oauth2\" is reserved for AUTH OAUTH2 <token>"
         );
-        assert_eq!(error("user a +gte"), "line 1: unknown command \"gte\"");
-        assert_eq!(error("user a -eval"), "line 1: unknown command \"eval\"");
+        assert_eq!(error("user a +gte"), "line 1: unknown command at word 3");
+        assert_eq!(
+            error("user a on -eval"),
+            "line 1: unknown command at word 4"
+        );
         assert_eq!(
             error("user a +@strings"),
-            "line 1: unknown category \"strings\""
+            "line 1: unknown category at word 3"
         );
         assert_eq!(
             error("user a #abc"),
             "line 1: a password hash must be 64 hex digits"
         );
         assert_eq!(
-            error("user a +config|get"),
-            "line 1: rules for one subcommand are not supported: \"+config|get\""
+            error("user a on +config|get"),
+            "line 1: rules for one subcommand are not supported (word 4)"
         );
         for rule in [
             "<pass",
@@ -314,9 +322,21 @@ mod tests {
                 "line 1: unknown rule at word 3"
             );
         }
-        let e = error("user a on >my pass");
-        assert_eq!(e, "line 1: unknown rule at word 5");
-        assert!(!e.contains("pass"));
+        // A mistyped password can hold whitespace or start with a rule prefix. No error for a rule
+        // holds the text of the rule.
+        for (line, expected) in [
+            ("user a on >my pass", "line 1: unknown rule at word 5"),
+            ("user a on >my -pass", "line 1: unknown command at word 5"),
+            ("user a on >my -@pass", "line 1: unknown category at word 5"),
+            (
+                "user a on >my +pa|ss",
+                "line 1: rules for one subcommand are not supported (word 5)",
+            ),
+        ] {
+            let e = error(line);
+            assert_eq!(e, expected);
+            assert!(!e.contains("pa"), "{e}");
+        }
         assert_eq!(error("# nothing\n"), "the file has no user");
     }
 }

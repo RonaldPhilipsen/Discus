@@ -285,9 +285,16 @@ causes:
 - The file has no user. This error names no line.
 - The file is missing or the node cannot read it. The error has the form `--acl-file <path>: ...`.
 
-The error for an unknown rule has this form: `line 3: unknown rule at word 5`. It gives the
-position of the word and never its text. A mistyped rule can hold a password, and the error goes
-to the log.
+An error for a rule gives the position of the word and never its text. A mistyped rule can hold a
+password, and the error goes to the log. These are the forms:
+
+- `line 3: unknown rule at word 5`
+- `line 3: unknown command at word 5`
+- `line 3: unknown category at word 5`
+- `line 3: rules for one subcommand are not supported (word 5)`
+
+The first word of a line is `user`, and the second word is the name. Thus the first rule is word 3.
+An error for the name shows the name.
 
 A `-` rule for a command that Discus lacks stops the node, because a typing error in a `-` rule
 otherwise leaves a command open. A category without Discus commands, such as `@pubsub`, is valid.

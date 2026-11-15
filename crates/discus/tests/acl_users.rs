@@ -293,3 +293,44 @@ async fn whoami_is_default_without_a_user() {
     let mut s = connect(node.addr).await;
     assert_eq!(run(&mut s, &["ACL", "WHOAMI"]).await, "$7\r\ndefault\r\n");
 }
+
+/// A node with the users of `acl`.
+async fn start_file(dir: &tempfile::TempDir, acl: &str) -> Node {
+    let file = dir.path().join("users.acl");
+    std::fs::write(&file, acl).unwrap();
+    start(&[
+        "--acl-file",
+        file.to_str().unwrap(),
+        "--auth-max-failures-per-source",
+        "1000000",
+    ])
+    .await
+}
+
+#[tokio::test]
+async fn auth_with_only_a_password_logs_in_the_user_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = start_file(
+        &dir,
+        "user default on >default-pass ~cache:* +@read +@connection\n",
+    )
+    .await;
+    let mut s = connect(node.addr).await;
+    assert_eq!(run(&mut s, &["AUTH", "default-pass"]).await, "+OK\r\n");
+    assert_eq!(run(&mut s, &["ACL", "WHOAMI"]).await, "$7\r\ndefault\r\n");
+    assert_eq!(run(&mut s, &["GET", "cache:a"]).await, "$-1\r\n");
+    assert_eq!(run(&mut s, &["GET", "other"]).await, KEY);
+    assert_eq!(run(&mut s, &["SET", "cache:a", "1"]).await, no_perm("set"));
+    let wrong = send(&node, &cmd(&["AUTH", "wrong"])).await;
+    assert!(wrong.starts_with("-WRONGPASS"), "{wrong:?}");
+}
+
+#[tokio::test]
+async fn a_nopass_user_logs_in_with_any_password() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = start_file(&dir, "user default off\nuser open on nopass ~* +@all\n").await;
+    for password in ["", "x", "anything at all"] {
+        let mut s = login(&node, "open", password).await;
+        assert_eq!(run(&mut s, &["ACL", "WHOAMI"]).await, "$4\r\nopen\r\n");
+    }
+}

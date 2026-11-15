@@ -38,7 +38,7 @@ pub enum Denied {
 }
 
 /// One user of the ACL file. A new user is off, with no password, no keys, and no commands.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct User {
     pub name: String,
     pub enabled: bool,
@@ -46,6 +46,19 @@ pub struct User {
     pub passwords: Vec<[u8; 32]>,
     pub commands: CommandSet,
     pub keys: Vec<KeyPattern>,
+}
+
+/// Leaves out the password hashes. An unsalted hash in a log helps an attacker guess.
+impl std::fmt::Debug for User {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("User")
+            .field("name", &self.name)
+            .field("enabled", &self.enabled)
+            .field("nopass", &self.nopass)
+            .field("commands", &self.commands)
+            .field("keys", &self.keys)
+            .finish_non_exhaustive()
+    }
 }
 
 impl User {
@@ -180,5 +193,16 @@ mod tests {
         assert!(!u.accepts(&sha256(b"")));
         u.nopass = true;
         assert!(u.accepts(&sha256(b"anything")));
+    }
+
+    #[test]
+    fn debug_hides_the_password_hashes() {
+        let mut u = User::new("u");
+        u.passwords.push(sha256(b"secret"));
+        let text = format!("{u:?}");
+        assert!(text.contains("\"u\""), "{text}");
+        assert!(!text.contains(&hex::encode(sha256(b"secret"))), "{text}");
+        let bytes = format!("{:?}", sha256(b"secret"));
+        assert!(!text.contains(&bytes), "{text}");
     }
 }
