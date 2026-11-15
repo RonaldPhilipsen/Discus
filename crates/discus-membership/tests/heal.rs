@@ -131,3 +131,40 @@ fn the_survivor_of_a_two_node_crash_keeps_serving() {
     assert!(sim.is_normal(ids[0]));
     assert!(!rejoined(&sim, ids[0]));
 }
+
+/// Isolate one node of four until both sides dropped each other. Then let it reach one healthy
+/// node only, which tells the other two by rumor that it is alive, before they get its epoch.
+fn rumored_back_rejoins(seed: u64) {
+    let mut sim = Sim::new(seed, SwimConfig::fast());
+    let ids = sim.cluster(4);
+    sim.run_ms(1_000);
+    let lone = ids[0];
+    let healthy: Vec<NodeId> = ids[1..].to_vec();
+    sim.partition(&[&[lone], &healthy]);
+    sim.run_until(30_000, |s| {
+        s.epoch(lone).normal().count() == 1
+            && healthy
+                .iter()
+                .all(|&h| s.epoch(h).member(lone).is_none() && s.is_normal(h))
+    });
+    sim.partition(&[&[lone, healthy[0]], &healthy]);
+    sim.run_ms(3_000);
+    sim.heal();
+    sim.run_until(30_000, |s| converged(s, &ids));
+    sim.run_ms(2_000);
+    assert!(converged(&sim, &ids), "seed {seed}: no lasting agreement");
+    for &h in &healthy {
+        assert!(!rejoined(&sim, h), "seed {seed}: healthy node {h} rejoined");
+    }
+    assert!(
+        rejoined(&sim, lone),
+        "seed {seed}: the isolated node came back without a rejoin"
+    );
+}
+
+#[test]
+fn a_node_rumored_alive_still_rejoins() {
+    for seed in 0..20 {
+        rumored_back_rejoins(900 + seed);
+    }
+}

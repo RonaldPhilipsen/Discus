@@ -744,6 +744,19 @@ impl Swim {
         });
     }
 
+    /// True when member `id` is absent from `current` and holds another epoch. A joiner holds
+    /// the epoch of its join reply. A member that holds another epoch comes from the other side
+    /// of a healed partition, which can be the side with the higher epoch. Added back without
+    /// that epoch arriving first, it never sees an epoch that drops it, so it never rejoins and
+    /// keeps the state of its time away (spec section 6.3).
+    fn elsewhere(&self, id: &NodeId, current: &Epoch) -> bool {
+        current.member(*id).is_none()
+            && self
+                .members
+                .get(id)
+                .is_some_and(|r| r.info.epoch != current.id())
+    }
+
     /// The `NORMAL` members of `epoch` that this node does not see as dead, itself included.
     fn alive_normal(&self, epoch: &Epoch) -> usize {
         epoch
@@ -830,7 +843,7 @@ impl Swim {
                 let adds_normal = want
                     .as_ref()
                     .is_some_and(|m| m.state == MemberState::Normal);
-                !(adds_normal && self.held.contains(id))
+                !(adds_normal && (self.held.contains(id) || self.elsewhere(id, &current)))
             })
             .map(|(id, want)| (*id, want.clone()))
             .collect();
