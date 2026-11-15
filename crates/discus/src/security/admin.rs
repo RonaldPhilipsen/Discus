@@ -4,6 +4,7 @@
 //! phase. Every route under `/admin/` needs an admin certificate or a bearer token with
 //! `discus.admin`. The shared token never opens them.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use axum::extract::{ConnectInfo, Request, State};
@@ -25,13 +26,18 @@ pub struct AdminPeer {
     pub tls: bool,
     /// The identity of a verified client certificate.
     pub identity: Option<String>,
+    /// The source address. The failed-attempt limit counts refused bearer tokens for it.
+    pub addr: Option<IpAddr>,
 }
 
 impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TcpListener>>
     for AdminPeer
 {
-    fn connect_info(_: axum::serve::IncomingStream<'_, TcpListener>) -> AdminPeer {
-        AdminPeer::default()
+    fn connect_info(stream: axum::serve::IncomingStream<'_, TcpListener>) -> AdminPeer {
+        AdminPeer {
+            addr: Some(stream.remote_addr().ip()),
+            ..AdminPeer::default()
+        }
     }
 }
 
@@ -42,6 +48,7 @@ impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TlsL
         AdminPeer {
             tls: true,
             identity: stream.remote_addr().identity.clone(),
+            addr: Some(stream.remote_addr().addr.ip()),
         }
     }
 }

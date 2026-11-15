@@ -271,6 +271,9 @@ The node limits failed `AUTH` attempts in two ways:
 
 Successful attempts never count.
 
+The limit per source address also covers bearer tokens on the admin port. See
+[Admin port](#admin-port).
+
 ## OAuth 2.0
 
 Discus is an OAuth 2.0 resource server. It does not issue tokens. It checks each JSON Web Token
@@ -347,6 +350,9 @@ The node checks the full token at `AUTH` and after a key refresh. For each other
 checks only the `exp` and `nbf` values that it saved. When the token expires, the next command
 returns `-NOAUTH`. The client can send `AUTH` with a new token on the same connection.
 
+A connection that used an opaque token also has a recheck time. See
+[Introspection](#introspection).
+
 ### Issuer addresses
 
 The node fetches keys from an issuer over HTTPS. For development, `--dev-insecure-oauth2` also
@@ -376,6 +382,25 @@ discovery document.
 The node accepts an answer only when `active` is true and `exp` is present and not past. When the
 answer has `iss` or `aud`, they must match. The node keeps an answer until the token expires, or
 for at most 300 seconds.
+
+A connection keeps its access only as long as the answer lives. When the answer ends, the node
+asks the identity provider again before it runs the next command of that connection. Thus the
+node sees a revoked token after at most 300 seconds, also on an open connection. Connections
+that use the same token share one request.
+
+- If the token is still active, the connection keeps its access. The node uses the scopes and
+  the `exp` value of the new answer.
+- If the token is not active, the connection loses its access, and the command returns
+  `-NOAUTH`.
+- If the identity provider gives no answer, the connection also loses its access. The node
+  cannot know that the token is still valid, so it fails closed. An outage of the identity
+  provider thus ends the access of every connection with an opaque token within 300 seconds.
+  When the identity provider is back, the client can send `AUTH` again.
+
+The node also keeps a refused answer, for 30 seconds. During that time it refuses the same token
+without a request to the identity provider. Thus a token that becomes active later can stay
+refused for up to 30 seconds. The node does not keep a refused token that is longer than 1024
+bytes.
 
 ## Kubernetes service accounts
 
@@ -467,6 +492,13 @@ An admin request passes in one of two ways:
   plaintext, this needs `--dev-insecure-oauth2`.
 
 The shared token never opens the admin routes. Without admin credentials, the node answers 401.
+
+Each refused bearer token counts as a failed attempt for its source address, together with the
+failed `AUTH` attempts from that address (see [Failed attempts](#failed-attempts)). When an
+address is over the limit, the node answers 401 to every bearer token from it until the window
+ends. It does not check the token, and it sends no request to the identity provider. An admin
+certificate still passes. The admin port takes the source address from the TCP connection, so
+every client behind one proxy shares one limit.
 
 With `--admin-tls`, the admin port uses TLS with `--tls-cert`, `--tls-key`, and
 `--tls-client-ca`. Admin certificate identities go in the `--auth-config` file:

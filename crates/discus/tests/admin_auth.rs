@@ -190,3 +190,55 @@ mod tokens {
         assert_eq!(get(&node, "/admin/security", Some(&t)).await.0, 401);
     }
 }
+
+#[cfg(feature = "oauth2-introspection")]
+mod introspected {
+    use super::*;
+    use security_support::idp::{unix_now, MockIdp};
+    use security_support::start_oauth2;
+    use serde_json::json;
+
+    async fn node(ca: &TestCa, idp: &MockIdp, args: &[&str]) -> security_support::Node {
+        let secret_file = write_file(ca, "secret", "secret");
+        let extra = format!("client_id = \"discus\"\nclient_secret_file = \"{secret_file}\"");
+        let file = write_file(ca, "auth.toml", &idp.toml(ca, &extra));
+        start_oauth2(&file, args).await
+    }
+
+    #[tokio::test]
+    async fn a_blocked_source_never_reaches_the_provider() {
+        let ca = TestCa::new();
+        let idp = MockIdp::start(&ca).await;
+        let admin = json!({
+            "active": true,
+            "iss": idp.issuer,
+            "aud": "discus",
+            "exp": unix_now() + 300,
+            "scope": "discus.admin",
+        });
+        idp.add_opaque("admin-1", admin.clone());
+        idp.add_opaque("admin-2", admin);
+        let node = node(&ca, &idp, &["--auth-max-failures-per-source", "3"]).await;
+        assert_eq!(get(&node, "/admin/security", Some("admin-1")).await.0, 200);
+        assert_eq!(idp.introspect_calls(), 1);
+        for bad in ["bad-1", "bad-2", "bad-3"] {
+            assert_eq!(get(&node, "/admin/security", Some(bad)).await.0, 401);
+        }
+        assert_eq!(idp.introspect_calls(), 4);
+        // The source is over its limit: a new token, bad or good, gets no call to the provider.
+        assert_eq!(get(&node, "/admin/security", Some("bad-4")).await.0, 401);
+        assert_eq!(get(&node, "/admin/security", Some("admin-2")).await.0, 401);
+        assert_eq!(idp.introspect_calls(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_refused_admin_token_reaches_the_provider_once() {
+        let ca = TestCa::new();
+        let idp = MockIdp::start(&ca).await;
+        let node = node(&ca, &idp, &[]).await;
+        for _ in 0..3 {
+            assert_eq!(get(&node, "/admin/security", Some("bad-1")).await.0, 401);
+        }
+        assert_eq!(idp.introspect_calls(), 1);
+    }
+}
