@@ -661,6 +661,9 @@ impl Security {
         let oauth2_only = user.is_some_and(|u| u.eq_ignore_ascii_case(b"OAUTH2"));
         if self.policy.uses(Factor::Password) && !oauth2_only {
             if let Some(acl) = &self.acl {
+                // Read the generation before the users: `reload_acl` stores the users first and
+                // changes the generation second, so an old user never pairs with a new generation.
+                let generation = self.acl_generation.load(Ordering::Acquire);
                 let acl = acl.load();
                 // Hash before the lookup, so an unknown name costs the same as a wrong password.
                 let hash = acl::sha256(token);
@@ -669,7 +672,7 @@ impl Security {
                     Some(u) if u.accepts(&hash) => {
                         conn.auth.user = Some(UserGrant {
                             user: u.clone(),
-                            generation: self.acl_generation.load(Ordering::Relaxed),
+                            generation,
                         });
                         return Ok(());
                     }
@@ -1067,6 +1070,37 @@ pub(crate) mod tests {
             },
         );
         let get = crate::counter::cmd(&["GET", "k"]);
+        assert_eq!(
+            s.authorize(&mut conn, spec(b"GET"), &get),
+            Err(CommandError::NoAuth)
+        );
+    }
+
+    #[test]
+    fn a_reload_that_turns_a_user_off_ends_its_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("users.acl");
+        std::fs::write(&file, "user u on >p ~* +@all\n").unwrap();
+        let s = security(&["--acl-file", file.to_str().unwrap()]);
+        let mut conn = ConnState::new(
+            1,
+            ConnAuth {
+                tls: true,
+                ..ConnAuth::default()
+            },
+        );
+        s.authenticate(&mut conn, Some(b"u"), b"p").unwrap();
+        let get = crate::counter::cmd(&["GET", "k"]);
+        assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), Ok(()));
+
+        let old_grant = conn.auth.user.clone();
+        std::fs::write(&file, "user u on >p ~* +@connection\n").unwrap();
+        s.reload_acl().unwrap();
+        conn.auth.user = old_grant;
+        assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), no_perm("get"));
+
+        std::fs::write(&file, "user u off >p ~* +@all\n").unwrap();
+        s.reload_acl().unwrap();
         assert_eq!(
             s.authorize(&mut conn, spec(b"GET"), &get),
             Err(CommandError::NoAuth)

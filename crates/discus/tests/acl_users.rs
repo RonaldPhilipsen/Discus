@@ -182,6 +182,7 @@ user writer on >w3 ~jobs:* +@read +@connection
         &file,
         "user default off\nuser admin on >admin-pass ~* +@all\n",
     );
+    // Not `eventually`: its closure cannot borrow the connection mutably.
     let deadline = Instant::now() + Duration::from_secs(60);
     while !run(&mut w, &["PING"]).await.starts_with("-NOAUTH") {
         assert!(Instant::now() < deadline, "the node did not reload");
