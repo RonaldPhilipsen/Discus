@@ -2,11 +2,13 @@
 #![allow(clippy::unwrap_used)]
 mod security_support;
 
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use security_support::common::client_tls::connect;
-use security_support::{cmd, exchange, send, start, Node, ACL_USERS, NOPERM_KEY as KEY};
+use security_support::{
+    cmd, eventually, exchange, replace_file, send, start, write_in, Node, ACL_USERS,
+    NOPERM_KEY as KEY,
+};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 
@@ -122,22 +124,6 @@ async fn a_second_login_replaces_the_user() {
     assert_eq!(run(&mut s, &["SET", "jobs:1", "v"]).await, no_perm("set"));
 }
 
-/// Wait until `ok` is true. The node checks the file every second, so 60 s is generous.
-async fn eventually<F: std::future::Future<Output = bool>>(mut ok: impl FnMut() -> F) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !ok().await {
-        assert!(Instant::now() < deadline, "the node did not reload");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-}
-
-/// Replace the file with one rename, as Kubernetes does, so the node never reads half a file.
-fn replace(path: &Path, content: &str) {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, content).unwrap();
-    std::fs::rename(&tmp, path).unwrap();
-}
-
 #[tokio::test]
 async fn a_reload_changes_users_on_open_connections() {
     let dir = tempfile::tempdir().unwrap();
@@ -147,7 +133,7 @@ async fn a_reload_changes_users_on_open_connections() {
     let mut w = login(&node, "writer", "w1").await;
     let mut a = login(&node, "admin", "admin-pass").await;
 
-    replace(
+    replace_file(
         &file,
         "\
 user default off
@@ -156,7 +142,10 @@ user reader off >read-pass ~cache:* +@read +@connection
 user writer on >w3 ~jobs:* +@read +@connection
 ",
     );
-    eventually(|| async { send(&node, &cmd(&["AUTH", "writer", "w3"])).await == "+OK\r\n" }).await;
+    eventually("the node did not load the new users", || async {
+        send(&node, &cmd(&["AUTH", "writer", "w3"])).await == "+OK\r\n"
+    })
+    .await;
 
     let denied = run(&mut r, &["PING"]).await;
     assert!(denied.starts_with("-NOAUTH"), "{denied:?}");
@@ -167,7 +156,7 @@ user writer on >w3 ~jobs:* +@read +@connection
     assert!(old.starts_with("-WRONGPASS"), "{old:?}");
     assert_eq!(run(&mut a, &["PING"]).await, "+PONG\r\n");
 
-    replace(
+    replace_file(
         &file,
         "user default off\nuser admin on >admin-pass ~* +@all\n",
     );
@@ -183,7 +172,7 @@ user writer on >w3 ~jobs:* +@read +@connection
 async fn a_broken_reload_keeps_the_users() {
     let dir = tempfile::tempdir().unwrap();
     let node = start_with(&dir).await;
-    replace(&dir.path().join("users.acl"), "usr broken\n");
+    replace_file(&dir.path().join("users.acl"), "usr broken\n");
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(
         send(&node, &cmd(&["AUTH", "reader", "read-pass"])).await,
@@ -194,19 +183,8 @@ async fn a_broken_reload_keeps_the_users() {
 #[tokio::test]
 async fn a_user_without_the_connection_group_cannot_ping() {
     let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("users.acl");
-    std::fs::write(
-        &file,
-        format!("{ACL_USERS}user nocon on >nocon-pass ~* +@read\n"),
-    )
-    .unwrap();
-    let node = start(&[
-        "--acl-file",
-        file.to_str().unwrap(),
-        "--auth-max-failures-per-source",
-        "1000000",
-    ])
-    .await;
+    let acl = format!("{ACL_USERS}user nocon on >nocon-pass ~* +@read\n");
+    let node = start_file(&dir, &acl).await;
     let mut s = login(&node, "nocon", "nocon-pass").await;
     assert_eq!(run(&mut s, &["PING"]).await, no_perm("ping"));
     assert_eq!(
@@ -442,12 +420,12 @@ async fn acl_list_shows_the_users_of_a_reload() {
     let before = run(&mut admin, &["ACL", "USERS"]).await;
     assert!(before.starts_with("*5\r\n"), "{before:?}");
 
-    replace(
+    replace_file(
         &dir.path().join("users.acl"),
         "user admin on >admin-pass ~* +@all\nuser extra off\n",
     );
     let after = format!("*2\r\n{}{}", bulk("admin"), bulk("extra"));
-    eventually(|| async {
+    eventually("the node did not load the new users", || async {
         let mut s = login(&node, "admin", "admin-pass").await;
         run(&mut s, &["ACL", "USERS"]).await == after
     })
@@ -458,11 +436,10 @@ async fn acl_list_shows_the_users_of_a_reload() {
 /// A node with the users of `acl`. It checks the file every second, and its source limit is high,
 /// because the tests send wrong passwords.
 async fn start_file(dir: &tempfile::TempDir, acl: &str) -> Node {
-    let file = dir.path().join("users.acl");
-    std::fs::write(&file, acl).unwrap();
+    let file = write_in(dir, "users.acl", acl);
     start(&[
         "--acl-file",
-        file.to_str().unwrap(),
+        &file,
         "--tls-reload-secs",
         "1",
         "--auth-max-failures-per-source",

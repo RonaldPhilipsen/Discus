@@ -6,9 +6,7 @@ mod security_support;
 use std::time::Duration;
 
 use security_support::idp::{unix_now, MockIdp};
-use security_support::{
-    cmd, exchange, send, start, start_oauth2, wait_status, write_file, Node, TestCa, ACL_USERS,
-};
+use security_support::{cmd, exchange, send, start_oauth2, write_file, Node, TestCa, ACL_USERS};
 use serde_json::json;
 
 async fn node(ca: &TestCa, idp: &MockIdp, secret: &str, args: &[&str]) -> Node {
@@ -172,24 +170,8 @@ async fn mixed_node(ca: &TestCa, idp: &MockIdp, acl: &str) -> Node {
     let secret_file = write_file(ca, "secret", "secret");
     let extra = format!("client_id = \"discus\"\nclient_secret_file = \"{secret_file}\"");
     let file = write_file(ca, "auth.toml", &idp.toml(ca, &extra));
-    let acl = write_file(ca, "users.acl", acl);
-    let node = start(&[
-        "--auth-policy",
-        "any:password,oauth2",
-        "--dev-insecure-oauth2",
-        "--auth-config",
-        &file,
-        "--acl-file",
-        &acl,
-        "--auth-max-failures-per-source",
-        "1000000",
-    ])
-    .await;
-    assert!(
-        wait_status(node.admin, "/readyz", 200, Duration::from_secs(60)).await,
-        "the node never became ready"
-    );
-    node
+    let policy = "any:password,oauth2";
+    security_support::start_users_oauth2(ca, &file, policy, acl, &["--dev-insecure-oauth2"]).await
 }
 
 #[tokio::test]

@@ -57,9 +57,7 @@ async fn the_entry_node_authorizes_and_the_owner_trusts_the_forward() {
 #[tokio::test]
 async fn the_entry_node_checks_the_user_rules_before_the_redirect() {
     let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("users.acl");
-    std::fs::write(&file, ACL_USERS).unwrap();
-    let file = file.to_str().unwrap().to_string();
+    let file = security_support::write_in(&dir, "users.acl", ACL_USERS);
     let (c, ports) = start_redirect_cluster(2, |_| vec!["--acl-file".into(), file.clone()]).await;
     let key = c.key_on(1, "other");
 

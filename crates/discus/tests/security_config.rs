@@ -39,17 +39,10 @@ async fn an_unknown_factor_is_named() {
     }
 }
 
-/// An ACL file with `content` in `dir`.
-fn acl_file(dir: &tempfile::TempDir, name: &str, content: &str) -> String {
-    let file = dir.path().join(name);
-    std::fs::write(&file, content).expect("the test directory is writable");
-    file.to_str().expect("a UTF-8 path").to_string()
-}
-
 #[tokio::test]
 async fn the_acl_file_and_the_password_factor_go_together() {
     let dir = tempfile::tempdir().unwrap();
-    let f = acl_file(&dir, "users.acl", "user admin on >p ~* +@all\n");
+    let f = common::write_in(&dir, "users.acl", "user admin on >p ~* +@all\n");
     let e = bind_error(&["--acl-file", &f, "--auth-policy", "none"]).await;
     assert!(e.contains("does not use password"), "{e}");
     let e = bind_error(&["--auth-policy", "all:password"]).await;
@@ -59,7 +52,7 @@ async fn the_acl_file_and_the_password_factor_go_together() {
 #[tokio::test]
 async fn a_bad_or_missing_acl_file_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
-    let b = acl_file(&dir, "bad.acl", "usr a\n");
+    let b = common::write_in(&dir, "bad.acl", "usr a\n");
     let e = bind_error(&["--acl-file", &b]).await;
     assert!(e.contains("line 1: a line must start with \"user\""), "{e}");
     let missing = dir.path().join("missing.acl");

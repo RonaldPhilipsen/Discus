@@ -3,18 +3,8 @@
 mod security_support;
 
 use std::path::Path;
-use std::time::{Duration, Instant};
 
-use security_support::{cmd, exchange, start, tls_connect, CertFiles, TestCa};
-
-/// Wait until `ok` is true. The node checks the files every second, so 60 s is generous.
-async fn eventually<F: std::future::Future<Output = bool>>(mut ok: impl FnMut() -> F) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !ok().await {
-        assert!(Instant::now() < deadline, "the node did not reload");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-}
+use security_support::{cmd, eventually, exchange, start, tls_connect, CertFiles, TestCa};
 
 fn copy(from: &Path, to: &Path) {
     std::fs::write(to, std::fs::read(from).unwrap()).unwrap();
@@ -49,7 +39,10 @@ async fn the_client_listener_reloads_its_certificate() {
     let next = new.server_cert();
     copy(&next.key, Path::new(&key));
     copy(&next.cert, Path::new(&cert));
-    eventually(|| async { tls_connect(node.addr, &new, None).await.is_ok() }).await;
+    eventually("the node did not load the new certificate", || async {
+        tls_connect(node.addr, &new, None).await.is_ok()
+    })
+    .await;
     let mut s = tls_connect(node.addr, &new, None).await.unwrap();
     assert_eq!(exchange(&mut s, &cmd(&["PING"])).await, "+PONG\r\n");
 }
@@ -87,5 +80,5 @@ async fn the_client_listener_reloads_its_client_ca() {
     );
 
     copy(&new.ca_path, &client_ca);
-    eventually(ping).await;
+    eventually("the node did not load the new certificate", ping).await;
 }

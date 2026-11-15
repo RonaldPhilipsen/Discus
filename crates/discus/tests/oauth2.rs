@@ -242,18 +242,7 @@ async fn all_mtls_oauth2_needs_both_factors() {
 async fn a_name_of_the_acl_file_takes_the_password_path() {
     let ca = TestCa::new();
     let idp = MockIdp::start(&ca).await;
-    let file = write_file(&ca, "auth.toml", &idp.toml(&ca, ""));
-    let acl = write_file(&ca, "users.acl", ACL_USERS);
-    let node = start(&[
-        "--auth-policy",
-        "any:password,oauth2",
-        "--auth-config",
-        &file,
-        "--acl-file",
-        &acl,
-    ])
-    .await;
-    assert!(wait_status(node.admin, "/readyz", 200, Duration::from_secs(60)).await);
+    let node = acl_node(&ca, &idp, "any:password,oauth2", ACL_USERS).await;
     let t = idp.token("discus.read");
     let named = send(&node, &cmd(&["AUTH", "reader", &t])).await;
     assert!(named.starts_with("-WRONGPASS"), "{named:?}");
@@ -267,20 +256,7 @@ async fn a_name_of_the_acl_file_takes_the_password_path() {
 /// A node with the policy `policy`, the issuer of `idp`, and the users of `acl`.
 async fn acl_node(ca: &TestCa, idp: &MockIdp, policy: &str, acl: &str) -> Node {
     let file = write_file(ca, "auth.toml", &idp.toml(ca, ""));
-    let acl = write_file(ca, "users.acl", acl);
-    let node = start(&[
-        "--auth-policy",
-        policy,
-        "--auth-config",
-        &file,
-        "--acl-file",
-        &acl,
-        "--auth-max-failures-per-source",
-        "1000000",
-    ])
-    .await;
-    assert!(wait_status(node.admin, "/readyz", 200, Duration::from_secs(60)).await);
-    node
+    security_support::start_users_oauth2(ca, &file, policy, acl, &[]).await
 }
 
 #[tokio::test]
