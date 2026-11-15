@@ -71,6 +71,8 @@ pub enum Reject {
     Stale,
     /// Introspection said the token is not active, or did not answer.
     Inactive,
+    /// Introspection said the token is not an access token.
+    TokenType,
 }
 
 impl fmt::Display for Reject {
@@ -88,6 +90,7 @@ impl fmt::Display for Reject {
             Reject::NoScope => "no Discus scope",
             Reject::Stale => "issuer keys unavailable or stale",
             Reject::Inactive => "token not active",
+            Reject::TokenType => "not an access token",
         })
     }
 }
@@ -462,6 +465,11 @@ impl OAuth2 {
 
     /// Before a synchronous check: refresh the JWKS when the token names an unknown `kid`.
     pub async fn prefetch(&self, token: &[u8]) {
+        // The limit holds before any decode or request, so an oversize value never reaches an
+        // identity provider. `check` refuses it.
+        if token.len() > MAX_TOKEN_BYTES {
+            return;
+        }
         if !is_jwt(token) {
             #[cfg(feature = "oauth2-introspection")]
             if let Some(i) = &self.introspector {
@@ -488,6 +496,9 @@ impl OAuth2 {
     /// Check a token. A JWT verifies locally. An opaque token needs a cached introspection
     /// answer, which `prefetch` fills.
     pub fn check(&self, token: &[u8], now: i64) -> Result<Claims, Reject> {
+        if token.len() > MAX_TOKEN_BYTES {
+            return Err(Reject::Malformed);
+        }
         if is_jwt(token) {
             return self.validator.check(token, now);
         }

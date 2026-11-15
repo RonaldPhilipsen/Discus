@@ -147,8 +147,11 @@ user writer on >w3 ~jobs:* +@read +@connection
     })
     .await;
 
-    let denied = run(&mut r, &["PING"]).await;
-    assert!(denied.starts_with("-NOAUTH"), "{denied:?}");
+    // As in Valkey, a user that is now `off` keeps its open logins with its new rules, and
+    // cannot log in again.
+    assert_eq!(run(&mut r, &["GET", "cache:1"]).await, "$-1\r\n");
+    let fresh = send(&node, &cmd(&["AUTH", "reader", "read-pass"])).await;
+    assert!(fresh.starts_with("-WRONGPASS"), "{fresh:?}");
     assert_eq!(run(&mut w, &["PING"]).await, "+PONG\r\n");
     assert_eq!(run(&mut w, &["SET", "jobs:1", "v"]).await, no_perm("set"));
     assert_eq!(run(&mut w, &["GET", "jobs:1"]).await, "$-1\r\n");
@@ -162,10 +165,15 @@ user writer on >w3 ~jobs:* +@read +@connection
     );
     // Not `eventually`: its closure cannot borrow the connection mutably.
     let deadline = Instant::now() + Duration::from_secs(60);
-    while !run(&mut w, &["PING"]).await.starts_with("-NOAUTH") {
+    while !run(&mut w, &["GET", "jobs:1"]).await.starts_with("-NOAUTH") {
         assert!(Instant::now() < deadline, "the node did not reload");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    assert_eq!(
+        run(&mut w, &["PING"]).await,
+        "",
+        "the node closed the connection"
+    );
 }
 
 #[tokio::test]

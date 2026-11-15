@@ -74,6 +74,8 @@ The node reads the identity of a client certificate in this order:
 2. The first DNS SAN.
 3. The subject CN.
 
+A certificate without any of these has no identity. It does not meet the `mtls` factor.
+
 ### Mode `lb`
 
 In this mode an L4 load balancer accepts the client TLS connection. The load balancer opens a new
@@ -87,12 +89,20 @@ The node trusts the header only when both of these checks pass:
 
 The node closes any other connection. It reads no header from an untrusted address.
 
+By default, every certificate from `--tls-client-ca` can act as the load balancer. Set `--lb-san`
+to the URI SAN of the load balancer certificate, for example `spiffe://example.org/ns/edge/sa/lb`.
+Then the node also closes a connection whose certificate does not carry this exact URI SAN. The
+test is the same as the test of `--cluster-san`. Use it when the CA also signs client or other
+certificates.
+
 The node accepts PROXY protocol v1 and v2. It reads these values from the header:
 
 - The client address. The node uses it for the failed-attempt limit.
 - The client identity. The node takes it from a custom TLV when `--lb-identity-tlv` names one,
   for example `0xE0`. Otherwise the node takes the CN from the `PP2_TYPE_SSL` TLV, but only when
-  the load balancer says that it verified the client certificate.
+  the load balancer says that it verified the client certificate. If the header has a
+  `PP2_TYPE_SSL` TLV, the custom TLV also counts only when the load balancer verified the client
+  certificate. An empty identity is no identity.
 - Whether the client used TLS. If the `PP2_TYPE_SSL` TLV says that the client did not use TLS, the
   node closes the connection. Configure the load balancer to accept TLS clients only.
 
@@ -351,7 +361,8 @@ names that the user cannot read, as in Valkey.
 - In every other case, the node treats the value as a token. With introspection, the value then
   goes to the identity provider. Thus a client that sends a password without its username, or
   with a mistyped username, sends that password to the identity provider.
-- A user that is `off` cannot log in.
+- A user that is `off` cannot log in. A connection that logged in before the user became `off`
+  keeps its login, as in Valkey.
 - A second successful `AUTH` on a connection replaces the user.
 - With an `any` policy, a successful `AUTH` replaces the earlier login of the connection. A login
   with a password removes an earlier token, and a login with a token removes an earlier user. A
@@ -669,7 +680,7 @@ The node fetches the discovery document of each issuer at startup. Then it fetch
 - A token with an unknown key ID (`kid`) makes the node fetch the keys at once. It does this at
   most once per `jwks_min_refetch_secs` for each issuer.
 - After a fetch, the node checks the token of each open connection again on its next command. A
-  token whose key is gone gets `-NOAUTH`.
+  token whose key is gone gets `-NOAUTH`, and the node closes the connection.
 - If the issuer is unreachable, the node keeps the keys it has. After `jwks_max_stale_secs`
   without a successful fetch, the node refuses every token from that issuer. The node stays
   ready.
@@ -683,7 +694,9 @@ not become ready.
 
 The node checks the full token at `AUTH` and after a key refresh. For each other command, it
 checks only the `exp` and `nbf` values that it saved. When the token expires, the next command
-returns `-NOAUTH`. The client can send `AUTH` with a new token on the same connection.
+returns `-NOAUTH`, and the node closes the connection. The client opens a new connection and sends
+`AUTH` with a new token. To keep a connection, send `AUTH` with a new token before the old one
+expires.
 
 A connection that used an opaque token also has a recheck time. See
 [Introspection](#introspection).
@@ -693,7 +706,12 @@ A connection that used an opaque token also has a recheck time. See
 The node fetches keys from an issuer over HTTPS. For development, `--dev-insecure-oauth2` also
 allows `http` issuer addresses.
 
-The node never logs a token. The debug log shows the `sub` and `jti` claims only.
+The node does not follow a redirect from an identity provider. It reads at most 1 MiB of a
+discovery document, a key set, or an introspection answer. A larger answer is an error.
+
+The node never logs a token. The debug log shows the `sub` and `jti` claims only. The node refuses
+a token that is longer than 16 KiB, before it decodes the token or sends it to an identity
+provider.
 
 ### Introspection
 
@@ -708,6 +726,7 @@ audience = "discus"
 client_id = "discus"
 client_secret_file = "/etc/discus/introspection-secret"
 # introspection_url = "https://login.example.com/oauth2/introspect"
+# require_aud = false
 ```
 
 Only one issuer can turn on introspection. The node sends a token with no JWT shape to that
@@ -715,7 +734,13 @@ issuer only. Without `introspection_url`, the node uses the `introspection_endpo
 discovery document.
 
 The node accepts an answer only when `active` is true and `exp` is present and not past. When the
-answer has `iss` or `aud`, they must match. The node keeps an answer until the token expires, or
+answer has `iss` or `aud`, they must match. With `require_aud = true`, the node also refuses an
+answer without `aud`. Set it when the identity provider always sends `aud`, so a token for another
+service never gets access.
+
+When the answer has `token_type`, it must name an access token: `access_token`, `Bearer`,
+`bearer`, or `urn:ietf:params:oauth:token-type:access_token`. The node refuses every other token
+type, for example a refresh token. The node keeps an answer until the token expires, or
 for at most 300 seconds.
 
 A connection keeps its access only as long as the answer lives. When the answer ends, the node
@@ -725,12 +750,12 @@ that use the same token share one request.
 
 - If the token is still active, the connection keeps its access. The node uses the scopes and
   the `exp` value of the new answer.
-- If the token is not active, the connection loses its access, and the command returns
-  `-NOAUTH`.
-- If the identity provider gives no answer, the connection also loses its access. The node
-  cannot know that the token is still valid, so it fails closed. An outage of the identity
-  provider thus ends the access of every connection with an opaque token within 300 seconds.
-  When the identity provider is back, the client can send `AUTH` again.
+- If the token is not active, the connection loses its access. The command returns `-NOAUTH`,
+  and the node closes the connection.
+- If the identity provider gives no answer, the connection also loses its access, and the node
+  closes it. The node cannot know that the token is still valid, so it fails closed. An outage of
+  the identity provider thus ends the access of every connection with an opaque token within 300
+  seconds. When the identity provider is back, the client can connect and send `AUTH` again.
 
 The node also keeps a refused answer, for 30 seconds. During that time it refuses the same token
 without a request to the identity provider. Thus a token that becomes active later can stay
@@ -890,6 +915,7 @@ identity provider without `ca_file`.
 | `--tls-client-auth` | `optional` | `required` refuses clients without a certificate in `node` mode. |
 | `--lb-trusted-source` | none | A network that the load balancer connects from. Repeat it for more. |
 | `--lb-identity-tlv` | none | A PROXY v2 TLV type from `0xE0` to `0xEF` that holds the client identity. |
+| `--lb-san` | empty | The URI SAN that the load balancer certificate must carry. Empty accepts any certificate from `--tls-client-ca`. |
 | `--auth-policy` | required without `--acl-file` | The client authentication policy. See [Authentication policy](#authentication-policy). |
 | `--auth-config` | none | The TOML file with issuers, rules, and admin identities. |
 | `--acl-file` | none | A file with users, passwords, and rules, for the `password` factor. The node reloads it after a change. |
@@ -913,7 +939,8 @@ the new files. New connections on the client, redirect, and admin ports then use
 connections keep the certificate of their handshake. You do not have to restart the node.
 
 If the new files do not load, the node logs a warning and keeps its current certificates. For
-example, this happens when the key does not match the certificate. In Kubernetes, the files of a
+example, this happens when the key does not match the certificate. The node tries the files again
+at each check, until they load. In Kubernetes, the files of a
 mounted Secret change after the Secret changes, usually within a minute or two.
 
 The node reads the `--auth-config` file once at startup. To change it, restart the node.
@@ -923,16 +950,22 @@ The node reads the `--auth-config` file once at startup. To change it, restart t
 The node checks the file of `--acl-file` every `--tls-reload-secs` seconds. If its content
 changes, the node reads the whole file. You do not have to restart the node.
 
-If the file has an error, the node logs a warning and keeps its users. After a good reload, these
-rules apply:
+The node loads the same content that it compared. If the file has an error, the node logs a
+warning and keeps its users. The node tries the file again at each check, until it loads. After a
+good reload, these rules apply:
 
-- If the user of a connection is gone or `off`, the connection loses its login. Its next command
-  returns `-NOAUTH`.
+- If the user of a connection is gone, the connection loses its login. Its next command returns
+  `-NOAUTH`, and the node closes the connection. Valkey also closes the connections of a user that
+  `ACL LOAD` removes.
 - The new rules apply to the next command of each connection.
+- A user that is now `off` cannot log in again. The connections that are logged in keep their
+  login and get the new rules of the user, as in Valkey. To end these connections, remove the
+  user from the file.
 - A changed password keeps the connections that are logged in.
 
 With an `any` policy, another factor can still authenticate the connection, for example a client
-certificate. Then the connection keeps the access of that factor after the user is gone.
+certificate. Then the connection stays open and keeps the access of that factor after the user is
+gone.
 
 Outside Kubernetes, write the new file next to the old file, and then rename it over the old file.
 A file that you write in place can load half written. Then a rule at the end of a line can be

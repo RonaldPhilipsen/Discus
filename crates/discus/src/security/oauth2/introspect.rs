@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use serde::Deserialize;
 
-use super::issuer::{check_url, Source};
+use super::issuer::{check_url, read_body, Source};
 use super::{unix_now, Claims, OneOrMany, RawClaims, Reject};
 use crate::security::file::IssuerFile;
 
@@ -34,6 +34,16 @@ struct Answer {
     jti: Option<String>,
     scope: Option<String>,
     scp: Option<OneOrMany>,
+    token_type: Option<String>,
+}
+
+/// The `token_type` values of an access token: the OAuth 2.0 token types of RFC 6749 section
+/// 7.1 and RFC 6750, and the token type URI of RFC 8693 section 3.
+fn is_access_token_type(kind: &str) -> bool {
+    matches!(
+        kind,
+        "access_token" | "Bearer" | "bearer" | "urn:ietf:params:oauth:token-type:access_token"
+    )
 }
 
 pub struct Introspector {
@@ -42,6 +52,7 @@ pub struct Introspector {
     client_id: String,
     secret: String,
     skew: i64,
+    require_aud: bool,
     max_cache_secs: i64,
     /// Token -> checked claims and the time the entry ends.
     cache: Mutex<HashMap<Bytes, (Claims, i64)>>,
@@ -87,6 +98,7 @@ impl Introspector {
             client_id,
             secret,
             skew: skew_secs as i64,
+            require_aud: f.require_aud,
             max_cache_secs: MAX_CACHE_SECS,
             cache: Mutex::new(HashMap::new()),
             refused: Mutex::new(HashMap::new()),
@@ -142,8 +154,8 @@ impl Introspector {
             .post(&url)
             .basic_auth(&self.client_id, Some(&self.secret))
             .form(&[("token", text), ("token_type_hint", "access_token")]);
-        let answer = match request.send().await {
-            Ok(r) if r.status().is_success() => r.json::<Answer>().await,
+        let body = match request.send().await {
+            Ok(r) if r.status().is_success() => read_body(r).await,
             Ok(r) => {
                 tracing::warn!(status = %r.status(), "introspection refused");
                 return;
@@ -153,9 +165,14 @@ impl Introspector {
                 return;
             }
         };
-        let Ok(answer) = answer else {
-            tracing::warn!("introspection answer does not parse");
-            return;
+        let answer = match body
+            .and_then(|b| serde_json::from_slice::<Answer>(&b).map_err(|e| e.to_string()))
+        {
+            Ok(answer) => answer,
+            Err(e) => {
+                tracing::warn!(error = %e, "introspection answer does not parse");
+                return;
+            }
         };
         let now = unix_now();
         match self.judge(answer, now) {
@@ -179,8 +196,14 @@ impl Introspector {
         if !a.active {
             return Err(Reject::Inactive);
         }
+        if a.token_type
+            .as_deref()
+            .is_some_and(|t| !is_access_token_type(t))
+        {
+            return Err(Reject::TokenType);
+        }
         let exp = a.exp.ok_or(Reject::Malformed)?;
-        if now > exp + self.skew {
+        if now > exp.saturating_add(self.skew) {
             return Err(Reject::Expired);
         }
         if a.nbf.is_some_and(|n| now + self.skew < n) {
@@ -191,7 +214,7 @@ impl Introspector {
         }
         let audience = &trusted.rules.audience;
         let aud_ok = match &a.aud {
-            None => true,
+            None => !self.require_aud,
             Some(OneOrMany::One(s)) => s == audience,
             Some(OneOrMany::Many(v)) => v.contains(audience),
         };

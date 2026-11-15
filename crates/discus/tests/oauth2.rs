@@ -75,7 +75,7 @@ async fn a_read_scope_cannot_write() {
 }
 
 #[tokio::test]
-async fn expiry_mid_connection_gives_noauth_then_reauth_works() {
+async fn expiry_mid_connection_gives_noauth_and_closes_the_connection() {
     let ca = TestCa::new();
     let idp = MockIdp::start(&ca).await;
     let node = node(&ca, &[&idp], "", &["--auth-clock-skew-secs", "0"]).await;
@@ -89,8 +89,27 @@ async fn expiry_mid_connection_gives_noauth_then_reauth_works() {
     let r = exchange(&mut s, &cmd(&["GET", "k"])).await;
     assert!(r.starts_with("-NOAUTH"), "{r:?}");
     let fresh = idp.token("discus.read");
+    assert_eq!(
+        exchange(&mut s, &cmd(&["AUTH", &fresh])).await,
+        "",
+        "the node closed the connection"
+    );
+    let mut s = security_support::common::client_tls::connect(node.addr).await;
     assert_eq!(exchange(&mut s, &cmd(&["AUTH", &fresh])).await, "+OK\r\n");
     assert_eq!(exchange(&mut s, &cmd(&["GET", "k"])).await, "$-1\r\n");
+}
+
+#[tokio::test]
+async fn the_largest_exp_does_not_overflow() {
+    let ca = TestCa::new();
+    let idp = MockIdp::start(&ca).await;
+    let node = node(&ca, &[&idp], "", &[]).await;
+    let mut c = idp.claims("discus.read");
+    c["exp"] = json!(i64::MAX);
+    let token = idp.sign("k1", &c);
+    let mut wire = cmd(&["AUTH", &token]);
+    wire.extend(cmd(&["GET", "k"]));
+    assert_eq!(send(&node, &wire).await, "+OK\r\n$-1\r\n");
 }
 
 #[tokio::test]

@@ -69,6 +69,10 @@ pub struct SecurityArgs {
     /// In lb mode, a custom PROXY v2 TLV type that carries the client identity.
     #[arg(long, value_parser = parse_tlv)]
     pub lb_identity_tlv: Option<u8>,
+    /// In lb mode, the URI SAN that the load balancer certificate must carry. Empty: any
+    /// certificate from --tls-client-ca.
+    #[arg(long, default_value = "")]
+    pub lb_san: String,
     /// Client authentication policy: none, any:<factors>, or all:<factors>. Required, unless
     /// --acl-file is set: the default is then all:password.
     #[arg(long)]

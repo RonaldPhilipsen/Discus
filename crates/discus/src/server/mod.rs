@@ -153,7 +153,7 @@ fn watch_certificates(
         client_seen,
         period.clone(),
         stop.clone(),
-        move || security.reload_client_tls(),
+        move |_| security.reload_client_tls(),
     );
     let (Some(ca), Some(cert), Some(key)) = (
         config.cluster_ca.clone(),
@@ -173,7 +173,7 @@ fn watch_certificates(
         cluster_seen,
         period,
         stop,
-        move || {
+        move |_| {
             let tls = TlsMaterial::from_files(&ca, &cert, &key, &san).map_err(io::Error::other)?;
             // Check every endpoint before any of them changes, so they never disagree.
             tls.check().map_err(io::Error::other)?;
@@ -198,7 +198,7 @@ fn watch_acl_file(node: &Arc<Node>, seen: file_watch::Snapshot, stop: Cancellati
         seen,
         move || live_settings.get().tls_reload,
         stop,
-        move || security.reload_acl(),
+        move |content| security.reload_acl_text(&content[0]),
     );
 }
 

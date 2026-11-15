@@ -14,6 +14,27 @@ use crate::security::tls;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const BACKOFF_START: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// The largest body that the node reads from an identity provider: a discovery document, a key
+/// set, or an introspection answer. Real ones are a few KiB.
+pub const MAX_BODY_BYTES: usize = 1024 * 1024;
+
+/// Read the body of `resp`, and stop with an error past [`MAX_BODY_BYTES`].
+pub async fn read_body(mut resp: reqwest::Response) -> Result<bytes::Bytes, String> {
+    if resp
+        .content_length()
+        .is_some_and(|n| n > MAX_BODY_BYTES as u64)
+    {
+        return Err(format!("the body is larger than {MAX_BODY_BYTES} bytes"));
+    }
+    let mut body = bytes::BytesMut::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        if body.len() + chunk.len() > MAX_BODY_BYTES {
+            return Err(format!("the body is larger than {MAX_BODY_BYTES} bytes"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body.freeze())
+}
 
 /// Where and how the keys of one issuer load.
 pub struct Source {
@@ -76,9 +97,13 @@ impl Source {
             check_url(url, config.insecure)?;
         }
         let tls = tls::client_config(config.ca_file.as_deref()).map_err(|e| e.to_string())?;
+        // A redirect could lead the client secret or the bearer token to another address, or
+        // from https to http.
         let client = reqwest::Client::builder()
             .tls_backend_preconfigured(tls)
             .timeout(FETCH_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .https_only(!config.insecure)
             .build()
             .map_err(|e| e.to_string())?;
         let max_stale = Duration::from_secs(config.max_stale_secs);
@@ -119,7 +144,7 @@ impl Source {
         if !resp.status().is_success() {
             return Err(format!("{url}: HTTP {}", resp.status()));
         }
-        resp.bytes().await.map_err(|e| format!("{url}: {e}"))
+        read_body(resp).await.map_err(|e| format!("{url}: {e}"))
     }
 
     /// Fetch the discovery document and return the `jwks_uri`.

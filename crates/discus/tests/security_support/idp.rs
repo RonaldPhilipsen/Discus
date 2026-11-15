@@ -112,6 +112,16 @@ async fn introspect(State(s): State<Arc<IdpState>>, headers: HeaderMap, body: St
     Json(answer).into_response()
 }
 
+/// A redirect to the introspection endpoint. RFC 7231 says that a client keeps the method and
+/// the body on a 307.
+async fn moved() -> Response {
+    (
+        StatusCode::TEMPORARY_REDIRECT,
+        [("location", "/introspect")],
+    )
+        .into_response()
+}
+
 impl MockIdp {
     /// Start the provider with one ES256 key, `k1`.
     pub async fn start(ca: &TestCa) -> MockIdp {
@@ -129,6 +139,7 @@ impl MockIdp {
             .route("/jwks", get(jwks))
             .route("/openid/v1/jwks", get(jwks))
             .route("/introspect", post(introspect))
+            .route("/moved", post(moved))
             .with_state(state.clone());
         tokio::spawn(async move { axum::serve(listener, app).await });
         let idp = MockIdp { issuer, state };

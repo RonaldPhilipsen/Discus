@@ -92,6 +92,7 @@ pub struct Security {
     server_tls: ArcSwap<rustls::ServerConfig>,
     lb_sources: Vec<ipnet::IpNet>,
     lb_identity_tlv: Option<u8>,
+    lb_san: String,
     cert_rules: Vec<(String, Scopes)>,
     policy: Policy,
     acl: Option<ArcSwap<Acl>>,
@@ -222,6 +223,7 @@ impl Security {
             server_tls,
             lb_sources: args.lb_trusted_source.clone(),
             lb_identity_tlv: args.lb_identity_tlv,
+            lb_san: args.lb_san.clone(),
             cert_rules,
             policy,
             acl: acl.map(ArcSwap::from_pointee),
@@ -367,8 +369,18 @@ impl Security {
     /// Read the ACL file again. A connection takes its new rules, or loses its login, at its
     /// next command. On an error, the node keeps its users.
     pub fn reload_acl(&self) -> io::Result<()> {
-        if let (Some(slot), Some(path)) = (&self.acl, &self.acl_file) {
-            slot.store(Arc::new(Acl::load(path)?));
+        let Some(path) = &self.acl_file else {
+            return Ok(());
+        };
+        self.reload_acl_text(&std::fs::read(path)?)
+    }
+
+    /// Load `content` as the new ACL file.
+    pub fn reload_acl_text(&self, content: &[u8]) -> io::Result<()> {
+        if let Some(slot) = &self.acl {
+            let invalid = |e: String| io::Error::new(io::ErrorKind::InvalidData, e);
+            let text = std::str::from_utf8(content).map_err(|e| invalid(e.to_string()))?;
+            slot.store(Arc::new(Acl::parse(text).map_err(invalid)?));
             // The users go first, so a connection that sees the new generation sees them too.
             self.acl_generation.fetch_add(1, Ordering::Release);
         }
@@ -498,6 +510,7 @@ impl Security {
         let Some(raw) = conn.auth.token.as_ref().map(|t| t.raw.clone()) else {
             return;
         };
+        let before = self.is_authenticated(&conn.auth);
         o.prefetch(&raw).await;
         match o.check(&raw, oauth2::unix_now()) {
             Ok(c) => {
@@ -511,14 +524,29 @@ impl Security {
             Err(reject) => {
                 tracing::debug!(conn = conn.id, reason = %reject, "token no longer active");
                 conn.auth.token = None;
+                self.close_if_lost(conn, before);
             }
+        }
+    }
+
+    /// Close a connection that met the policy and no longer does, as Valkey closes the
+    /// connections of a user that `ACL LOAD` removes. The connection must not keep the limits of
+    /// an authenticated client.
+    fn close_if_lost(&self, conn: &mut ConnState, before: bool) {
+        if before && !self.is_authenticated(&conn.auth) {
+            tracing::debug!(conn = conn.id, "the login is gone, closing the connection");
+            conn.closing = true;
         }
     }
 
     /// The grant of a verified certificate identity. Without any rule every identity gets
     /// read-write. With rules, an identity that matches none gets no grant, so a typing error in
-    /// a rule never widens access.
+    /// a rule never widens access. An empty identity gets no grant.
     fn cert_grant(&self, identity: String) -> Option<CertGrant> {
+        if identity.is_empty() {
+            tracing::debug!("the certificate identity is empty");
+            return None;
+        }
         let scopes = if self.cert_rules.is_empty() {
             Scopes::READ_WRITE
         } else {
@@ -568,6 +596,19 @@ impl Security {
         let acceptor = tokio_rustls::TlsAcceptor::from(self.server_tls.load_full());
         let tls = acceptor.accept(tcp).await?;
         if let Some(header) = forwarded {
+            let pinned = self.lb_san.is_empty()
+                || tls
+                    .get_ref()
+                    .1
+                    .peer_certificates()
+                    .and_then(|c| c.first())
+                    .is_some_and(|der| identity::has_uri_san(der, &self.lb_san));
+            if !pinned {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "lb mode: the load balancer certificate does not carry the --lb-san URI SAN",
+                ));
+            }
             // The handshake verified the load balancer certificate, so the header is trusted.
             if let Some(source) = header.source {
                 auth.peer = Some(source.ip());
@@ -586,8 +627,8 @@ impl Security {
         }
         let conn = tls.get_ref().1;
         if conn.peer_certificates().is_some_and(|c| !c.is_empty()) {
-            // A verified certificate without a SAN or CN has an empty identity. It meets mtls
-            // unless client_cert rules exist and none matches the empty identity.
+            // A verified certificate without a SAN or CN has an empty identity, which does not
+            // meet mtls.
             let identity = identity::peer_identity(conn).unwrap_or_default();
             tracing::debug!(%identity, "client certificate verified");
             auth.cert = self.cert_grant(identity);
@@ -738,14 +779,15 @@ impl Security {
                     conn.auth.token = None;
                 }
             }
-        } else if now > t.exp + skew || t.nbf.is_some_and(|n| now + skew < n) {
+        } else if now > t.exp.saturating_add(skew) || t.nbf.is_some_and(|n| now + skew < n) {
             tracing::debug!(conn = conn.id, "token expired");
             conn.auth.token = None;
         }
     }
 
     /// After a reload, give the connection the new rules of its user, or drop the login when the
-    /// user is gone or off. A changed password keeps the login.
+    /// user is gone. As in Valkey, a user that is now `off` or has a new password keeps its open
+    /// logins: `off` only stops a new login.
     fn recheck_user(&self, conn: &mut ConnState) {
         let Some(grant) = &conn.auth.user else { return };
         let current = self.acl_generation.load(Ordering::Acquire);
@@ -755,7 +797,6 @@ impl Security {
         let users = self.acl.as_ref().map(|a| a.load());
         conn.auth.user = users
             .and_then(|acl| acl.user(grant.user.name.as_bytes()).cloned())
-            .filter(|u| u.enabled)
             .map(|user| UserGrant {
                 user,
                 generation: current,
@@ -797,10 +838,12 @@ impl Security {
         if self.policy == Policy::None || spec.access == Access::Public {
             return Ok(());
         }
+        let before = conn.auth.authenticated(&self.policy);
         #[cfg(feature = "oauth2")]
         self.recheck_token(conn);
         self.recheck_user(conn);
         if !conn.auth.authenticated(&self.policy) {
+            self.close_if_lost(conn, before);
             return Err(CommandError::NoAuth);
         }
         let sub = spec.subcommand(cmd);
@@ -1236,7 +1279,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_reload_that_turns_a_user_off_ends_its_login() {
+    fn a_reload_that_turns_a_user_off_keeps_its_login_with_the_new_rules() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("users.acl");
         std::fs::write(&file, "user u on >p ~* +@all\n").unwrap();
@@ -1252,12 +1295,64 @@ pub(crate) mod tests {
         conn.auth.user = old_grant;
         assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), no_perm("get"));
 
+        // As in Valkey: `off` stops a new login, and an open connection keeps its login and
+        // takes the new rules of the user.
+        std::fs::write(&file, "user u off >p ~* +@connection\n").unwrap();
+        s.reload_acl().unwrap();
+        assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), no_perm("get"));
         std::fs::write(&file, "user u off >p ~* +@all\n").unwrap();
         s.reload_acl().unwrap();
+        assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), Ok(()));
+        assert!(!conn.closing);
+        let mut fresh = ConnState::new(2, ConnAuth::default());
+        assert!(s.authenticate(&mut fresh, Some(b"u"), b"p").is_err());
+    }
+
+    #[test]
+    fn a_reload_closes_the_connections_of_a_removed_user_and_keeps_a_changed_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("users.acl");
+        std::fs::write(&file, "user u on >p ~* +@all\nuser v on >p ~* +@all\n").unwrap();
+        let s = security(&["--acl-file", file.to_str().unwrap()]);
+        let get = crate::counter::cmd(&["GET", "k"]);
+        let login = |user: &[u8]| {
+            let mut conn = ConnState::new(1, ConnAuth::default());
+            s.authenticate(&mut conn, Some(user), b"p").unwrap();
+            conn
+        };
+        let (mut u, mut v) = (login(b"u"), login(b"v"));
+        std::fs::write(&file, "user v on >new ~* +@all\n").unwrap();
+        s.reload_acl().unwrap();
         assert_eq!(
-            s.authorize(&mut conn, spec(b"GET"), &get),
+            s.authorize(&mut u, spec(b"GET"), &get),
             Err(CommandError::NoAuth)
         );
+        assert!(u.closing);
+        assert_eq!(s.authorize(&mut v, spec(b"GET"), &get), Ok(()));
+        assert!(!v.closing);
+    }
+
+    #[test]
+    fn a_lost_user_keeps_a_connection_that_another_factor_authenticates() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("users.acl");
+        std::fs::write(&file, "user u on >p ~* +@all\n").unwrap();
+        let s = Security {
+            policy: Policy::parse("any:password,mtls").unwrap(),
+            ..security(&["--acl-file", file.to_str().unwrap()])
+        };
+        let mut conn = ConnState::new(1, ConnAuth::default());
+        conn.auth.cert = Some(CertGrant {
+            identity: "c".into(),
+            scopes: Scopes::READ_WRITE,
+        });
+        s.authenticate(&mut conn, Some(b"u"), b"p").unwrap();
+        std::fs::write(&file, "user w on >p ~* +@all\n").unwrap();
+        s.reload_acl().unwrap();
+        let get = crate::counter::cmd(&["GET", "k"]);
+        assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), Ok(()));
+        assert!(conn.auth.user.is_none());
+        assert!(!conn.closing);
     }
 
     #[test]
