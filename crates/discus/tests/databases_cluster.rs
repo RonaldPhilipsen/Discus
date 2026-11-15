@@ -593,13 +593,7 @@ async fn copy_reads_the_source_on_the_primary() {
 /// A connection to `n` that selects database `db` in its URL, so it selects again after a
 /// reconnect.
 async fn client(n: &GossipNode, db: u32) -> redis::aio::MultiplexedConnection {
-    let client = common::client_tls::redis_client(&format!("rediss://{}/{db}", n.addr));
-    let config =
-        redis::AsyncConnectionConfig::new().set_response_timeout(Some(Duration::from_secs(30)));
-    client
-        .get_multiplexed_async_connection_with_config(&config)
-        .await
-        .unwrap()
+    common::client_tls::redis_connection(&format!("rediss://{}/{db}", n.addr)).await
 }
 
 /// Send `GET key` until it answers `want`, and fail after 10 s.
@@ -722,7 +716,8 @@ async fn cluster_client(
         .collect();
     let mut builder = redis::cluster::ClusterClientBuilder::new(urls)
         .certs(common::client_tls::redis_certs())
-        .response_timeout(Duration::from_secs(30));
+        .response_timeout(Duration::from_secs(30))
+        .connection_timeout(Duration::from_secs(30));
     if let Some(db) = db {
         builder = builder.database_id(db);
     }
