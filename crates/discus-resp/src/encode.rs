@@ -50,6 +50,12 @@ pub fn encode(value: &Value, protocol: Protocol, out: &mut BytesMut) {
                 encode(item, protocol, out);
             }
         }
+        Value::Set(items) => {
+            header(out, if resp3 { b'~' } else { b'*' }, items.len());
+            for item in items {
+                encode(item, protocol, out);
+            }
+        }
         Value::Map(pairs) => {
             let (prefix, n) = if resp3 {
                 (b'%', pairs.len())
@@ -96,5 +102,14 @@ mod tests {
             );
             assert_eq!(&out[..], b"-ERR a  +OK  b\r\n+x y z\r\n");
         }
+    }
+
+    #[test]
+    fn a_set_is_an_array_in_resp2() {
+        let set = Value::Set(vec![Value::Bulk(Bytes::from_static(b"a"))]);
+        let mut out = BytesMut::new();
+        encode(&set, Protocol::Resp3, &mut out);
+        encode(&set, Protocol::Resp2, &mut out);
+        assert_eq!(&out[..], b"~1\r\n$1\r\na\r\n*1\r\n$1\r\na\r\n");
     }
 }

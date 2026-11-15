@@ -388,7 +388,23 @@ pub fn serve_here(
 pub fn run(node: &Arc<Node>, job: Job, writes: Option<&Writes>, route: Span) -> Dispatch {
     // With one owner per key, a read reaches that owner whatever the write set requires.
     let writes = writes.filter(|_| node.config.replication_factor > 1);
-    run_hop(node, job, Hop::default(), writes, route)
+    let set_reply = job.spec.set_reply;
+    let dispatch = run_hop(node, job, Hop::default(), writes, route);
+    if !set_reply {
+        return dispatch;
+    }
+    // A forwarded reply arrives as an array, so the entry node marks the set here, for local
+    // and forwarded replies alike.
+    let as_set = |mut reply: Reply| {
+        if let Value::Array(items) = reply.value {
+            reply.value = Value::Set(items);
+        }
+        reply
+    };
+    match dispatch {
+        Dispatch::Ready(reply) => Dispatch::Ready(as_set(reply)),
+        Dispatch::Pending(f) => Dispatch::Pending(Box::pin(async move { as_set(f.await) })),
+    }
 }
 
 /// Run a data command at any hop. A command that needs no other node runs inline. A command on

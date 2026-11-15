@@ -83,7 +83,7 @@ fn wire_estimate(value: &Value) -> usize {
     FRAMING
         + match value {
             Value::Simple(b) | Value::Error(b) | Value::Bulk(b) => b.len(),
-            Value::Array(items) => items.iter().map(wire_estimate).sum(),
+            Value::Array(items) | Value::Set(items) => items.iter().map(wire_estimate).sum(),
             Value::Map(pairs) => pairs
                 .iter()
                 .map(|(k, v)| wire_estimate(k) + wire_estimate(v))

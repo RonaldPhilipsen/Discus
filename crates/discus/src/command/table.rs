@@ -71,6 +71,8 @@ pub struct CommandSpec {
     /// The subcommands that have their own ACL rule. A subcommand without an entry uses the rule
     /// of the command.
     pub subcommands: &'static [Subcommand],
+    /// Valkey replies with a set (RESP3 `~`) where this command replies with an array.
+    pub set_reply: bool,
 }
 
 impl CommandSpec {
@@ -87,6 +89,7 @@ impl CommandSpec {
             reads_old: false,
             categories: Categories::EMPTY,
             subcommands: &[],
+            set_reply: false,
         }
     }
 
@@ -103,6 +106,7 @@ impl CommandSpec {
             reads_old: false,
             categories: Categories::EMPTY,
             subcommands: &[],
+            set_reply: false,
         }
     }
 
@@ -119,6 +123,7 @@ impl CommandSpec {
             reads_old: false,
             categories: Categories::EMPTY,
             subcommands: &[],
+            set_reply: false,
         }
     }
 
@@ -132,6 +137,13 @@ impl CommandSpec {
 
     pub const fn with_fast(self) -> CommandSpec {
         CommandSpec { fast: true, ..self }
+    }
+
+    pub const fn with_set_reply(self) -> CommandSpec {
+        CommandSpec {
+            set_reply: true,
+            ..self
+        }
     }
 
     pub const fn with_reads_old(self) -> CommandSpec {
