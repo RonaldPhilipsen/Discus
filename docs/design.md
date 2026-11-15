@@ -350,7 +350,9 @@ A Kubernetes `Lease` makes sure that only one node forms a new cluster.
   outside Kubernetes. Seeds point at the gossip port.
 - A starting node looks for a `NORMAL` peer until the bootstrap deadline (default 10 s). If it
   finds one, it announces `JOINING`, receives the epoch and the HLC maximum, takes its handoff, and
-  becomes `NORMAL`.
+  becomes `NORMAL`. The responder leaves out of that maximum any HLC that a member sent beyond the
+  drift bound of the responder's own clock, and it logs that member. One fast clock therefore does
+  not block every join.
 - If it finds none, it tries to acquire the `Lease` `discus-cluster` (`coordination.k8s.io/v1`) in
   its namespace. If the lease is unheld or expired, acquisition can succeed. The `resourceVersion`
   precondition makes it exclusive. The winner mints the `cluster_id`, creates epoch `(1, self)`,

@@ -1625,14 +1625,27 @@ impl Swim {
         g
     }
 
-    /// The highest HLC that this node issued, observed, or heard from a member recently.
+    /// The highest HLC that this node issued, observed, or heard from a member recently. A heard
+    /// value beyond the drift bound of this node is left out: the joiner would refuse it as a
+    /// floor, so one member with a fast clock would block every join.
     fn cluster_max_hlc(&self, now: Millis, host: &dyn Host) -> u64 {
-        self.members
-            .values()
-            .filter_map(|r| r.hlc)
-            .filter(|(_, at)| now.saturating_sub(*at) < HLC_WINDOW_MS)
-            .map(|(h, _)| h)
-            .fold(host.hlc(), u64::max)
+        let limit = host.hlc_limit();
+        let mut max = host.hlc();
+        for (id, r) in &self.members {
+            let Some((hlc, at)) = r.hlc else { continue };
+            if now.saturating_sub(at) >= HLC_WINDOW_MS {
+                continue;
+            }
+            if hlc > limit {
+                tracing::warn!(
+                    member = %id,
+                    "a member sent an HLC beyond the drift bound, left out of the join floor"
+                );
+                continue;
+            }
+            max = max.max(hlc);
+        }
+        max
     }
 
     fn reply(&mut self, kind: GossipKind, to: Option<NodeId>, host: &dyn Host) -> Handled {

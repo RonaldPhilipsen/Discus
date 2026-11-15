@@ -358,3 +358,17 @@ fn a_change_that_loses_to_a_competing_epoch_is_applied_again() {
         e.id() > rival.id() && e.member(x).is_none()
     });
 }
+
+#[test]
+fn a_member_with_a_clock_far_ahead_does_not_block_joins() {
+    let mut sim = Sim::new(9, SwimConfig::fast());
+    let ids = sim.cluster(4);
+    // Far beyond the drift bound of the simulated HLC (1 s).
+    sim.node_mut(ids[0]).host.clock_offset = 60_000;
+    sim.run_ms(1_000);
+    let j = sim.add_node();
+    sim.start(j, &[ids[1]]);
+    sim.run_until(5_000, |s| s.node(j).swim.me().state == MemberState::Normal);
+    let floor = sim.node(j).host.hlc;
+    assert!(floor <= sim.now() + 1_000, "floor {floor} at {}", sim.now());
+}
