@@ -15,6 +15,7 @@ use common::gossip::{refs, socket, wait_agreed, wait_until, GossipNode, Net, Opt
 use common::run_in;
 use discus::counter::state::Kind;
 use discus::counter::Refusal;
+use discus::server::Clocks;
 use discus_placement::mock::MockClock;
 use discus_placement::{Clock, SystemClock};
 use discus_resp::Value;
@@ -751,4 +752,78 @@ async fn a_large_state_reaches_a_new_follower() {
         held_in(&second, 0, "cnt:{big}9").map(|v| v.len()),
         Some(1 << 20)
     );
+}
+
+/// A read on a leader with a fast clock finds a key expired. A failover then moves the group
+/// to a node whose clock runs behind. The key must stay expired, so `INCR` starts from 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_key_read_as_expired_stays_expired_after_a_failover() {
+    const SKEW: u64 = 10_000;
+    // Only the wall clocks differ. The HLC of both nodes follows real time, so membership
+    // accepts the skew.
+    let (fast, slow, hlc) = (MockClock::<22>, MockClock::<23>, MockClock::<24>);
+    let real_ms = || SystemClock.now_ms();
+    fast.set(real_ms() + SKEW);
+    slow.set(real_ms());
+    hlc.set(real_ms());
+    let ticking = tokio::spawn(async move {
+        loop {
+            fast.set(real_ms() + SKEW);
+            slow.set(real_ms());
+            hlc.set(real_ms());
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    });
+    let (net, leases) = (Net::new(), Leases::new());
+    let (sa, aa) = socket();
+    let (sb, ab) = socket();
+    let start = |s, seed, clock: Clocks| {
+        let (net, leases) = (&net, &leases);
+        async move {
+            net.start_on(
+                s,
+                &[seed],
+                &[],
+                Opts {
+                    clocks: Some(clock),
+                    counter_leases: Some(leases.for_node(Arc::new(AtomicBool::new(true)))),
+                    defaults: FAST,
+                    ..Opts::default()
+                },
+            )
+            .await
+        }
+    };
+    // The fast node starts first, so it leads the group, and leadership is sticky.
+    let na = start(sa, ab, (hlc.hlc_clock(), Arc::new(fast))).await;
+    let g = 0;
+    assert!(
+        wait_until(Duration::from_secs(10), || role(&na, g) == "leader").await,
+        "the fast node does not lead"
+    );
+    let nb = start(sb, aa, (hlc.hlc_clock(), Arc::new(slow))).await;
+    let refs = [&na, &nb];
+    wait_agreed(&refs, Duration::from_secs(10)).await;
+    assert!(wait_until(Duration::from_secs(10), || settled(&refs)).await);
+    assert_eq!(leader_of(&refs, g).map(|l| l.id), Some(na.id));
+    let key = key_of_group(&na, g);
+    let mut c = na.redis().await;
+    let _: i64 = redis::cmd("INCR")
+        .arg(&key)
+        .arg("PX")
+        .arg(1000)
+        .query_async(&mut c)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let got: Option<i64> = c.get(&key).await.unwrap();
+    assert_eq!(got, None, "the key did not expire on the leader");
+    assert!(
+        wait_until(Duration::from_secs(5), || held_in(&nb, 0, &key).is_none()).await,
+        "the follower still holds the key that the leader read as expired"
+    );
+    na.kill();
+    let mut bc = nb.redis().await;
+    assert_eq!(incr_until(&mut bc, &key, Duration::from_secs(15)).await, 1);
+    ticking.abort();
 }

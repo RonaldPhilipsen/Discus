@@ -923,6 +923,10 @@ stateDiagram-v2
 - `INCR key EX|PX|EXAT|PXAT` is an atomic extension for rate limiting. The leader stamps every
   command with its clock, and the state machine expires keys against that stamp, never against the
   local clock. Replicas therefore agree on expiry.
+- A read on the leader judges expiry by the leader clock. When a key that the read looks at is
+  alive by the state machine but expired by the leader clock, the leader first writes a `PURGE`
+  entry with its stamp and then replies. So a key that read as expired stays expired under a later
+  leader with a slower clock.
 - A change of `G` is an offline procedure: pause strong writes, snapshot each group, reassign keys,
   restart the groups, and resume. Linearizability does not hold across it.
 - If a counter command got no reply, the entry node cannot know whether it applied. It returns

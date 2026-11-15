@@ -87,16 +87,42 @@ impl RaftRole {
     ) -> Result<Value, Refusal> {
         let raft = &self.replica.raft;
         if kind.is_read() {
-            return match tokio::time::timeout(timeout, self.replica.ensure_linearizable()).await {
-                Ok(Ok(_)) => Ok(self
-                    .replica
-                    .sm
-                    .lock()
-                    .state
-                    .get()
-                    .read(now_ms, db, kind, cmd)),
-                _ => Err(Refusal::NotLeader),
+            let expires = self
+                .replica
+                .sm
+                .lock()
+                .state
+                .get()
+                .read_expires(now_ms, db, kind, cmd);
+            // A key that this leader reads as expired must stay expired under any later leader,
+            // so its expiry goes through the log first. The applied entry also proves the
+            // leadership that a read index would.
+            let ready = if expires {
+                let purge = Op {
+                    stamp_ms: self.stamp(now_ms),
+                    db,
+                    command: vec![bytes::Bytes::from_static(super::state::PURGE)],
+                };
+                matches!(
+                    tokio::time::timeout(timeout, raft.client_write(purge)).await,
+                    Ok(Ok(_))
+                )
+            } else {
+                matches!(
+                    tokio::time::timeout(timeout, self.replica.ensure_linearizable()).await,
+                    Ok(Ok(_))
+                )
             };
+            if !ready {
+                return Err(Refusal::NotLeader);
+            }
+            return Ok(self
+                .replica
+                .sm
+                .lock()
+                .state
+                .get()
+                .read(now_ms, db, kind, cmd));
         }
         let op = Op {
             stamp_ms: self.stamp(now_ms),

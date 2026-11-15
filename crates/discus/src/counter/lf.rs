@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use super::budget::{Budget, Tracked};
-use super::state::{parse_command, CounterState, Kind, Limits};
+use super::state::{parse_command, CounterState, Kind, Limits, PURGE};
 use super::{Counters, Refusal};
 
 /// Ops in one `COUNTER_SYNC`.
@@ -196,12 +196,35 @@ impl LfLeader {
             return Err(Refusal::NotLeader);
         }
         if kind.is_read() {
+            let expires = self
+                .core
+                .lock()
+                .state
+                .get()
+                .read_expires(now_ms, db, kind, cmd);
+            if expires {
+                // The expiry reaches the follower before the reply, so a key that read as
+                // expired stays expired under the next leader, whatever its clock.
+                let purge = vec![Bytes::from_static(PURGE)];
+                self.write(db, &purge, now_ms, limits, wait).await?;
+            }
             let core = self.core.lock();
             if core.sealed {
                 return Err(Refusal::NotLeader);
             }
             return Ok(core.state.get().read(now_ms, db, kind, cmd));
         }
+        self.write(db, cmd, now_ms, limits, wait).await
+    }
+
+    async fn write(
+        &self,
+        db: u32,
+        cmd: &Command,
+        now_ms: u64,
+        limits: &Limits,
+        wait: Duration,
+    ) -> Result<Value, Refusal> {
         let follower = self.follower().is_some();
         let raw = follower.then(|| encode_command(cmd));
         let (reply, seq) = {
