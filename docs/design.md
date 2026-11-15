@@ -436,6 +436,11 @@ create epochs that mark the other side `DEAD`.
   - A node that receives a lower epoch that does not list it, with more `NORMAL` members than its
     own count, holds back the members of that epoch in the same way. It does not take them into
     its own epochs before an epoch of the larger side arrives.
+  - If a `NORMAL` member is absent from the current epoch of a node, the node adds it only after
+    it holds that epoch. A joiner holds the epoch of its join reply. A member that holds another
+    epoch comes from the other side, and a rumor from a third node can announce it before its
+    epoch arrives. If the node adds that member at once, the member never sees an epoch that
+    drops it, and it does not rejoin.
   - A refusal needs an epoch that is smaller than the live part of the own epoch, and that part is
     never larger than the own epoch. Two nodes therefore never refuse the epochs of each other,
     and the exchange ends.
