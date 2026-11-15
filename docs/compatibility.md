@@ -178,13 +178,16 @@ See [security.md](security.md) for TLS, the authentication policy, scopes, and t
 | Key size | 64 KiB | `--max-key-bytes` |
 | Value size | 64 MiB | `--max-value-bytes` |
 | In-flight commands per connection | 10000 | `--max-pipeline` |
+| Open client connections | 10000 | `--max-clients` |
 | Members in one collection | 1048576 | `--max-collection-members` |
 | Memory budget | 1 GiB | `--max-memory` |
 | Counter state | 5% of the memory budget | `--counter-memory-percent` |
 | Store shards | 256 | `--shards` |
 
 A request over a size limit returns an error. A client that sends more commands than the pipeline
-limit without reading its replies stops being read until the replies drain.
+limit without reading its replies stops being read until the replies drain. At the connection
+limit, the node closes a new connection at once. Before a connection meets the authentication
+policy, smaller request limits apply. See [security.md](security.md#limits-before-authentication).
 
 When the memory budget is full, a write evicts the least recently used entries from a small
 random sample. A single value larger than the whole budget returns

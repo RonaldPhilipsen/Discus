@@ -155,7 +155,17 @@ impl Security {
             None => None,
         };
         let policy = match &args.auth_policy {
-            Some(p) => Policy::parse(p)?,
+            Some(p) => {
+                let parsed = Policy::parse(p)?;
+                if parsed.dropped_tls {
+                    tracing::warn!(
+                        policy = %parsed.policy,
+                        "--auth-policy names the factor tls, which is no longer needed because \
+                         every client uses TLS. Remove tls from the list"
+                    );
+                }
+                parsed.policy
+            }
             None if shared_token.is_some() && acl.is_some() => {
                 let flag = match config.shared_token_file {
                     Some(_) => "--shared-token-file",
@@ -165,10 +175,15 @@ impl Security {
                     "{flag} and --acl-file are both set, so set --auth-policy"
                 ));
             }
-            None if acl.is_some() => Policy::All(vec![Factor::Tls, Factor::Password]),
-            None if shared_token.is_some() => Policy::All(vec![Factor::Tls, Factor::SharedToken]),
-            // Every client uses TLS, so `none` means TLS without credentials.
-            None => Policy::None,
+            None if acl.is_some() => Policy::All(vec![Factor::Password]),
+            None if shared_token.is_some() => Policy::All(vec![Factor::SharedToken]),
+            // An open node must be a choice of the operator, never a silent default.
+            None => {
+                return fail(
+                    "--auth-policy is not set. Choose a policy: --auth-policy none for TLS \
+                     without credentials, or a policy with mtls, oauth2, shared_token, or password",
+                )
+            }
         };
         if policy.uses(Factor::SharedToken) && policy.uses(Factor::Password) {
             return fail(
@@ -251,6 +266,12 @@ impl Security {
             return fail("[admin] cert_identities needs --admin-tls and --tls-client-ca");
         }
         let server_tls = ArcSwap::from_pointee(tls_files.listener().map_err(|e| e.to_string())?);
+        if policy == Policy::None {
+            tracing::warn!(
+                "--auth-policy none: every client that completes a TLS handshake gets read and \
+                 write access"
+            );
+        }
 
         Ok(Security {
             mode: args.tls_mode,
@@ -561,14 +582,24 @@ impl Security {
         }
     }
 
-    /// The grant of a verified certificate identity. Read-write without a matching rule.
-    fn cert_grant(&self, identity: String) -> CertGrant {
-        let scopes = self
-            .cert_rules
-            .iter()
-            .find(|(pattern, _)| identity::pattern_matches(pattern, &identity))
-            .map_or(Scopes::READ_WRITE, |(_, scopes)| *scopes);
-        CertGrant { identity, scopes }
+    /// The grant of a verified certificate identity. Without any rule every identity gets
+    /// read-write. With rules, an identity that matches none gets no grant, so a typing error in
+    /// a rule never widens access.
+    fn cert_grant(&self, identity: String) -> Option<CertGrant> {
+        let scopes = if self.cert_rules.is_empty() {
+            Scopes::READ_WRITE
+        } else {
+            let rule = self
+                .cert_rules
+                .iter()
+                .find(|(pattern, _)| identity::pattern_matches(pattern, &identity));
+            let Some((_, scopes)) = rule else {
+                tracing::debug!(%identity, "no client_cert rule matches the identity");
+                return None;
+            };
+            *scopes
+        };
+        Some(CertGrant { identity, scopes })
     }
 
     /// Run the transport setup of a new client connection: the TLS handshake in `node` mode, and
@@ -590,7 +621,6 @@ impl Security {
         peer: SocketAddr,
     ) -> io::Result<(ClientStream, ConnAuth)> {
         let mut auth = ConnAuth::new(Some(peer.ip()));
-        auth.tls = true;
         let forwarded = if self.mode == TlsMode::Lb {
             if !self.lb_sources.iter().any(|n| n.contains(&peer.ip())) {
                 return Err(io::Error::new(
@@ -617,16 +647,17 @@ impl Security {
             }
             if let Some(identity) = header.identity {
                 tracing::debug!(%identity, "forwarded client identity");
-                auth.cert = Some(self.cert_grant(identity));
+                auth.cert = self.cert_grant(identity);
             }
             return Ok((Box::new(tls), auth));
         }
         let conn = tls.get_ref().1;
         if conn.peer_certificates().is_some_and(|c| !c.is_empty()) {
-            // A verified certificate without a SAN or CN still meets mtls.
+            // A verified certificate without a SAN or CN has an empty identity. It meets mtls
+            // unless client_cert rules exist and none matches the empty identity.
             let identity = identity::peer_identity(conn).unwrap_or_default();
             tracing::debug!(%identity, "client certificate verified");
-            auth.cert = Some(self.cert_grant(identity));
+            auth.cert = self.cert_grant(identity);
         }
         Ok((Box::new(tls), auth))
     }
@@ -930,8 +961,8 @@ pub(crate) mod tests {
         crate::command::lookup(name).unwrap()
     }
 
-    /// A `Security` with a self-signed client certificate and `args`.
-    pub(crate) fn security(args: &[&str]) -> Security {
+    /// The result of `Security::from_config` with a self-signed client certificate and `args`.
+    fn try_security(args: &[&str]) -> Result<Security, SecurityError> {
         let key = rcgen::KeyPair::generate().unwrap();
         let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
             .unwrap()
@@ -946,7 +977,72 @@ pub(crate) mod tests {
         argv.extend_from_slice(args);
         let config = Config::parse_from(argv).unwrap();
         let live_settings = Live::new(crate::settings::Reloadable::from_config(&config));
-        Security::from_config(&config, live_settings).unwrap()
+        Security::from_config(&config, live_settings)
+    }
+
+    /// A `Security` with a self-signed client certificate and `args`. Without a policy and
+    /// without a shared token in `args`, the policy is `none`.
+    pub(crate) fn security(args: &[&str]) -> Security {
+        let mut all = args.to_vec();
+        let sets_policy = |a: &&str| {
+            *a == "--auth-policy" || *a == "--acl-file" || a.starts_with("--shared-token")
+        };
+        if !args.iter().any(sets_policy) {
+            all.extend(["--auth-policy", "none"]);
+        }
+        try_security(&all).unwrap()
+    }
+
+    #[test]
+    fn a_node_without_a_policy_refuses_to_start() {
+        let Err(e) = try_security(&[]) else {
+            panic!("the node started without a policy");
+        };
+        assert!(e.to_string().contains("--auth-policy"), "{e}");
+    }
+
+    #[test]
+    fn an_explicit_none_policy_starts() {
+        let s = try_security(&["--auth-policy", "none"]).unwrap();
+        assert_eq!(s.policy, Policy::None);
+    }
+
+    #[test]
+    fn a_shared_token_alone_gets_the_shared_token_policy() {
+        let s = try_security(&["--shared-token", "x"]).unwrap();
+        assert_eq!(s.policy, Policy::All(vec![Factor::SharedToken]));
+    }
+
+    #[test]
+    fn the_shared_token_default_and_the_old_spelling_give_the_same_policy() {
+        let default = security(&["--shared-token", "x"]);
+        assert_eq!(default.policy.to_string(), "all:shared_token");
+        let old = security(&[
+            "--shared-token",
+            "x",
+            "--auth-policy",
+            "all:tls,shared_token",
+        ]);
+        assert_eq!(old.policy, default.policy);
+    }
+
+    #[test]
+    fn a_certificate_identity_needs_a_matching_rule_when_rules_exist() {
+        let open = security(&[]);
+        let grant = open.cert_grant("spiffe://test/app".into()).unwrap();
+        assert_eq!(grant.scopes, Scopes::READ_WRITE);
+
+        let ruled = Security {
+            cert_rules: vec![("spiffe://test/ro*".into(), Scopes::READ)],
+            ..open
+        };
+        let grant = ruled
+            .cert_grant("spiffe://test/ro-reporting".into())
+            .unwrap();
+        assert_eq!(grant.identity, "spiffe://test/ro-reporting");
+        assert_eq!(grant.scopes, Scopes::READ);
+        assert!(ruled.cert_grant("spiffe://test/app".into()).is_none());
+        assert!(ruled.cert_grant(String::new()).is_none());
     }
 
     #[test]
@@ -977,13 +1073,7 @@ pub(crate) mod tests {
     #[test]
     fn a_read_only_connection_cannot_write() {
         let s = security(&["--shared-token", "x"]);
-        let mut conn = ConnState::new(
-            1,
-            ConnAuth {
-                tls: true,
-                ..ConnAuth::default()
-            },
-        );
+        let mut conn = ConnState::new(1, ConnAuth::default());
         let get = crate::counter::cmd(&["GET", "k"]);
         let set = crate::counter::cmd(&["SET", "k", "v"]);
         assert_eq!(
@@ -1045,19 +1135,13 @@ pub(crate) mod tests {
         std::fs::write(&file, format!("user u on >p {rules}\n")).unwrap();
         let s = security(&["--acl-file", file.to_str().unwrap()]);
         Security {
-            policy: Policy::parse(policy).unwrap(),
+            policy: Policy::parse(policy).unwrap().policy,
             ..s
         }
     }
 
     fn user_conn(s: &Security, scopes: Option<Scopes>) -> ConnState {
-        let mut conn = ConnState::new(
-            1,
-            ConnAuth {
-                tls: true,
-                ..ConnAuth::default()
-            },
-        );
+        let mut conn = ConnState::new(1, ConnAuth::default());
         conn.auth.cert = scopes.map(|scopes| CertGrant {
             identity: "c".into(),
             scopes,
@@ -1110,14 +1194,8 @@ pub(crate) mod tests {
 
     #[test]
     fn tls_without_a_user_is_not_authenticated() {
-        let s = with_user("~k +@all", "all:tls,password");
-        let mut conn = ConnState::new(
-            1,
-            ConnAuth {
-                tls: true,
-                ..ConnAuth::default()
-            },
-        );
+        let s = with_user("~k +@all", "all:password");
+        let mut conn = ConnState::new(1, ConnAuth::default());
         let get = crate::counter::cmd(&["GET", "k"]);
         assert_eq!(
             s.authorize(&mut conn, spec(b"GET"), &get),
@@ -1131,13 +1209,7 @@ pub(crate) mod tests {
         let file = dir.path().join("users.acl");
         std::fs::write(&file, "user u on >p ~* +@all\n").unwrap();
         let s = security(&["--acl-file", file.to_str().unwrap()]);
-        let mut conn = ConnState::new(
-            1,
-            ConnAuth {
-                tls: true,
-                ..ConnAuth::default()
-            },
-        );
+        let mut conn = ConnState::new(1, ConnAuth::default());
         s.authenticate(&mut conn, Some(b"u"), b"p").unwrap();
         let get = crate::counter::cmd(&["GET", "k"]);
         assert_eq!(s.authorize(&mut conn, spec(b"GET"), &get), Ok(()));

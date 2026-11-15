@@ -53,8 +53,6 @@ pub struct UserGrant {
 pub struct ConnAuth {
     /// The client address. In `lb` mode it is the address that the PROXY header carries.
     pub peer: Option<IpAddr>,
-    /// The client used TLS.
-    pub tls: bool,
     pub cert: Option<CertGrant>,
     /// The client sent the shared token.
     pub shared: bool,
@@ -74,7 +72,6 @@ impl ConnAuth {
 
     fn has(&self, f: Factor) -> bool {
         match f {
-            Factor::Tls => self.tls,
             Factor::Mtls => self.cert.is_some(),
             Factor::Oauth2 => self.token.is_some(),
             Factor::SharedToken => self.shared,
@@ -82,20 +79,18 @@ impl ConnAuth {
         }
     }
 
-    /// True when the connection meets the policy. `tls` alone never meets an `any` policy.
+    /// True when the connection meets the policy.
     pub fn authenticated(&self, policy: &Policy) -> bool {
         match policy {
             Policy::None => true,
             Policy::All(factors) => factors.iter().all(|f| self.has(*f)),
-            Policy::Any(factors) => factors.iter().any(|f| *f != Factor::Tls && self.has(*f)),
+            Policy::Any(factors) => factors.iter().any(|f| self.has(*f)),
         }
     }
 
-    /// The scopes that one identity factor grants. `tls` grants nothing, and a user grant gives
-    /// no scopes: its rules decide.
+    /// The scopes that one identity factor grants. A user grant gives no scopes: its rules decide.
     fn grant(&self, f: Factor) -> Option<Scopes> {
         match f {
-            Factor::Tls => None,
             Factor::Mtls => self.cert.as_ref().map(|c| c.scopes),
             Factor::Oauth2 => self.token.as_ref().map(|t| t.scopes),
             Factor::SharedToken => self.shared.then_some(Scopes::READ_WRITE),
@@ -106,7 +101,7 @@ impl ConnAuth {
     /// The scopes from the certificate, the token, and the shared token. `None` when the policy is
     /// not met, or when none of them applies. A user grant gives no scopes: its rules decide.
     ///
-    /// `all` takes the intersection of the identity factors, so the strictest factor wins. `any`
+    /// `all` takes the intersection of the factors, so the strictest factor wins. `any`
     /// takes the union of the factors that are present.
     pub fn scopes(&self, policy: &Policy) -> Option<Scopes> {
         match policy {
@@ -143,14 +138,16 @@ mod tests {
         }
     }
 
+    fn policy(s: &str) -> Policy {
+        Policy::parse(s).unwrap().policy
+    }
+
     #[test]
-    fn tls_alone_never_meets_a_policy() {
-        let a = ConnAuth {
-            tls: true,
-            ..ConnAuth::default()
-        };
-        let p = Policy::parse("all:tls,oauth2").unwrap();
-        assert_eq!(a.scopes(&p), None);
+    fn a_connection_without_credentials_never_meets_a_policy() {
+        let a = ConnAuth::default();
+        for p in ["all:oauth2", "all:tls,oauth2", "any:oauth2"] {
+            assert_eq!(a.scopes(&policy(p)), None, "{p}");
+        }
     }
 
     #[test]
@@ -163,7 +160,7 @@ mod tests {
             token: Some(token(Scopes::READ_WRITE)),
             ..ConnAuth::default()
         };
-        let p = Policy::parse("all:mtls,oauth2").unwrap();
+        let p = policy("all:mtls,oauth2");
         assert_eq!(a.scopes(&p), Some(Scopes::READ));
     }
 
@@ -177,7 +174,7 @@ mod tests {
             token: Some(token(Scopes::ADMIN)),
             ..ConnAuth::default()
         };
-        let p = Policy::parse("any:mtls,oauth2").unwrap();
+        let p = policy("any:mtls,oauth2");
         assert_eq!(a.scopes(&p), Some(Scopes::READ.union(Scopes::ADMIN)));
         assert_eq!(ConnAuth::default().scopes(&p), None);
     }
@@ -192,23 +189,18 @@ mod tests {
     #[test]
     fn a_user_meets_the_password_factor_and_gives_no_scopes() {
         let a = ConnAuth {
-            tls: true,
             user: Some(grant()),
             ..ConnAuth::default()
         };
-        let all = Policy::parse("all:tls,password").unwrap();
+        let all = policy("all:password");
         assert!(a.authenticated(&all));
         assert_eq!(a.scopes(&all), None);
-        let tls_only = ConnAuth {
-            tls: true,
-            ..ConnAuth::default()
-        };
-        assert!(!tls_only.authenticated(&all));
+        assert!(!ConnAuth::default().authenticated(&all));
 
-        let any = Policy::parse("any:mtls,password").unwrap();
+        let any = policy("any:mtls,password");
         assert!(a.authenticated(&any));
         assert!(!ConnAuth::default().authenticated(&any));
-        let both = Policy::parse("all:mtls,password").unwrap();
+        let both = policy("all:mtls,password");
         assert!(!a.authenticated(&both));
     }
 
@@ -218,7 +210,7 @@ mod tests {
             shared: true,
             ..ConnAuth::default()
         };
-        let p = Policy::parse("any:shared_token").unwrap();
+        let p = policy("any:shared_token");
         assert_eq!(a.scopes(&p), Some(Scopes::READ_WRITE));
     }
 }

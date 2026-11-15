@@ -3,6 +3,11 @@
   "type": "object",
   "properties": {
     "databases": { "type": "integer", "minimum": 1, "maximum": 65536 },
+    "authPolicy": {
+      "description": "The flag --auth-policy. The template fails with a message when the value is empty.",
+      "type": "string",
+      "pattern": "^$|^none$|^(any|all):.+$"
+    },
     "sharedToken": {
       "type": "object",
       "properties": {
@@ -51,7 +56,15 @@
           "properties": {
             "maxFailuresPerConnection": { "type": ["integer", "null"], "minimum": 0 },
             "maxFailuresPerSource": { "type": ["integer", "null"], "minimum": 0 },
-            "failureWindowSecs": { "type": ["integer", "null"], "minimum": 0 }
+            "failureWindowSecs": { "type": ["integer", "null"], "minimum": 0 },
+            "timeoutSecs": { "type": ["integer", "null"], "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "clients": {
+          "type": "object",
+          "properties": {
+            "max": { "type": ["integer", "null"], "minimum": 0 }
           },
           "additionalProperties": false
         },

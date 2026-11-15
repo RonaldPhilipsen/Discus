@@ -81,8 +81,11 @@ scripts/dev-cert.sh certs
 The script writes `certs/ca.pem`, `certs/cert.pem`, and `certs/key.pem`. Then start one node:
 
 ```sh
-./target/release/discus --tls-cert certs/cert.pem --tls-key certs/key.pem
+./target/release/discus --tls-cert certs/cert.pem --tls-key certs/key.pem --auth-policy none
 ```
+
+A node needs an authentication policy. With `--auth-policy none`, every client that completes the
+TLS handshake gets read and write access. Use this policy only for tests.
 
 The node listens for clients on port 6379. After about ten seconds, it forms a cluster of one node.
 Run `discus --help` to see every flag.
@@ -92,11 +95,12 @@ Run `discus --help` to see every flag.
 TLS on the client port is always on. There is no plaintext mode. The flags `--tls-cert` and
 `--tls-key` take PEM files, and the certificate file can hold a chain.
 
-To ask every client for a certificate (mTLS), add the CA that signs the client certificates:
+To ask every client for a certificate (mTLS), add the CA that signs the client certificates and
+set the policy `all:mtls`:
 
 ```sh
 ./target/release/discus --tls-cert certs/cert.pem --tls-key certs/key.pem \
-  --tls-client-ca certs/client-ca.pem
+  --tls-client-ca certs/client-ca.pem --auth-policy all:mtls
 ```
 
 Discus can also ask clients for an OAuth 2.0 token or a Kubernetes service account token.
@@ -109,13 +113,14 @@ CA that serves only that cluster. The flags are `--cluster-ca`, `--cluster-cert`
 ## Running a cluster
 
 On Kubernetes, install the Helm chart. Before you install it, create a Secret with the keys
-`ca.crt`, `tls.crt`, and `tls.key`.
+`ca.crt`, `tls.crt`, and `tls.key`. The chart needs an authentication policy in `authPolicy`.
 
 ```sh
 helm install <release> oci://ghcr.io/ronaldphilipsen/charts/discus \
   --version <version> \
   --namespace <namespace> \
-  --set cluster.tls.secretName=<secret>
+  --set cluster.tls.secretName=<secret> \
+  --set authPolicy=<policy>
 ```
 
 Outside Kubernetes, give each node the other nodes as seeds with `--peer`, and set

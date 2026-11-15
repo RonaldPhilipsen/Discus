@@ -180,6 +180,27 @@ async fn two_issuers_each_check_their_own_tokens() {
 }
 
 #[tokio::test]
+async fn the_old_tls_factor_still_starts_and_means_all_oauth2() {
+    let ca = TestCa::new();
+    let idp = MockIdp::start(&ca).await;
+    let file = write_file(&ca, "auth.toml", &idp.toml(&ca, ""));
+    let node = start(&[
+        "--auth-policy",
+        "all:tls,oauth2",
+        "--dev-insecure-oauth2",
+        "--auth-config",
+        &file,
+    ])
+    .await;
+    assert!(wait_status(node.admin, "/readyz", 200, Duration::from_secs(10)).await);
+    assert!(send(&node, &cmd(&["PING"])).await.starts_with("-NOAUTH"));
+    let mut wire = cmd(&["AUTH", &idp.token("discus.write")]);
+    wire.extend(cmd(&["SET", "k", "v"]));
+    wire.extend(cmd(&["GET", "k"]));
+    assert_eq!(send(&node, &wire).await, "+OK\r\n+OK\r\n$1\r\nv\r\n");
+}
+
+#[tokio::test]
 async fn all_mtls_oauth2_needs_both_factors() {
     let ca = TestCa::new();
     let idp = MockIdp::start(&ca).await;
@@ -297,7 +318,7 @@ async fn the_name_default_logs_in_the_user_default() {
 async fn a_wrong_password_of_default_fails_without_oauth2() {
     let ca = TestCa::new();
     let acl = write_file(&ca, "users.acl", ACL_USERS);
-    let node = start(&["--auth-policy", "all:tls,password", "--acl-file", &acl]).await;
+    let node = start(&["--auth-policy", "all:password", "--acl-file", &acl]).await;
     let r = send(&node, &cmd(&["AUTH", "default", "wrong"])).await;
     assert!(r.starts_with("-WRONGPASS"), "{r:?}");
 }

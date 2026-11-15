@@ -123,12 +123,17 @@ spec:
             {{- if not (has .clientAuth (list "optional" "required")) }}
             {{- fail "clientTls.clientAuth must be optional or required" }}
             {{- end }}
+            {{- if and (not .clientCaSecretName) (or (not .secretName) (eq .secretName $.Values.cluster.tls.secretName)) (not $.Values.cluster.san.enabled) }}
+            {{- fail "clientTls.verifyClients with cluster.san.enabled=false lets a client certificate join the cluster: the client CA is the cluster CA, and without the URI SAN check every certificate from that CA is a peer. Set clientTls.clientCaSecretName to a Secret with a separate client CA, or set cluster.san.enabled=true." }}
+            {{- end }}
             - --tls-client-ca={{ if .clientCaSecretName }}/client-ca{{ else }}/client-tls{{ end }}/ca.crt
             - --tls-client-auth={{ .clientAuth }}
             {{- end }}
             {{- end }}
-            {{- with .Values.authPolicy }}
-            - --auth-policy={{ . }}
+            {{- if .Values.authPolicy }}
+            - --auth-policy={{ .Values.authPolicy }}
+            {{- else if not (or .Values.sharedToken.secretName .Values.aclFile.secretName) }}
+            {{- fail "authPolicy is required. Set authPolicy=none for TLS without credentials, or a policy with mtls, oauth2, shared_token, or password, for example authPolicy=all:mtls. With sharedToken.secretName or aclFile.secretName, an empty value gives the policy of that Secret" }}
             {{- end }}
             {{- if .Values.authConfig.secretName }}
             - --auth-config=/auth/auth.toml

@@ -938,6 +938,8 @@ steps in reverse.
   cover the whole shard.
 - The default limits are 64 KiB per key, 64 MiB per value, and 10000 in-flight commands per
   connection. A connection over the pipeline limit is not read until replies drain.
+- A node serves at most 10000 client connections (`--max-clients`), counted from the accept. It
+  closes a connection over the limit before the TLS handshake.
 - There is no persistence.
 
 ## 12. Protocol surface
@@ -1173,12 +1175,18 @@ line. To move to it, install a new cluster. The cache starts empty.
 
 ### 14.2 Client authentication policy
 
-- The policy lists factors (`tls`, `mtls`, `oauth2`, `shared_token`) and combines them with `any`
-  or `all`. Every client uses TLS. The default policy is `none`, so a client needs no other
-  factor. With a policy that names other factors, a client with `tls` and no other factor gets
-  `-NOAUTH`.
+- The policy lists factors (`mtls`, `oauth2`, `shared_token`) and combines them with `any`
+  or `all`. Every client uses TLS, so TLS is not a factor. With the policy `none`, a client needs
+  no factor. With a policy that names factors, a client without them gets `-NOAUTH`. The old
+  factor name `tls` is still accepted in an `all` list and ignored.
+- The policy has no default without a shared token. A node without a policy and without a shared
+  token refuses to start, so open access is always a choice of the operator. The node logs a
+  warning at startup when the policy is `none`. With a shared token and no policy, the policy is
+  `all:shared_token`.
 - A shared token grants read-write by default and is meant for simple setups. An mTLS-only client
-  gets the scope configured for its certificate identity, read-write by default.
+  gets read-write when no certificate rule exists. With at least one rule, the client gets the
+  scope of the first rule that matches its certificate identity. An identity that matches no rule
+  does not have the `mtls` factor.
 - Each node authenticates its own client connections. A cluster client opens a connection to each
   node and authenticates on each one. The limiter of failed attempts counts per node.
 - Authorization runs before the redirect rule. A command that the scopes deny returns `-NOPERM`,
@@ -1191,6 +1199,9 @@ line. To move to it, install a new cluster. The cache starts empty.
 - Authentication errors are generic. The reason goes to the debug log. Failed attempts are
   rate-limited per connection and per source. The limit per source also counts refused bearer
   tokens on the admin port.
+- Until a connection meets the policy, one argument and one buffered request are at most 64 KiB,
+  and a command has at most 64 arguments. A connection that does not meet the policy within
+  `--auth-timeout-secs` (default 30) of the accept is closed.
 
 ### 14.3 OAuth 2.0
 
@@ -1354,7 +1365,7 @@ removes its code and dependencies. Features never change the wire format.
 
 - Without `otel`, there are no metrics or traces. The node still forwards the trace context
   unchanged, so traces stay connected across it.
-- Without `oauth2`, the policy accepts only `tls`, `mtls`, and `shared_token`, and the node does
+- Without `oauth2`, the policy accepts only `mtls` and `shared_token`, and the node does
   not advertise the OAuth 2.0 capability.
 - Without `k8s`, the only lease provider is `none`.
 - If the configuration enables a subsystem that the binary lacks, the node refuses to start and
