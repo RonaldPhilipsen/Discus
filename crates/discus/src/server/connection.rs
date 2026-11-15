@@ -162,11 +162,13 @@ impl Pipeline {
         }
     }
 
-    /// The async part of `AUTH` and `HELLO ... AUTH` (a JWKS refresh). Earlier commands keep
-    /// running meanwhile, and their replies go into the output buffer in order.
+    /// The async part of `AUTH` and `HELLO ... AUTH` (a JWKS refresh), and the introspection of an
+    /// opaque grant that is due. Earlier commands keep running meanwhile, and their replies go
+    /// into the output buffer in order. The command that waits is not submitted yet, so it sees
+    /// the grant as the refresh left it.
     async fn prefetch(&mut self, cmd: &Command) {
         let node = self.node.clone();
-        let fetch = node.security.prefetch(&self.conn, cmd);
+        let fetch = node.security.prefetch(&mut self.conn, cmd);
         tokio::pin!(fetch);
         loop {
             tokio::select! {
@@ -313,7 +315,7 @@ async fn serve_until_closed<S: AsyncRead + AsyncWrite + Unpin>(
         while !p.closing && p.pending.len() < max_pipeline {
             match parser.next() {
                 Ok(Some(cmd)) => {
-                    if node.security.wants_prefetch(&cmd) {
+                    if node.security.wants_prefetch(&p.conn, &cmd) {
                         p.prefetch(&cmd).await;
                     }
                     p.submit(cmd);
