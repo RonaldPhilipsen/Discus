@@ -26,6 +26,20 @@ pub fn cert_identity(der: &[u8]) -> Option<String> {
     cn.as_str().ok().map(str::to_string)
 }
 
+/// True when the certificate carries `san` as one of its URI SANs, the test of `--cluster-san`.
+pub fn has_uri_san(der: &[u8], san: &str) -> bool {
+    let Ok((_, cert)) = x509_parser::parse_x509_certificate(der) else {
+        return false;
+    };
+    let Ok(Some(ext)) = cert.subject_alternative_name() else {
+        return false;
+    };
+    ext.value
+        .general_names
+        .iter()
+        .any(|n| matches!(n, GeneralName::URI(u) if *u == san))
+}
+
 /// The identity of the verified client certificate of a TLS connection, if the client sent one
 /// that names one.
 pub fn peer_identity(conn: &rustls::ServerConnection) -> Option<String> {

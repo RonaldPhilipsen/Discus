@@ -86,6 +86,7 @@ pub struct Security {
     server_tls: ArcSwap<rustls::ServerConfig>,
     lb_sources: Vec<ipnet::IpNet>,
     lb_identity_tlv: Option<u8>,
+    lb_san: String,
     cert_rules: Vec<(String, Scopes)>,
     policy: Policy,
     acl: Option<ArcSwap<Acl>>,
@@ -201,6 +202,7 @@ impl Security {
             server_tls,
             lb_sources: args.lb_trusted_source.clone(),
             lb_identity_tlv: args.lb_identity_tlv,
+            lb_san: args.lb_san.clone(),
             cert_rules,
             policy,
             acl: acl.map(ArcSwap::from_pointee),
@@ -567,6 +569,19 @@ impl Security {
         let acceptor = tokio_rustls::TlsAcceptor::from(self.server_tls.load_full());
         let tls = acceptor.accept(tcp).await?;
         if let Some(header) = forwarded {
+            let pinned = self.lb_san.is_empty()
+                || tls
+                    .get_ref()
+                    .1
+                    .peer_certificates()
+                    .and_then(|c| c.first())
+                    .is_some_and(|der| identity::has_uri_san(der, &self.lb_san));
+            if !pinned {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "lb mode: the load balancer certificate does not carry the --lb-san URI SAN",
+                ));
+            }
             // The handshake verified the load balancer certificate, so the header is trusted.
             if let Some(source) = header.source {
                 auth.peer = Some(source.ip());

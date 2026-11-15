@@ -96,6 +96,28 @@ async fn a_load_balancer_without_its_certificate_is_rejected() {
 }
 
 #[tokio::test]
+async fn lb_san_pins_the_load_balancer_certificate() {
+    let ca = TestCa::new();
+    let server = ca.server_cert();
+    let lb = ca.client_cert("spiffe://test/lb");
+    let other = ca.client_cert("spiffe://test/app");
+    let mut args = lb_args(&ca, &server, "127.0.0.1/32");
+    args.extend(["--auth-policy", "any:mtls", "--lb-san", "spiffe://test/lb"]);
+    let node = start(&args).await;
+    let reply = via_lb(&node, &ca, Some(&lb), &header(Some("app")), &cmd(&["PING"])).await;
+    assert_eq!(reply, "+PONG\r\n");
+    let reply = via_lb(
+        &node,
+        &ca,
+        Some(&other),
+        &header(Some("app")),
+        &cmd(&["PING"]),
+    )
+    .await;
+    assert_eq!(reply, "");
+}
+
+#[tokio::test]
 async fn an_untrusted_source_is_closed_before_the_header_is_read() {
     let ca = TestCa::new();
     let server = ca.server_cert();

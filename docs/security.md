@@ -89,6 +89,12 @@ The node trusts the header only when both of these checks pass:
 
 The node closes any other connection. It reads no header from an untrusted address.
 
+By default, every certificate from `--tls-client-ca` can act as the load balancer. Set `--lb-san`
+to the URI SAN of the load balancer certificate, for example `spiffe://example.org/ns/edge/sa/lb`.
+Then the node also closes a connection whose certificate does not carry this exact URI SAN. The
+test is the same as the test of `--cluster-san`. Use it when the CA also signs client or other
+certificates.
+
 The node accepts PROXY protocol v1 and v2. It reads these values from the header:
 
 - The client address. The node uses it for the failed-attempt limit.
@@ -886,6 +892,7 @@ identity provider without `ca_file`.
 | `--tls-client-auth` | `optional` | `required` refuses clients without a certificate in `node` mode. |
 | `--lb-trusted-source` | none | A network that the load balancer connects from. Repeat it for more. |
 | `--lb-identity-tlv` | none | A PROXY v2 TLV type from `0xE0` to `0xEF` that holds the client identity. |
+| `--lb-san` | empty | The URI SAN that the load balancer certificate must carry. Empty accepts any certificate from `--tls-client-ca`. |
 | `--auth-policy` | required without `--acl-file` | The client authentication policy. See [Authentication policy](#authentication-policy). |
 | `--auth-config` | none | The TOML file with issuers, rules, and admin identities. |
 | `--acl-file` | none | A file with users, passwords, and rules, for the `password` factor. The node reloads it after a change. |
