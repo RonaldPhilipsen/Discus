@@ -945,7 +945,8 @@ steps in reverse.
 - The default limits are 64 KiB per key, 64 MiB per value, and 10000 in-flight commands per
   connection. A connection over the pipeline limit is not read until replies drain.
 - A node serves at most 10000 client connections (`--max-clients`), counted from the accept. It
-  closes a connection over the limit before the TLS handshake.
+  closes a connection over the limit before the TLS handshake. An `accept` error never stops a
+  listener. The node waits from 10 ms up to 1 s and accepts again.
 - There is no persistence.
 
 ## 12. Protocol surface

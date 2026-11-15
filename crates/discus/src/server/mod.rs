@@ -106,6 +106,7 @@ async fn bind_transport(
     }
 }
 
+pub mod accept;
 mod connection;
 pub(crate) mod file_watch;
 mod order;
@@ -202,13 +203,6 @@ fn watch_acl_file(node: &Arc<Node>, seen: file_watch::Snapshot, stop: Cancellati
 }
 
 /// Accept on `listener`, or wait forever without one.
-async fn accept_on(listener: Option<&TcpListener>) -> io::Result<(TcpStream, SocketAddr)> {
-    match listener {
-        Some(l) => l.accept().await,
-        None => std::future::pending().await,
-    }
-}
-
 /// Serve a connection that a client listener accepted. At `--max-clients` open connections the
 /// node closes it instead, before the transport setup, so a refused connection costs no handshake.
 fn start_client(
@@ -516,20 +510,19 @@ impl Server {
         }
 
         let drain = node.drain_token();
-        let result = loop {
+        let (mut client_backoff, mut redirect_backoff) = Default::default();
+        loop {
             tokio::select! {
-                _ = shutdown.cancelled() => break Ok(()),
-                _ = drain.cancelled() => break Ok(()),
-                accepted = listener.accept() => match accepted {
-                    Ok(client) => start_client(&node, &tracker, &hard_stop, client, false),
-                    Err(e) => break Err(e),
-                },
-                accepted = accept_on(redirect.as_ref()) => match accepted {
-                    Ok(client) => start_client(&node, &tracker, &hard_stop, client, true),
-                    Err(e) => break Err(e),
-                },
+                _ = shutdown.cancelled() => break,
+                _ = drain.cancelled() => break,
+                client = accept::accept(&listener, &mut client_backoff, "client") => {
+                    start_client(&node, &tracker, &hard_stop, client, false);
+                }
+                client = accept::accept_on(redirect.as_ref(), &mut redirect_backoff, "redirect") => {
+                    start_client(&node, &tracker, &hard_stop, client, true);
+                }
             }
-        };
+        }
 
         node.set_phase(Phase::Leaving);
         // LEAVING leaves placement in the next epoch, and the node keeps serving its open
@@ -574,6 +567,6 @@ impl Server {
             link.transport.close();
         }
         let _ = tokio::task::spawn_blocking(move || lane.shutdown()).await;
-        result
+        Ok(())
     }
 }

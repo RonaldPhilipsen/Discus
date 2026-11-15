@@ -595,6 +595,12 @@ connections in the TLS handshake, and the listener and the redirect listener sha
 limit, the node accepts a new TCP connection and closes it at once, before the TLS handshake. The
 metric `discus.client.rejected_connections` counts these connections.
 
+Each connection uses one file descriptor. At start, the node raises its soft open file limit to the
+hard limit. If the result is below `--max-clients` plus 1024, the node logs a warning with both
+limits. If `accept` fails, for example at the file limit, the node logs the error and tries again
+after 10 ms. The wait doubles after each further error, up to 1 s, and a success resets it. The
+listener does not stop.
+
 The settings file sets both values too, with the keys `[auth] timeout-secs` and `[clients] max`.
 The chart values are `settings.auth.timeoutSecs` and `settings.clients.max`. The node applies a
 change without a restart. A lower connection limit closes no open connection. The node refuses new
