@@ -24,6 +24,25 @@ pub(super) fn parse(text: &str) -> Result<Acl, String> {
     Ok(Acl { users })
 }
 
+/// An unknown rule is reported by position only, because a mistyped password rule would put the
+/// password into the error and the log.
+enum RuleError {
+    Unknown,
+    Invalid(String),
+}
+
+impl From<String> for RuleError {
+    fn from(message: String) -> Self {
+        RuleError::Invalid(message)
+    }
+}
+
+impl From<&str> for RuleError {
+    fn from(message: &str) -> Self {
+        RuleError::Invalid(message.to_owned())
+    }
+}
+
 fn parse_line(line: &str, seen: &HashMap<String, Arc<User>>) -> Result<User, String> {
     let mut words = line.split_ascii_whitespace();
     if words.next() != Some("user") {
@@ -39,13 +58,16 @@ fn parse_line(line: &str, seen: &HashMap<String, Arc<User>>) -> Result<User, Str
         return Err(format!("the user {name:?} is defined twice"));
     }
     let mut user = User::new(name);
-    for rule in words {
-        apply(&mut user, rule)?;
+    for (index, rule) in words.enumerate() {
+        apply(&mut user, rule).map_err(|e| match e {
+            RuleError::Unknown => format!("unknown rule at word {}", index + 3),
+            RuleError::Invalid(message) => message,
+        })?;
     }
     Ok(user)
 }
 
-fn apply(user: &mut User, rule: &str) -> Result<(), String> {
+fn apply(user: &mut User, rule: &str) -> Result<(), RuleError> {
     match rule {
         "on" => user.enabled = true,
         "off" => user.enabled = false,
@@ -61,6 +83,7 @@ fn apply(user: &mut User, rule: &str) -> Result<(), String> {
         "resetkeys" => user.keys.clear(),
         "allcommands" => set_all(user, true),
         "nocommands" => set_all(user, false),
+        // Discus has no pub/sub, so channel rules are accepted with no effect (spec, "The file").
         "allchannels" | "resetchannels" => {}
         "reset" => *user = User::new(&user.name),
         _ => return apply_prefixed(user, rule),
@@ -68,11 +91,10 @@ fn apply(user: &mut User, rule: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn apply_prefixed(user: &mut User, rule: &str) -> Result<(), String> {
-    let unknown = || format!("unknown rule {rule:?}");
+fn apply_prefixed(user: &mut User, rule: &str) -> Result<(), RuleError> {
     if let Some(password) = rule.strip_prefix('>') {
         if password.is_empty() {
-            return Err(unknown());
+            return Err(RuleError::Unknown);
         }
         add_password(user, sha256(password.as_bytes()));
     } else if let Some(hash) = rule.strip_prefix('#') {
@@ -91,16 +113,17 @@ fn apply_prefixed(user: &mut User, rule: &str) -> Result<(), String> {
         } else if let Some(p) = rest.strip_prefix("W~") {
             (KeyPerm::WRITE, p)
         } else {
-            return Err(unknown());
+            return Err(RuleError::Unknown);
         };
         add_key(user, pattern, perm);
     } else if rule.starts_with('&') {
+        // Accepted with no effect, as `allchannels` is.
     } else if let Some(target) = rule.strip_prefix('+') {
         command_rule(user, rule, target, true)?;
     } else if let Some(target) = rule.strip_prefix('-') {
         command_rule(user, rule, target, false)?;
     } else {
-        return Err(unknown());
+        return Err(RuleError::Unknown);
     }
     Ok(())
 }
@@ -288,9 +311,12 @@ mod tests {
         ] {
             assert_eq!(
                 error(&format!("user a {rule}")),
-                format!("line 1: unknown rule {:?}", rule.split(' ').next().unwrap())
+                "line 1: unknown rule at word 3"
             );
         }
+        let e = error("user a on >my pass");
+        assert_eq!(e, "line 1: unknown rule at word 5");
+        assert!(!e.contains("pass"));
         assert_eq!(error("# nothing\n"), "the file has no user");
     }
 }
