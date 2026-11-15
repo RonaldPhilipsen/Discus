@@ -140,6 +140,13 @@ jobs:
       - run: >-
           ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
           --set databases=0
+      - run: >-
+          helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
+          --set probes.startup.failureThreshold=400
+          | grep -A6 'startupProbe:' | grep -q 'failureThreshold: 400'
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls --set authPolicy=none
+          --set probes.startup.exec=x
 
   # redis-cli against a fresh node, for every supported and unsupported command.
   compat:

@@ -134,6 +134,29 @@ settings:
   #       some-new-key: 5
   extra: {}
 
+# The probes of the admin port. The chart sets the handler, and each map below adds the timing
+# fields to its probe.
+probes:
+  # /startupz passes after the node joined, received its handoff, and settled its counter groups.
+  # The kubelet restarts the pod after periodSeconds * failureThreshold seconds, and the next start
+  # begins the handoff again. So keep this budget above the worst start:
+  #   store budget / settings.handoff.rateBytes + --bootstrap-deadline-ms + --counter-settle-timeout-ms
+  # The store budget is 75% of limits.memory. With the defaults: 1.5 GiB / 32 MiB/s = 48 s, plus
+  # 10 s, plus 45 s, is 103 s. The default budget is 300 s. Raise it with the memory limit. For
+  # a 16 Gi limit, the worst start is 12 GiB / 32 MiB/s + 55 s = 439 s, so set about 900 s.
+  startup:
+    periodSeconds: 5
+    failureThreshold: 60
+    timeoutSeconds: 1
+  readiness:
+    periodSeconds: 10
+    failureThreshold: 3
+    timeoutSeconds: 1
+  liveness:
+    periodSeconds: 10
+    failureThreshold: 3
+    timeoutSeconds: 1
+
 # The termination grace period of the pod is this value plus 15 seconds.
 shutdownTimeoutSeconds: 30
 

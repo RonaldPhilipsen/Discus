@@ -237,7 +237,7 @@ spec:
               path: /startupz
               port: 9100
             failureThreshold: 60
-            periodSeconds: 1
+            periodSeconds: 5
           readinessProbe:
             httpGet:
               path: /readyz
@@ -256,6 +256,13 @@ Follow these rules:
   `minReadySeconds` makes one replacement finish before the next one begins.
 - `terminationGracePeriodSeconds` is longer than `--shutdown-timeout-secs`, so the drain ends
   before Kubernetes kills the container.
+- The startup probe budget (`periodSeconds` times `failureThreshold`) is longer than the worst
+  start of a node. Otherwise the kubelet restarts the pod during its handoff, and the next start
+  begins the handoff again. The worst start is the store budget divided by
+  `--handoff-rate-bytes`, plus `--bootstrap-deadline-ms`, plus `--counter-settle-timeout-ms`.
+  With a 2 Gi memory limit and the defaults, that is 1.5 GiB / 32 MiB/s = 48 s, plus 10 s, plus
+  45 s, which is 103 s. The example above gives 300 s. For a 16 Gi limit, the worst start is
+  439 s, so give it about 900 s. The chart sets this budget in `probes.startup`.
 - The service account `discus` needs the Role of the cluster lease above.
 - Mount the node certificate at `/tls`, for example from a cert-manager `Certificate` with the URI
   SAN `spiffe://cluster.local/ns/<namespace>/sa/discus`. Set `--cluster-san` to the same value.
