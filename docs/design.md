@@ -359,6 +359,15 @@ A Kubernetes `Lease` makes sure that only one node forms a new cluster.
   always holds the lease. The holder writes `holderIdentity`, `discus.io/address`, and
   `discus.io/cluster-id`. After a full cold restart, the lease expires and the first node to
   acquire it forms a new cluster.
+- A node judges expiry as client-go leader election does. It remembers the record that it read
+  last (`resourceVersion`, holder, `renewTime`) and the time on its own monotonic clock at which
+  it first read that record. The lease is expired only when one full `leaseDurationSeconds` passes
+  on that clock without a change of the record. A node never compares `renewTime` with its own
+  wall clock, so clock skew between nodes cannot end a live lease. A node that starts fresh waits
+  one full duration after its first read.
+- The `Lease` object stores the duration in whole seconds. A node refuses to start with a lease
+  duration that is not a whole number of seconds, or that is not greater than the renew interval.
+  For a counter lease, the duration must be greater than the renew interval plus the margin.
 - The lease matters only for formation. If the API server is unreachable, a running cluster keeps
   serving. A node that reaches neither a `NORMAL` peer nor the API server stays unready.
 - The lease provider `none` (outside Kubernetes) forms a cluster alone after the deadline. It
@@ -795,14 +804,15 @@ two-voter Raft group cannot survive a loss, so small clusters use leader-followe
 - The `Lease` `discus-counter-<g>` names the leader (duration 5 s, renew every 1 s).
 - The leader serves only while its lease is valid by its own monotonic clock, minus a 1 s margin.
   Otherwise it returns `-TRYAGAIN`. Two leaders never serve one group at the same time.
-- Leadership is sticky. When the lease expires, the follower tries to acquire it first. Other
-  members wait one more lease duration.
+- Leadership is sticky. After two missed syncs, the follower starts to read the lease, and it
+  takes the lease when the lease expires. Other members wait two lease durations without a leader
+  before they read it.
 - The leader sends each entry to the follower and waits up to 50 ms for the acknowledgment. On a
   timeout it marks the follower lagging, replies anyway, and sends a fresh snapshot later. A joining
   follower receives a snapshot.
-- Failover takes about one lease duration and loses the increments that a lagging follower missed.
-  With one node, a node loss loses the counters. Counter availability in this mode depends on the
-  API server.
+- Failover takes about one lease duration plus two renew intervals and loses the increments that a
+  lagging follower missed. With one node, a node loss loses the counters. Counter availability in
+  this mode depends on the API server.
 - With the lease provider `none`, the epoch names the leader: the previous leader, else the
   previous follower, else the top member by HRW. This mode cannot fence a leader and is for
   development only.
