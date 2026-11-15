@@ -145,7 +145,7 @@ Without `--auth-policy`, the node picks a default:
 
 | Setting | Default policy |
 | --- | --- |
-| `--shared-token` set | `all:tls,shared_token` |
+| `--shared-token-file` or `--shared-token` set | `all:tls,shared_token` |
 | No shared token | `none` |
 
 A shared token that the policy does not use stops the node at startup. With `none`, every client
@@ -160,6 +160,38 @@ Examples:
 | A client certificate or a token | `any:mtls,oauth2` |
 | A client certificate and a token | `all:mtls,oauth2` |
 | A simple setup with one password over TLS | `all:tls,shared_token` |
+
+### Shared token
+
+The shared token is one password that every client sends with `AUTH`. Put it in a file and set
+`--shared-token-file`:
+
+```bash
+discus \
+  --tls-cert /etc/discus/tls.crt \
+  --tls-key /etc/discus/tls.key \
+  --shared-token-file /etc/discus/token
+```
+
+The node reads the token from the file and drops whitespace at the end, for example a newline. If
+the node cannot read the file, or the file has no token, the node refuses to start. The error
+names the flag and the file.
+
+The flag `--shared-token <value>` gives the token on the command line. Every user on the host
+can then read it in the process list, and Kubernetes shows it in the pod spec. The node logs a
+warning at startup when you use this flag. Use it only for tests. The node refuses to start with
+both flags.
+
+In the Helm chart, put the token in a Secret and set `sharedToken.secretName`. The chart mounts
+the Secret read-only and sets `--shared-token-file`. The value `sharedToken.key` names the key of
+the Secret that holds the token. The default key is `token`.
+
+```bash
+kubectl create secret generic discus-token --from-literal=token="$TOKEN"
+helm upgrade discus charts/discus --reuse-values --set sharedToken.secretName=discus-token
+```
+
+To change the token while the node runs, see [Shared token rotation](#shared-token-rotation).
 
 ### Commands
 
@@ -479,14 +511,15 @@ identity provider without `ca_file`.
 | `--lb-identity-tlv` | none | A PROXY v2 TLV type from `0xE0` to `0xEF` that holds the client identity. |
 | `--auth-policy` | see above | The client authentication policy. |
 | `--auth-config` | none | The TOML file with issuers, rules, and admin identities. |
-| `--shared-token` | none | The shared token for the `shared_token` factor. |
+| `--shared-token-file` | none | A file with the shared token for the `shared_token` factor. The node reloads it after a change. |
+| `--shared-token` | none | The shared token as a value. The process list shows it, so use `--shared-token-file`. |
 | `--dev-insecure-oauth2` | off | Allows `http` issuers, and admin bearer tokens on a plaintext admin port. Development only. |
 | `--auth-clock-skew-secs` | 60 | The clock skew allowed on token times. |
 | `--auth-max-failures-per-connection` | 5 | Failed attempts that close a connection. |
 | `--auth-max-failures-per-source` | 20 | Failed attempts per source address in one window. |
 | `--auth-failure-window-secs` | 60 | The window of the per-source limit. |
 | `--admin-tls` | off | Serves the admin port over TLS. |
-| `--tls-reload-secs` | 10 | Seconds between checks of the certificate files. `0` turns the reload off. |
+| `--tls-reload-secs` | 10 | Seconds between checks of the certificate files and the shared token file. `0` turns the reload off. |
 
 ### Certificate rotation
 
@@ -498,5 +531,22 @@ certificate of their handshake. You do not have to restart the node.
 If the new files do not load, the node logs a warning and keeps its current certificates. For
 example, this happens when the key does not match the certificate. In Kubernetes, the files of a
 mounted Secret change after the Secret changes, usually within a minute or two.
+
+### Shared token rotation
+
+The node checks the file of `--shared-token-file` every `--tls-reload-secs` seconds. If its
+content changes, the node reads the new token. Each new `AUTH` then needs the new token, and the
+old token fails. A connection that logged in with the old token keeps its login until it closes.
+You do not have to restart the node.
+
+If the node cannot read the new file, or the file has no token, the node logs a warning and keeps
+its current token. In Kubernetes, change the Secret of `sharedToken.secretName`. The mounted file
+changes after the Secret changes, usually within a minute or two.
+
+The node has one shared token at a time. Between the change of the Secret and the reload on each
+node, some nodes accept the old token and some accept the new token. Give each client the new
+token after every node has it, and make the client try again after `-WRONGPASS`.
+
+A token from `--shared-token` changes only with a restart.
 
 The node reads the `--auth-config` file once at startup. To change it, restart the node.
