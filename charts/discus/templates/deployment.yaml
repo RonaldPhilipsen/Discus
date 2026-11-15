@@ -4,6 +4,9 @@ metadata:
   name: {{ include "discus.fullname" . }}
   labels:
     {{- include "discus.labels" . | nindent 4 }}
+{{- if and .Values.sharedToken.secretName .Values.aclFile.secretName }}
+{{- fail "sharedToken.secretName and aclFile.secretName cannot both be set: the shared token is a password of the user default, so put it in the ACL file" }}
+{{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
   # One replacement finishes before the next one begins.
@@ -133,6 +136,9 @@ spec:
             {{- if .Values.sharedToken.secretName }}
             - --shared-token-file=/shared-token/{{ .Values.sharedToken.key }}
             {{- end }}
+            {{- if .Values.aclFile.secretName }}
+            - --acl-file=/acl/{{ .Values.aclFile.key }}
+            {{- end }}
             - --config=/settings/discus.toml
             {{- with .Values.pyroscope.url }}
             - --pyroscope-url={{ . }}
@@ -198,6 +204,11 @@ spec:
               mountPath: /shared-token
               readOnly: true
             {{- end }}
+            {{- if .Values.aclFile.secretName }}
+            - name: acl-file
+              mountPath: /acl
+              readOnly: true
+            {{- end }}
             {{- if and .Values.otel.enabled .Values.otel.tls.secretName }}
             - name: otel-tls
               mountPath: /otel-tls
@@ -230,6 +241,16 @@ spec:
         {{- with .Values.sharedToken }}
         {{- if .secretName }}
         - name: shared-token
+          secret:
+            secretName: {{ .secretName }}
+            items:
+              - key: {{ .key }}
+                path: {{ .key }}
+        {{- end }}
+        {{- end }}
+        {{- with .Values.aclFile }}
+        {{- if .secretName }}
+        - name: acl-file
           secret:
             secretName: {{ .secretName }}
             items:

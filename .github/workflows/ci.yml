@@ -84,6 +84,16 @@ jobs:
           --set sharedToken.secretName=discus-token --set sharedToken.key=../token
       - run: >-
           helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --set aclFile.secretName=discus-acl
+          | grep -q -- '--acl-file=/acl/users.acl'
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          | grep -q 'acl'
+      - run: >-
+          ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls
+          --set sharedToken.secretName=discus-token --set aclFile.secretName=discus-acl
+      - run: >-
+          helm template discus charts/discus --set cluster.tls.secretName=discus-tls
           --set settings.budget.holdMs=1500 | grep -A12 'discus.toml' | grep -q 'hold-ms = 1500'
       - run: >-
           ! helm template discus charts/discus --set cluster.tls.secretName=discus-tls

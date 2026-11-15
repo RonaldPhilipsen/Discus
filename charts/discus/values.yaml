@@ -78,6 +78,13 @@ sharedToken:
   secretName: ""
   # The key of the Secret that holds the token.
   key: token
+aclFile:
+  # A Secret with the users, their passwords, and their rules, for the flag --acl-file. The node
+  # then uses the policy all:tls,password, unless authPolicy names another policy with password.
+  # After the Secret changes, the node reads the new file without a restart. See docs/security.md.
+  secretName: ""
+  # The key of the Secret that holds the file.
+  key: users.acl
 
 # The number of databases that SELECT accepts. A higher value reaches the nodes through the
 # settings file, so it needs no restart. A lower value applies nothing: see docs/cluster.md for the
