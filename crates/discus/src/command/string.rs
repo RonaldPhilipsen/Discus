@@ -311,14 +311,23 @@ fn append(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     check_key(node, &cmd[1])?;
     admit(node, cmd[2].len())?;
     node.write(conn.db, &cmd[1], node.stamp()?, |slot| {
-        let mut bytes = str_of(slot.as_ref())?.map_or_else(Vec::new, |b| b.to_vec());
+        let head = str_of(slot.as_ref())?.map_or(&[][..], |b| &b[..]);
+        let bytes = concat(head, &cmd[2]);
         let expires = slot.as_ref().and_then(|e| e.expires_at_ms);
-        bytes.extend_from_slice(&cmd[2]);
         check_value(node, &bytes)?;
         let len = bytes.len() as i64;
         slot.set(Some(new_entry(Bytes::from(bytes), expires)));
         Ok(Value::Integer(len))
     })
+}
+
+/// `head` then `tail` in a buffer with no spare room. The size estimate counts the length only,
+/// so spare room would be memory outside `maxmemory`.
+fn concat(head: &[u8], tail: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(head.len() + tail.len());
+    bytes.extend_from_slice(head);
+    bytes.extend_from_slice(tail);
+    bytes
 }
 
 fn strlen(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
@@ -355,6 +364,15 @@ fn type_(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_appended_value_has_no_spare_room() {
+        let mut value = Vec::new();
+        for _ in 0..100 {
+            value = concat(&value, b"abc");
+            assert_eq!(value.capacity(), value.len());
+        }
+    }
 
     /// redis-server 8.10.2 refuses a deadline past `i64::MAX` milliseconds, so `PTTL` never
     /// reads a negative number for a key that has a deadline.
