@@ -603,10 +603,12 @@ impl Sim {
                 SimLease::None => Ok(LeaseState::Held(me.clone())),
                 SimLease::Memory(l) => l.acquire_or_renew(&me).now_or_never().unwrap(),
             };
-            if let (Ok(LeaseState::Held(h) | LeaseState::HeldByOther(h)), SimLease::Memory(_)) =
-                (&result, &self.lease)
-            {
-                node.host.lease_cluster = Some(h.cluster_id);
+            match (&result, &self.lease) {
+                (Ok(LeaseState::Held(h) | LeaseState::HeldByOther(h)), SimLease::Memory(_)) => {
+                    node.host.lease_cluster = Some(h.cluster_id);
+                }
+                (Err(_), _) => node.host.lease_cluster = None,
+                _ => {}
             }
             let before = node.swim.cluster_id();
             node.host.now = now;

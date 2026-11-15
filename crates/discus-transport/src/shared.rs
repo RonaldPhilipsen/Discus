@@ -17,13 +17,17 @@ use bytes::{BufMut, BytesMut};
 use discus_wire::{decode_frame, DecodeError, Frame, Limits};
 use futures::StreamExt;
 use parking_lot::Mutex;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::frame::{codec, read_frame};
 
 /// The bytes that one write takes. Frames that wait past it go out in the next write.
 const WRITE_BYTES: usize = 256 * 1024;
+
+/// The bytes of requests that wait in the queue of a dialer writer. A request over it waits for
+/// the queue to drain. A frame holds its share until it was written.
+const QUEUE_BYTES: usize = 4 * 1024 * 1024;
 
 /// The largest reply that the acceptor sends on the shared stream. A larger one takes a
 /// unidirectional stream.
@@ -34,9 +38,26 @@ pub(crate) type Rejected = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// What the writer task sends.
 pub(crate) enum Out {
-    Frame(Vec<u8>),
+    Frame {
+        frame: Vec<u8>,
+        /// Released after the write, so the queue stays bounded: a share of the dialer byte
+        /// budget, or the acceptor permit of the request.
+        hold: Option<OwnedSemaphorePermit>,
+        /// Cancelled when the caller stopped waiting. The writer then drops the frame unsent.
+        waiter: Option<CancellationToken>,
+    },
     /// Reset the stream after the frames before it.
     Reset(quinn::VarInt),
+}
+
+impl Out {
+    pub(crate) fn frame(frame: Vec<u8>, hold: Option<OwnedSemaphorePermit>) -> Out {
+        Out::Frame {
+            frame,
+            hold,
+            waiter: None,
+        }
+    }
 }
 
 /// Write each frame with its length prefix, and finish the stream when every sender is gone or
@@ -47,6 +68,7 @@ pub(crate) async fn pump(
     stop: CancellationToken,
 ) -> Result<(), String> {
     let mut buf = BytesMut::new();
+    let mut held = Vec::new();
     loop {
         let next = tokio::select! {
             _ = stop.cancelled() => None,
@@ -59,11 +81,13 @@ pub(crate) async fn pump(
         let mut reset = None;
         loop {
             match out {
-                Out::Frame(frame) => {
+                Out::Frame { waiter, .. } if waiter.as_ref().is_some_and(|w| w.is_cancelled()) => {}
+                Out::Frame { frame, hold, .. } => {
                     let len = u32::try_from(frame.len())
                         .map_err(|_| "a frame is larger than 4 GiB".to_string())?;
                     buf.put_u32(len);
                     buf.extend_from_slice(&frame);
+                    held.extend(hold);
                 }
                 Out::Reset(code) => {
                     reset = Some(code);
@@ -82,6 +106,7 @@ pub(crate) async fn pump(
             send.write_all(&buf).await.map_err(|e| e.to_string())?;
             buf.clear();
         }
+        held.clear();
         if let Some(code) = reset {
             let _ = send.reset(code);
             return Ok(());
@@ -97,7 +122,9 @@ type Waiting = Mutex<Option<HashMap<u64, oneshot::Sender<Reply>>>>;
 
 /// The dialer side of a shared stream. Dropping it finishes the stream.
 pub(crate) struct Shared {
+    /// Unbounded as a channel, but `budget` bounds the bytes in it.
     out: mpsc::UnboundedSender<Out>,
+    budget: Arc<Semaphore>,
     waiting: Arc<Waiting>,
 }
 
@@ -113,7 +140,7 @@ impl Shared {
     ) -> Option<Arc<Shared>> {
         let (send, recv) = conn.open_bi().await.ok()?;
         let (out, rx) = mpsc::unbounded_channel();
-        out.send(Out::Frame(Vec::new())).ok()?;
+        out.send(Out::frame(Vec::new(), None)).ok()?;
         let waiting: Arc<Waiting> = Arc::new(Mutex::new(Some(HashMap::new())));
         let stop = CancellationToken::new();
         tokio::spawn({
@@ -141,24 +168,39 @@ impl Shared {
             stop,
             rejected,
         ));
-        Some(Arc::new(Shared { out, waiting }))
+        Some(Arc::new(Shared {
+            out,
+            budget: Arc::new(Semaphore::new(QUEUE_BYTES)),
+            waiting,
+        }))
     }
 
     /// Send `frame` with `request_id` and wait for its reply. Returns the frame when the stream
     /// already failed: then it was not sent, and the caller can send it on a stream of its own.
     pub(crate) async fn exchange(&self, request_id: u64, frame: Vec<u8>) -> Result<Reply, Vec<u8>> {
+        let share = u32::try_from(frame.len().min(QUEUE_BYTES)).unwrap_or(u32::MAX);
+        let Ok(hold) = self.budget.clone().acquire_many_owned(share).await else {
+            return Err(frame);
+        };
         let (tx, rx) = oneshot::channel();
         match self.waiting.lock().as_mut() {
             Some(w) => w.insert(request_id, tx),
             None => return Err(frame),
         };
         // A timeout drops this future. The guard then forgets the request, so a late reply
-        // finds no waiter.
+        // finds no waiter, and cancels `waiter`, so the writer drops the frame if it still waits.
         let _guard = Forget {
             waiting: &self.waiting,
             request_id,
         };
-        if let Err(mpsc::error::SendError(Out::Frame(frame))) = self.out.send(Out::Frame(frame)) {
+        let waiter = CancellationToken::new();
+        let _gone = waiter.clone().drop_guard();
+        let out = Out::Frame {
+            frame,
+            hold: Some(hold),
+            waiter: Some(waiter),
+        };
+        if let Err(mpsc::error::SendError(Out::Frame { frame, .. })) = self.out.send(out) {
             return Err(frame);
         }
         Ok(rx

@@ -3,7 +3,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -124,6 +124,33 @@ fn provider(addr: SocketAddr) -> K8sLease {
         .with_timeout(Duration::from_secs(2))
 }
 
+/// A manual monotonic clock: a fixed start plus an offset that the test moves.
+#[derive(Clone)]
+struct Clock {
+    start: Instant,
+    offset: Arc<Mutex<Duration>>,
+}
+
+impl Default for Clock {
+    fn default() -> Clock {
+        Clock {
+            start: Instant::now(),
+            offset: Arc::default(),
+        }
+    }
+}
+
+impl Clock {
+    fn advance(&self, by: Duration) {
+        *self.offset.lock() += by;
+    }
+
+    fn source(&self) -> Arc<dyn Fn() -> Instant + Send + Sync> {
+        let c = self.clone();
+        Arc::new(move || c.start + *c.offset.lock())
+    }
+}
+
 fn holder(name: &str, cluster: u128) -> LeaseHolder {
     LeaseHolder {
         identity: name.into(),
@@ -221,19 +248,83 @@ async fn the_holder_renews() {
     assert_eq!(f.lease.as_ref().unwrap()["spec"]["leaseTransitions"], 3);
 }
 
+/// The holder's clock runs 16 s behind: by the local wall clock its fresh renewal looks expired.
+/// A contender never compares `renewTime` with its own clock (client-go leader election).
 #[tokio::test]
-async fn an_expired_lease_is_taken_over() {
+async fn a_renewal_time_in_the_past_is_not_expiry() {
     let (fake, addr) = fake_server().await;
     {
         let mut f = fake.lock();
         stamp(&mut f, lease_json("node-z", 9, 16));
     }
+    let state = provider(addr)
+        .acquire_or_renew(&holder("node-a", 7))
+        .await
+        .unwrap();
+    assert!(
+        matches!(&state, LeaseState::HeldByOther(h) if h.identity == "node-z"),
+        "{state:?}"
+    );
+    assert_eq!(fake.lock().puts, 0);
+}
+
+#[tokio::test]
+async fn an_expired_lease_is_taken_over() {
+    let (fake, addr) = fake_server().await;
+    {
+        let mut f = fake.lock();
+        stamp(&mut f, lease_json("node-z", 9, 0));
+    }
+    let clock = Clock::default();
+    let lease = provider(addr).with_clock(clock.source());
     let me = holder("node-a", 7);
-    let state = provider(addr).acquire_or_renew(&me).await.unwrap();
+    let state = lease.acquire_or_renew(&me).await.unwrap();
+    assert!(matches!(state, LeaseState::HeldByOther(_)), "{state:?}");
+    clock.advance(Duration::from_millis(14_999));
+    let state = lease.acquire_or_renew(&me).await.unwrap();
+    assert!(matches!(state, LeaseState::HeldByOther(_)), "{state:?}");
+    clock.advance(Duration::from_millis(1));
+    let state = lease.acquire_or_renew(&me).await.unwrap();
     assert_eq!(state, LeaseState::Held(me));
     let stored = fake.lock().lease.clone().unwrap();
     assert_eq!(stored["spec"]["holderIdentity"], "node-a");
     assert_eq!(stored["spec"]["leaseTransitions"], 4);
+}
+
+/// A renewal by the holder changes the record, so the wait of a contender starts again.
+#[tokio::test]
+async fn a_renewed_lease_restarts_the_wait() {
+    let (fake, addr) = fake_server().await;
+    {
+        let mut f = fake.lock();
+        stamp(&mut f, lease_json("node-z", 9, 0));
+    }
+    let clock = Clock::default();
+    let lease = provider(addr).with_clock(clock.source());
+    let me = holder("node-a", 7);
+    assert!(matches!(
+        lease.acquire_or_renew(&me).await.unwrap(),
+        LeaseState::HeldByOther(_)
+    ));
+    clock.advance(Duration::from_secs(10));
+    {
+        let mut f = fake.lock();
+        stamp(&mut f, lease_json("node-z", 9, 0));
+    }
+    assert!(matches!(
+        lease.acquire_or_renew(&me).await.unwrap(),
+        LeaseState::HeldByOther(_)
+    ));
+    clock.advance(Duration::from_secs(10));
+    assert!(matches!(
+        lease.acquire_or_renew(&me).await.unwrap(),
+        LeaseState::HeldByOther(_)
+    ));
+    clock.advance(Duration::from_secs(5));
+    assert_eq!(
+        lease.acquire_or_renew(&me).await.unwrap(),
+        LeaseState::Held(me)
+    );
 }
 
 #[tokio::test]
@@ -242,12 +333,14 @@ async fn a_conflict_loses_the_race() {
     {
         let mut f = fake.lock();
         stamp(&mut f, lease_json("node-z", 9, 16));
-        f.steal = Some(lease_json("node-w", 5, 0));
     }
-    let state = provider(addr)
-        .acquire_or_renew(&holder("node-a", 7))
-        .await
-        .unwrap();
+    let clock = Clock::default();
+    let lease = provider(addr).with_clock(clock.source());
+    let me = holder("node-a", 7);
+    lease.acquire_or_renew(&me).await.unwrap();
+    clock.advance(Duration::from_secs(15));
+    fake.lock().steal = Some(lease_json("node-w", 5, 0));
+    let state = lease.acquire_or_renew(&me).await.unwrap();
     assert!(
         matches!(&state, LeaseState::HeldByOther(h) if h.identity == "node-w"),
         "{state:?}"

@@ -186,6 +186,42 @@ fn memory_lease_semantics() {
     assert!(call(&a).is_err());
 }
 
+/// A contender judges expiry on its own clock from its first read of the record, as client-go
+/// does. It never trusts the renewal time of the holder.
+#[test]
+fn memory_lease_waits_a_full_duration_from_the_first_read() {
+    use discus_membership::{LeaseHolder, LeaseProvider, LeaseState};
+    use discus_placement::ClusterId;
+    use futures::FutureExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    let now = Arc::new(AtomicU64::new(0));
+    let clock = now.clone();
+    let lease = MemoryLease::new(Arc::new(move || clock.load(Ordering::Relaxed)), 1_000);
+    let holder = |id: &str, c: u128| LeaseHolder {
+        identity: id.into(),
+        address: "10.0.0.1:7379".parse().unwrap(),
+        cluster_id: ClusterId::from_u128(c),
+    };
+    let (a, b, c) = (holder("a", 1), holder("b", 2), holder("c", 3));
+    let call = |h: &LeaseHolder| lease.acquire_or_renew(h).now_or_never().unwrap();
+    assert_eq!(call(&a), Ok(LeaseState::Held(a.clone())));
+    now.store(900, Ordering::Relaxed);
+    assert_eq!(call(&b), Ok(LeaseState::HeldByOther(a.clone())));
+    now.store(1_500, Ordering::Relaxed);
+    assert_eq!(call(&b), Ok(LeaseState::HeldByOther(a.clone())));
+    assert_eq!(call(&c), Ok(LeaseState::HeldByOther(a.clone())));
+    now.store(1_900, Ordering::Relaxed);
+    assert_eq!(call(&b), Ok(LeaseState::Held(b.clone())));
+    // c saw the record of a, not the one of b: the new record restarts its wait.
+    now.store(2_500, Ordering::Relaxed);
+    assert_eq!(call(&c), Ok(LeaseState::HeldByOther(b.clone())));
+    now.store(3_400, Ordering::Relaxed);
+    assert_eq!(call(&c), Ok(LeaseState::HeldByOther(b.clone())));
+    now.store(3_500, Ordering::Relaxed);
+    assert_eq!(call(&c), Ok(LeaseState::Held(c.clone())));
+}
+
 #[test]
 fn a_discovery_refresh_keeps_learned_seeds() {
     use discus_membership::Swim;

@@ -57,7 +57,7 @@ fn fail<T>(msg: impl Into<String>) -> Result<T, SecurityError> {
 }
 
 /// How long a client has to finish the connection setup, the TLS handshake included.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The files of the client listener certificate. A reload reads them again.
 struct ClientTlsFiles {
@@ -65,6 +65,8 @@ struct ClientTlsFiles {
     key: PathBuf,
     client_ca: Option<PathBuf>,
     require_client: bool,
+    /// The certificate and key of the admin port, if they differ from the listener.
+    admin: Option<(PathBuf, PathBuf)>,
 }
 
 impl ClientTlsFiles {
@@ -75,7 +77,11 @@ impl ClientTlsFiles {
 
     /// The admin port asks for a client certificate but never requires one.
     fn admin(&self) -> io::Result<rustls::ServerConfig> {
-        tls::server_config(&self.cert, &self.key, self.client_ca.as_deref(), false)
+        let (cert, key) = match &self.admin {
+            Some((cert, key)) => (cert, key),
+            None => (&self.cert, &self.key),
+        };
+        tls::server_config(cert, key, self.client_ca.as_deref(), false)
     }
 }
 
@@ -152,6 +158,8 @@ impl Security {
         let oauth = Self::oauth2(args, &policy, &file)?;
         #[cfg(not(feature = "oauth2"))]
         Self::no_oauth2(&policy, &file)?;
+        let users = trust_root_users(config, &file, policy.uses(Factor::Oauth2));
+        tls::warn_if_no_trust_roots(&users, &tls::trust_roots());
         let lb = args.tls_mode == TlsMode::Lb;
         if lb && (args.lb_trusted_source.is_empty() || args.tls_client_ca.is_none()) {
             return fail(
@@ -175,7 +183,14 @@ impl Security {
             key: tls_key.clone(),
             client_ca: args.tls_client_ca.clone(),
             require_client: required,
+            admin: args.admin_tls_cert.clone().zip(args.admin_tls_key.clone()),
         };
+        if args.admin_tls_cert.is_some() != args.admin_tls_key.is_some() {
+            return fail("--admin-tls-cert and --admin-tls-key must be set together");
+        }
+        if args.admin_tls_cert.is_some() && !args.admin_tls {
+            return fail("--admin-tls-cert needs --admin-tls");
+        }
         let admin_tls = if args.admin_tls {
             let config = tls_files.admin().map_err(|e| e.to_string())?;
             Some(Arc::new(ArcSwap::from_pointee(config)))
@@ -188,6 +203,12 @@ impl Security {
             return fail("[admin] cert_identities needs --admin-tls and --tls-client-ca");
         }
         let server_tls = ArcSwap::from_pointee(tls_files.listener().map_err(|e| e.to_string())?);
+        if args.dev_insecure_oauth2 {
+            tracing::warn!(
+                "--dev-insecure-oauth2: the node accepts http issuers and bearer tokens over a \
+                 plaintext admin port. Development only"
+            );
+        }
         if policy == Policy::None {
             tracing::warn!(
                 "--auth-policy none: every client that completes a TLS handshake gets read and \
@@ -304,11 +325,17 @@ impl Security {
 
     /// The files that [`Security::reload_client_tls`] reads.
     pub fn client_tls_files(args: &SecurityArgs) -> Vec<PathBuf> {
-        [&args.tls_cert, &args.tls_key, &args.tls_client_ca]
-            .into_iter()
-            .flatten()
-            .cloned()
-            .collect()
+        [
+            &args.tls_cert,
+            &args.tls_key,
+            &args.tls_client_ca,
+            &args.admin_tls_cert,
+            &args.admin_tls_key,
+        ]
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect()
     }
 
     /// Read the certificate, the key, and the client CA again, and use them for every new
@@ -857,6 +884,32 @@ fn credentials_arg(cmd: &discus_resp::Command) -> Option<(Option<&[u8]>, &[u8])>
         .map(|i| (Some(&cmd[i + 1][..]), &cmd[i + 2][..]))
 }
 
+/// What uses the build trust roots, named for the log: each OAuth 2.0 issuer without `ca_file`
+/// when the policy uses oauth2, and an https OTLP endpoint without `--otel-ca-file`.
+fn trust_root_users(config: &Config, file: &AuthFile, oauth2: bool) -> Vec<String> {
+    let mut users = Vec::new();
+    if oauth2 {
+        let plain = |f: &&file::IssuerFile| {
+            f.discovery_url
+                .as_deref()
+                .unwrap_or(&f.issuer)
+                .starts_with("http://")
+        };
+        for f in file
+            .issuer
+            .iter()
+            .filter(|f| f.ca_file.is_none() && !plain(f))
+        {
+            users.push(format!("OAuth 2.0 issuer {:?}", f.issuer));
+        }
+    }
+    let otel = &config.telemetry;
+    if otel.otel && otel.otel_endpoint.starts_with("https://") && otel.otel_ca_file.is_none() {
+        users.push(format!("OTLP endpoint {:?}", otel.otel_endpoint));
+    }
+    users
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -892,6 +945,81 @@ pub(crate) mod tests {
             all.extend(["--auth-policy", "none"]);
         }
         try_security(&all).unwrap()
+    }
+
+    /// The log lines that `f` writes at WARN and above.
+    fn warnings(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Buf(Arc<parking_lot::Mutex<Vec<u8>>>);
+        impl io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+                self.0.lock().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf::default();
+        let out = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || out.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let text = String::from_utf8_lossy(&buf.0.lock()).into_owned();
+        text
+    }
+
+    #[test]
+    fn dev_insecure_oauth2_logs_a_warning() {
+        let on = warnings(|| drop(security(&["--dev-insecure-oauth2"])));
+        assert!(on.contains("--dev-insecure-oauth2"), "{on}");
+        let off = warnings(|| drop(security(&[])));
+        assert!(!off.contains("--dev-insecure-oauth2"), "{off}");
+    }
+
+    #[test]
+    fn trust_root_users_name_what_has_no_ca_file() {
+        let file: AuthFile = toml::from_str(
+            r#"
+            [[issuer]]
+            issuer = "https://public"
+            audience = "discus"
+            [[issuer]]
+            issuer = "https://private"
+            audience = "discus"
+            ca_file = "/ca.pem"
+            [[issuer]]
+            issuer = "https://dev"
+            audience = "discus"
+            discovery_url = "http://dev/.well-known/openid-configuration"
+            "#,
+        )
+        .unwrap();
+        let parse = |args: &[&str]| {
+            let mut argv = vec!["discus"];
+            argv.extend_from_slice(args);
+            Config::parse_from(argv).unwrap()
+        };
+        let plain = parse(&[]);
+        assert_eq!(
+            trust_root_users(&plain, &file, true),
+            ["OAuth 2.0 issuer \"https://public\""]
+        );
+        assert!(trust_root_users(&plain, &file, false).is_empty());
+
+        let https = ["--otel", "--otel-endpoint", "https://collector:4317"];
+        assert_eq!(
+            trust_root_users(&parse(&https), &AuthFile::default(), false),
+            ["OTLP endpoint \"https://collector:4317\""]
+        );
+        let with_ca = [&https[..], &["--otel-ca-file", "/ca.pem"]].concat();
+        assert!(trust_root_users(&parse(&with_ca), &AuthFile::default(), false).is_empty());
+        let http = ["--otel", "--otel-endpoint", "http://collector:4317"];
+        assert!(trust_root_users(&parse(&http), &AuthFile::default(), false).is_empty());
+        let off = ["--otel-endpoint", "https://collector:4317"];
+        assert!(trust_root_users(&parse(&off), &AuthFile::default(), false).is_empty());
     }
 
     #[test]

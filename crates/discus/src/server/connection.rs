@@ -14,7 +14,8 @@
 //! telemetry span and metrics from the entry checks to the reply.
 //!
 //! Backpressure: the loop reads only while fewer than `max_pipeline` slots are pending and the
-//! parser needs more bytes. It flushes when the buffer reaches 1 MiB and when no slot is pending.
+//! parser needs more bytes, and while the replies that wait ready in the slots stay under a byte
+//! limit. It flushes when the buffer reaches 1 MiB and when no slot is pending.
 //! A client that does not read its replies stalls the flush, which stalls the next read, so memory
 //! stays bounded.
 
@@ -25,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use bytes::BytesMut;
-use discus_resp::{encode, Command, Limits, Parser, Protocol, Value};
+use discus_resp::{encode, Command, Limits, Parser, Protocol, Value, MAX_IDLE_BUFFER};
 use discus_telemetry::Metrics;
 use futures::future::{AbortHandle, Abortable, BoxFuture};
 use futures::stream::{FuturesOrdered, StreamExt};
@@ -51,12 +52,18 @@ const PREAUTH_REQUEST_BYTES: usize = 64 * 1024;
 /// `HELLO 3 AUTH <user> <token> SETNAME <name>`, has 7.
 const PREAUTH_ARRAY_LEN: usize = 64;
 
+/// The most reply bytes, by estimate, that wait in the pending slots of one connection behind a
+/// reply that is not ready. The loop parses no more commands above it.
+const MAX_QUEUED_BYTES: usize = 4 * FLUSH_BYTES;
+
 /// One reply in request order.
 struct Slot {
     protocol: Protocol,
     value: Value,
     /// Close the connection after this reply.
     closes: bool,
+    /// The bytes that this slot adds to [`Output::queued`].
+    queued: usize,
 }
 
 impl Slot {
@@ -65,8 +72,59 @@ impl Slot {
             protocol,
             value,
             closes: false,
+            queued: 0,
         }
     }
+}
+
+/// About the wire size of `value`. It only needs to be close enough to bound memory.
+fn wire_estimate(value: &Value) -> usize {
+    const FRAMING: usize = 16;
+    FRAMING
+        + match value {
+            Value::Simple(b) | Value::Error(b) | Value::Bulk(b) => b.len(),
+            Value::Array(items) | Value::Set(items) => items.iter().map(wire_estimate).sum(),
+            Value::Map(pairs) => pairs
+                .iter()
+                .map(|(k, v)| wire_estimate(k) + wire_estimate(v))
+                .sum(),
+            Value::Integer(_) | Value::Null | Value::Boolean(_) | Value::Double(_) => 0,
+        }
+}
+
+/// The encoded replies that wait for a flush.
+#[derive(Default)]
+struct Output {
+    buf: BytesMut,
+    /// The estimated bytes of the replies that wait, ready, in the pending slots.
+    queued: usize,
+    /// The closing reply is in `buf`: flush and end.
+    finished: bool,
+}
+
+impl Output {
+    fn encode(&mut self, slot: Slot) {
+        encode(&slot.value, slot.protocol, &mut self.buf);
+        self.queued -= slot.queued;
+        self.finished |= slot.closes;
+    }
+}
+
+/// Encode every pending reply that is done, in order. The output is flushed each time it reaches
+/// `FLUSH_BYTES`, so many large replies that are ready at once never sit in it together.
+/// Returns false to end the connection.
+async fn drain_ready<S: AsyncWrite + Unpin>(
+    pending: &mut FuturesOrdered<BoxFuture<'static, Slot>>,
+    out: &mut Output,
+    stream: &mut S,
+) -> bool {
+    while let Some(Some(slot)) = futures::FutureExt::now_or_never(pending.next()) {
+        out.encode(slot);
+        if out.buf.len() >= FLUSH_BYTES && !flush(stream, &mut out.buf).await {
+            return false;
+        }
+    }
+    true
 }
 
 /// Write `out` to the client. Returns false to end the connection. A client that never reads
@@ -80,6 +138,10 @@ async fn flush<S: AsyncWrite + Unpin>(stream: &mut S, out: &mut BytesMut) -> boo
     // the end of a large reply.
     let sent = stream.write_all(out).await.is_ok() && stream.flush().await.is_ok();
     out.clear();
+    // One large reply must not keep its buffer for the life of the connection.
+    if out.capacity() > MAX_IDLE_BUFFER {
+        *out = BytesMut::new();
+    }
     sent
 }
 
@@ -149,25 +211,20 @@ struct Pipeline {
     conn: ConnState,
     order: KeyOrder,
     pending: FuturesOrdered<BoxFuture<'static, Slot>>,
-    out: BytesMut,
+    out: Output,
     /// A closing reply is queued: parse nothing more.
     closing: bool,
-    /// The closing reply is in `out`: flush and end.
-    finished: bool,
 }
 
 impl Pipeline {
-    fn encode(&mut self, slot: Slot) {
-        encode(&slot.value, slot.protocol, &mut self.out);
-        self.finished |= slot.closes;
-    }
-
     /// Queue a reply that is known now.
-    fn ready(&mut self, slot: Slot) {
+    fn ready(&mut self, mut slot: Slot) {
         self.closing |= slot.closes;
         if self.pending.is_empty() {
-            self.encode(slot);
+            self.out.encode(slot);
         } else {
+            slot.queued = wire_estimate(&slot.value);
+            self.out.queued += slot.queued;
             self.pending.push_back(Box::pin(async move { slot }));
         }
     }
@@ -184,8 +241,7 @@ impl Pipeline {
             tokio::select! {
                 () = &mut fetch => return,
                 Some(slot) = self.pending.next(), if !self.pending.is_empty() => {
-                    encode(&slot.value, slot.protocol, &mut self.out);
-                    self.finished |= slot.closes;
+                    self.out.encode(slot);
                 }
             }
         }
@@ -208,6 +264,7 @@ impl Pipeline {
                     protocol: self.conn.protocol,
                     value,
                     closes: self.conn.closing,
+                    queued: 0,
                 };
                 return self.ready(slot);
             }
@@ -357,15 +414,14 @@ async fn serve_until_closed<S: AsyncRead + AsyncWrite + Unpin>(
         conn,
         order: KeyOrder::new(),
         pending: FuturesOrdered::new(),
-        out: BytesMut::new(),
+        out: Output::default(),
         closing: false,
-        finished: false,
     };
 
     loop {
         // Parse what is buffered, up to the pipeline limit.
         let mut starved = false;
-        while !p.closing && p.pending.len() < max_pipeline {
+        while !p.closing && p.pending.len() < max_pipeline && p.out.queued < MAX_QUEUED_BYTES {
             match parser.next() {
                 Ok(Some(cmd)) => {
                     if node.security.wants_prefetch(&p.conn, &cmd) {
@@ -388,6 +444,7 @@ async fn serve_until_closed<S: AsyncRead + AsyncWrite + Unpin>(
                             protocol: p.conn.protocol,
                             value: Value::error("ERR Protocol error: request too large"),
                             closes: true,
+                            queued: 0,
                         });
                     } else {
                         starved = true;
@@ -399,20 +456,21 @@ async fn serve_until_closed<S: AsyncRead + AsyncWrite + Unpin>(
                         protocol: p.conn.protocol,
                         value: Value::error(&e.to_string()),
                         closes: true,
+                        queued: 0,
                     });
                     break;
                 }
             }
-            if p.out.len() >= FLUSH_BYTES && !flush(&mut stream, &mut p.out).await {
+            if p.out.buf.len() >= FLUSH_BYTES && !flush(&mut stream, &mut p.out.buf).await {
                 return;
             }
         }
-        if p.finished {
-            flush(&mut stream, &mut p.out).await;
+        if p.out.finished {
+            flush(&mut stream, &mut p.out.buf).await;
             return;
         }
         if p.pending.is_empty() {
-            if !flush(&mut stream, &mut p.out).await || p.closing {
+            if !flush(&mut stream, &mut p.out.buf).await || p.closing {
                 return;
             }
             match stream.read_buf(parser.buffer()).await {
@@ -424,17 +482,17 @@ async fn serve_until_closed<S: AsyncRead + AsyncWrite + Unpin>(
         let can_read = starved && !p.closing && p.pending.len() < max_pipeline;
         tokio::select! {
             Some(slot) = p.pending.next() => {
-                p.encode(slot);
+                p.out.encode(slot);
                 // Drain every reply that is already done before deciding to flush.
-                while let Some(Some(slot)) = futures::FutureExt::now_or_never(p.pending.next()) {
-                    p.encode(slot);
+                if !drain_ready(&mut p.pending, &mut p.out, &mut stream).await {
+                    return;
                 }
-                if (p.pending.is_empty() || p.out.len() >= FLUSH_BYTES || p.finished)
-                    && !flush(&mut stream, &mut p.out).await
+                if (p.pending.is_empty() || p.out.buf.len() >= FLUSH_BYTES || p.out.finished)
+                    && !flush(&mut stream, &mut p.out.buf).await
                 {
                     return;
                 }
-                if p.finished {
+                if p.out.finished {
                     return;
                 }
             }
@@ -489,5 +547,76 @@ mod tests {
         assert!(flush(&mut stream, &mut out).await);
         assert_eq!(stream.sent, b"+OK\r\n");
         assert!(stream.held.is_empty());
+    }
+
+    /// A large reply must not leave its buffer with the connection after the flush.
+    #[tokio::test]
+    async fn a_flush_drops_a_large_buffer() {
+        let mut stream = HoldsUntilFlush::default();
+        let mut out = BytesMut::with_capacity(8 << 20);
+        out.extend_from_slice(&[b'x'; 4 << 20]);
+        assert!(flush(&mut stream, &mut out).await);
+        assert!(out.capacity() <= MAX_IDLE_BUFFER, "{}", out.capacity());
+        let mut small = BytesMut::with_capacity(4096);
+        small.extend_from_slice(b"+OK\r\n");
+        assert!(flush(&mut stream, &mut small).await);
+        assert_eq!(small.capacity(), 4096);
+    }
+
+    /// A writer that records the size of each flush.
+    #[derive(Default)]
+    struct Flushes {
+        held: usize,
+        sizes: Vec<usize>,
+    }
+
+    impl AsyncWrite for Flushes {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.held += buf.len();
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            let held = std::mem::take(&mut self.held);
+            if held > 0 {
+                self.sizes.push(held);
+            }
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            self.poll_flush(cx)
+        }
+    }
+
+    /// Many large replies that are ready at once go out in pieces of about `FLUSH_BYTES`.
+    #[tokio::test]
+    async fn a_drain_of_large_replies_flushes_as_it_goes() {
+        let value = bytes::Bytes::from(vec![b'v'; 300 * 1024]);
+        let mut pending: FuturesOrdered<BoxFuture<'static, Slot>> = FuturesOrdered::new();
+        let mut out = Output::default();
+        for _ in 0..20 {
+            let mut slot = Slot::reply(Protocol::Resp2, Value::Bulk(value.clone()));
+            slot.queued = wire_estimate(&slot.value);
+            out.queued += slot.queued;
+            pending.push_back(Box::pin(async move { slot }));
+        }
+        let mut stream = Flushes::default();
+        assert!(drain_ready(&mut pending, &mut out, &mut stream).await);
+        assert!(flush(&mut stream, &mut out.buf).await);
+        assert_eq!(out.queued, 0);
+        assert_eq!(stream.sizes.iter().sum::<usize>(), 20 * (value.len() + 11));
+        assert!(
+            stream
+                .sizes
+                .iter()
+                .all(|&n| n < FLUSH_BYTES + value.len() + 16),
+            "{:?}",
+            stream.sizes
+        );
     }
 }

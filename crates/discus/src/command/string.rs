@@ -93,7 +93,7 @@ pub enum Expiry {
 /// with its argument. Any other option is a syntax error.
 pub fn expiry_option(opt: &[u8], arg: &[u8], now_ms: u64, who: &str) -> Result<u64, CommandError> {
     let (unit, base) = if opt.eq_ignore_ascii_case(b"EX") {
-        (1000, now_ms)
+        (1000i64, now_ms)
     } else if opt.eq_ignore_ascii_case(b"PX") {
         (1, now_ms)
     } else if opt.eq_ignore_ascii_case(b"EXAT") {
@@ -105,12 +105,11 @@ pub fn expiry_option(opt: &[u8], arg: &[u8], now_ms: u64, who: &str) -> Result<u
     };
     let n = parse_i64(arg)?;
     let invalid = || CommandError::Custom(format!("ERR invalid expire time in '{who}' command"));
-    if n <= 0 {
-        return Err(invalid());
-    }
-    (n as u64)
-        .checked_mul(unit)
-        .and_then(|v| v.checked_add(base))
+    // Valkey keeps a deadline as signed milliseconds and refuses one that does not fit.
+    n.checked_mul(unit)
+        .and_then(|v| v.checked_add(base as i64))
+        .filter(|_| n > 0)
+        .map(|v| v as u64)
         .ok_or_else(invalid)
 }
 
@@ -166,7 +165,8 @@ pub fn set_options(cmd: &Command, now_ms: u64) -> Result<SetOptions, CommandErro
 fn set(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     check_key(node, &cmd[1])?;
     check_value(node, &cmd[2])?;
-    let o = set_options(cmd, node.store.now_ms())?;
+    let now = node.store.now_ms();
+    let o = set_options(cmd, now)?;
     admit(node, cmd[1].len() + cmd[2].len())?;
     let value = cmd[2].clone();
     node.write(conn.db, &cmd[1], node.stamp()?, |slot| {
@@ -189,7 +189,12 @@ fn set(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
             Some(Expiry::Keep) => slot.as_ref().and_then(|e| e.expires_at_ms),
             _ => None,
         };
-        slot.set(Some(new_entry(value, expires)));
+        // Valkey turns a deadline in the past into a delete, so the replicas drop the old value.
+        if expires.is_some_and(|t| t <= now) {
+            slot.take();
+        } else {
+            slot.set(Some(new_entry(value, expires)));
+        }
         Ok(reply(old))
     })
 }
@@ -205,7 +210,8 @@ fn getdel(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
 }
 
 fn getex(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
-    let expiry = getex_expiry(cmd, node.store.now_ms())?;
+    let now = node.store.now_ms();
+    let expiry = getex_expiry(cmd, now)?;
     let deadline = match expiry {
         Some(Expiry::At(t)) => Some(Some(t)),
         Some(Expiry::Persist) => Some(None),
@@ -216,7 +222,9 @@ fn getex(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
             return Ok(Value::Null);
         };
         let reply = Value::Bulk(b.clone());
-        if let Some(d) = deadline {
+        if deadline.is_some_and(|d| d.is_some_and(|t| t <= now)) {
+            slot.take();
+        } else if let Some(d) = deadline {
             if slot.as_ref().is_some_and(|e| e.expires_at_ms != d) {
                 if let Some(e) = slot.as_mut() {
                     e.expires_at_ms = d;
@@ -312,14 +320,23 @@ fn append(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
     check_key(node, &cmd[1])?;
     admit(node, cmd[2].len())?;
     node.write(conn.db, &cmd[1], node.stamp()?, |slot| {
-        let mut bytes = str_of(slot.as_ref())?.map_or_else(Vec::new, |b| b.to_vec());
+        let head = str_of(slot.as_ref())?.map_or(&[][..], |b| &b[..]);
+        let bytes = concat(head, &cmd[2]);
         let expires = slot.as_ref().and_then(|e| e.expires_at_ms);
-        bytes.extend_from_slice(&cmd[2]);
         check_value(node, &bytes)?;
         let len = bytes.len() as i64;
         slot.set(Some(new_entry(Bytes::from(bytes), expires)));
         Ok(Value::Integer(len))
     })
+}
+
+/// `head` then `tail` in a buffer with no spare room. The size estimate counts the length only,
+/// so spare room would be memory outside `maxmemory`.
+fn concat(head: &[u8], tail: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(head.len() + tail.len());
+    bytes.extend_from_slice(head);
+    bytes.extend_from_slice(tail);
+    bytes
 }
 
 fn strlen(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
@@ -351,4 +368,52 @@ fn type_(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
         None => Value::simple("none"),
         Some(e) => Value::simple(e.value.kind()),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_appended_value_has_no_spare_room() {
+        let mut value = Vec::new();
+        for _ in 0..100 {
+            value = concat(&value, b"abc");
+            assert_eq!(value.capacity(), value.len());
+        }
+    }
+
+    /// redis-server 8.10.2 refuses a deadline past `i64::MAX` milliseconds, so `PTTL` never
+    /// reads a negative number for a key that has a deadline.
+    #[test]
+    fn an_expiry_past_the_signed_millisecond_range_is_invalid() {
+        let now = 1_800_000_000_000;
+        let invalid = Err(CommandError::Custom(
+            "ERR invalid expire time in 'set' command".into(),
+        ));
+        assert_eq!(
+            expiry_option(b"EX", b"10000000000000000", now, "set"),
+            invalid
+        );
+        assert_eq!(
+            expiry_option(b"EX", b"9223372036854775", now, "set"),
+            invalid
+        );
+        assert_eq!(
+            expiry_option(b"PX", b"9223372036854775807", now, "set"),
+            invalid
+        );
+        assert_eq!(
+            expiry_option(b"EXAT", b"9223372036854775", now, "set"),
+            Ok(9_223_372_036_854_775_000)
+        );
+        assert_eq!(
+            expiry_option(b"PXAT", b"9223372036854775807", now, "set"),
+            Ok(i64::MAX as u64)
+        );
+        assert_eq!(
+            expiry_option(b"EX", b"9223372036854", now, "set"),
+            Ok(now + 9_223_372_036_854_000)
+        );
+    }
 }

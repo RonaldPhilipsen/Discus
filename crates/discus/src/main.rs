@@ -66,6 +66,7 @@ async fn run(mut config: Config, nice_target: Option<i32>) -> std::io::Result<()
         max_memory = config.max_memory,
         "starting"
     );
+    discus::server::accept::raise_nofile_limit(config.max_clients);
     for key in discus::settings::KEYS {
         let source = if config.cli_set.contains(key.flag) {
             "command line"

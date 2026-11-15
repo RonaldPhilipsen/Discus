@@ -86,3 +86,16 @@ async fn hello_3_in_a_pipeline_switches_later_replies() {
     }
     assert!(text.starts_with(b"%"));
 }
+
+/// Inline commands work as in Valkey, and a negative array header is skipped.
+#[tokio::test]
+async fn inline_commands_and_empty_arrays_are_served() {
+    let addr = common::start_node(&[]).await;
+    let mut s = common::client_tls::connect(addr).await;
+    s.write_all(b"PING\r\n*-1\r\nECHO \"a b\"\r\nQUIT\r\n")
+        .await
+        .unwrap();
+    let mut got = Vec::new();
+    s.read_to_end(&mut got).await.unwrap();
+    assert_eq!(got, b"+PONG\r\n$3\r\na b\r\n+OK\r\n");
+}
