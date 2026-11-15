@@ -1507,7 +1507,7 @@ mod tests {
         assert!(entries.len() < keys.len());
         q.acked();
         let mut sent: Vec<DbKey> = entries.into_iter().map(|(k, _)| k).collect();
-        while !q.is_empty() {
+        while q.busy() {
             sent.extend(
                 fill(&store, &q, q.take(keys.len()))
                     .into_iter()

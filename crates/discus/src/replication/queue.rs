@@ -184,10 +184,6 @@ impl PeerQueue {
         self.state.lock().keys.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     /// Keys wait or a batch is in flight.
     pub fn busy(&self) -> bool {
         let s = self.state.lock();
