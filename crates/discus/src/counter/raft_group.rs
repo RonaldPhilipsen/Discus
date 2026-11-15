@@ -290,6 +290,7 @@ impl Group {
         r: &Arc<RaftRole>,
     ) {
         let replica = &r.replica;
+        replica.compact(counters.settings.raft_log_bytes).await;
         let dropped_since = r.dropped_since.lock().take();
         let voters = replica.voters();
         let me_voter = replica.is_voter();

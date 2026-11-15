@@ -48,6 +48,9 @@ const METRICS_EVERY: Duration = Duration::from_secs(1);
 /// How often a leader looks for expired keys to purge.
 const PURGE_EVERY: Duration = Duration::from_secs(10);
 
+/// The reply to a counter write that would grow a full reserve.
+const RESERVE_FULL: &str = "OOM command not allowed when the counter reserve is full";
+
 /// How long a `RAFT_LEADER` question waits for each answer.
 const ASK_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -80,6 +83,8 @@ pub struct Settings {
     pub catchup_entries: u64,
     pub voter_timeout: Duration,
     pub settle_timeout: Duration,
+    /// The log bytes of one Raft replica: its share of the counter reserve.
+    pub raft_log_bytes: u64,
 }
 
 impl Settings {
@@ -104,6 +109,8 @@ impl Settings {
             catchup_entries: c.raft_catchup_entries,
             voter_timeout: Duration::from_millis(c.raft_voter_timeout_ms),
             settle_timeout: Duration::from_millis(c.counter_settle_timeout_ms),
+            raft_log_bytes: c.max_memory / 100 * c.counter_memory_percent
+                / u64::from(c.counter_groups.max(1)),
         }
     }
 }
@@ -612,9 +619,7 @@ impl Counters {
         cmd: &Command,
     ) -> Result<Value, Refusal> {
         if !kind.is_read() && !kind.is_shrinking() && self.budget.full() {
-            return Ok(Value::error(
-                "OOM command not allowed when the counter reserve is full",
-            ));
+            return Ok(Value::error(RESERVE_FULL));
         }
         let now_ms = self.now_ms();
         match self.group(g).role() {
@@ -630,6 +635,13 @@ impl Counters {
                 .await
             }
             Role::Raft(r) if r.leads() => {
+                // A log that the snapshots do not keep up with must not grow further.
+                if !kind.is_read()
+                    && !kind.is_shrinking()
+                    && r.replica.log_bytes() > self.settings.raft_log_bytes
+                {
+                    return Ok(Value::error(RESERVE_FULL));
+                }
                 r.execute(kind, db, cmd, now_ms, self.settings.timeout)
                     .await
             }

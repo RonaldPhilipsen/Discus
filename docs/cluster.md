@@ -1013,8 +1013,9 @@ snapshots, and the votes live in memory.
 - A group that lost a majority of its voters starts a new instance on the leader or on the top
   live voter. This also frees a joint change that can no longer commit.
 - A minority side of a partition returns `-TRYAGAIN`.
-- A snapshot follows every `--raft-snapshot-entries` (default 10000) entries. A learner that is
-  far behind receives the snapshot.
+- A snapshot follows every `--raft-snapshot-entries` (default 10000) entries, or sooner when the
+  log bytes pass half of the log limit (see [Memory](#memory)). A learner that is far behind
+  receives the snapshot.
 
 ### Mode switches
 
@@ -1112,6 +1113,11 @@ counter bytes of the leader reach the share, a write that can grow the state ret
 `-OOM command not allowed when the counter reserve is full`. `DEL`, `GETDEL`, `PERSIST`, the expiry
 commands, and `FLUSHALL` still work. An expired counter key uses the share until it is removed.
 Every 10 s, the leader of each group with expired keys removes them from every replica.
+
+In Raft mode the log entries of a replica count in the share too. Each replica may keep log
+entries up to its part of the share, the share divided by `--counter-groups`. Past half of that
+part, the replica takes a snapshot and drops the log up to it. While the log of a leader is above
+its part, a write that can grow the state returns the same `-OOM` error.
 
 ## Databases
 

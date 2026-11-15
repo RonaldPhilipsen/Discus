@@ -27,16 +27,75 @@ use crate::counter::state::{CounterState, Limits};
 /// so the state it starts from reaches every learner through the log or a snapshot.
 pub const RESTORE: &[u8] = b"RESTORE";
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Log {
     vote: Option<Vote>,
     committed: Option<LogId>,
     entries: BTreeMap<u64, Entry>,
     purged: Option<LogId>,
+    /// The bytes of `entries`, charged to `budget` (spec section 10.4).
+    bytes: u64,
+    budget: Arc<Budget>,
 }
 
-#[derive(Debug, Clone, Default)]
+impl Log {
+    fn insert(&mut self, e: Entry) {
+        let add = entry_bytes(&e);
+        if let Some(old) = self.entries.insert(e.log_id.index, e) {
+            self.release(entry_bytes(&old));
+        }
+        self.bytes += add;
+        self.budget.charge(add);
+    }
+
+    fn release(&mut self, bytes: u64) {
+        self.bytes -= bytes;
+        self.budget.release(bytes);
+    }
+
+    fn released(&mut self, gone: BTreeMap<u64, Entry>) {
+        let bytes = gone.values().map(entry_bytes).sum();
+        self.release(bytes);
+    }
+}
+
+impl Drop for Log {
+    fn drop(&mut self) {
+        self.budget.release(self.bytes);
+    }
+}
+
+/// The memory that one log entry holds, as an estimate: the command bytes and a fixed overhead
+/// for each argument and for the entry.
+fn entry_bytes(e: &Entry) -> u64 {
+    let payload = match &e.payload {
+        EntryPayload::Normal(op) => op.command.iter().map(|a| a.len() as u64 + 32).sum(),
+        EntryPayload::Membership(_) => 256,
+        EntryPayload::Blank => 0,
+    };
+    payload + 96
+}
+
+#[derive(Debug, Clone)]
 pub struct LogStore(Arc<Mutex<Log>>);
+
+impl LogStore {
+    pub fn new(budget: Arc<Budget>) -> LogStore {
+        LogStore(Arc::new(Mutex::new(Log {
+            vote: None,
+            committed: None,
+            entries: BTreeMap::new(),
+            purged: None,
+            bytes: 0,
+            budget,
+        })))
+    }
+
+    /// The bytes of the entries that this log holds.
+    pub fn bytes(&self) -> u64 {
+        self.0.lock().bytes
+    }
+}
 
 impl RaftLogReader<TypeConfig> for LogStore {
     async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + OptionalSend>(
@@ -99,7 +158,7 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         {
             let mut log = self.0.lock();
             for e in entries {
-                log.entries.insert(e.log_id.index, e);
+                log.insert(e);
             }
         }
         // The log is memory, so an append is durable once it is in the map.
@@ -109,14 +168,17 @@ impl RaftLogStorage<TypeConfig> for LogStore {
 
     async fn truncate_after(&mut self, last_log_id: Option<LogId>) -> Result<(), io::Error> {
         let start = last_log_id.map_or(0, |l| l.index + 1);
-        self.0.lock().entries.split_off(&start);
+        let mut log = self.0.lock();
+        let gone = log.entries.split_off(&start);
+        log.released(gone);
         Ok(())
     }
 
     async fn purge(&mut self, log_id: LogId) -> Result<(), io::Error> {
         let mut log = self.0.lock();
         let keep = log.entries.split_off(&(log_id.index + 1));
-        log.entries = keep;
+        let gone = std::mem::replace(&mut log.entries, keep);
+        log.released(gone);
         log.purged = Some(log_id);
         Ok(())
     }

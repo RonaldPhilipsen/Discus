@@ -913,8 +913,10 @@ stateDiagram-v2
   `-TRYAGAIN` with a message that says so. A fan-out passes that message on unchanged.
 - The p99 target for a counter write is 5 ms. Counter throughput scales with `G`, not with group
   size.
-- If the counter memory reserve is full, counter writes return `-OOM`. A full cold restart loses
-  every counter.
+- If the counter memory reserve is full, counter writes return `-OOM`. The Raft log counts in the
+  reserve. A replica takes a snapshot when its log bytes pass half of its share of the reserve,
+  and its leader refuses writes with `-OOM` while the log is above the share. A full cold restart
+  loses every counter.
 
 ### 10.5 Growth from one node to three
 
