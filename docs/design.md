@@ -246,8 +246,9 @@ the owner of a key. It cannot compute HRW over the members.
   epoch with `generation = max(seen) + 1` and itself as origin. Every other node waits longer: three
   gossip periods, plus one period for each doubling of the cluster size. If no epoch that shows the
   change arrived by then, that node builds. Two nodes therefore build at once only in rare cases,
-  for example when a partition makes them disagree about who is alive. The higher epoch wins. A
-  losing creator applies its change again in the next epoch.
+  for example when a partition makes them disagree about who is alive. The higher epoch wins, except
+  for the epoch of the smaller side after a partition (§6.3). A losing creator applies its change
+  again in the next epoch.
 - Nodes can briefly compute different owner sets. Forwarding carries the epoch and a 2-hop budget,
   and previous-epoch fallback covers the gap. The invariant is one primary per key per epoch.
 - A node keeps every epoch that a pending handoff references, and at least the last four. A rolling
@@ -365,12 +366,20 @@ A Kubernetes `Lease` makes sure that only one node forms a new cluster.
   outside Kubernetes. Seeds point at the gossip port.
 - A starting node looks for a `NORMAL` peer until the bootstrap deadline (default 10 s). If it
   finds one, it announces `JOINING`, receives the epoch and the HLC maximum, takes its handoff, and
-  becomes `NORMAL`.
+  becomes `NORMAL`. The responder leaves out of that maximum any HLC that a member sent beyond the
+  drift bound of the responder's own clock, and it logs that member. One fast clock therefore does
+  not block every join.
 - If it finds none, it tries to acquire the `Lease` `discus-cluster` (`coordination.k8s.io/v1`) in
   its namespace. If the lease is unheld or expired, acquisition can succeed. The `resourceVersion`
   precondition makes it exclusive. The winner mints the `cluster_id`, creates epoch `(1, self)`,
   sets its HLC from the wall clock, creates the counter groups, and serves. A loser reads the holder
   address from the `discus.io/address` annotation, adds it as a seed, and keeps looking.
+- Only a `NORMAL` member counts as a found peer. A seeker that still carries the ID of a lost
+  cluster does not stop formation, and it does not take part in a merge (§6.3).
+- A rejoining node that finds no `NORMAL` member until the bootstrap deadline gives up the
+  cluster. It discards its store and counters, keeps the addresses that it knows as seeds, and
+  seeks like a new node. If it held the lease before, it forms a cluster only after the lease
+  duration, so its old hold cannot let it form a second cluster beside a live one.
 - Every `NORMAL` member runs acquire-or-renew (duration 15 s, renew every 5 s), so a live cluster
   always holds the lease. The holder writes `holderIdentity`, `discus.io/address`, and
   `discus.io/cluster-id`. After a full cold restart, the lease expires and the first node to
@@ -415,10 +424,32 @@ flowchart TD
 Split-brain is accepted for normal keys. Both sides of a partition serve, promote primaries, and
 create epochs that mark the other side `DEAD`.
 
-- On heal, the higher epoch wins. A node that is not `NORMAL` in an adopted epoch increments its
-  incarnation and rejoins as `JOINING` with a handoff. It discards its counter state. If it was away
-  for less than the tombstone TTL, it keeps its cache store. HLC last-write-wins resolves the
-  conflicting writes.
+- A partitioned node marks the other side dead one member at a time and builds one epoch for each
+  death. The smaller side therefore often holds the higher epoch at the heal. So the larger side
+  wins, and the epoch ID decides only between sides of equal size:
+  - A `NORMAL` node counts the `NORMAL` members of its current epoch that it does not see as
+    `DEAD`, itself included. It refuses a higher epoch that has fewer `NORMAL` members than that
+    count and that drops the node or lists a member that the node holds back.
+  - A node that refuses an epoch builds an epoch from its own, with a generation above the refused
+    one. It holds back the members that are `NORMAL` in the refused epoch but not in its own. It
+    adds them again only after they hold its current epoch or stop being `NORMAL`.
+  - A node that receives a lower epoch that does not list it, with more `NORMAL` members than its
+    own count, holds back the members of that epoch in the same way. It does not take them into
+    its own epochs before an epoch of the larger side arrives.
+  - A refusal needs an epoch that is smaller than the live part of the own epoch, and that part is
+    never larger than the own epoch. Two nodes therefore never refuse the epochs of each other,
+    and the exchange ends.
+  - A side that lost members to a real crash keeps serving. The rule compares sides only when
+    they meet again.
+- On heal, the higher epoch that a node does not refuse wins. A node that is not `NORMAL` in an
+  adopted epoch increments its incarnation and rejoins as `JOINING` with a handoff. It discards its
+  counter state. If it was away for less than the tombstone TTL, it keeps its cache store. HLC
+  last-write-wins resolves the conflicting writes.
+- The deaths that a partitioned node decided alone reach the other side at the heal. A `DEAD` rumor
+  that a node hears from another node, about a member that it holds alive at the same incarnation,
+  makes that member `SUSPECT` only. The member then has the normal suspicion timeout to refute it. A
+  rumor about the sender itself, such as the death in its `LEAVE`, counts as first-hand. A node that
+  rejoins forgets its `DEAD` records, and a `DEAD` rumor about an unknown node creates no record.
 - If two clusters formed independently, the cluster whose `cluster_id` matches the lease wins.
   Without lease access, the larger cluster wins, then the higher `cluster_id`. The losing nodes
   discard their store and counters and rejoin.

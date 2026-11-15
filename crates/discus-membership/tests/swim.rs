@@ -392,3 +392,81 @@ fn all_multi_db_needs_every_member() {
         assert!(!sim.all_multi_db(o), "{o}");
     }
 }
+
+fn rumor_about(sim: &Sim, subject: NodeId, liveness: Liveness) -> discus_wire::Rumor {
+    discus_wire::Rumor {
+        info: sim.node(subject).swim.me().clone(),
+        liveness,
+        accuser: None,
+    }
+}
+
+#[test]
+fn a_hearsay_death_of_a_live_member_is_a_suspicion() {
+    let mut sim = Sim::new(14, SwimConfig::fast());
+    let ids = sim.cluster(4);
+    sim.run_ms(1_000);
+    let (observer, subject) = (ids[0], ids[1]);
+    let before = sim.incarnation(subject);
+    let rumor = rumor_about(&sim, subject, Liveness::Dead);
+    let now = sim.now();
+    sim.node_mut(observer).swim.learn(now, rumor, false);
+    assert_eq!(sim.liveness(observer, subject), Some(Liveness::Suspect));
+    // The member hears the suspicion and refutes it before the timeout.
+    sim.run_ms(3_000);
+    for &o in &ids {
+        if o != subject {
+            assert_eq!(sim.liveness(o, subject), Some(Liveness::Alive), "{o}");
+        }
+    }
+    assert!(sim.incarnation(subject) > before);
+    for &o in &ids {
+        assert!(
+            !sim.events(o).iter().any(|e| matches!(
+                e,
+                discus_membership::Event::MemberChanged { id, liveness: Liveness::Dead, .. }
+                    if *id == subject
+            )),
+            "{o} marked the member dead"
+        );
+    }
+}
+
+#[test]
+fn a_direct_death_still_counts_at_once() {
+    let mut sim = Sim::new(15, SwimConfig::fast());
+    let ids = sim.cluster(3);
+    sim.run_ms(1_000);
+    let rumor = rumor_about(&sim, ids[1], Liveness::Dead);
+    let now = sim.now();
+    sim.node_mut(ids[0]).swim.learn(now, rumor, true);
+    assert_eq!(sim.liveness(ids[0], ids[1]), Some(Liveness::Dead));
+}
+
+#[test]
+fn a_leaving_node_is_dead_at_once() {
+    let mut sim = Sim::new(16, SwimConfig::fast());
+    let ids = sim.cluster(3);
+    sim.run_ms(1_000);
+    let now = sim.now();
+    let node = sim.node_mut(ids[2]);
+    let action = node.swim.depart(&node.host).remove(0);
+    let to = action.expected.unwrap();
+    let src = sim.node(ids[2]).swim.me().addr;
+    let node = sim.node_mut(to);
+    node.swim.handle(now, src, action.msg, &mut node.host);
+    assert_eq!(sim.liveness(to, ids[2]), Some(Liveness::Dead));
+}
+
+#[test]
+fn a_death_of_an_unknown_member_creates_no_record() {
+    let mut sim = Sim::new(17, SwimConfig::fast());
+    let ids = sim.cluster(2);
+    let stranger = sim.add_node();
+    sim.run_ms(500);
+    let rumor = rumor_about(&sim, stranger, Liveness::Dead);
+    let now = sim.now();
+    sim.node_mut(ids[0]).swim.learn(now, rumor.clone(), false);
+    sim.node_mut(ids[0]).swim.learn(now, rumor, true);
+    assert_eq!(sim.liveness(ids[0], stranger), None);
+}

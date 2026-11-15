@@ -21,6 +21,9 @@ pub trait Host {
     /// Raise the HLC to at least `floor`. False when the floor is too far ahead of the wall
     /// clock.
     fn set_hlc_floor(&mut self, floor: u64) -> bool;
+    /// The highest HLC time that this node takes from a peer: its wall clock plus the drift
+    /// bound, as a raw `NTP64`.
+    fn hlc_limit(&self) -> u64;
     /// The cluster that the lease names, from the last lease read.
     fn lease_cluster(&self) -> Option<ClusterId>;
 }

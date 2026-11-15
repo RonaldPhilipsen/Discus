@@ -296,3 +296,79 @@ fn a_drain_during_a_join_stays_leaving() {
     assert_eq!(sim.node(j).swim.phase(), discus_membership::Phase::Leaving);
     assert!(!sim.is_normal(j));
 }
+
+#[test]
+fn a_rejoining_node_forgets_its_dead_records() {
+    let mut sim = Sim::new(7, SwimConfig::fast());
+    let ids = sim.cluster(4);
+    sim.run_ms(500);
+    let (c, gone) = (ids[2], ids[3]);
+    sim.kill(gone);
+    sim.run_until(5_000, |s| {
+        s.liveness(c, gone) == Some(Liveness::Dead) && s.epoch(c).member(gone).is_none()
+    });
+    let without: Vec<Member> = sim
+        .epoch(ids[0])
+        .members()
+        .iter()
+        .filter(|m| m.id != c)
+        .cloned()
+        .collect();
+    let e = forced(&sim, ids[0], without);
+    sim.adopt(c, e);
+    sim.run_ms(10);
+    assert!(sim
+        .events(c)
+        .iter()
+        .any(|e| matches!(e, Event::Rejoining { .. })));
+    assert_eq!(sim.liveness(c, gone), None);
+}
+
+#[test]
+fn a_change_that_loses_to_a_competing_epoch_is_applied_again() {
+    let mut sim = Sim::new(8, SwimConfig::fast());
+    let mut ids = sim.cluster(5);
+    ids.sort();
+    sim.run_ms(500);
+    let (a, x) = (ids[0], ids[4]);
+    let with_x = sim.epoch(a);
+    sim.kill(x);
+    // Only `a` has strong evidence, so it removes X before the others see the death.
+    for _ in 0..4 {
+        sim.data_path_failure(a, x);
+    }
+    sim.run_until(3_000, |s| s.epoch(a).member(x).is_none());
+    // A competing epoch of the same generation, from a higher origin, still lists X.
+    let lost = sim.epoch(a).id();
+    let rival = Epoch::new(
+        EpochId {
+            generation: lost.generation,
+            origin: ids[3],
+        },
+        with_x.cluster_id(),
+        with_x.members().to_vec(),
+    )
+    .unwrap();
+    for &id in &ids[..4] {
+        sim.adopt(id, rival.clone());
+    }
+    // The creator applies its change again at once, before the others detect the death.
+    sim.run_until(300, |s| {
+        let e = s.epoch(a);
+        e.id() > rival.id() && e.member(x).is_none()
+    });
+}
+
+#[test]
+fn a_member_with_a_clock_far_ahead_does_not_block_joins() {
+    let mut sim = Sim::new(9, SwimConfig::fast());
+    let ids = sim.cluster(4);
+    // Far beyond the drift bound of the simulated HLC (1 s).
+    sim.node_mut(ids[0]).host.clock_offset = 60_000;
+    sim.run_ms(1_000);
+    let j = sim.add_node();
+    sim.start(j, &[ids[1]]);
+    sim.run_until(5_000, |s| s.node(j).swim.me().state == MemberState::Normal);
+    let floor = sim.node(j).host.hlc;
+    assert!(floor <= sim.now() + 1_000, "floor {floor} at {}", sim.now());
+}

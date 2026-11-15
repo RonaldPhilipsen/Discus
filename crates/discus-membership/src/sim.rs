@@ -75,11 +75,15 @@ impl Host for SimHost {
     }
 
     fn set_hlc_floor(&mut self, floor: u64) -> bool {
-        if floor > self.wall() + 1000 {
+        if floor > self.hlc_limit() {
             return false;
         }
         self.hlc = self.hlc.max(floor);
         true
+    }
+
+    fn hlc_limit(&self) -> u64 {
+        self.wall() + 1000
     }
 
     fn lease_cluster(&self) -> Option<ClusterId> {
