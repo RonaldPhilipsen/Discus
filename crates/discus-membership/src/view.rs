@@ -18,6 +18,10 @@ pub struct Record {
     pub detector: Detector,
     /// The last HLC that the member sent, and when it arrived.
     pub hlc: Option<(u64, Millis)>,
+    /// The suspicion came from a `DEAD` rumor heard from another node, and no detector confirmed
+    /// it. A `DEAD` rumor at the same incarnation keeps the member `SUSPECT`, so it keeps its time
+    /// to refute.
+    pub doubted: bool,
 }
 
 /// SWIM precedence: a higher incarnation wins. At the same incarnation, `Dead` beats `Suspect`,

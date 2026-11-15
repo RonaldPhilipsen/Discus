@@ -8,13 +8,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
-use hashbrown::hash_map::EntryRef;
-use hashbrown::HashMap;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 use crate::entry::estimate_size;
+use crate::keymap::KeyMap;
 use crate::{Clock, Entry, Value, Version};
 
 /// The seed of the key hash that picks a shard. Placement does not use it.
@@ -132,9 +131,7 @@ pub struct EntryCursor {
 /// The keys of one database in one shard.
 #[derive(Default)]
 pub(crate) struct DbShard {
-    /// The default hasher of hashbrown is foldhash with a random seed, so clients cannot choose
-    /// keys that collide.
-    pub(crate) map: HashMap<Bytes, Entry>,
+    pub(crate) map: KeyMap,
     /// The tombstones by deadline, so the oldest one is found without a walk.
     pub(crate) tombs: BTreeSet<(u64, Bytes)>,
     /// Live entries in `map`: every entry that is not a tombstone.
@@ -185,6 +182,14 @@ pub(crate) struct ShardInner {
     /// Sorted by database. Most shards hold one database, so a lookup is one compare. The first
     /// database stays inline, so its map is found without a load through a heap pointer.
     pub(crate) dbs: SmallVec<[(u32, DbShard); 1]>,
+    /// Where the next TTL sweep continues: a database and a bucket index of its map.
+    pub(crate) sweep: SweepCursor,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SweepCursor {
+    pub(crate) db: u32,
+    pub(crate) bucket: usize,
 }
 
 impl ShardInner {
@@ -209,11 +214,35 @@ impl ShardInner {
         &mut self.dbs[i].1
     }
 
-    /// Every entry of the shard, database by database in ascending order.
-    pub(crate) fn entries(&self) -> impl Iterator<Item = (u32, &Bytes, &Entry)> + Clone {
-        self.dbs
-            .iter()
-            .flat_map(|(db, d)| d.map.iter().map(move |(k, e)| (*db, k, e)))
+    /// Every entry of the shard in bucket order from the bucket at `start`, round to the bucket
+    /// before it. The buckets of the databases count in database order, so `start` is below the
+    /// sum of their bucket counts. A sample reads only the buckets it needs, and buckets next to
+    /// each other hold keys of unrelated hashes.
+    pub(crate) fn entries_from(
+        &self,
+        start: usize,
+    ) -> impl Iterator<Item = (u32, &Bytes, &Entry)> + '_ {
+        let spans = self.dbs.iter().scan(0, |offset, (db, d)| {
+            let first = *offset;
+            *offset += d.map.num_buckets();
+            Some((first, *db, &d.map))
+        });
+        let tail = spans.clone().map(move |(first, db, map)| {
+            let from = start.saturating_sub(first).min(map.num_buckets());
+            (db, map, from..map.num_buckets())
+        });
+        let head = spans.map(move |(first, db, map)| {
+            let to = start.saturating_sub(first).min(map.num_buckets());
+            (db, map, 0..to)
+        });
+        tail.chain(head).flat_map(|(db, map, range)| {
+            range.filter_map(move |i| map.bucket(i).map(|(k, e)| (db, k, e)))
+        })
+    }
+
+    /// The sum of the bucket counts of the databases of the shard.
+    pub(crate) fn num_buckets(&self) -> usize {
+        self.dbs.iter().map(|(_, d)| d.map.num_buckets()).sum()
     }
 
     pub(crate) fn map_len(&self) -> usize {
@@ -227,8 +256,6 @@ impl ShardInner {
 
 pub(crate) struct Shard {
     pub(crate) inner: RwLock<ShardInner>,
-    /// Where the next sweep or eviction sample starts within the shard's iteration order.
-    pub(crate) cursor: AtomicUsize,
     /// Reads that found a live entry, and reads that did not. Per shard, so reads on different
     /// shards never touch the same counter.
     hits: AtomicU64,
@@ -300,7 +327,6 @@ impl Store {
         let shards = (0..count)
             .map(|_| Shard {
                 inner: RwLock::new(ShardInner::default()),
-                cursor: AtomicUsize::new(0),
                 hits: AtomicU64::new(0),
                 misses: AtomicU64::new(0),
                 needs_refill: AtomicBool::new(false),
@@ -382,10 +408,28 @@ impl Store {
         stamp: Version,
         f: impl FnOnce(&mut Slot) -> R,
     ) -> (R, bool) {
+        let (result, stored) = self.write_stamped(db, key, stamp, f);
+        (result, stored.is_some())
+    }
+
+    /// [`Store::write`], and the version that a change stored, `None` without a change.
+    ///
+    /// The caller takes `stamp` before the shard lock, so a racing write or an inbound entry can
+    /// store a newer version first. A change then stores the version just above the one it
+    /// replaces, with the origin of `stamp`, so the stored version only grows and the replicas
+    /// take the change too. Raising here costs one comparison, where a stamp under the lock
+    /// would take the clock lock inside every shard lock.
+    pub fn write_stamped<R>(
+        &self,
+        db: u32,
+        key: &[u8],
+        stamp: Version,
+        f: impl FnOnce(&mut Slot) -> R,
+    ) -> (R, Option<Version>) {
         let shard = &self.shards[self.shard_index(key)];
         let now = self.clock.now_ms();
         let mut added_tomb = false;
-        let (result, changed) = {
+        let (result, stored) = {
             let mut guard = shard.inner.write();
             // A live entry changes in its bucket, so the common overwrite hashes and probes once.
             if let Some(DbShard {
@@ -395,57 +439,66 @@ impl Store {
                 deadlines,
             }) = guard.get_mut(db)
             {
-                if let EntryRef::Occupied(o) = map.entry_ref(key) {
-                    if !o.get().tombstone && !o.get().is_expired(now) {
-                        let mut out = None;
-                        o.replace_entry_with(|k, e| {
-                            let before = estimate_size(k, &e);
-                            deadlines.remove(e.expires_at_ms);
-                            let mut slot = Slot {
-                                entry: Some(e),
-                                touched: false,
-                            };
-                            let result = f(&mut slot);
-                            let changed = slot.touched;
-                            let next = match slot.entry {
-                                Some(mut e) => {
-                                    e.last_access_ms = now;
-                                    if changed {
-                                        e.version = stamp;
-                                        e.tombstone = false;
-                                    }
-                                    self.adjust_used(before, estimate_size(k, &e));
-                                    deadlines.add(e.expires_at_ms);
-                                    Some(e)
+                if let Some(mut o) = map.find_entry(key) {
+                    if !o.get().1.tombstone && !o.get().1.is_expired(now) {
+                        // The entry moves out of its bucket for `f` and back in, so the bucket is
+                        // found once. The placeholder costs no allocation.
+                        let (k, e) = o.get_mut();
+                        let e = std::mem::replace(e, Entry::new(Value::Str(Bytes::new()), None));
+                        let stamp = above(stamp, e.version);
+                        let before = estimate_size(k, &e);
+                        deadlines.remove(e.expires_at_ms);
+                        let mut slot = Slot {
+                            entry: Some(e),
+                            touched: false,
+                        };
+                        let result = f(&mut slot);
+                        let changed = slot.touched;
+                        match slot.entry {
+                            Some(mut e) => {
+                                e.last_access_ms = now;
+                                if changed {
+                                    e.version = stamp;
+                                    e.tombstone = false;
                                 }
-                                None => {
-                                    self.adjust_used(before, 0);
-                                    self.len.fetch_sub(1, Ordering::Relaxed);
-                                    *live -= 1;
-                                    (stamp != Version::zero()).then(|| {
-                                        let t = self.tombstone(stamp, now);
-                                        let size = estimate_size(k, &t);
-                                        self.adjust_used(0, size);
-                                        self.tomb_count.fetch_add(1, Ordering::Relaxed);
-                                        self.tomb_bytes.fetch_add(size, Ordering::Relaxed);
-                                        tombs.insert((t.expires_at_ms.unwrap_or(0), k.clone()));
-                                        added_tomb = true;
-                                        t
-                                    })
+                                let (k, cur) = o.get_mut();
+                                self.adjust_used(before, estimate_size(k, &e));
+                                deadlines.add(e.expires_at_ms);
+                                *cur = e;
+                            }
+                            None => {
+                                self.adjust_used(before, 0);
+                                self.len.fetch_sub(1, Ordering::Relaxed);
+                                *live -= 1;
+                                if stamp == Version::zero() {
+                                    o.remove();
+                                } else {
+                                    let t = self.tombstone(stamp, now);
+                                    let (k, cur) = o.get_mut();
+                                    let size = estimate_size(k, &t);
+                                    self.adjust_used(0, size);
+                                    self.tomb_count.fetch_add(1, Ordering::Relaxed);
+                                    self.tomb_bytes.fetch_add(size, Ordering::Relaxed);
+                                    tombs.insert((t.expires_at_ms.unwrap_or(0), k.clone()));
+                                    *cur = t;
+                                    added_tomb = true;
                                 }
-                            };
-                            out = Some((result, changed));
-                            next
-                        });
+                            }
+                        }
                         drop(guard);
                         if added_tomb {
                             self.enforce_reserve();
                         }
-                        return out.expect("the closure of replace_entry_with ran");
+                        return (result, changed.then_some(stamp));
                     }
                 }
             }
-            let (key_bytes, entry, old_tomb) = match self.take(&mut guard, db, key) {
+            let taken = self.take(&mut guard, db, key);
+            let stamp = match &taken {
+                Some((_, e)) => above(stamp, e.version),
+                None => stamp,
+            };
+            let (key_bytes, entry, old_tomb) = match taken {
                 Some((k, e)) if e.tombstone && !e.is_expired(now) => (Some(k), None, Some(e)),
                 Some((k, e)) if e.tombstone || e.is_expired(now) => (Some(k), None, None),
                 Some((k, e)) => (Some(k), Some(e), None),
@@ -478,12 +531,12 @@ impl Store {
                     }
                 }
             }
-            (result, changed)
+            (result, changed.then_some(stamp))
         };
         if added_tomb {
             self.enforce_reserve();
         }
-        (result, changed)
+        (result, stored)
     }
 
     fn tombstone(&self, stamp: Version, now: u64) -> Entry {
@@ -498,11 +551,13 @@ impl Store {
 
     /// Store a replicated or handed-off entry if its version is newer than the local one,
     /// tombstone or not. The entry keeps its own version and deadline. An entry that is already
-    /// expired is not stored. Returns true when the entry was stored.
+    /// expired is not stored. If it is newer than a local entry, a tombstone with its version
+    /// replaces that entry: a write with a deadline in the past is a delete, and the older value
+    /// must not stay. Returns true when the entry or the tombstone was stored.
     pub fn apply(&self, db: u32, key: &[u8], mut entry: Entry) -> bool {
         let now = self.clock.now_ms();
         if entry.is_expired(now) {
-            return false;
+            return self.apply_expired(db, key, entry.version, now);
         }
         entry.last_access_ms = now;
         let tomb = entry.tombstone;
@@ -554,6 +609,23 @@ impl Store {
             return false;
         }
         self.replace(&mut guard, db, key, entry);
+        true
+    }
+
+    /// Replace an older local entry of `key` with a tombstone at `version`.
+    fn apply_expired(&self, db: u32, key: &[u8], version: Version, now: u64) -> bool {
+        let shard = &self.shards[self.shard_index(key)];
+        let mut guard = shard.inner.write();
+        let older = guard
+            .get(db)
+            .and_then(|d| d.map.get(key))
+            .is_some_and(|cur| cur.version < version);
+        if !older {
+            return false;
+        }
+        self.replace(&mut guard, db, key, self.tombstone(version, now));
+        drop(guard);
+        self.enforce_reserve();
         true
     }
 
@@ -670,7 +742,7 @@ impl Store {
     fn discard(&self, d: DbShard) -> usize {
         let mut bytes = 0;
         let mut tomb_bytes = 0;
-        for (k, e) in &d.map {
+        for (k, e) in d.map.iter() {
             let size = estimate_size(k, e);
             bytes += size;
             if e.tombstone {
@@ -925,6 +997,15 @@ impl Store {
             }
         }
     }
+}
+
+/// `stamp`, or the version just above `prior` with the origin of `stamp` when `prior` is not
+/// older. The internal stamp `Version::zero()` stays.
+fn above(stamp: Version, prior: Version) -> Version {
+    if stamp > prior || stamp == Version::zero() {
+        return stamp;
+    }
+    Version::new(crate::NTP64(prior.time().0 + 1), stamp.origin())
 }
 
 #[cfg(test)]

@@ -38,6 +38,18 @@ proptest! {
         sim.run_ms(at);
         sim.partition(&[&ids[..split], &ids[split..]]);
         sim.run_ms(heal_after);
+        let rejoins = |sim: &Sim, id: NodeId| {
+            sim.events(id)
+                .iter()
+                .filter(|e| matches!(e, Event::Rejoining { .. }))
+                .count()
+        };
+        let (small, large) = if split * 2 < n {
+            (&ids[..split], &ids[split..])
+        } else {
+            (&ids[split..], &ids[..split])
+        };
+        let before: Vec<usize> = large.iter().map(|&id| rejoins(&sim, id)).collect();
         sim.heal();
         let mut quiet = 0;
         let mut waited = 0;
@@ -46,6 +58,12 @@ proptest! {
             waited += 100;
             quiet = if converged(&sim) { quiet + 100 } else { 0 };
             prop_assert!(waited < 120_000, "no convergence after 120 s");
+        }
+        // The larger side wins the heal: none of its nodes rejoins. A tie has no larger side.
+        if small.len() != large.len() {
+            for (i, &id) in large.iter().enumerate() {
+                prop_assert_eq!(rejoins(&sim, id), before[i], "{} of the larger side rejoined", id);
+            }
         }
     }
 }

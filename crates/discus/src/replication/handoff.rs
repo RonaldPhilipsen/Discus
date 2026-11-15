@@ -186,16 +186,23 @@ pub async fn scan(
                     continue;
                 }
                 if rank == 0 {
-                    t.bytes += discus_store::estimate_size(&k.key, &e);
+                    // The batch flushes on bytes inside the page, because a page of large values
+                    // can pass the frame limit. An entry larger than the batch limit goes alone.
+                    let size = discus_store::estimate_size(&k.key, &e);
+                    if !t.batch.is_empty() && t.bytes + size > BATCH_BYTES {
+                        flush(node, &replicator, g, t, None).await;
+                        if t.abandoned {
+                            continue;
+                        }
+                    }
+                    t.bytes += size;
                     t.batch.push((k.clone(), e.clone()));
                 } else {
                     t.offers.push((k.clone(), e.version));
                 }
-            }
-        }
-        for (g, t) in targets.iter_mut() {
-            if t.full() && !t.abandoned {
-                flush(node, &replicator, *g, t, None).await;
+                if t.full() {
+                    flush(node, &replicator, g, t, None).await;
+                }
             }
         }
         let Some(next) = next else {
@@ -411,17 +418,31 @@ async fn flush(
 ) {
     let mut batch = Batch::new(node.epoch_id());
     batch.entries = std::mem::take(&mut t.batch);
+    let mut bytes = std::mem::take(&mut t.bytes);
+    // The wanted entries join up to the byte limit. The rest wait for the next batch, and an
+    // entry larger than the limit goes alone.
+    let mut later = Vec::new();
     for k in std::mem::take(&mut t.wanted) {
+        if !later.is_empty() {
+            later.push(k);
+            continue;
+        }
         if let Some(e) = node.store.entry(k.db, &k.key) {
+            let size = discus_store::estimate_size(&k.key, &e);
+            if !batch.entries.is_empty() && bytes + size > BATCH_BYTES {
+                later.push(k);
+                continue;
+            }
+            bytes += size;
             batch.entries.push((k, e));
         }
     }
     batch.offers = std::mem::take(&mut t.offers);
     batch.done = done;
-    let bytes = std::mem::take(&mut t.bytes);
     match send(node, replicator, target, &batch).await {
         Some(ack) => {
-            t.wanted = ack.want;
+            later.extend(ack.want);
+            t.wanted = later;
             let rate = node.live_settings.get().handoff_rate_bytes;
             pace(bytes, rate).await;
         }

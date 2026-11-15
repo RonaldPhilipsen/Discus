@@ -167,7 +167,7 @@ impl Kind {
 }
 
 fn unknown(cmd: &Command) -> CommandError {
-    CommandError::UnknownCommand(upper(&cmd[0]).to_lowercase())
+    CommandError::UnknownCommand(upper(&cmd[0]).to_lowercase(), String::new())
 }
 
 type Reply = Result<Value, CommandError>;
@@ -310,6 +310,24 @@ impl CounterState {
         }
         dbs.retain(|_, map| !map.is_empty());
         removed
+    }
+
+    /// True when a key that the read `cmd` looks at is alive by the clock of the state but
+    /// expired at `now_ms`. The leader must then commit the expiry before it answers, or a
+    /// leader with a slower clock can bring the key back after a change of leader.
+    pub fn read_expires(&self, now_ms: u64, db: u32, kind: Kind, cmd: &Command) -> bool {
+        let now = now_ms.max(self.clock_ms);
+        if now == self.clock_ms {
+            return false;
+        }
+        let keys = match kind {
+            Kind::MGet | Kind::Exists => &cmd[1..],
+            _ => &cmd[1..cmd.len().min(2)],
+        };
+        keys.iter().any(|k| {
+            self.get(db, k)
+                .is_some_and(|e| e.alive(self.clock_ms) && !e.alive(now))
+        })
     }
 
     /// Answer a read of `kind` in database `db` at `max(clock, now_ms)` without changing the
@@ -580,6 +598,24 @@ mod tests {
         s.apply(at, 0, &cmd(parts), &LIMITS)
     }
 
+    #[test]
+    fn only_a_read_that_expires_a_live_key_needs_the_log() {
+        let mut s = CounterState::new();
+        run(&mut s, 100, &["SET", "cnt:a", "1", "PX", "50"]);
+        run(&mut s, 100, &["SET", "cnt:b", "1"]);
+        let read = |s: &CounterState, now: u64, parts: &[&str]| {
+            s.read_expires(now, 0, Kind::of(parts[0].as_bytes()).unwrap(), &cmd(parts))
+        };
+        assert!(!read(&s, 120, &["GET", "cnt:a"]), "still alive");
+        assert!(read(&s, 200, &["GET", "cnt:a"]));
+        assert!(read(&s, 200, &["MGET", "cnt:b", "cnt:a"]));
+        assert!(!read(&s, 200, &["GET", "cnt:b"]), "no deadline");
+        assert!(!read(&s, 200, &["GET", "cnt:none"]));
+        // Once the state clock passed the deadline, the expiry is already in the log.
+        run(&mut s, 200, &["INCR", "cnt:b"]);
+        assert!(!read(&s, 300, &["GET", "cnt:a"]));
+    }
+
     fn run_in(s: &mut CounterState, db: u32, parts: &[&str]) -> Value {
         s.apply(1, db, &cmd(parts), &LIMITS)
     }
@@ -840,11 +876,11 @@ mod tests {
         let mut s = CounterState::new();
         assert_eq!(
             run(&mut s, 1, &["HSet", "k"]),
-            CommandError::UnknownCommand("hset".into()).to_value()
+            CommandError::UnknownCommand("hset".into(), String::new()).to_value()
         );
         assert_eq!(
             s.read(1, 0, Kind::Set, &cmd(&["Set", "k", "v"])),
-            CommandError::UnknownCommand("set".into()).to_value()
+            CommandError::UnknownCommand("set".into(), String::new()).to_value()
         );
     }
 

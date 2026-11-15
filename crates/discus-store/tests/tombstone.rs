@@ -140,6 +140,27 @@ fn apply_keeps_the_expiry_deadline() {
     assert!(!s.apply(0, b"j", late));
 }
 
+/// `SET k new PXAT 1` on the primary is a delete, so a newer entry that already expired must
+/// not leave the older value in place on a replica.
+#[test]
+fn apply_of_a_newer_expired_entry_removes_the_older_one() {
+    let (s, _) = store(1 << 20, 1 << 20);
+    put(&s, "k", v(10));
+    let mut old = value("old", v(5));
+    old.expires_at_ms = Some(500);
+    assert!(!s.apply(0, b"k", old));
+    assert!(s.read(0, b"k", |e| e.is_some()));
+    let mut gone = value("new", v(20));
+    gone.expires_at_ms = Some(500);
+    assert!(s.apply(0, b"k", gone));
+    assert!(!s.read(0, b"k", |e| e.is_some()));
+    let t = s.entry(0, b"k").unwrap();
+    assert!(t.tombstone);
+    assert_eq!(t.version, v(20));
+    assert!(!s.apply(0, b"k", value("late", v(15))));
+    assert!(!s.read(0, b"k", |e| e.is_some()));
+}
+
 #[test]
 fn eviction_never_takes_a_tombstone() {
     let (s, _) = store(20_000, 1 << 20);

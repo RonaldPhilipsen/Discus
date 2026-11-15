@@ -168,6 +168,11 @@ impl Hlc {
         self.observe(Version::new(floor, self.origin))
     }
 
+    /// The highest remote time that [`Hlc::observe`] accepts now.
+    pub fn limit(&self) -> NTP64 {
+        (self.clock)() + MAX_DRIFT
+    }
+
     /// True when the next tick refuses, because the clock is at its drift bound.
     pub fn is_pinned(&self) -> bool {
         let now = (self.clock)();

@@ -48,6 +48,9 @@ const METRICS_EVERY: Duration = Duration::from_secs(1);
 /// How often a leader looks for expired keys to purge.
 const PURGE_EVERY: Duration = Duration::from_secs(10);
 
+/// The reply to a counter write that would grow a full reserve.
+const RESERVE_FULL: &str = "OOM command not allowed when the counter reserve is full";
+
 /// How long a `RAFT_LEADER` question waits for each answer.
 const ASK_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -80,6 +83,8 @@ pub struct Settings {
     pub catchup_entries: u64,
     pub voter_timeout: Duration,
     pub settle_timeout: Duration,
+    /// The log bytes of one Raft replica: its share of the counter reserve.
+    pub raft_log_bytes: u64,
 }
 
 impl Settings {
@@ -104,6 +109,8 @@ impl Settings {
             catchup_entries: c.raft_catchup_entries,
             voter_timeout: Duration::from_millis(c.raft_voter_timeout_ms),
             settle_timeout: Duration::from_millis(c.counter_settle_timeout_ms),
+            raft_log_bytes: c.max_memory / 100 * c.counter_memory_percent
+                / u64::from(c.counter_groups.max(1)),
         }
     }
 }
@@ -137,6 +144,14 @@ pub fn normal(epoch: &Epoch, id: NodeId) -> bool {
 impl View {
     pub fn normal(&self, id: NodeId) -> bool {
         normal(&self.epoch, id)
+    }
+
+    /// `id` is `NORMAL` or `LEAVING`. A `LEAVING` voter still takes part in its Raft groups
+    /// until the leader moves its slot away (spec section 15.3).
+    pub fn voting(&self, id: NodeId) -> bool {
+        self.epoch
+            .member(id)
+            .is_some_and(|m| matches!(m.state, MemberState::Normal | MemberState::Leaving))
     }
 
     pub fn normal_count(&self) -> usize {
@@ -575,9 +590,12 @@ impl Counters {
         let node = self.node()?;
         let epoch = node.epochs().current().clone();
         let me = epoch.member(node.id).map(|m| m.state);
+        // A drain marks this node `LEAVING` before the epoch that says so arrives. In between
+        // it is no longer `NORMAL`, and it must keep its voter slots as a `LEAVING` node does.
+        let draining = me.is_some() && node.phase() == crate::Phase::Leaving;
         Some(View {
             me_normal: node.is_normal() && me.is_some(),
-            leaving: me == Some(MemberState::Leaving),
+            leaving: me == Some(MemberState::Leaving) || draining,
             epoch,
             me: node.id,
         })
@@ -601,9 +619,7 @@ impl Counters {
         cmd: &Command,
     ) -> Result<Value, Refusal> {
         if !kind.is_read() && !kind.is_shrinking() && self.budget.full() {
-            return Ok(Value::error(
-                "OOM command not allowed when the counter reserve is full",
-            ));
+            return Ok(Value::error(RESERVE_FULL));
         }
         let now_ms = self.now_ms();
         match self.group(g).role() {
@@ -619,6 +635,13 @@ impl Counters {
                 .await
             }
             Role::Raft(r) if r.leads() => {
+                // A log that the snapshots do not keep up with must not grow further.
+                if !kind.is_read()
+                    && !kind.is_shrinking()
+                    && r.replica.log_bytes() > self.settings.raft_log_bytes
+                {
+                    return Ok(Value::error(RESERVE_FULL));
+                }
                 r.execute(kind, db, cmd, now_ms, self.settings.timeout)
                     .await
             }
@@ -685,11 +708,20 @@ impl Counters {
 
     /// Ask now and wait for the answers. Returns the best hint with a `NORMAL` leader.
     pub async fn ask_now(&self, g: u16) -> Option<GroupHint> {
-        let view = self.view()?;
+        self.ask_with_holders(g).await.0
+    }
+
+    /// Like [`Counters::ask_now`], and also the newest regime of a peer that answered that it
+    /// holds the state of the group without leading it.
+    pub async fn ask_with_holders(&self, g: u16) -> (Option<GroupHint>, Option<Regime>) {
+        let Some(view) = self.view() else {
+            return (None, None);
+        };
         let answers = self.ask_all(&view, g).await;
+        let held = group::held_regime(g, &answers);
         let (best, denied) = group::pick(g, &view, answers);
         self.group(g).learn(best.clone(), &denied);
-        best
+        (best, held)
     }
 
     /// Ask every other `NORMAL` member about group `g`. Returns the members that answered, and
@@ -748,6 +780,14 @@ impl Counters {
         node.request(to, discus_transport::Lane::Bulk, build, timeout, true)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    /// The capability bits that member `id` advertises in gossip. Zero when unknown.
+    pub fn peer_caps(&self, id: NodeId) -> u64 {
+        self.node()
+            .and_then(|n| n.membership().cloned())
+            .and_then(|m| m.members().into_iter().find(|(info, _)| info.id == id))
+            .map_or(0, |(info, _)| info.capabilities)
     }
 
     /// The hints of every group that this node leads.

@@ -159,3 +159,50 @@ fn a_write_that_changes_nothing_keeps_the_version() {
     assert!(changed);
     assert_eq!(s.version(0, b"k"), Some(v2));
 }
+
+/// A writer takes its stamp before the shard lock, so a racing writer or an inbound entry can
+/// store a newer version first. The late write must still raise the stored version, or the
+/// owners that applied the newer version keep it while this node holds the late value.
+#[test]
+fn a_late_stamp_still_raises_the_stored_version() {
+    let clock = Arc::new(ManualClock::new(0));
+    let s = store(&clock);
+    let at = |t| Version::new(discus_store::NTP64(t), discus_store::NodeId::from_u128(2));
+    let late = Version::new(discus_store::NTP64(10), discus_store::NodeId::from_u128(1));
+    let put = |stamp, v: &'static str| {
+        s.write_stamped(0, b"k", stamp, |slot| {
+            slot.set(Some(Entry::new(Value::Str(v.into()), None)));
+        })
+        .1
+    };
+    assert_eq!(put(at(20), "newer"), Some(at(20)));
+    let applied = put(late, "late").unwrap();
+    assert!(applied > at(20), "{applied:?}");
+    assert_eq!(applied.origin(), late.origin());
+    assert_eq!(s.version(0, b"k"), Some(applied));
+    let gone = s
+        .write_stamped(0, b"k", late, |slot| {
+            slot.take();
+        })
+        .1
+        .unwrap();
+    assert!(gone > applied);
+    assert_eq!(s.version(0, b"k"), Some(gone));
+}
+
+/// `SCAN` accepts any positive `COUNT`, as Valkey does. A huge one must not size an allocation.
+#[test]
+fn a_walk_with_a_huge_count_returns_every_key_without_a_huge_allocation() {
+    let clock = Arc::new(ManualClock::new(0));
+    let s = store(&clock);
+    for i in 0..50 {
+        s.write(0, format!("k{i}").as_bytes(), Version::zero(), |slot| {
+            slot.set(Some(Entry::new(Value::Str("v".into()), None)));
+        });
+    }
+    for count in [1 << 50, usize::MAX] {
+        let (next, keys) = s.scan(0, 0, count, None);
+        assert_eq!(next, 0);
+        assert_eq!(keys.len(), 50);
+    }
+}

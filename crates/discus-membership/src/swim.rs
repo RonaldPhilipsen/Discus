@@ -8,7 +8,9 @@
 //! records the presence that the member needs in the epoch. When the jitter timer fires, the node
 //! drops the deltas that the current epoch already shows and creates the next epoch from the
 //! current members with the rest applied. So a node never undoes a change that it has not seen,
-//! and a losing creator applies its change again in the next epoch.
+//! and a losing creator applies its change again in the next epoch: a creator remembers the
+//! members that it changed in its own epochs, and when the epoch of another node replaces them,
+//! it records the change of each of them again from its view.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
@@ -138,6 +140,8 @@ pub struct Swim {
     learned: Vec<SocketAddr>,
     seek_started: Option<Millis>,
     last_normal_seen: Option<Millis>,
+    /// When the lease last named this node as the holder.
+    lease_held_at: Option<Millis>,
     next_join: Millis,
     join_cursor: usize,
     next_lease: Millis,
@@ -145,6 +149,15 @@ pub struct Swim {
     /// or `None` (absent).
     deltas: BTreeMap<NodeId, Option<Member>>,
     epoch_timer: Option<Millis>,
+    /// The highest epoch that this node refused because it came from a smaller side. The node
+    /// builds an epoch above it from its own (spec section 6.3).
+    outrank: Option<EpochId>,
+    /// The members `NORMAL` in a refused epoch but not in the own one. This node does not add
+    /// them back until they hold its current epoch, which drops them and so makes them rejoin.
+    held: BTreeSet<NodeId>,
+    /// The members whose changes this node put into its own epochs since it last adopted the
+    /// epoch of another node.
+    built: BTreeSet<NodeId>,
     /// The epoch that the core processed last. It notices epochs adopted elsewhere, for example
     /// on the forward path.
     last_epoch: Option<Arc<Epoch>>,
@@ -194,11 +207,15 @@ impl Swim {
             learned: Vec::new(),
             seek_started: None,
             last_normal_seen: None,
+            lease_held_at: None,
             next_join: 0,
             join_cursor: 0,
             next_lease: 0,
             deltas: BTreeMap::new(),
             epoch_timer: None,
+            outrank: None,
+            held: BTreeSet::new(),
+            built: BTreeSet::new(),
             last_epoch: None,
             limiter: JoinLimiter::default(),
             detector_n: 1,
@@ -527,8 +544,8 @@ impl Swim {
     }
 
     /// Merge one rumor into the view. `direct` marks the sender part of a message, which also
-    /// counts as a heartbeat.
-    pub fn learn(&mut self, now: Millis, rumor: Rumor, direct: bool) {
+    /// counts as a heartbeat, and a rumor that the sender gives about itself.
+    pub fn learn(&mut self, now: Millis, mut rumor: Rumor, direct: bool) {
         let id = rumor.info.id;
         if id == self.me.id {
             if rumor.liveness != Liveness::Alive && rumor.info.incarnation >= self.me.incarnation {
@@ -539,10 +556,31 @@ impl Swim {
             }
             return;
         }
+        if rumor.liveness == Liveness::Dead {
+            match self.members.get(&id) {
+                // A dead record that comes back with a new time would never expire across the
+                // cluster, and a death needs no record of a member that this node never knew.
+                None => return,
+                // A node that returns from a partition carries deaths that it decided alone, at
+                // the incarnation that the member still has. A suspicion gives the member the
+                // normal timeout to refute (spec section 6.3).
+                Some(r) if !direct && r.info.incarnation == rumor.info.incarnation => {
+                    match r.liveness {
+                        Liveness::Alive => rumor.liveness = Liveness::Suspect,
+                        Liveness::Suspect if r.doubted => return,
+                        _ => {}
+                    }
+                }
+                Some(_) => {}
+            }
+        }
         let new = (rumor.info.incarnation, rumor.liveness);
         let accuser = rumor
             .accuser
             .filter(|_| rumor.liveness == Liveness::Suspect);
+        // A detector always names its node as the accuser, so a suspicion without one comes from
+        // a death heard from another node, here or where the rumor came from.
+        let doubted = rumor.liveness == Liveness::Suspect && accuser.is_none();
         let mut changed = None;
         match self.members.get_mut(&id) {
             None => {
@@ -553,6 +591,7 @@ impl Swim {
                     accusers: BTreeSet::new(),
                     detector: Detector::new(&self.cfg, now, self.detector_n),
                     hlc: None,
+                    doubted,
                 };
                 record.accusers.extend(accuser);
                 changed = Some((rumor.info.state, rumor.liveness));
@@ -572,11 +611,13 @@ impl Swim {
                     r.accusers.extend(accuser);
                     r.info = rumor.info;
                     r.liveness = rumor.liveness;
+                    r.doubted = doubted;
                     self.broadcasts.push(id);
                 } else if new == old && rumor.liveness == Liveness::Suspect {
                     // Lifeguard: independent accusers shorten the suspicion timeout. Only the
                     // first confirmations are worth spreading.
                     if let Some(a) = accuser {
+                        r.doubted = false;
                         if r.accusers.insert(a) && r.accusers.len() <= self.cfg.suspicion_k + 1 {
                             self.broadcasts.push(id);
                         }
@@ -689,6 +730,84 @@ impl Swim {
         });
     }
 
+    /// Release the held members that left `NORMAL`, that this node forgot, that `current` lists
+    /// already, or that hold `current`. Only the exact ID shows that a member holds an epoch of
+    /// this side: the smaller side builds its own epochs after the heal too, and their IDs can be
+    /// higher.
+    fn release_held(&mut self, current: &Epoch) {
+        let members = &self.members;
+        self.held.retain(|id| {
+            !current.is_normal(*id)
+                && members.get(id).is_some_and(|r| {
+                    r.info.state == MemberState::Normal && r.info.epoch != current.id()
+                })
+        });
+    }
+
+    /// The `NORMAL` members of `epoch` that this node does not see as dead, itself included.
+    fn alive_normal(&self, epoch: &Epoch) -> usize {
+        epoch
+            .normal()
+            .filter(|m| {
+                m.id == self.me.id
+                    || self
+                        .members
+                        .get(&m.id)
+                        .is_some_and(|r| r.liveness != Liveness::Dead)
+            })
+            .count()
+    }
+
+    /// True when this node is `NORMAL` in `current` and in no position to give that up.
+    fn placed(&self, current: &Epoch) -> bool {
+        self.phase == Phase::Member
+            && self.me.state == MemberState::Normal
+            && current.is_normal(self.me.id)
+    }
+
+    /// True when `body`, higher than `current`, comes from the smaller side of a healed
+    /// partition: it lists fewer `NORMAL` members than this node still sees in `current`, and it
+    /// drops this node or lists a member that this node holds back. That side marked this side
+    /// dead one member at a time, with one epoch per death, so it usually holds the higher
+    /// generation (spec section 6.3).
+    fn outranks(&self, current: &Epoch, body: &Epoch) -> bool {
+        self.placed(current)
+            && normal_count(body) < self.alive_normal(current)
+            && (!body.is_normal(self.me.id) || body.normal().any(|m| self.held.contains(&m.id)))
+    }
+
+    /// `body`, not higher than `current`, comes from a larger side that does not list this node.
+    /// This node then holds back the members of that side, so it does not take them into its own
+    /// epochs before an epoch of that side arrives and makes it rejoin.
+    fn yield_to(&mut self, current: &Epoch, body: &Epoch) {
+        if self.placed(current)
+            && !body.is_normal(self.me.id)
+            && normal_count(body) > self.alive_normal(current)
+        {
+            self.held.extend(
+                body.normal()
+                    .filter(|m| !current.is_normal(m.id))
+                    .map(|m| m.id),
+            );
+        }
+    }
+
+    fn refuse(&mut self, now: Millis, current: &Epoch, body: &Epoch) {
+        tracing::warn!(
+            refused = %body.id(),
+            current = %current.id(),
+            "refused the epoch of a smaller side, building one above it"
+        );
+        let id = body.id();
+        self.outrank = Some(self.outrank.map_or(id, |o| o.max(id)));
+        self.held.extend(
+            body.normal()
+                .filter(|m| !current.is_normal(m.id))
+                .map(|m| m.id),
+        );
+        self.arm(now);
+    }
+
     /// Create the next epoch from the current one with the pending deltas applied (spec section
     /// 5.1). The jitter has already passed.
     fn create_epoch(&mut self, now: Millis, host: &mut dyn Host) {
@@ -702,26 +821,43 @@ impl Swim {
             return;
         }
         self.drop_shown_deltas(&current);
-        if self.deltas.is_empty() {
+        let outrank = self.outrank.filter(|o| *o > current.id());
+        self.release_held(&current);
+        let apply: BTreeMap<NodeId, Option<Member>> = self
+            .deltas
+            .iter()
+            .filter(|(id, want)| {
+                let adds_normal = want
+                    .as_ref()
+                    .is_some_and(|m| m.state == MemberState::Normal);
+                !(adds_normal && self.held.contains(id))
+            })
+            .map(|(id, want)| (*id, want.clone()))
+            .collect();
+        if apply.is_empty() && outrank.is_none() {
+            if !self.deltas.is_empty() {
+                self.epoch_timer = Some(now + self.cfg.period_ms);
+            }
             return;
         }
         let mut members: Vec<Member> = current
             .members()
             .iter()
-            .filter(|m| !self.deltas.contains_key(&m.id))
+            .filter(|m| !apply.contains_key(&m.id))
             .cloned()
             .collect();
-        members.extend(self.deltas.values().flatten().cloned());
+        members.extend(apply.values().flatten().cloned());
         let id = EpochId {
-            generation: host.next_generation(),
+            generation: host
+                .next_generation()
+                .max(outrank.map_or(0, |o| o.generation + 1)),
             origin: self.me.id,
         };
         match Epoch::new(id, self.cluster_id, members) {
-            Ok(epoch) => {
-                if let Err(e) = host.adopt(epoch) {
-                    tracing::warn!(error = %e, "could not adopt an own epoch");
-                }
-            }
+            Ok(epoch) => match host.adopt(epoch) {
+                Ok(_) => self.built.extend(apply.keys()),
+                Err(e) => tracing::warn!(error = %e, "could not adopt an own epoch"),
+            },
             Err(e) => tracing::warn!(error = %e, "could not build an epoch"),
         }
         self.sync_epoch(now, host);
@@ -736,6 +872,9 @@ impl Swim {
             return;
         }
         let old = self.last_epoch.replace(current.clone());
+        if self.outrank.is_some_and(|o| current.id() > o) {
+            self.outrank = None;
+        }
         if let Some(old) = old.filter(|o| o.cluster_id() == current.cluster_id()) {
             self.events.push(Event::EpochAdopted {
                 old: old.id(),
@@ -750,10 +889,23 @@ impl Swim {
                 self.events.push(Event::Rejoining {
                     incarnation: self.me.incarnation,
                 });
+                // The cluster went on without this node, so its deaths are opinions from the
+                // time away. Spread, they would remove healthy members.
+                self.members.retain(|_, r| r.liveness != Liveness::Dead);
+                self.outrank = None;
+                self.held.clear();
+                self.built.clear();
+            }
+        }
+        if current.id().origin != self.me.id {
+            // The epoch of another node replaced the own ones, which can lack their changes. The
+            // view decides again for each of them, so only changes that this node saw come back.
+            for id in std::mem::take(&mut self.built) {
+                self.on_change(now, id);
             }
         }
         self.drop_shown_deltas(&current);
-        if self.deltas.is_empty() {
+        if self.deltas.is_empty() && self.outrank.is_none() {
             // A deadline left from a finished change must not cut short the wait for the next.
             self.epoch_timer = None;
         } else {
@@ -766,14 +918,19 @@ impl Swim {
         if g.from.id == self.me.id {
             return;
         }
-        if g.cluster_id != ClusterId::NIL {
+        // Only a `NORMAL` sender shows a live cluster. A seeker keeps the ID of the cluster it
+        // lost, and the size of its last epoch.
+        let normal = g.from.state == MemberState::Normal;
+        if g.cluster_id != ClusterId::NIL && normal {
             self.last_normal_seen = Some(now);
         }
         if g.cluster_id != ClusterId::NIL
             && self.cluster_id != ClusterId::NIL
             && g.cluster_id != self.cluster_id
         {
-            self.foreign(now, g, host);
+            if normal {
+                self.foreign(now, g, host);
+            }
             return;
         }
         if g.cluster_id == ClusterId::NIL || self.cluster_id == ClusterId::NIL {
@@ -784,11 +941,18 @@ impl Swim {
             r.hlc = Some((g.hlc, now));
         }
         for rumor in &g.rumors {
-            self.learn(now, rumor.clone(), false);
+            // The sender's word about itself is first-hand, such as the death in a `LEAVE`.
+            let first_hand = rumor.info.id == g.from.id;
+            self.learn(now, rumor.clone(), first_hand);
         }
         if let Some(body) = &g.epoch_body {
-            if body.cluster_id() == self.cluster_id && body.id() > host.epoch().id() {
-                if let Err(e) = host.adopt(body.clone()) {
+            let current = host.epoch();
+            if body.cluster_id() == self.cluster_id {
+                if body.id() <= current.id() {
+                    self.yield_to(&current, body);
+                } else if self.outranks(&current, body) {
+                    self.refuse(now, &current, body);
+                } else if let Err(e) = host.adopt(body.clone()) {
                     tracing::debug!(error = %e, "refused a gossiped epoch");
                 }
             }
@@ -816,35 +980,55 @@ impl Swim {
             return;
         }
         tracing::warn!(ours = %self.cluster_id, winner = %won, "lost a merge, joining the winner");
+        self.drop_cluster(won, host);
+        self.last_normal_seen = Some(now);
+        self.add_seed(g.from.addr);
+        self.set_state(now, MemberState::Joining, Phase::Seeking);
+    }
+
+    /// Discard the cluster: the store, the counters, the view, and the epochs. `winner` is the
+    /// cluster that replaces it, or NIL.
+    fn drop_cluster(&mut self, winner: ClusterId, host: &mut dyn Host) {
         self.events.push(Event::ClusterLost {
             old: self.cluster_id,
-            winner: won,
+            winner,
         });
         host.reset_cluster(provisional_epoch(self.me.id));
         self.cluster_id = ClusterId::NIL;
         self.members.clear();
         self.deltas.clear();
         self.epoch_timer = None;
+        self.outrank = None;
+        self.held.clear();
+        self.built.clear();
         self.order.clear();
         self.pending.clear();
         self.probes.clear();
         self.broadcasts = Broadcasts::default();
         self.last_epoch = Some(host.epoch());
-        self.last_normal_seen = Some(now);
-        self.add_seed(g.from.addr);
-        self.set_state(now, MemberState::Joining, Phase::Seeking);
     }
 
-    fn may_form(&self, now: Millis) -> bool {
+    /// Seeking for the bootstrap deadline without a message from a `NORMAL` member.
+    fn alone(&self, now: Millis) -> bool {
         let deadline = self.cfg.bootstrap_deadline_ms;
         self.phase == Phase::Seeking
-            && self.cluster_id == ClusterId::NIL
             && self
                 .seek_started
                 .is_some_and(|s| now.saturating_sub(s) >= deadline)
             && self
                 .last_normal_seen
                 .is_none_or(|t| now.saturating_sub(t) >= deadline)
+    }
+
+    /// A node that held the lease waits for the lease duration: a renewal by the same identity
+    /// succeeds at once, so a node that left its cluster could otherwise form a second cluster
+    /// next to it.
+    fn may_form(&self, now: Millis) -> bool {
+        self.cluster_id == ClusterId::NIL
+            && self.alone(now)
+            && self
+                .lease_held_at
+                .is_none_or(|t| now.saturating_sub(t) >= self.cfg.lease_duration_ms)
     }
 
     /// Form a new cluster: epoch `(1, self)`, the HLC stays on the wall clock (spec section 6.2).
@@ -868,8 +1052,12 @@ impl Swim {
     ) {
         match result {
             Ok(LeaseState::Held(h)) => {
-                if h.identity == self.me.id.to_string() && self.may_form(now) {
-                    self.form(now, h.cluster_id, host);
+                if h.identity == self.me.id.to_string() {
+                    let may_form = self.may_form(now);
+                    self.lease_held_at = Some(now);
+                    if may_form {
+                        self.form(now, h.cluster_id, host);
+                    }
                 }
             }
             Ok(LeaseState::HeldByOther(h)) => self.add_seed(h.address),
@@ -945,8 +1133,20 @@ impl Swim {
         out
     }
 
-    fn seek(&mut self, now: Millis, host: &dyn Host, out: &mut Vec<Action>) {
+    fn seek(&mut self, now: Millis, host: &mut dyn Host, out: &mut Vec<Action>) {
         self.seek_started.get_or_insert(now);
+        if self.cluster_id != ClusterId::NIL && self.alone(now) {
+            // A rejoiner whose cluster is gone. It seeks as a new node, so it can join or form
+            // another cluster. The lease still keeps it from forming one beside a live cluster,
+            // whose members renew the lease (spec section 6.2). It keeps the addresses that it
+            // knows, so it finds the cluster again if the cluster comes back.
+            tracing::warn!(old = %self.cluster_id, "no member of the cluster answers, leaving it");
+            let known = self.join_targets();
+            self.drop_cluster(ClusterId::NIL, host);
+            for addr in known {
+                self.add_seed(addr);
+            }
+        }
         if now >= self.next_join {
             self.next_join = now + self.cfg.period_ms;
             let targets = self.join_targets();
@@ -1026,10 +1226,12 @@ impl Swim {
                     r.liveness = Liveness::Suspect;
                     r.since = now;
                     r.accusers = BTreeSet::from([me]);
+                    r.doubted = false;
                     changes.push(*id);
                 }
                 Liveness::Suspect => {
                     if score >= self.cfg.phi_suspect && r.accusers.insert(me) {
+                        r.doubted = false;
                         self.broadcasts.push(*id);
                     }
                     let others = r.accusers.iter().filter(|a| **a != me).count();
@@ -1423,14 +1625,27 @@ impl Swim {
         g
     }
 
-    /// The highest HLC that this node issued, observed, or heard from a member recently.
+    /// The highest HLC that this node issued, observed, or heard from a member recently. A heard
+    /// value beyond the drift bound of this node is left out: the joiner would refuse it as a
+    /// floor, so one member with a fast clock would block every join.
     fn cluster_max_hlc(&self, now: Millis, host: &dyn Host) -> u64 {
-        self.members
-            .values()
-            .filter_map(|r| r.hlc)
-            .filter(|(_, at)| now.saturating_sub(*at) < HLC_WINDOW_MS)
-            .map(|(h, _)| h)
-            .fold(host.hlc(), u64::max)
+        let limit = host.hlc_limit();
+        let mut max = host.hlc();
+        for (id, r) in &self.members {
+            let Some((hlc, at)) = r.hlc else { continue };
+            if now.saturating_sub(at) >= HLC_WINDOW_MS {
+                continue;
+            }
+            if hlc > limit {
+                tracing::warn!(
+                    member = %id,
+                    "a member sent an HLC beyond the drift bound, left out of the join floor"
+                );
+                continue;
+            }
+            max = max.max(hlc);
+        }
+        max
     }
 
     fn reply(&mut self, kind: GossipKind, to: Option<NodeId>, host: &dyn Host) -> Handled {

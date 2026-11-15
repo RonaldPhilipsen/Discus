@@ -7,6 +7,11 @@ This page lists what a single Discus node supports today. The matrix is tested b
 Discus reports Redis version 7.2.0 in `INFO` and in the `HELLO` reply, because clients choose
 features from that value.
 
+Discus reads a command as a RESP array of bulk strings, or as an inline command: one line of
+words, as `telnet` sends. Words split as in Valkey, with double quotes, single quotes, and
+escapes. An inline line is at most 64 KiB. Lengths follow the rules of Valkey: a `+` sign or a
+leading zero is a protocol error, and an array header of zero or fewer items is skipped.
+
 ## Supported commands
 
 | Family | Commands |
@@ -58,7 +63,11 @@ command that starts with `GEO`.
 [Cluster commands](#cluster-commands). On any other node, `CLUSTER` returns an error that
 explains that Discus is not a Redis Cluster and that clients do not need topology awareness.
 
-Any other unknown command returns `-ERR unknown command '<name>'`.
+Any other unknown command returns the error of Valkey:
+`-ERR unknown command '<name>', with args beginning with: '<arg>' '<arg>' `. A command with no
+arguments gets only `-ERR unknown command '<name>'`. The name stops at 128 bytes, and the quoted
+arguments stop when their text reaches 128 bytes. A CR or LF in a simple string reply or an error
+reply becomes a space, as in Valkey, so client bytes cannot split one reply into two.
 
 ## Cluster commands
 
@@ -128,8 +137,9 @@ keys of one group is atomic.
 In a cluster, any node accepts any command and forwards it to the owner of the key. Some commands
 behave differently from Redis:
 
-- `MSET` and `DEL` with several keys are not atomic. If one part fails, the command returns
-  `-TRYAGAIN` and the other parts stay applied. A retry of the whole command is safe.
+- `MSET` and `DEL` with several keys are not atomic. If one part gets no answer, the command
+  returns `-TRYAGAIN` and the other parts stay applied. A retry of the whole command is safe. If
+  one part returns an error, such as `-OOM`, the command returns that error.
 - `SCAN` and `RANDOMKEY` see only the keys of the node that the client is connected to. They never
   list counter keys.
 - `DBSIZE` adds the counts of every member that answers and divides the sum by the replication

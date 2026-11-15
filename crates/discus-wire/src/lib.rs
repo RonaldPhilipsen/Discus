@@ -38,7 +38,7 @@ pub use message::{
     ForwardMode, ForwardReply, Frame, Gossip, GossipKind, GroupHint, HandshakeCode,
     HandshakeFailed, Hello, Liveness, MemberInfo, Message, RaftAppend, RaftConfig, RaftEntry,
     RaftHeader, RaftLogId, RaftMembership, RaftOutcome, RaftPayload, RaftReply, RaftSnapshot,
-    RaftVote, RaftVoteReq, Regime, Rumor, TraceContext,
+    RaftVote, RaftVoteReq, Regime, Rumor, SnapshotChunk, TraceContext,
 };
 pub use resp::encode_command;
 
@@ -69,6 +69,9 @@ pub mod caps {
     pub const SLOT_PLACEMENT: u64 = 64;
     /// The node serves numbered databases: the `db` fields, `MOVE`, and `COPY`.
     pub const MULTI_DB: u64 = 128;
+    /// The node takes a leader-follower counter snapshot in parts (`COUNTER_SYNC` with
+    /// `snapshot_chunked`).
+    pub const COUNTER_CHUNKS: u64 = 256;
     /// Every bit this build knows.
     pub const KNOWN: u64 = EPOCH_PUSH
         | GOSSIP
@@ -77,7 +80,8 @@ pub mod caps {
         | SHARED_STREAM
         | SHARED_READS
         | SLOT_PLACEMENT
-        | MULTI_DB;
+        | MULTI_DB
+        | COUNTER_CHUNKS;
 }
 
 /// The frame limit before `HELLO` completes, and the smallest offer that `HELLO` accepts.
