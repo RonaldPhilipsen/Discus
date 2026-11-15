@@ -159,3 +159,33 @@ fn a_write_that_changes_nothing_keeps_the_version() {
     assert!(changed);
     assert_eq!(s.version(0, b"k"), Some(v2));
 }
+
+/// A writer takes its stamp before the shard lock, so a racing writer or an inbound entry can
+/// store a newer version first. The late write must still raise the stored version, or the
+/// owners that applied the newer version keep it while this node holds the late value.
+#[test]
+fn a_late_stamp_still_raises_the_stored_version() {
+    let clock = Arc::new(ManualClock::new(0));
+    let s = store(&clock);
+    let at = |t| Version::new(discus_store::NTP64(t), discus_store::NodeId::from_u128(2));
+    let late = Version::new(discus_store::NTP64(10), discus_store::NodeId::from_u128(1));
+    let put = |stamp, v: &'static str| {
+        s.write_stamped(0, b"k", stamp, |slot| {
+            slot.set(Some(Entry::new(Value::Str(v.into()), None)));
+        })
+        .1
+    };
+    assert_eq!(put(at(20), "newer"), Some(at(20)));
+    let applied = put(late, "late").unwrap();
+    assert!(applied > at(20), "{applied:?}");
+    assert_eq!(applied.origin(), late.origin());
+    assert_eq!(s.version(0, b"k"), Some(applied));
+    let gone = s
+        .write_stamped(0, b"k", late, |slot| {
+            slot.take();
+        })
+        .1
+        .unwrap();
+    assert!(gone > applied);
+    assert_eq!(s.version(0, b"k"), Some(gone));
+}
