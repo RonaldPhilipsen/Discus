@@ -1191,7 +1191,8 @@ line. To move to it, install a new cluster. The cache starts empty.
 - The admin port requires the `discus.admin` scope or an admin certificate, never the shared token.
   `RAFT_FORCE_RECONFIGURE` exists only on the admin port.
 - Authentication errors are generic. The reason goes to the debug log. Failed attempts are
-  rate-limited per connection and per source.
+  rate-limited per connection and per source. The limit per source also counts refused bearer
+  tokens on the admin port.
 - Until a connection meets the policy, one argument and one buffered request are at most 64 KiB,
   and a command has at most 64 arguments. A connection that does not meet the policy within
   `--auth-timeout-secs` (default 30) of the accept is closed.
@@ -1204,7 +1205,9 @@ line. To move to it, install a new cluster. The cache starts empty.
   (default RS256 and ES256). It checks `iss`, `aud`, `exp`, `nbf`, and `iat` with 60 s of clock
   skew. It refreshes the JWKS on an unknown `kid`, rate-limited, and periodically.
 - If introspection is enabled, opaque tokens use RFC 7662. Results are cached no longer than the
-  token lifetime.
+  token lifetime, and no longer than 300 s. When the result of a connection ends, Discus
+  introspects the token again before the next command. A token that is not active, or no answer
+  from the provider, returns `-NOAUTH`. Refused results are cached for 30 s.
 - Scopes are `discus.read`, `discus.write`, and `discus.admin`.
 - Discus checks the full token at `AUTH` and after a JWKS refresh. Each command checks only the
   cached `exp` and `nbf`. An expired token returns `-NOAUTH`, and the client can `AUTH` again on

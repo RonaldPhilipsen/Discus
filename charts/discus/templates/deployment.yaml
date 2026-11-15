@@ -130,6 +130,9 @@ spec:
             {{- if .Values.authConfig.secretName }}
             - --auth-config=/auth/auth.toml
             {{- end }}
+            {{- if .Values.sharedToken.secretName }}
+            - --shared-token-file=/shared-token/{{ .Values.sharedToken.key }}
+            {{- end }}
             - --config=/settings/discus.toml
             {{- with .Values.pyroscope.url }}
             - --pyroscope-url={{ . }}
@@ -190,6 +193,11 @@ spec:
               mountPath: /auth
               readOnly: true
             {{- end }}
+            {{- if .Values.sharedToken.secretName }}
+            - name: shared-token
+              mountPath: /shared-token
+              readOnly: true
+            {{- end }}
             {{- if and .Values.otel.enabled .Values.otel.tls.secretName }}
             - name: otel-tls
               mountPath: /otel-tls
@@ -218,6 +226,16 @@ spec:
         - name: auth-config
           secret:
             secretName: {{ . }}
+        {{- end }}
+        {{- with .Values.sharedToken }}
+        {{- if .secretName }}
+        - name: shared-token
+          secret:
+            secretName: {{ .secretName }}
+            items:
+              - key: {{ .key }}
+                path: {{ .key }}
+        {{- end }}
         {{- end }}
         {{- if and .Values.otel.enabled .Values.otel.tls.secretName }}
         - name: otel-tls

@@ -72,6 +72,78 @@ async fn the_cache_saves_calls_but_never_outlives_the_token() {
     assert!(r.starts_with("-WRONGPASS"), "{r:?}");
 }
 
+/// A node that introspects a token again after 1 s instead of 300 s, and a connection that holds
+/// a grant from `opaque-1`.
+async fn node_with_grant(
+    ca: &TestCa,
+    idp: &MockIdp,
+) -> (Node, tokio_rustls::client::TlsStream<tokio::net::TcpStream>) {
+    idp.add_opaque("opaque-1", active(idp, unix_now() + 300));
+    let node = node(ca, idp, "secret", &["--test-introspection-cache-secs", "1"]).await;
+    let mut s = security_support::common::client_tls::connect(node.addr).await;
+    assert_eq!(
+        exchange(&mut s, &cmd(&["AUTH", "opaque-1"])).await,
+        "+OK\r\n"
+    );
+    assert_eq!(idp.introspect_calls(), 1);
+    (node, s)
+}
+
+/// Longer than the 1 s cache time of `node_with_grant`, so the next command is past the recheck
+/// time on any machine.
+const PAST_RECHECK: Duration = Duration::from_secs(3);
+
+#[tokio::test]
+async fn a_revoked_token_loses_its_grant_at_the_recheck() {
+    let ca = TestCa::new();
+    let idp = MockIdp::start(&ca).await;
+    let (_node, mut s) = node_with_grant(&ca, &idp).await;
+    idp.add_opaque("opaque-1", json!({"active": false}));
+    tokio::time::sleep(PAST_RECHECK).await;
+    let mut wire = cmd(&["GET", "k"]);
+    wire.extend(cmd(&["GET", "k"]));
+    let r = exchange(&mut s, &wire).await;
+    assert_eq!(r.matches("-NOAUTH").count(), 2, "{r:?}");
+    assert_eq!(idp.introspect_calls(), 2);
+}
+
+#[tokio::test]
+async fn an_active_token_keeps_its_grant_across_a_recheck() {
+    let ca = TestCa::new();
+    let idp = MockIdp::start(&ca).await;
+    let (_node, mut s) = node_with_grant(&ca, &idp).await;
+    tokio::time::sleep(PAST_RECHECK).await;
+    let mut wire = cmd(&["PING"]);
+    wire.extend(cmd(&["GET", "k"]));
+    wire.extend(cmd(&["SET", "k", "v"]));
+    let r = exchange(&mut s, &wire).await;
+    assert!(r.starts_with("+PONG\r\n$-1\r\n-NOPERM"), "{r:?}");
+    assert!(idp.introspect_calls() >= 2);
+}
+
+#[tokio::test]
+async fn an_unreachable_provider_drops_the_grant_at_the_recheck() {
+    let ca = TestCa::new();
+    let idp = MockIdp::start(&ca).await;
+    let (_node, mut s) = node_with_grant(&ca, &idp).await;
+    idp.set_down(true);
+    tokio::time::sleep(PAST_RECHECK).await;
+    let r = exchange(&mut s, &cmd(&["GET", "k"])).await;
+    assert!(r.starts_with("-NOAUTH"), "{r:?}");
+}
+
+#[tokio::test]
+async fn a_refused_token_reaches_the_provider_once() {
+    let ca = TestCa::new();
+    let idp = MockIdp::start(&ca).await;
+    let node = node(&ca, &idp, "secret", &[]).await;
+    for _ in 0..3 {
+        let r = send(&node, &cmd(&["AUTH", "opaque-bad"])).await;
+        assert!(r.starts_with("-WRONGPASS"), "{r:?}");
+    }
+    assert_eq!(idp.introspect_calls(), 1);
+}
+
 #[tokio::test]
 async fn a_wrong_client_secret_fails_closed() {
     let ca = TestCa::new();

@@ -139,6 +139,42 @@ pub(crate) struct DbShard {
     pub(crate) tombs: BTreeSet<(u64, Bytes)>,
     /// Live entries in `map`: every entry that is not a tombstone.
     pub(crate) live: usize,
+    /// The live entries in `map` that have a deadline.
+    pub(crate) deadlines: Deadlines,
+}
+
+/// A count and a sum of deadlines, so `INFO keyspace` needs no walk of the keys.
+#[derive(Default)]
+pub(crate) struct Deadlines {
+    count: usize,
+    sum: u128,
+}
+
+impl Deadlines {
+    fn add(&mut self, deadline: Option<u64>) {
+        if let Some(t) = deadline {
+            self.count += 1;
+            self.sum += u128::from(t);
+        }
+    }
+
+    fn remove(&mut self, deadline: Option<u64>) {
+        if let Some(t) = deadline {
+            self.count -= 1;
+            self.sum -= u128::from(t);
+        }
+    }
+}
+
+/// What `INFO keyspace` reports for one database.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Keyspace {
+    pub keys: usize,
+    /// The keys with a deadline.
+    pub expires: usize,
+    /// The mean time to the deadline of those keys. A key past its deadline that the sweep did
+    /// not remove yet lowers it.
+    pub avg_ttl_ms: u64,
 }
 
 /// A database gets its [`DbShard`] at its first insert, so a read or a miss never allocates.
@@ -352,12 +388,19 @@ impl Store {
         let (result, changed) = {
             let mut guard = shard.inner.write();
             // A live entry changes in its bucket, so the common overwrite hashes and probes once.
-            if let Some(DbShard { map, tombs, live }) = guard.get_mut(db) {
+            if let Some(DbShard {
+                map,
+                tombs,
+                live,
+                deadlines,
+            }) = guard.get_mut(db)
+            {
                 if let EntryRef::Occupied(o) = map.entry_ref(key) {
                     if !o.get().tombstone && !o.get().is_expired(now) {
                         let mut out = None;
                         o.replace_entry_with(|k, e| {
                             let before = estimate_size(k, &e);
+                            deadlines.remove(e.expires_at_ms);
                             let mut slot = Slot {
                                 entry: Some(e),
                                 touched: false,
@@ -372,6 +415,7 @@ impl Store {
                                         e.tombstone = false;
                                     }
                                     self.adjust_used(before, estimate_size(k, &e));
+                                    deadlines.add(e.expires_at_ms);
                                     Some(e)
                                 }
                                 None => {
@@ -470,18 +514,23 @@ impl Store {
         {
             let mut guard = shard.inner.write();
             let mut old = 0;
-            if let Some(cur) = guard.get_mut(db).and_then(|d| d.map.get_mut(key)) {
-                // An expired entry still refuses an older version, or a late copy would bring
-                // back a value that a newer write replaced before it expired.
-                if cur.version >= entry.version {
-                    return false;
-                }
-                old = estimate_size(key, cur);
-                let fits = self.used_memory() + size.saturating_sub(old) <= self.config.max_memory;
-                if !tomb && !cur.tombstone && fits {
-                    self.adjust_used(old, size);
-                    *cur = entry;
-                    return true;
+            if let Some(d) = guard.get_mut(db) {
+                if let Some(cur) = d.map.get_mut(key) {
+                    // An expired entry still refuses an older version, or a late copy would
+                    // bring back a value that a newer write replaced before it expired.
+                    if cur.version >= entry.version {
+                        return false;
+                    }
+                    old = estimate_size(key, cur);
+                    let fits =
+                        self.used_memory() + size.saturating_sub(old) <= self.config.max_memory;
+                    if !tomb && !cur.tombstone && fits {
+                        self.adjust_used(old, size);
+                        d.deadlines.remove(cur.expires_at_ms);
+                        d.deadlines.add(entry.expires_at_ms);
+                        *cur = entry;
+                        return true;
+                    }
                 }
             }
             if tomb || self.used_memory() + size.saturating_sub(old) <= self.config.max_memory {
@@ -593,6 +642,7 @@ impl Store {
             self.tomb_bytes.fetch_sub(size, Ordering::Relaxed);
         } else {
             d.live -= 1;
+            d.deadlines.remove(e.expires_at_ms);
             self.len.fetch_sub(1, Ordering::Relaxed);
         }
         Some((k, e))
@@ -609,6 +659,7 @@ impl Store {
             self.tomb_bytes.fetch_add(size, Ordering::Relaxed);
         } else {
             d.live += 1;
+            d.deadlines.add(e.expires_at_ms);
             self.len.fetch_add(1, Ordering::Relaxed);
         }
         d.map.insert(k, e);
@@ -649,6 +700,25 @@ impl Store {
             .iter()
             .map(|s| s.inner.read().get(db).map_or(0, |d| d.live))
             .sum()
+    }
+
+    /// The keys of one database, how many have a deadline, and their mean TTL.
+    pub fn keyspace(&self, db: u32) -> Keyspace {
+        let mut out = Keyspace::default();
+        let mut sum = 0u128;
+        for shard in &self.shards {
+            if let Some(d) = shard.inner.read().get(db) {
+                out.keys += d.live;
+                out.expires += d.deadlines.count;
+                sum += d.deadlines.sum;
+            }
+        }
+        if out.expires > 0 {
+            let mean = sum / out.expires as u128;
+            let ttl = mean.saturating_sub(u128::from(self.clock.now_ms()));
+            out.avg_ttl_ms = u64::try_from(ttl).unwrap_or(u64::MAX);
+        }
+        out
     }
 
     /// The databases that hold an entry or a tombstone, in ascending order.
@@ -897,5 +967,68 @@ mod tests {
         let other_db: &dyn AsDbKey = &(0, &b"k"[..]);
         assert!(set.contains(hit));
         assert!(!set.contains(other_db));
+    }
+
+    #[test]
+    fn the_keyspace_counts_the_keys_with_a_deadline_and_their_average_ttl() {
+        let clock = Arc::new(ManualClock::new(1_000));
+        let s = Store::new(
+            StoreConfig {
+                shards: 4,
+                ..StoreConfig::default()
+            },
+            clock.clone(),
+        );
+        let stamp = |n| Version::new(crate::NTP64(n), crate::NodeId::from_u128(1));
+        let put = |key: &str, deadline: Option<u64>, n| {
+            s.write(2, key.as_bytes(), stamp(n), |slot| {
+                slot.set(Some(Entry::new(
+                    Value::Str(Bytes::from_static(b"v")),
+                    deadline,
+                )));
+            });
+        };
+        assert_eq!(s.keyspace(2), Keyspace::default());
+        put("a", Some(11_000), 1);
+        put("b", Some(31_000), 2);
+        put("plain", None, 3);
+        assert_eq!(
+            s.keyspace(2),
+            Keyspace {
+                keys: 3,
+                expires: 2,
+                avg_ttl_ms: 20_000
+            }
+        );
+        // An overwrite in place without a deadline, then with one again.
+        put("a", None, 4);
+        assert_eq!(s.keyspace(2).expires, 1);
+        put("a", Some(21_000), 5);
+        assert_eq!(s.keyspace(2).avg_ttl_ms, 25_000);
+        s.write(2, b"b", stamp(6), |slot| slot.take());
+        assert_eq!(
+            s.keyspace(2),
+            Keyspace {
+                keys: 2,
+                expires: 1,
+                avg_ttl_ms: 20_000
+            }
+        );
+        let replica = Entry {
+            version: stamp(7),
+            ..Entry::new(Value::Str(Bytes::from_static(b"r")), Some(41_000))
+        };
+        assert!(s.apply(2, b"plain", replica));
+        assert_eq!(s.keyspace(2).expires, 2);
+        assert_eq!(s.keyspace(2).avg_ttl_ms, 30_000);
+        assert_eq!(s.keyspace(0), Keyspace::default());
+        // A key past its deadline lowers the average until the sweep removes it. The average
+        // never drops below 0.
+        clock.set(30_000);
+        assert_eq!(s.keyspace(2).avg_ttl_ms, 1_000);
+        clock.set(50_000);
+        assert_eq!(s.keyspace(2).avg_ttl_ms, 0);
+        s.sweep_expired(64);
+        assert_eq!(s.keyspace(2), Keyspace::default());
     }
 }

@@ -94,6 +94,10 @@ pub struct SecurityArgs {
     /// Seconds that a new connection gets to meet the authentication policy. 0 means no limit.
     #[arg(long, default_value_t = 30)]
     pub auth_timeout_secs: u64,
+    /// The longest life of an introspection answer, in seconds, instead of 300.
+    #[cfg(feature = "testing")]
+    #[arg(long, hide = true)]
+    pub test_introspection_cache_secs: Option<u64>,
     /// Serve the admin port over TLS with the client listener certificate and CA.
     #[arg(long)]
     pub admin_tls: bool,

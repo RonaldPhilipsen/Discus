@@ -134,6 +134,9 @@ pub struct Claims {
     pub exp: i64,
     pub nbf: Option<i64>,
     pub scopes: Scopes,
+    /// The end of the introspection answer. After it, the node must introspect the token again.
+    /// `None` for a JWT.
+    pub recheck: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -318,6 +321,7 @@ impl Validator {
             exp: c.exp,
             nbf: c.nbf,
             scopes,
+            recheck: None,
         })
     }
 }
@@ -437,6 +441,14 @@ impl OAuth2 {
     pub fn start(&self, stop: CancellationToken) {
         for s in &self.sources {
             tokio::spawn(s.clone().run(stop.clone()));
+        }
+    }
+
+    /// Use a shorter introspection cache time, so a test does not wait 300 s for a recheck.
+    #[cfg(all(feature = "testing", feature = "oauth2-introspection"))]
+    pub fn set_introspection_cache_secs(&mut self, secs: u64) {
+        if let Some(i) = &mut self.introspector {
+            i.set_max_cache_secs(secs);
         }
     }
 

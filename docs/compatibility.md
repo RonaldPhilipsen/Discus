@@ -34,7 +34,7 @@ A node serves the databases from 0 to the cluster count minus 1. The default cou
 | `FLUSHDB` | Clears the selected database only. |
 | `FLUSHALL` | Clears every database. |
 | `DBSIZE`, `SCAN`, `RANDOMKEY` | See the selected database only. |
-| `INFO keyspace` | Shows one `db<n>` line for each database that holds keys. |
+| `INFO keyspace` | Shows one `db<n>` line for each database that holds keys. `avg_ttl` is the exact mean TTL of the keys with a deadline, not a sample. |
 | `CONFIG GET databases` | Returns the count of the cluster. |
 
 Take a cluster with more than one database. If a member lacks support for numbered databases, then
