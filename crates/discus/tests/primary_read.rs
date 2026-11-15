@@ -365,3 +365,43 @@ async fn a_batch_that_the_secondary_refused_is_no_acknowledgment() {
         "the refused tombstone counts as delivered"
     );
 }
+
+/// A hint for a peer whose queue is up replays on the next tick, for example a write that
+/// became a hint while the queue came back up, or an entry that the peer refused once.
+#[tokio::test]
+async fn a_hint_for_an_up_peer_replays() {
+    let args = &[
+        "--replication-factor",
+        "2",
+        "--replication-timeout-ms",
+        "1000",
+        "--primary-read-prefix",
+        "sess",
+    ];
+    let c = start_cluster(2, args).await;
+    let k = c.key_on(0, "sess");
+    settled(&c, &k).await;
+    let secondary = &c.nodes[1];
+    secondary
+        .node
+        .faults
+        .refuse_apply
+        .store(true, Ordering::Relaxed);
+    let mut conn = c.nodes[0].redis().await;
+    let del: i64 = conn.del(&k).await.unwrap();
+    assert_eq!(del, 1);
+    let replicator = c.nodes[0].node.replicator().unwrap();
+    assert_eq!(replicator.hints(secondary.id), 1);
+    secondary
+        .node
+        .faults
+        .refuse_apply
+        .store(false, Ordering::Relaxed);
+    assert!(
+        wait_until(Duration::from_secs(20), || replicator
+            .settled(0, k.as_bytes()))
+        .await,
+        "the hint did not replay"
+    );
+    assert!(any_tombstone(&[secondary], &k));
+}

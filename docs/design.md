@@ -757,9 +757,11 @@ directly but never gets `-MOVED`. That setting is for tests.
   Hints coalesce to the latest entry per key.
 - Bounds are a byte cap and an entry cap per target, a global cap (5% of `maxmemory`), and a
   maximum age equal to the tombstone TTL. The oldest hints are evicted and counted.
-- Replay starts in two cases: the target is `NORMAL` and reconnected, or the queue of a lagging peer
-  drains below a low-water mark. The primary sends `HINT_REPLAY` batches in HLC order and waits for
-  an acknowledgment per batch. The target applies only newer entries.
+- Replay starts in three cases: the target is `NORMAL` and reconnected, the queue of a lagging peer
+  drains below a low-water mark, or the once-per-second tick finds hints for a target whose queue is
+  up. The primary sends `HINT_REPLAY` batches in HLC order and waits for an acknowledgment per
+  batch. The target applies only newer entries. A hint that the target answers but does not store
+  stays for the next tick.
 - A `DEAD` target never returns, so its hints are dropped. Hints cover transient unreachability and
   slow peers, not restarts.
 - On every epoch change, the primary drops the hints whose target no longer owns the key.
@@ -777,7 +779,7 @@ flowchart TD
     sent{"delivered?"}
     apply["secondary applies the entry if its HLC is newer"]
     hint["record a hint: target, key, entry, epoch"]
-    ready{"target NORMAL and reconnected, or queue below the low-water mark?"}
+    ready{"target NORMAL and reconnected, queue below the low-water mark, or tick with the queue up?"}
     replay["HINT_REPLAY batches in HLC order"]
     drop["drop the hint"]
     refill["mark the refill bucket needs_refill"]

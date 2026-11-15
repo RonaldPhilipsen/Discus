@@ -190,6 +190,18 @@ impl Replicator {
         let evicted = self.hints.lock().expire(Instant::now());
         self.count_evicted(&evicted);
         self.sync_charge();
+        // A hint can be recorded for a peer whose queue is up: a write that saw the queue down
+        // while it came back up, or an entry that the peer did not store. Nothing else replays
+        // those.
+        let targets = self.hints.lock().targets();
+        if !targets.is_empty() {
+            let peers = self.peers.read();
+            for t in targets {
+                if let Some(q) = peers.get(&t).filter(|q| !q.is_down()) {
+                    q.want_replay();
+                }
+            }
+        }
         if let Some(node) = self.node.upgrade() {
             let current = node.epochs().current().clone();
             self.prune_handoffs(&current);
@@ -754,6 +766,9 @@ impl Replicator {
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 continue;
             }
+            if q.take_replay() && !self.replay(&node, q.peer).await {
+                tracing::debug!(peer = %q.peer, "a hint replay to an up peer stopped");
+            }
             let keys = q.take(self.settings.batch_keys);
             if keys.is_empty() {
                 drop(node);
@@ -775,7 +790,7 @@ impl Replicator {
             let started = Instant::now();
             let reply = match self.send(&node, q.peer, Message::Replicate(batch)).await {
                 Ok(Message::BatchAck(a)) if a.applied as usize >= sent => Ok(Vec::new()),
-                Ok(Message::BatchAck(_)) => self.unstored(&node, &q).await,
+                Ok(Message::BatchAck(_)) => self.unstored_inflight(&node, &q).await,
                 Ok(other) => Err(TransportError::Frame(format!(
                     "a replication batch got message type {}",
                     other.type_code()
@@ -812,21 +827,32 @@ impl Replicator {
     /// only the entries it stored, and an entry that it already held is not stored again, so an
     /// offer of each key at its version tells the two apart. An entry refused for clock drift or
     /// for a database that the peer does not hold stays unacknowledged.
-    async fn unstored(
+    async fn unstored_inflight(
         &self,
         node: &Arc<Node>,
         q: &PeerQueue,
     ) -> Result<Vec<DbKey>, TransportError> {
-        let mut batch = Batch::new(node.epoch_id());
-        batch.offers = q
+        let offers = q
             .inflight()
             .into_iter()
             .filter_map(|k| self.store.stored_version(k.db, &k.key).map(|v| (k, v)))
             .collect();
-        if batch.offers.is_empty() {
+        self.unstored(node, q.peer, offers).await
+    }
+
+    /// The keys of `offers` that `peer` does not hold at the offered version or newer.
+    async fn unstored(
+        &self,
+        node: &Arc<Node>,
+        peer: NodeId,
+        offers: Vec<(DbKey, Version)>,
+    ) -> Result<Vec<DbKey>, TransportError> {
+        if offers.is_empty() {
             return Ok(Vec::new());
         }
-        match self.send(node, q.peer, Message::Handoff(batch)).await? {
+        let mut batch = Batch::new(node.epoch_id());
+        batch.offers = offers;
+        match self.send(node, peer, Message::Handoff(batch)).await? {
             Message::BatchAck(a) => Ok(a.want),
             other => Err(TransportError::Frame(format!(
                 "an offer got message type {}",
@@ -839,7 +865,8 @@ impl Replicator {
     /// first: one batch tells the peer to discard its copies there, and [`Self::refill`] sends
     /// this node's entries of those buckets again. Then the hints go in HLC order, one
     /// acknowledged batch at a time. A hint is never newer than the entry that the refill sent,
-    /// so this order is safe. Only a peer that the epoch lists as `NORMAL` gets a replay.
+    /// so this order is safe. Only a peer that the epoch lists as `NORMAL` gets a replay. A hint
+    /// that the peer answered but did not store stays, and the replay ends there.
     /// Returns false when a batch failed or the epoch changed. The buckets stay lost until their
     /// refill ends, so the next replay discards and refills them again.
     async fn replay(&self, node: &Arc<Node>, peer: NodeId) -> bool {
@@ -877,18 +904,35 @@ impl Replicator {
                 .collect();
             let mut batch = Batch::new(node.epoch_id());
             batch.entries = entries;
-            match self.send(node, peer, Message::HintReplay(batch)).await {
-                Ok(_) => {
-                    self.hints.lock().confirm(peer, &sent);
-                    self.sync_charge();
-                    if let Some(label) = crate::telemetry::node_label(peer) {
-                        discus_telemetry::global().hint_replayed(&label, sent.len() as u64);
-                    }
-                }
+            let unstored = match self.send(node, peer, Message::HintReplay(batch)).await {
+                Ok(Message::BatchAck(a)) if a.applied as usize >= sent.len() => Ok(Vec::new()),
+                Ok(Message::BatchAck(_)) => self.unstored(node, peer, sent.clone()).await,
+                Ok(other) => Err(TransportError::Frame(format!(
+                    "a hint replay got message type {}",
+                    other.type_code()
+                ))),
+                Err(e) => Err(e),
+            };
+            let unstored = match unstored {
+                Ok(keys) => keys,
                 Err(e) => {
                     tracing::debug!(%peer, error = %e, "a hint replay batch failed");
                     return false;
                 }
+            };
+            // A hint that the peer did not store stays for the replay of a later tick. The peer
+            // answered, so the replay still succeeds.
+            let stored: Vec<(DbKey, Version)> = sent
+                .into_iter()
+                .filter(|(k, _)| !unstored.contains(k))
+                .collect();
+            self.hints.lock().confirm(peer, &stored);
+            self.sync_charge();
+            if let Some(label) = crate::telemetry::node_label(peer) {
+                discus_telemetry::global().hint_replayed(&label, stored.len() as u64);
+            }
+            if !unstored.is_empty() {
+                return true;
             }
         }
     }

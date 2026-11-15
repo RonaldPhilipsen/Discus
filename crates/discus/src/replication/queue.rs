@@ -38,6 +38,8 @@ struct QueueState {
     lagging: bool,
     /// The peer left the epoch. The sender stops.
     closed: bool,
+    /// The sender replays the hints of the peer at its next turn.
+    replay: bool,
 }
 
 impl PeerQueue {
@@ -51,6 +53,7 @@ impl PeerQueue {
                 down: false,
                 lagging: false,
                 closed: false,
+                replay: false,
             }),
             notify: Notify::new(),
             cap: cap.max(1),
@@ -129,6 +132,17 @@ impl PeerQueue {
             out.push(k);
         }
         out
+    }
+
+    /// Ask the sender to replay the hints of the peer.
+    pub fn want_replay(&self) {
+        self.state.lock().replay = true;
+        self.notify.notify_one();
+    }
+
+    /// True once after [`PeerQueue::want_replay`].
+    pub fn take_replay(&self) -> bool {
+        std::mem::take(&mut self.state.lock().replay)
     }
 
     /// True once after the queue of a lagging peer drains below a quarter of its size.
