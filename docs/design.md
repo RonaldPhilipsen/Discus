@@ -1196,8 +1196,10 @@ line. To move to it, install a new cluster. The cache starts empty.
 - The admin port requires the `discus.admin` scope or an admin certificate, never a password.
   `RAFT_FORCE_RECONFIGURE` exists only on the admin port.
 - Authentication errors are generic. The reason goes to the debug log. Failed attempts are
-  rate-limited per connection and per source. The limit per source also counts refused bearer
-  tokens on the admin port.
+  rate-limited per connection and per source. A source is one IPv4 address or one IPv6 /64
+  network. The limiter tracks a bounded number of sources. When that table is full, all other
+  sources share one count, and the limiter refuses them together when the count reaches the limit.
+  The limit per source also counts refused bearer tokens on the admin port.
 - Until a connection meets the policy, one argument and one buffered request are at most 64 KiB,
   and a command has at most 64 arguments. A connection that does not meet the policy within
   `--auth-timeout-secs` (default 30) of the accept is closed.
