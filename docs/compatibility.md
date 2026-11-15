@@ -154,12 +154,13 @@ See [Running a cluster](cluster.md) for the details.
 
 ## Authentication
 
-`AUTH` and `HELLO ... AUTH` accept an OAuth 2.0 token or the password of a user of the ACL file.
-`AUTH OAUTH2 <token>` selects OAuth 2.0. If the ACL file does not name the username, the username is
-only a hint. `AUTH default <value>` and `AUTH "" <value>` work like `AUTH <value>`. A failed `AUTH`
-always returns the same `-WRONGPASS` error. A command that the scopes of the connection do not allow
-returns `-NOPERM this user has no permissions to run the '<command>' command`. An expired token
-turns the next command into `-NOAUTH`, and the client can send `AUTH` again on the same connection.
+`AUTH` and `HELLO ... AUTH` accept an OAuth 2.0 token or the password of a user
+of the ACL file. `AUTH OAUTH2 <token>` selects OAuth 2.0. If the ACL file does not name the
+username, the username is only a hint. `AUTH default <value>` works like `AUTH <value>`. A failed
+`AUTH` always returns the same `-WRONGPASS` error. A command that the scopes of the connection do
+not allow returns `-NOPERM this user has no permissions to run the '<command>' command`. An expired
+token turns the next command into `-NOAUTH`, and the client can send `AUTH` again on the same
+connection.
 
 The users come from the file of `--acl-file`. `ACL WHOAMI`, `ACL CAT`, `ACL LIST`, `ACL USERS`,
 and `ACL GETUSER` work. `ACL LIST`, `ACL USERS`, and `ACL GETUSER` are in `@admin`, as in Valkey.

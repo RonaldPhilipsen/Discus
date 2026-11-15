@@ -31,9 +31,8 @@ async fn auth_is_required_when_a_password_is_configured() {
     )
     .await;
     assert_eq!(two, "+OK\r\n");
+    // An empty name is not the user `default`, as in Valkey.
     let empty = common::roundtrip(addr, b"*3\r\n$4\r\nAUTH\r\n$0\r\n\r\n$6\r\ns3cret\r\n").await;
-    assert_eq!(empty, "+OK\r\n");
-    let empty = common::roundtrip(addr, b"*3\r\n$4\r\nAUTH\r\n$0\r\n\r\n$5\r\nwrong\r\n").await;
     assert!(empty.starts_with("-WRONGPASS"), "{empty:?}");
     // The password belongs to the user `default`. A different name is a different user.
     let other =

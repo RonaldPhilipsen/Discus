@@ -206,8 +206,7 @@ Older versions had the flags `--shared-token` and `--shared-token-file` and the 
 user `default`, and use the factor `password`.
 
 One thing changes for the clients. The shared token accepted every username. The password
-belongs to the user `default`. A client must thus send no username, an empty username, or the
-username `default`.
+belongs to the user `default`, so a client must send no username or the username `default`.
 
 #### The file
 
@@ -345,7 +344,6 @@ names that the user cannot read, as in Valkey.
 - `AUTH default <value>` works like `AUTH <value>`. Many client libraries send this form for a
   credential without a username. Only the exact name `default` counts, because names are
   case-sensitive.
-- An empty username, as in `AUTH "" <value>`, also works like `AUTH <value>`.
 - If the command names a user of the file, the node never sends the value to an identity
   provider. This also holds for a wrong password.
 - If the user `default` accepts the value, the node does not send the value to an identity
@@ -414,7 +412,6 @@ The file is the only source of users. If you copy a Valkey ACL file, change thes
 - A byte order mark at the start of the file is an error.
 - If the policy needs the `password` factor, a client that sends no `AUTH` gets `-NOAUTH`, also
   with `user default on nopass`. In Valkey, that client is the user `default`.
-- An empty username is the user `default`. In Valkey, an empty username fails.
 - A user never opens the admin port.
 - Discus does not copy users between nodes. Each node reads its own file.
 
