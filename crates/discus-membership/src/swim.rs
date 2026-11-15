@@ -145,6 +145,12 @@ pub struct Swim {
     /// or `None` (absent).
     deltas: BTreeMap<NodeId, Option<Member>>,
     epoch_timer: Option<Millis>,
+    /// The highest epoch that this node refused because it came from a smaller side. The node
+    /// builds an epoch above it from its own (spec section 6.3).
+    outrank: Option<EpochId>,
+    /// The members `NORMAL` in a refused epoch but not in the own one. This node does not add
+    /// them back until they hold its current epoch, which drops them and so makes them rejoin.
+    held: BTreeSet<NodeId>,
     /// The epoch that the core processed last. It notices epochs adopted elsewhere, for example
     /// on the forward path.
     last_epoch: Option<Arc<Epoch>>,
@@ -199,6 +205,8 @@ impl Swim {
             next_lease: 0,
             deltas: BTreeMap::new(),
             epoch_timer: None,
+            outrank: None,
+            held: BTreeSet::new(),
             last_epoch: None,
             limiter: JoinLimiter::default(),
             detector_n: 1,
@@ -713,6 +721,84 @@ impl Swim {
         });
     }
 
+    /// Release the held members that left `NORMAL`, that this node forgot, that `current` lists
+    /// already, or that hold `current`. Only the exact ID shows that a member holds an epoch of
+    /// this side: the smaller side builds its own epochs after the heal too, and their IDs can be
+    /// higher.
+    fn release_held(&mut self, current: &Epoch) {
+        let members = &self.members;
+        self.held.retain(|id| {
+            !current.is_normal(*id)
+                && members.get(id).is_some_and(|r| {
+                    r.info.state == MemberState::Normal && r.info.epoch != current.id()
+                })
+        });
+    }
+
+    /// The `NORMAL` members of `epoch` that this node does not see as dead, itself included.
+    fn alive_normal(&self, epoch: &Epoch) -> usize {
+        epoch
+            .normal()
+            .filter(|m| {
+                m.id == self.me.id
+                    || self
+                        .members
+                        .get(&m.id)
+                        .is_some_and(|r| r.liveness != Liveness::Dead)
+            })
+            .count()
+    }
+
+    /// True when this node is `NORMAL` in `current` and in no position to give that up.
+    fn placed(&self, current: &Epoch) -> bool {
+        self.phase == Phase::Member
+            && self.me.state == MemberState::Normal
+            && current.is_normal(self.me.id)
+    }
+
+    /// True when `body`, higher than `current`, comes from the smaller side of a healed
+    /// partition: it lists fewer `NORMAL` members than this node still sees in `current`, and it
+    /// drops this node or lists a member that this node holds back. That side marked this side
+    /// dead one member at a time, with one epoch per death, so it usually holds the higher
+    /// generation (spec section 6.3).
+    fn outranks(&self, current: &Epoch, body: &Epoch) -> bool {
+        self.placed(current)
+            && normal_count(body) < self.alive_normal(current)
+            && (!body.is_normal(self.me.id) || body.normal().any(|m| self.held.contains(&m.id)))
+    }
+
+    /// `body`, not higher than `current`, comes from a larger side that does not list this node.
+    /// This node then holds back the members of that side, so it does not take them into its own
+    /// epochs before an epoch of that side arrives and makes it rejoin.
+    fn yield_to(&mut self, current: &Epoch, body: &Epoch) {
+        if self.placed(current)
+            && !body.is_normal(self.me.id)
+            && normal_count(body) > self.alive_normal(current)
+        {
+            self.held.extend(
+                body.normal()
+                    .filter(|m| !current.is_normal(m.id))
+                    .map(|m| m.id),
+            );
+        }
+    }
+
+    fn refuse(&mut self, now: Millis, current: &Epoch, body: &Epoch) {
+        tracing::warn!(
+            refused = %body.id(),
+            current = %current.id(),
+            "refused the epoch of a smaller side, building one above it"
+        );
+        let id = body.id();
+        self.outrank = Some(self.outrank.map_or(id, |o| o.max(id)));
+        self.held.extend(
+            body.normal()
+                .filter(|m| !current.is_normal(m.id))
+                .map(|m| m.id),
+        );
+        self.arm(now);
+    }
+
     /// Create the next epoch from the current one with the pending deltas applied (spec section
     /// 5.1). The jitter has already passed.
     fn create_epoch(&mut self, now: Millis, host: &mut dyn Host) {
@@ -726,18 +812,36 @@ impl Swim {
             return;
         }
         self.drop_shown_deltas(&current);
-        if self.deltas.is_empty() {
+        let outrank = self.outrank.filter(|o| *o > current.id());
+        self.release_held(&current);
+        let apply: BTreeMap<NodeId, Option<Member>> = self
+            .deltas
+            .iter()
+            .filter(|(id, want)| {
+                let adds_normal = want
+                    .as_ref()
+                    .is_some_and(|m| m.state == MemberState::Normal);
+                !(adds_normal && self.held.contains(id))
+            })
+            .map(|(id, want)| (*id, want.clone()))
+            .collect();
+        if apply.is_empty() && outrank.is_none() {
+            if !self.deltas.is_empty() {
+                self.epoch_timer = Some(now + self.cfg.period_ms);
+            }
             return;
         }
         let mut members: Vec<Member> = current
             .members()
             .iter()
-            .filter(|m| !self.deltas.contains_key(&m.id))
+            .filter(|m| !apply.contains_key(&m.id))
             .cloned()
             .collect();
-        members.extend(self.deltas.values().flatten().cloned());
+        members.extend(apply.values().flatten().cloned());
         let id = EpochId {
-            generation: host.next_generation(),
+            generation: host
+                .next_generation()
+                .max(outrank.map_or(0, |o| o.generation + 1)),
             origin: self.me.id,
         };
         match Epoch::new(id, self.cluster_id, members) {
@@ -760,6 +864,9 @@ impl Swim {
             return;
         }
         let old = self.last_epoch.replace(current.clone());
+        if self.outrank.is_some_and(|o| current.id() > o) {
+            self.outrank = None;
+        }
         if let Some(old) = old.filter(|o| o.cluster_id() == current.cluster_id()) {
             self.events.push(Event::EpochAdopted {
                 old: old.id(),
@@ -777,10 +884,12 @@ impl Swim {
                 // The cluster went on without this node, so its deaths are opinions from the
                 // time away. Spread, they would remove healthy members.
                 self.members.retain(|_, r| r.liveness != Liveness::Dead);
+                self.outrank = None;
+                self.held.clear();
             }
         }
         self.drop_shown_deltas(&current);
-        if self.deltas.is_empty() {
+        if self.deltas.is_empty() && self.outrank.is_none() {
             // A deadline left from a finished change must not cut short the wait for the next.
             self.epoch_timer = None;
         } else {
@@ -816,8 +925,13 @@ impl Swim {
             self.learn(now, rumor.clone(), first_hand);
         }
         if let Some(body) = &g.epoch_body {
-            if body.cluster_id() == self.cluster_id && body.id() > host.epoch().id() {
-                if let Err(e) = host.adopt(body.clone()) {
+            let current = host.epoch();
+            if body.cluster_id() == self.cluster_id {
+                if body.id() <= current.id() {
+                    self.yield_to(&current, body);
+                } else if self.outranks(&current, body) {
+                    self.refuse(now, &current, body);
+                } else if let Err(e) = host.adopt(body.clone()) {
                     tracing::debug!(error = %e, "refused a gossiped epoch");
                 }
             }
@@ -854,6 +968,8 @@ impl Swim {
         self.members.clear();
         self.deltas.clear();
         self.epoch_timer = None;
+        self.outrank = None;
+        self.held.clear();
         self.order.clear();
         self.pending.clear();
         self.probes.clear();
