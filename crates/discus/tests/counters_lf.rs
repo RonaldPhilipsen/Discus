@@ -699,6 +699,7 @@ async fn a_leader_takes_a_regime_above_a_refusing_follower() {
         snapshot: Some(Bytes::from(
             discus::counter::state::CounterState::new().encode(),
         )),
+        chunk: None,
     };
     let ack = counters
         .group(g)
@@ -714,4 +715,40 @@ async fn a_leader_takes_a_regime_above_a_refusing_follower() {
     );
     let mut lc = leader.redis().await;
     assert_eq!(incr_until(&mut lc, key, Duration::from_secs(5)).await, 4);
+}
+
+/// A group state larger than one snapshot part reaches a new follower in parts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_large_state_reaches_a_new_follower() {
+    let (net, leases) = (Net::new(), Leases::new());
+    let (first, _) = join_to(&net, &leases, &[], &[]).await;
+    let mut c = first.redis().await;
+    let value = "v".repeat(1 << 20);
+    for i in 0..10 {
+        let key = format!("cnt:{{big}}{i}");
+        let set = redis::cmd("SET").arg(&key).arg(&value).clone();
+        common::counters::query_until::<()>(
+            &mut c,
+            &set,
+            Duration::from_secs(10),
+            common::counters::is_try_again,
+        )
+        .await
+        .unwrap();
+    }
+    let (second, _) = join_to(&net, &leases, &[&first], &[]).await;
+    wait_agreed(&[&first, &second], Duration::from_secs(10)).await;
+    let g = group_of(&first, "cnt:{big}0");
+    assert!(
+        wait_until(Duration::from_secs(20), || {
+            let s = status(&second, g);
+            s.role == "follower" && s.synced
+        })
+        .await,
+        "the follower never synced"
+    );
+    assert_eq!(
+        held_in(&second, 0, "cnt:{big}9").map(|v| v.len()),
+        Some(1 << 20)
+    );
 }

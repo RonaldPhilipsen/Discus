@@ -158,6 +158,12 @@ table CounterSync {
   ops: [CounterOp] (id: 3);
   snapshot: [ubyte] (id: 4);
   has_snapshot: bool (id: 5);
+  /// `snapshot` is one part of a snapshot, at byte `snapshot_offset`. Sent only to a follower
+  /// with the `COUNTER_CHUNKS` capability. Without it, `snapshot` is the whole snapshot.
+  snapshot_chunked: bool (id: 6);
+  snapshot_offset: ulong (id: 7);
+  /// This part ends the snapshot.
+  snapshot_last: bool (id: 8);
 }
 
 table CounterAck {

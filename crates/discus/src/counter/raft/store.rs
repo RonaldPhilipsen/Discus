@@ -67,7 +67,7 @@ impl Drop for Log {
 
 /// The memory that one log entry holds, as an estimate: the command bytes and a fixed overhead
 /// for each argument and for the entry.
-fn entry_bytes(e: &Entry) -> u64 {
+pub(super) fn entry_bytes(e: &Entry) -> u64 {
     let payload = match &e.payload {
         EntryPayload::Normal(op) => op.command.iter().map(|a| a.len() as u64 + 32).sum(),
         EntryPayload::Membership(_) => 256,

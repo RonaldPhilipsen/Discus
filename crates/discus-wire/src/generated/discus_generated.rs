@@ -7143,6 +7143,9 @@ impl<'a> CounterSync<'a> {
   pub const VT_OPS: ::flatbuffers::VOffsetT = 10;
   pub const VT_SNAPSHOT: ::flatbuffers::VOffsetT = 12;
   pub const VT_HAS_SNAPSHOT: ::flatbuffers::VOffsetT = 14;
+  pub const VT_SNAPSHOT_CHUNKED: ::flatbuffers::VOffsetT = 16;
+  pub const VT_SNAPSHOT_OFFSET: ::flatbuffers::VOffsetT = 18;
+  pub const VT_SNAPSHOT_LAST: ::flatbuffers::VOffsetT = 20;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -7154,11 +7157,14 @@ impl<'a> CounterSync<'a> {
     args: &'args CounterSyncArgs<'args>
   ) -> ::flatbuffers::WIPOffset<CounterSync<'bldr>> {
     let mut builder = CounterSyncBuilder::new(_fbb);
+    builder.add_snapshot_offset(args.snapshot_offset);
     builder.add_seq(args.seq);
     if let Some(x) = args.snapshot { builder.add_snapshot(x); }
     if let Some(x) = args.ops { builder.add_ops(x); }
     if let Some(x) = args.regime { builder.add_regime(x); }
     builder.add_group(args.group);
+    builder.add_snapshot_last(args.snapshot_last);
+    builder.add_snapshot_chunked(args.snapshot_chunked);
     builder.add_has_snapshot(args.has_snapshot);
     builder.finish()
   }
@@ -7206,6 +7212,30 @@ impl<'a> CounterSync<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<bool>(CounterSync::VT_HAS_SNAPSHOT, Some(false)).unwrap()}
   }
+  /// `snapshot` is one part of a snapshot, at byte `snapshot_offset`. Sent only to a follower
+  /// with the `COUNTER_CHUNKS` capability. Without it, `snapshot` is the whole snapshot.
+  #[inline]
+  pub fn snapshot_chunked(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(CounterSync::VT_SNAPSHOT_CHUNKED, Some(false)).unwrap()}
+  }
+  #[inline]
+  pub fn snapshot_offset(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(CounterSync::VT_SNAPSHOT_OFFSET, Some(0)).unwrap()}
+  }
+  /// This part ends the snapshot.
+  #[inline]
+  pub fn snapshot_last(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(CounterSync::VT_SNAPSHOT_LAST, Some(false)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for CounterSync<'_> {
@@ -7220,6 +7250,9 @@ impl ::flatbuffers::Verifiable for CounterSync<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<CounterOp>>>>("ops", Self::VT_OPS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>("snapshot", Self::VT_SNAPSHOT, false)?
      .visit_field::<bool>("has_snapshot", Self::VT_HAS_SNAPSHOT, false)?
+     .visit_field::<bool>("snapshot_chunked", Self::VT_SNAPSHOT_CHUNKED, false)?
+     .visit_field::<u64>("snapshot_offset", Self::VT_SNAPSHOT_OFFSET, false)?
+     .visit_field::<bool>("snapshot_last", Self::VT_SNAPSHOT_LAST, false)?
      .finish();
     Ok(())
   }
@@ -7231,6 +7264,9 @@ pub struct CounterSyncArgs<'a> {
     pub ops: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<CounterOp<'a>>>>>,
     pub snapshot: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
     pub has_snapshot: bool,
+    pub snapshot_chunked: bool,
+    pub snapshot_offset: u64,
+    pub snapshot_last: bool,
 }
 impl<'a> Default for CounterSyncArgs<'a> {
   #[inline]
@@ -7242,6 +7278,9 @@ impl<'a> Default for CounterSyncArgs<'a> {
       ops: None,
       snapshot: None,
       has_snapshot: false,
+      snapshot_chunked: false,
+      snapshot_offset: 0,
+      snapshot_last: false,
     }
   }
 }
@@ -7276,6 +7315,18 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> CounterSyncBuilder<'a, 'b, A>
     self.fbb_.push_slot::<bool>(CounterSync::VT_HAS_SNAPSHOT, has_snapshot, false);
   }
   #[inline]
+  pub fn add_snapshot_chunked(&mut self, snapshot_chunked: bool) {
+    self.fbb_.push_slot::<bool>(CounterSync::VT_SNAPSHOT_CHUNKED, snapshot_chunked, false);
+  }
+  #[inline]
+  pub fn add_snapshot_offset(&mut self, snapshot_offset: u64) {
+    self.fbb_.push_slot::<u64>(CounterSync::VT_SNAPSHOT_OFFSET, snapshot_offset, 0);
+  }
+  #[inline]
+  pub fn add_snapshot_last(&mut self, snapshot_last: bool) {
+    self.fbb_.push_slot::<bool>(CounterSync::VT_SNAPSHOT_LAST, snapshot_last, false);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> CounterSyncBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     CounterSyncBuilder {
@@ -7299,6 +7350,9 @@ impl ::core::fmt::Debug for CounterSync<'_> {
       ds.field("ops", &self.ops());
       ds.field("snapshot", &self.snapshot());
       ds.field("has_snapshot", &self.has_snapshot());
+      ds.field("snapshot_chunked", &self.snapshot_chunked());
+      ds.field("snapshot_offset", &self.snapshot_offset());
+      ds.field("snapshot_last", &self.snapshot_last());
       ds.finish()
   }
 }

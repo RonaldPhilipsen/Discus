@@ -782,6 +782,14 @@ impl Counters {
             .map_err(|e| e.to_string())
     }
 
+    /// The capability bits that member `id` advertises in gossip. Zero when unknown.
+    pub fn peer_caps(&self, id: NodeId) -> u64 {
+        self.node()
+            .and_then(|n| n.membership().cloned())
+            .and_then(|m| m.members().into_iter().find(|(info, _)| info.id == id))
+            .map_or(0, |(info, _)| info.capabilities)
+    }
+
     /// The hints of every group that this node leads.
     pub fn own_hints(&self) -> Vec<discus_wire::GroupHint> {
         self.groups

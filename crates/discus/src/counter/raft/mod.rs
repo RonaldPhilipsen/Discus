@@ -632,6 +632,48 @@ mod tests {
         a.shutdown().await;
     }
 
+    /// A learner far behind gets a batch of many large entries, which goes out in parts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_batch_of_large_entries_reaches_a_learner() {
+        let link = Arc::new(MemLink::default());
+        let budget = Arc::new(Budget::new(u64::MAX, None));
+        let a = replica(&link, 1, 1_000_000, &budget).await;
+        a.bootstrap(
+            NodeId::from_u128(1),
+            &CounterState::new(),
+            5,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let value = "v".repeat(1 << 20);
+        for i in 0..12 {
+            a.raft
+                .client_write(Op {
+                    stamp_ms: 10,
+                    db: 0,
+                    command: cmd(&["SET", &format!("cnt:{i}"), &value]),
+                })
+                .await
+                .unwrap();
+        }
+        let b = replica(&link, 2, 1_000_000, &budget).await;
+        a.raft
+            .add_learner(
+                b.replica,
+                Peer {
+                    node: NodeId::from_u128(2),
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        wait_applied(&b, "cnt:11", &value).await;
+        assert_eq!(b.sm.lock().installed, 0, "the learner got a snapshot");
+        a.shutdown().await;
+        b.shutdown().await;
+    }
+
     #[tokio::test]
     async fn a_lost_peer_is_refused() {
         let link = Arc::new(MemLink::default());

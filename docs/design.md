@@ -808,6 +808,9 @@ two-voter Raft group cannot survive a loss, so small clusters use leader-followe
 - The leader sends each entry to the follower and waits up to 50 ms for the acknowledgment. On a
   timeout it marks the follower lagging, replies anyway, and sends a fresh snapshot later. A joining
   follower receives a snapshot.
+- One `COUNTER_SYNC` carries at most 512 ops and 4 MiB of commands. A snapshot above 4 MiB goes in
+  parts of 4 MiB, the last part with a final flag, to a follower with the capability bit
+  `COUNTER_CHUNKS`. A follower without the bit gets the snapshot in one frame, as before.
 - Failover takes about one lease duration and loses the increments that a lagging follower missed.
   With one node, a node loss loses the counters. Counter availability in this mode depends on the
   API server.
@@ -818,7 +821,8 @@ two-voter Raft group cannot survive a loss, so small clusters use leader-followe
 ### 10.2 Raft mode
 
 - The leader appends the command to an in-memory log, replicates to a quorum (2 of 3), commits,
-  applies, and replies. Commands are batched per append.
+  applies, and replies. Commands are batched per append. One `RAFT_APPEND` carries at most 4 MiB of
+  entries, or one larger entry. The rest goes in the next append. A snapshot goes in parts of 1 MiB.
 - The target voters of group `g` are the top three `NORMAL` members by HRW with `g` as the key.
 - The leader adds each missing target as a learner and waits for it to catch up. When all three
   targets are ready, the leader replaces the voters with the targets in one change. A ready target
