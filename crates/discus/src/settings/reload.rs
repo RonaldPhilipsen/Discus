@@ -78,10 +78,10 @@ pub fn spawn(node: &Arc<Node>, stop: CancellationToken) {
         seen,
         move || Duration::from_secs(period_secs),
         stop,
-        move || {
-            let result = std::fs::read_to_string(&path)
+        move |content| {
+            let result = std::str::from_utf8(&content[0])
                 .map_err(|e| e.to_string())
-                .and_then(|text| reload(&base, &live_settings, &text, node.databases.local()));
+                .and_then(|text| reload(&base, &live_settings, text, node.databases.local()));
             let metrics = discus_telemetry::global();
             metrics.config_pending(!live_settings.pending().is_empty());
             match result {

@@ -1,10 +1,11 @@
 //! Reloads something from files when their content changes, so a rotated certificate or an edited
 //! settings file needs no restart.
 //!
-//! A task reads the files every period and compares their content with the last content it saw.
-//! Kubernetes replaces the files of a mounted Secret or ConfigMap with one symlink swap, so a
-//! read sees either every old file or every new file. A change that does not load, for example a
-//! key that does not match its certificate, logs a warning, and the node keeps what it has.
+//! A task reads the files every period and compares their content with the last content that
+//! loaded. Kubernetes replaces the files of a mounted Secret or ConfigMap with one symlink swap, so
+//! a read sees either every old file or every new file. A change that does not load, for example a
+//! key that does not match its certificate, logs a warning once, and the node keeps what it has.
+//! The task tries the change again at each check, until a load succeeds.
 
 use std::io;
 use std::path::PathBuf;
@@ -32,20 +33,24 @@ async fn read_all(files: &[PathBuf]) -> io::Result<Vec<Vec<u8>>> {
 /// How long a paused watcher waits before it reads the period again.
 const PAUSED_RECHECK: Duration = Duration::from_secs(1);
 
-/// Call `reload` after a change to the content of `files`. `what` names the reloaded thing in the
-/// log. `period` is read before every wait, so a new period applies after the current wait ends. A zero
-/// period pauses the checks, and the task reads the period again after one second.
+/// Call `reload` after a change to the content of `files`. `reload` gets the content that the
+/// task compared, one entry for each file, so the content that counts as loaded is the content
+/// that loaded. `what` names the reloaded thing in the log. `period` is read before every wait, so
+/// a new period applies after the current wait ends. A zero period pauses the checks, and the task
+/// reads the period again after one second.
 pub fn watch(
     what: &'static str,
     files: Vec<PathBuf>,
     mut seen: Snapshot,
     period: impl Fn() -> Duration + Send + 'static,
     stop: CancellationToken,
-    reload: impl Fn() -> io::Result<()> + Send + 'static,
+    reload: impl Fn(&[Vec<u8>]) -> io::Result<()> + Send + 'static,
 ) {
     tokio::spawn(async move {
         // A missing file warns once, not on every check.
         let mut unreadable = false;
+        // The content of the last failed load, so it warns once, not on every check.
+        let mut failed: Option<Vec<Vec<u8>>> = None;
         loop {
             let wait = match period() {
                 Duration::ZERO => PAUSED_RECHECK,
@@ -72,11 +77,18 @@ pub fn watch(
             if seen.as_ref() == Some(&now) {
                 continue;
             }
-            seen = Some(now);
-            match reload() {
-                Ok(()) => tracing::info!("reloaded {what}"),
+            match reload(&now) {
+                Ok(()) => {
+                    tracing::info!("reloaded {what}");
+                    seen = Some(now);
+                    failed = None;
+                }
+                Err(e) if failed.as_ref() == Some(&now) => {
+                    tracing::debug!(what, error = %e, "the {what} files still do not load");
+                }
                 Err(e) => {
-                    tracing::warn!(what, error = %e, "the new {what} files do not load, so the node keeps its current {what}")
+                    tracing::warn!(what, error = %e, "the new {what} files do not load, so the node keeps its current {what}");
+                    failed = Some(now);
                 }
             }
         }
@@ -124,13 +136,13 @@ mod tests {
         .await;
     }
 
-    fn counter() -> (
-        Arc<AtomicUsize>,
-        impl Fn() -> io::Result<()> + Send + 'static,
-    ) {
+    trait Reload: Fn(&[Vec<u8>]) -> io::Result<()> + Send + 'static {}
+    impl<T: Fn(&[Vec<u8>]) -> io::Result<()> + Send + 'static> Reload for T {}
+
+    fn counter() -> (Arc<AtomicUsize>, impl Reload) {
         let n = Arc::new(AtomicUsize::new(0));
         let n2 = n.clone();
-        (n, move || {
+        (n, move |_: &[Vec<u8>]| {
             n2.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })
@@ -157,6 +169,36 @@ mod tests {
         until("the swap reloads", || count.load(Ordering::SeqCst) == 1).await;
         after_more_calls(&calls, 3).await;
         assert_eq!(count.load(Ordering::SeqCst), 1);
+        stop.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_failed_load_is_tried_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        std::fs::write(&path, "one").unwrap();
+        let files = vec![path.clone()];
+        let seen = snapshot(&files);
+        let tries = Arc::new(AtomicUsize::new(0));
+        let t = tries.clone();
+        let reload = move |content: &[Vec<u8>]| {
+            assert_eq!(content, [b"two".to_vec()]);
+            if t.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(io::Error::other("a load that fails once"))
+            } else {
+                Ok(())
+            }
+        };
+        let stop = CancellationToken::new();
+        let (calls, period) = counted(Arc::new(AtomicU64::new(10)));
+        watch("test files", files, seen, period, stop.clone(), reload);
+        atomic_write(&path, "two");
+        until("the load is tried again", || {
+            tries.load(Ordering::SeqCst) == 2
+        })
+        .await;
+        after_more_calls(&calls, 3).await;
+        assert_eq!(tries.load(Ordering::SeqCst), 2);
         stop.cancel();
     }
 

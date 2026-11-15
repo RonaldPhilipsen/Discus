@@ -340,8 +340,18 @@ impl Security {
     /// Read the ACL file again. A connection takes its new rules, or loses its login, at its
     /// next command. On an error, the node keeps its users.
     pub fn reload_acl(&self) -> io::Result<()> {
-        if let (Some(slot), Some(path)) = (&self.acl, &self.acl_file) {
-            slot.store(Arc::new(Acl::load(path)?));
+        let Some(path) = &self.acl_file else {
+            return Ok(());
+        };
+        self.reload_acl_text(&std::fs::read(path)?)
+    }
+
+    /// Load `content` as the new ACL file.
+    pub fn reload_acl_text(&self, content: &[u8]) -> io::Result<()> {
+        if let Some(slot) = &self.acl {
+            let invalid = |e: String| io::Error::new(io::ErrorKind::InvalidData, e);
+            let text = std::str::from_utf8(content).map_err(|e| invalid(e.to_string()))?;
+            slot.store(Arc::new(Acl::parse(text).map_err(invalid)?));
             // The users go first, so a connection that sees the new generation sees them too.
             self.acl_generation.fetch_add(1, Ordering::Release);
         }

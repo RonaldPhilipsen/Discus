@@ -893,7 +893,8 @@ connections on the client, redirect, and admin ports then use them. Open connect
 certificate of their handshake. You do not have to restart the node.
 
 If the new files do not load, the node logs a warning and keeps its current certificates. For
-example, this happens when the key does not match the certificate. In Kubernetes, the files of a
+example, this happens when the key does not match the certificate. The node tries the files again
+at each check, until they load. In Kubernetes, the files of a
 mounted Secret change after the Secret changes, usually within a minute or two.
 
 The node reads the `--auth-config` file once at startup. To change it, restart the node.
@@ -903,8 +904,9 @@ The node reads the `--auth-config` file once at startup. To change it, restart t
 The node checks the file of `--acl-file` every `--tls-reload-secs` seconds. If its content
 changes, the node reads the whole file. You do not have to restart the node.
 
-If the file has an error, the node logs a warning and keeps its users. After a good reload, these
-rules apply:
+The node loads the same content that it compared. If the file has an error, the node logs a
+warning and keeps its users. The node tries the file again at each check, until it loads. After a
+good reload, these rules apply:
 
 - If the user of a connection is gone or `off`, the connection loses its login. Its next command
   returns `-NOAUTH`.
