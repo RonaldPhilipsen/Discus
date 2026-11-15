@@ -7,7 +7,8 @@ overrides the file and blocks reloads, so the chart never renders those flags.
   "budget" (dict "forward-read-ms" $s.budget.forwardReadMs "forward-write-ms" $s.budget.forwardWriteMs "hold-ms" $s.budget.holdMs "replication-ms" $s.budget.replicationMs)
   "reads" (dict "from-replicas" $s.reads.fromReplicas)
   "handoff" (dict "rate-bytes" $s.handoff.rateBytes)
-  "auth" (dict "max-failures-per-connection" $s.auth.maxFailuresPerConnection "max-failures-per-source" $s.auth.maxFailuresPerSource "failure-window-secs" $s.auth.failureWindowSecs)
+  "auth" (dict "max-failures-per-connection" $s.auth.maxFailuresPerConnection "max-failures-per-source" $s.auth.maxFailuresPerSource "failure-window-secs" $s.auth.failureWindowSecs "timeout-secs" $s.auth.timeoutSecs)
+  "clients" (dict "max" $s.clients.max)
   "tls" (dict "reload-secs" $s.tls.reloadSecs)
 -}}
 {{- $sections := dict -}}

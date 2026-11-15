@@ -51,18 +51,20 @@ fn fixture() -> &'static Fixture {
     })
 }
 
-/// The flags that a test node needs for client TLS, unless `args` brings its own certificate.
+/// The flags that a test node needs to accept clients. These are the client TLS flags, unless
+/// `args` brings its own certificate, and the policy `none`, unless `args` sets a policy or a
+/// shared token.
 pub fn server_args<S: AsRef<str>>(args: &[S]) -> Vec<String> {
-    if args.iter().any(|a| a.as_ref() == "--tls-cert") {
-        return Vec::new();
+    let has = |flag: &str| args.iter().any(|a| a.as_ref() == flag);
+    let mut out = Vec::new();
+    if !has("--tls-cert") {
+        let f = fixture();
+        out.extend(["--tls-cert", &f.cert, "--tls-key", &f.key].map(String::from));
     }
-    let f = fixture();
-    vec![
-        "--tls-cert".to_string(),
-        f.cert.clone(),
-        "--tls-key".to_string(),
-        f.key.clone(),
-    ]
+    if !has("--auth-policy") && !has("--shared-token") && !has("--shared-token-file") {
+        out.extend(["--auth-policy", "none"].map(String::from));
+    }
+    out
 }
 
 /// The PEM file of the CA that signed the test node certificates, for external clients.

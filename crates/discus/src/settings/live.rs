@@ -19,6 +19,10 @@ pub struct Reloadable {
     pub auth_max_failures_per_connection: u32,
     pub auth_max_failures_per_source: u32,
     pub auth_failure_window: Duration,
+    /// Zero means no deadline.
+    pub auth_timeout: Duration,
+    /// Zero means no limit.
+    pub max_clients: usize,
     pub tls_reload: Duration,
     pub databases: u32,
 }
@@ -35,6 +39,8 @@ impl Reloadable {
             auth_max_failures_per_connection: c.security.auth_max_failures_per_connection,
             auth_max_failures_per_source: c.security.auth_max_failures_per_source,
             auth_failure_window: Duration::from_secs(c.security.auth_failure_window_secs),
+            auth_timeout: Duration::from_secs(c.security.auth_timeout_secs),
+            max_clients: c.max_clients,
             tls_reload: Duration::from_secs(c.tls_reload_secs),
             databases: c.databases,
         }
@@ -76,6 +82,8 @@ impl Reloadable {
                 "auth.failure-window-secs",
                 self.auth_failure_window != other.auth_failure_window,
             ),
+            ("auth.timeout-secs", self.auth_timeout != other.auth_timeout),
+            ("clients.max", self.max_clients != other.max_clients),
             ("tls.reload-secs", self.tls_reload != other.tls_reload),
             ("databases", self.databases != other.databases),
         ];

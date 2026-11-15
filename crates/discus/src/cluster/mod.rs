@@ -690,13 +690,7 @@ mod tests {
         let live = Live::new(Reloadable::from_config(&config));
         let security = Arc::new(crate::security::tests::security(&[]));
         let node = Node::new(config, security, live);
-        let mut conn = ConnState::new(
-            1,
-            crate::security::ConnAuth {
-                tls: true,
-                ..Default::default()
-            },
-        );
+        let mut conn = ConnState::new(1, crate::security::ConnAuth::default());
         let get = |conn: &mut ConnState| {
             let cmd = crate::counter::cmd(&["GET", "k"]);
             prepare(&node, conn, command::lookup(&cmd[0]), cmd)

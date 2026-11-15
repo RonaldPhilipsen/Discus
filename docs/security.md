@@ -11,19 +11,20 @@ always uses QUIC with mTLS. See [Running a cluster](cluster.md) for its certific
 
 ## Quick start
 
-By default, a node asks only for TLS. Each client connects with TLS and needs no credentials:
+A node needs an authentication policy. Without one, it refuses to start. With the policy `none`,
+the node asks only for TLS. Each client connects with TLS and needs no credentials:
 
 ```bash
-discus --tls-cert /etc/discus/tls.crt --tls-key /etc/discus/tls.key
+discus --tls-cert /etc/discus/tls.crt --tls-key /etc/discus/tls.key --auth-policy none
 ```
 
-To also ask each client for an OAuth 2.0 token, set the policy `all:tls,oauth2`:
+To also ask each client for an OAuth 2.0 token, set the policy `all:oauth2`:
 
 ```bash
 discus \
   --tls-cert /etc/discus/tls.crt \
   --tls-key /etc/discus/tls.key \
-  --auth-policy all:tls,oauth2 \
+  --auth-policy all:oauth2 \
   --auth-config /etc/discus/auth.toml
 ```
 
@@ -57,6 +58,12 @@ The certificate file can hold a chain.
 
 Set `--tls-client-ca` to ask clients for a certificate. The node verifies a client certificate
 against this CA only. It never uses the system trust store for client certificates.
+
+Use a client CA that is not the cluster CA. With an empty `--cluster-san`, every certificate from
+the cluster CA is a member of the cluster, and a member needs no client authorization. A client
+certificate from that CA then gives access to the cluster ports. If one CA must serve both, set
+`--cluster-san`. The Helm chart refuses an install that has the same CA for both and no URI SAN
+test. See [Install with Helm](cluster.md#install-with-helm).
 
 By default a client certificate is optional. Set `--tls-client-auth required` to refuse every
 client without one.
@@ -123,11 +130,10 @@ that the scopes deny returns `-NOPERM`, never `-MOVED`.
 
 ## Authentication policy
 
-The flag `--auth-policy` sets which factors a client needs. There are four factors:
+The flag `--auth-policy` sets which factors a client needs. There are three factors:
 
 | Factor | The client has it when |
 | --- | --- |
-| `tls` | It uses TLS. This factor never identifies a client, so it never works alone. |
 | `mtls` | It presents a verified client certificate. |
 | `oauth2` | It sends a valid OAuth 2.0 token with `AUTH`. |
 | `shared_token` | It sends the shared token with `AUTH`. |
@@ -138,28 +144,35 @@ The policy has one of these forms:
 - `any:<factor>,<factor>`. The client needs one factor.
 - `none`. Every client is in, with read and write access. Every client still uses TLS.
 
-The node refuses to start with a policy that `tls` alone can meet, for example `all:tls` or
-`any:tls,oauth2`. For TLS without credentials, use `none`.
+Every client uses TLS, so TLS is not a factor. Older versions had a factor `tls`. The node still
+accepts `tls` in an `all:` list, ignores it, and logs a warning at startup. For example,
+`all:tls,oauth2` means `all:oauth2`. The node refuses to start with `tls` in an `any:` list, or
+with `all:tls`, because these policies would let every client in. For TLS without credentials,
+use `none`.
 
-Without `--auth-policy`, the node picks a default:
+Without `--auth-policy`, the result depends on the shared token:
 
-| Setting | Default policy |
+| Setting | Result |
 | --- | --- |
-| `--shared-token-file` or `--shared-token` set | `all:tls,shared_token` |
-| No shared token | `none` |
+| `--shared-token-file` or `--shared-token` set | The policy is `all:shared_token`. |
+| No shared token | The node refuses to start. The error names `--auth-policy`. |
+
+The node never opens the client port without credentials unless you ask for it. Set
+`--auth-policy none` to make that choice.
 
 A shared token that the policy does not use stops the node at startup. With `none`, every client
-that can reach the port and complete the TLS handshake gets read and write access. To limit
-access, set a policy with `mtls`, `oauth2`, or `shared_token`.
+that can reach the port and complete the TLS handshake gets read and write access. The node logs
+a warning about this at startup. To limit access, set a policy with `mtls`, `oauth2`, or
+`shared_token`.
 
 Examples:
 
 | Goal | Policy |
 | --- | --- |
-| TLS and a token from an identity provider | `all:tls,oauth2` |
+| A token from an identity provider | `all:oauth2` |
 | A client certificate or a token | `any:mtls,oauth2` |
 | A client certificate and a token | `all:mtls,oauth2` |
-| A simple setup with one password over TLS | `all:tls,shared_token` |
+| A simple setup with one password | `all:shared_token` |
 
 ### Shared token
 
@@ -230,8 +243,9 @@ Connection commands need a login but no scope. They are `PING`, `ECHO`, `QUIT`, 
 Each factor grants scopes:
 
 - The shared token grants `discus.read` and `discus.write`.
-- A client certificate grants the scopes of its first matching `[[client_cert]]` rule. Without a
-  match it grants `discus.read` and `discus.write`.
+- A client certificate grants `discus.read` and `discus.write` when the `--auth-config` file has
+  no `[[client_cert]]` rule. With at least one rule, it grants the scopes of its first matching
+  rule. A certificate that matches no rule gives no `mtls` factor.
 - A token grants the scopes in its claims, or the scopes of its `sub` rule.
 
 With an `all` policy, the client gets only the scopes that every identity factor grants. With an
@@ -244,6 +258,11 @@ Client certificate rules go in the `--auth-config` file. A trailing `*` matches 
 identity = "spiffe://example.org/ns/reporting/*"
 scopes = ["discus.read"]
 ```
+
+With this file, a client whose certificate identity does not start with
+`spiffe://example.org/ns/reporting/` does not have the `mtls` factor. Discus keeps the TLS
+connection open, so the client can still log in with another factor that the policy accepts. Add
+a rule for each identity that needs access.
 
 ## Commands from other nodes
 
@@ -282,6 +301,34 @@ continue to work.
 
 The limit per source also covers bearer tokens on the admin port. See
 [Admin port](#admin-port).
+
+## Limits before authentication
+
+With a policy other than `none`, a connection that has not met the policy yet gets small limits.
+A client without a credential then cannot use much memory on the node.
+
+- One argument and one buffered request are at most 64 KiB, and one command has at most 64
+  arguments. This is enough for `HELLO` and `AUTH` with the largest token. A larger request gets
+  a protocol error, and the node closes the connection.
+- The connection has 30 seconds from the accept to meet the policy. After that the node closes it.
+  Set the time with `--auth-timeout-secs`. The value `0` turns the deadline off. A new value
+  from the settings file applies to new connections.
+
+When the connection meets the policy, the normal limits apply from the next command. So a client
+can send `AUTH` and a large `SET` in one pipeline. A client certificate that meets the policy
+alone gives the normal limits from the start. The normal limits then stay for the life of the
+connection.
+
+The node also limits the number of open client connections, with every policy. The default is
+10000. Set it with `--max-clients`. The value `0` turns the limit off. The count includes
+connections in the TLS handshake, and the listener and the redirect listener share it. At the
+limit, the node accepts a new TCP connection and closes it at once, before the TLS handshake. The
+metric `discus.client.rejected_connections` counts these connections.
+
+The settings file sets both values too, with the keys `[auth] timeout-secs` and `[clients] max`.
+The chart values are `settings.auth.timeoutSecs` and `settings.clients.max`. The node applies a
+change without a restart. A lower connection limit closes no open connection. The node refuses new
+connections until the count is below the new limit.
 
 ## OAuth 2.0
 
@@ -550,7 +597,7 @@ identity provider without `ca_file`.
 | `--tls-client-auth` | `optional` | `required` refuses clients without a certificate in `node` mode. |
 | `--lb-trusted-source` | none | A network that the load balancer connects from. Repeat it for more. |
 | `--lb-identity-tlv` | none | A PROXY v2 TLV type from `0xE0` to `0xEF` that holds the client identity. |
-| `--auth-policy` | see above | The client authentication policy. |
+| `--auth-policy` | required without a shared token | The client authentication policy. See [Authentication policy](#authentication-policy). |
 | `--auth-config` | none | The TOML file with issuers, rules, and admin identities. |
 | `--shared-token-file` | none | A file with the shared token for the `shared_token` factor. The node reloads it after a change. |
 | `--shared-token` | none | The shared token as a value. The process list shows it, so use `--shared-token-file`. |
@@ -559,6 +606,8 @@ identity provider without `ca_file`.
 | `--auth-max-failures-per-connection` | 5 | Failed attempts that close a connection. |
 | `--auth-max-failures-per-source` | 20 | Failed attempts per source in one window. An IPv6 source is a /64 network. |
 | `--auth-failure-window-secs` | 60 | The window of the per-source limit. |
+| `--auth-timeout-secs` | 30 | Seconds that a new connection gets to meet the policy. `0` turns the deadline off. The node applies a change from the settings file. |
+| `--max-clients` | 10000 | Open client connections on both client listeners. `0` means no limit. The node applies a change from the settings file. |
 | `--admin-tls` | off | Serves the admin port over TLS. |
 | `--tls-reload-secs` | 10 | Seconds between checks of the certificate files and the shared token file. `0` turns the reload off. |
 
