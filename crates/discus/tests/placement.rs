@@ -77,8 +77,7 @@ fn bad_placement_settings_are_refused() {
 #[tokio::test]
 async fn info_reports_identity_and_epoch() {
     let addr = common::start_node(&[]).await;
-    let client = common::client_tls::redis_client(&format!("rediss://{addr}"));
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let mut con = common::client_tls::redis_connection(&format!("rediss://{addr}")).await;
     let info: String = redis::cmd("INFO")
         .arg("discus")
         .query_async(&mut con)
