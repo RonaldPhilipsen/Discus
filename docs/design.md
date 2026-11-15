@@ -736,8 +736,11 @@ directly but never gets `-MOVED`. That setting is for tests.
   hints (§9).
 - Read repair is miss-driven. A replica that misses asks the primary or another replica and stores
   what it finds. Hits are not compared across replicas.
-- A promoted primary exchanges per-shard HLC digests with the other replicas once and pulls newer
-  entries. Continuous anti-entropy is out of scope.
+- A promoted primary exchanges per-bucket HLC digests with the other replicas once and pulls newer
+  entries. A reply carries whole buckets up to 16 MiB. While a reply reaches that limit, the
+  primary sends another round for the remaining buckets. The exchange has its own timeout, which
+  grows with the size of the store, and a failed round is tried again up to five times.
+  Continuous anti-entropy is out of scope.
 - Repair treats tombstones as entries, so repair cannot bring back a deleted key.
 - A replica that was unreachable for longer than the tombstone TTL discards its store on rejoin.
 

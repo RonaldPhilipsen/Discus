@@ -917,6 +917,18 @@ impl Replicator {
         peer: NodeId,
         message: Message,
     ) -> Result<Message, TransportError> {
+        let timeout = node.live_settings.get().replication_timeout;
+        self.send_with(node, peer, message, timeout).await
+    }
+
+    /// [`Self::send`] with its own `timeout`.
+    pub(crate) async fn send_with(
+        &self,
+        node: &Arc<Node>,
+        peer: NodeId,
+        message: Message,
+        timeout: Duration,
+    ) -> Result<Message, TransportError> {
         let link = node
             .link()
             .ok_or_else(|| TransportError::Connect("no transport".into()))?;
@@ -926,7 +938,6 @@ impl Replicator {
             link.saw_peer_epoch(peer, info.cluster_id, info.epoch);
             Ok(message)
         };
-        let timeout = node.live_settings.get().replication_timeout;
         let reply = node.request(peer, Lane::Bulk, build, timeout, true).await?;
         // An answered bulk message shows the peer is up (spec "Target health").
         link.note_forward(peer, true);
@@ -1032,7 +1043,17 @@ impl Replicator {
                 };
                 let (store, rf, me) = (self.store.clone(), self.settings.rf, self.id);
                 let entries = tokio::task::spawn_blocking(move || {
-                    digest::answer(&store, &old, &new, rf, from, me, db, &sums)
+                    digest::answer(
+                        &store,
+                        &old,
+                        &new,
+                        rf,
+                        from,
+                        me,
+                        db,
+                        &sums,
+                        digest::REPLY_BYTES,
+                    )
                 })
                 .await
                 .unwrap_or_default();
