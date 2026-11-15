@@ -10,20 +10,9 @@ use security_support::{cmd, exchange, send, start, Node, ACL_USERS, NOPERM_KEY a
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 
-/// A node with the ACL file in `dir`. The source limit is high, because the tests send wrong
-/// passwords.
+/// A node with the users of `ACL_USERS`.
 async fn start_with(dir: &tempfile::TempDir) -> Node {
-    let file = dir.path().join("users.acl");
-    std::fs::write(&file, ACL_USERS).unwrap();
-    start(&[
-        "--acl-file",
-        file.to_str().unwrap(),
-        "--tls-reload-secs",
-        "1",
-        "--auth-max-failures-per-source",
-        "1000000",
-    ])
-    .await
+    start_file(dir, ACL_USERS).await
 }
 
 async fn login(node: &Node, user: &str, password: &str) -> TlsStream<TcpStream> {
@@ -466,13 +455,16 @@ async fn acl_list_shows_the_users_of_a_reload() {
     assert_eq!(run(&mut admin, &["ACL", "USERS"]).await, after);
 }
 
-/// A node with the users of `acl`.
+/// A node with the users of `acl`. It checks the file every second, and its source limit is high,
+/// because the tests send wrong passwords.
 async fn start_file(dir: &tempfile::TempDir, acl: &str) -> Node {
     let file = dir.path().join("users.acl");
     std::fs::write(&file, acl).unwrap();
     start(&[
         "--acl-file",
         file.to_str().unwrap(),
+        "--tls-reload-secs",
+        "1",
         "--auth-max-failures-per-source",
         "1000000",
     ])

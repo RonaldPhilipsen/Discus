@@ -353,6 +353,10 @@ names that the user cannot read, as in Valkey.
   with a mistyped username, sends that password to the identity provider.
 - A user that is `off` cannot log in.
 - A second successful `AUTH` on a connection replaces the user.
+- With an `any` policy, a successful `AUTH` replaces the earlier login of the connection. A login
+  with a password removes an earlier token, and a login with a token removes an earlier user. A
+  client certificate stays. With an `all` policy, the connection keeps both, because it needs
+  both.
 
 Every failure returns the same `-WRONGPASS` error and counts for the limits in
 [Failed attempts](#failed-attempts).

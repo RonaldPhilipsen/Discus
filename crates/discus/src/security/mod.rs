@@ -606,9 +606,16 @@ impl Security {
                 return Err(self.failed(conn, "the source is over its failed-attempt limit"));
             }
         }
+        // With an `any` policy, one credential is the whole login, so a new login replaces the
+        // earlier one. An earlier token must not keep its scopes next to a user with fewer
+        // rights. With an `all` policy, the connection needs both.
+        let replaces = matches!(self.policy, Policy::Any(_));
         match self.password_path(user, token) {
             PasswordPath::Accepted(grant) => {
                 conn.auth.user = Some(grant);
+                if replaces {
+                    conn.auth.token = None;
+                }
                 return Ok(());
             }
             PasswordPath::Refused => return Err(self.failed(conn, "wrong password or user is off")),
@@ -634,12 +641,15 @@ impl Security {
                         generation: oauth2::is_jwt(token).then_some(generation),
                         recheck: claims.recheck,
                     });
+                    if replaces {
+                        conn.auth.user = None;
+                    }
                     Ok(())
                 }
                 Err(reject) => Err(self.failed(conn, &reject.to_string())),
             };
         }
-        Err(self.failed(conn, "the token does not match"))
+        Err(self.failed(conn, "no factor accepts the credential"))
     }
 
     /// Decide whether the password path takes the value of `AUTH [user] <value>`. Both
@@ -664,8 +674,8 @@ impl Security {
         let hash = acl::sha256(value);
         // Most client libraries send `AUTH default <value>` for a credential without a user, so
         // the exact name `default` is the form without a name. Names are case-sensitive.
-        let named = user.filter(|u| *u != b"default");
-        match acl.user(named.unwrap_or(b"default")) {
+        let named = user.filter(|u| *u != acl::DEFAULT_USER.as_bytes());
+        match acl.user(named.unwrap_or(acl::DEFAULT_USER.as_bytes())) {
             Some(u) if u.accepts(&hash) => PasswordPath::Accepted(UserGrant {
                 user: u.clone(),
                 generation,
@@ -768,39 +778,45 @@ impl Security {
         }
         let sub = spec.subcommand(cmd);
         let no_perm = || CommandError::NoPerm(spec.rule_name(sub));
-        // The scopes have no rule for one subcommand. A subcommand that shows the users and their
-        // password hashes thus needs the admin scope.
-        let needs_admin = sub.is_some_and(|sub| sub.is_admin());
-        let by_scopes = conn.auth.scopes(&self.policy).map(|s| {
-            let allowed = match spec.access {
-                Access::Public | Access::Connection => true,
-                Access::Read => s.can_read(),
-                Access::Write => s.can_write(),
-            };
-            allowed && (!needs_admin || s.is_admin())
+        let scopes = conn.auth.scopes(&self.policy);
+        let by_access = scopes.map(|s| match spec.access {
+            Access::Public | Access::Connection => true,
+            Access::Read => s.can_read(),
+            Access::Write => s.can_write(),
         });
-        let by_user = match &conn.auth.user {
-            Some(g) if self.policy.uses(Factor::Password) => {
-                Some(g.user.check(spec, cmd).map_err(|d| match d {
+        // The scopes have no rule for one subcommand. When the scopes alone decide, a subcommand
+        // that shows the users and their password hashes thus needs the admin scope.
+        let admin_ok =
+            !sub.is_some_and(|sub| sub.is_admin()) || scopes.is_some_and(Scopes::is_admin);
+        let by_scopes = by_access == Some(true) && admin_ok;
+        let all = matches!(self.policy, Policy::All(_));
+        if !all && by_scopes {
+            return Ok(());
+        }
+        let by_user = conn
+            .auth
+            .user
+            .as_ref()
+            .filter(|_| self.policy.uses(Factor::Password))
+            .map(|grant| {
+                grant.user.check(spec, sub, cmd).map_err(|d| match d {
                     acl::Denied::Command => no_perm(),
                     acl::Denied::Key => CommandError::NoPermKey,
-                }))
-            }
-            _ => None,
-        };
-        let all = matches!(self.policy, Policy::All(_));
-        match (by_scopes, by_user) {
-            (Some(scopes), Some(user)) if all => {
+                })
+            });
+        match (by_access, by_user) {
+            // The rule of the user decides the subcommand, so the scopes need only the access.
+            (Some(access), Some(user)) if all => {
                 user?;
-                if scopes {
+                if access {
                     Ok(())
                 } else {
                     Err(no_perm())
                 }
             }
-            (Some(true), _) => Ok(()),
             (_, Some(user)) => user,
-            (Some(false), None) => Err(no_perm()),
+            (Some(_), None) if by_scopes => Ok(()),
+            (Some(_), None) => Err(no_perm()),
             (None, None) => Err(CommandError::NoAuth),
         }
     }
@@ -1019,6 +1035,53 @@ pub(crate) mod tests {
             s.authorize(&mut conn, spec(b"GET"), &other),
             Err(CommandError::NoPermKey)
         );
+    }
+
+    #[test]
+    fn the_rule_of_a_user_decides_a_subcommand_that_shows_the_users() {
+        let list = crate::counter::cmd(&["ACL", "LIST"]);
+        let acl = spec(b"ACL");
+
+        // `all`: the certificate has no admin scope, and the rule of the user is enough.
+        let s = with_user("~k +@all", "all:mtls,password");
+        let mut conn = user_conn(&s, Some(Scopes::READ_WRITE));
+        assert_eq!(s.authorize(&mut conn, acl, &list), Ok(()));
+        let s = with_user("~k +@connection", "all:mtls,password");
+        let mut conn = user_conn(&s, Some(Scopes::READ_WRITE.union(Scopes::ADMIN)));
+        assert_eq!(s.authorize(&mut conn, acl, &list), no_perm("acl|list"));
+
+        // `any`: a certificate without the admin scope never opens it for a user without the rule.
+        let s = with_user("~k +@connection", "any:mtls,password");
+        let mut conn = user_conn(&s, Some(Scopes::READ_WRITE));
+        assert_eq!(s.authorize(&mut conn, acl, &list), no_perm("acl|list"));
+        let mut conn = user_conn(&s, Some(Scopes::ADMIN));
+        assert_eq!(s.authorize(&mut conn, acl, &list), Ok(()));
+        let s = with_user("~k +acl|list", "any:mtls,password");
+        let mut conn = user_conn(&s, Some(Scopes::READ_WRITE));
+        assert_eq!(s.authorize(&mut conn, acl, &list), Ok(()));
+    }
+
+    #[test]
+    fn a_login_replaces_the_earlier_one_only_with_an_any_policy() {
+        let token = || TokenGrant {
+            raw: bytes::Bytes::new(),
+            exp: i64::MAX,
+            nbf: None,
+            scopes: Scopes::READ_WRITE,
+            generation: None,
+            recheck: None,
+        };
+        for (policy, kept) in [
+            ("any:oauth2,password", false),
+            ("all:oauth2,password", true),
+        ] {
+            let s = with_user("~k +get", policy);
+            let mut conn = ConnState::new(1, ConnAuth::default());
+            conn.auth.token = Some(token());
+            s.authenticate(&mut conn, Some(b"u"), b"p").unwrap();
+            assert!(conn.auth.user.is_some(), "{policy}");
+            assert_eq!(conn.auth.token.is_some(), kept, "{policy}");
+        }
     }
 
     #[test]

@@ -303,19 +303,18 @@ fn acl(node: &Node, conn: &mut ConnState, cmd: &Command) -> Reply {
             ]),
         }),
         "WHOAMI" if cmd.len() == 2 => Ok(bulk(
-            conn.auth.user.as_ref().map_or("default", |g| &g.user.name),
+            conn.auth
+                .user
+                .as_ref()
+                .map_or(crate::security::acl::DEFAULT_USER, |g| &g.user.name),
         )),
         "CAT" if cmd.len() == 2 => Ok(Value::Array(
             Categories::NAMES.iter().map(|(n, _)| bulk(n)).collect(),
         )),
         "CAT" if cmd.len() == 3 => {
-            let category =
-                Categories::parse(&String::from_utf8_lossy(&cmd[2])).ok_or_else(|| {
-                    CommandError::Custom(format!(
-                        "ERR Unknown category '{}'",
-                        String::from_utf8_lossy(&cmd[2])
-                    ))
-                })?;
+            let name = String::from_utf8_lossy(&cmd[2]);
+            let category = Categories::parse(&name)
+                .ok_or_else(|| CommandError::Custom(format!("ERR Unknown category '{name}'")))?;
             Ok(Value::Array(
                 specs()
                     .iter()

@@ -3,7 +3,10 @@
 mod parse;
 mod user;
 
-pub use user::{CommandSet, Denied, KeyPattern, User};
+pub use user::{Denied, KeyPattern, User};
+
+/// The user of a login without a name, and of a connection without a user in `ACL WHOAMI`.
+pub const DEFAULT_USER: &str = "default";
 
 use std::collections::HashMap;
 use std::io;
@@ -45,13 +48,5 @@ impl Acl {
         let mut users: Vec<&Arc<User>> = self.users.values().collect();
         users.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         users
-    }
-
-    pub fn len(&self) -> usize {
-        self.users.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.users.is_empty()
     }
 }

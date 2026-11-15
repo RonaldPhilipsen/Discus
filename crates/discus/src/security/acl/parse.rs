@@ -31,19 +31,7 @@ enum RuleError {
     UnknownCommand,
     UnknownCategory,
     Subcommand,
-    Invalid(String),
-}
-
-impl From<String> for RuleError {
-    fn from(message: String) -> Self {
-        RuleError::Invalid(message)
-    }
-}
-
-impl From<&str> for RuleError {
-    fn from(message: &str) -> Self {
-        RuleError::Invalid(message.to_owned())
-    }
+    BadHash,
 }
 
 fn parse_line(line: &str, seen: &HashMap<String, Arc<User>>) -> Result<User, String> {
@@ -70,7 +58,7 @@ fn parse_line(line: &str, seen: &HashMap<String, Arc<User>>) -> Result<User, Str
             RuleError::Subcommand => {
                 format!("this command has no rules for one subcommand (word {word})")
             }
-            RuleError::Invalid(message) => message,
+            RuleError::BadHash => "a password hash must be 64 hex digits".to_owned(),
         })?;
     }
     Ok(user)
@@ -110,7 +98,7 @@ fn apply_prefixed(user: &mut User, rule: &str) -> Result<(), RuleError> {
         let bytes = hex::decode(hash)
             .ok()
             .and_then(|b| <[u8; 32]>::try_from(b).ok())
-            .ok_or("a password hash must be 64 hex digits")?;
+            .ok_or(RuleError::BadHash)?;
         add_password(user, bytes);
     } else if let Some(pattern) = rule.strip_prefix('~') {
         add_key(user, pattern, KeyPerm::READ_WRITE);
@@ -213,9 +201,7 @@ fn command_rule(user: &mut User, target: &str, allowed: bool) -> Result<(), Rule
         Some(_) if spec.subcommands.is_empty() => return Err(RuleError::Subcommand),
         Some(sub) => {
             let sub = spec
-                .subcommands
-                .iter()
-                .find(|s| s.name.eq_ignore_ascii_case(sub))
+                .subcommand_named(sub.as_bytes())
                 .ok_or(RuleError::UnknownCommand)?;
             user.commands.set(sub.id, allowed);
         }
@@ -274,7 +260,7 @@ mod tests {
 
     fn allows_sub(u: &User, sub: &str) -> bool {
         let spec = crate::command::lookup(b"ACL").unwrap();
-        let entry = spec.subcommands.iter().find(|s| s.name == sub).unwrap();
+        let entry = spec.subcommand_named(sub.as_bytes()).unwrap();
         u.commands.contains(entry.id)
     }
 
@@ -392,7 +378,7 @@ mod tests {
     #[test]
     fn comments_blank_lines_and_crlf_are_fine() {
         let acl = Acl::parse("# users\r\n\r\nuser a on nopass\r\n  user b off  \r\n").unwrap();
-        assert_eq!(acl.len(), 2);
+        assert_eq!(acl.users().len(), 2);
         assert!(acl.user(b"a").unwrap().enabled);
         assert!(acl.user(b"A").is_none());
     }

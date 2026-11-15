@@ -154,7 +154,11 @@ impl CommandSpec {
 
     /// The entry of the subcommand that `cmd` names, when it has one.
     pub fn subcommand(&self, cmd: &Command) -> Option<&'static Subcommand> {
-        let name = cmd.get(1)?;
+        self.subcommand_named(cmd.get(1)?)
+    }
+
+    /// The entry of the subcommand `name`, ignoring case.
+    pub fn subcommand_named(&self, name: &[u8]) -> Option<&'static Subcommand> {
         self.subcommands
             .iter()
             .find(|sub| sub.name.as_bytes().eq_ignore_ascii_case(name))
@@ -213,14 +217,13 @@ fn registry() -> &'static Registry {
             let subs: Vec<Subcommand> = spec
                 .subcommands
                 .iter()
-                .map(|sub| {
-                    next += 1;
-                    Subcommand {
-                        id: (next - 1) as u16,
-                        ..*sub
-                    }
+                .enumerate()
+                .map(|(i, sub)| Subcommand {
+                    id: (next + i) as u16,
+                    ..*sub
                 })
                 .collect();
+            next += subs.len();
             spec.subcommands = Vec::leak(subs);
         }
         assert!(

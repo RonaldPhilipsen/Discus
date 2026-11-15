@@ -2,7 +2,7 @@ use ctutils::CtEq;
 use discus_resp::Command;
 
 use crate::cluster::route::{key_perms, KeyPerm};
-use crate::command::table::{CommandSpec, MAX_COMMANDS};
+use crate::command::table::{CommandSpec, Subcommand, MAX_COMMANDS};
 use crate::command::util::glob_match;
 
 /// One bit for each command id.
@@ -141,12 +141,17 @@ impl User {
     }
 
     /// Check the command rule, then every key of `cmd`. A subcommand with its own entry, such as
-    /// `ACL LIST`, uses its own rule.
+    /// `ACL LIST`, uses its own rule: `sub` is `spec.subcommand(cmd)`.
     ///
     /// Each key needs one pattern that matches it and grants the whole access. Two patterns do not
     /// add up: `%R~x` and `%W~x` together do not allow `INCR x`. This is the rule of Valkey.
-    pub fn check(&self, spec: &CommandSpec, cmd: &Command) -> Result<(), Denied> {
-        let id = spec.subcommand(cmd).map_or(spec.id, |sub| sub.id);
+    pub fn check(
+        &self,
+        spec: &CommandSpec,
+        sub: Option<&Subcommand>,
+        cmd: &Command,
+    ) -> Result<(), Denied> {
+        let id = sub.map_or(spec.id, |sub| sub.id);
         if !self.commands.contains(id) {
             return Err(Denied::Command);
         }
@@ -154,7 +159,10 @@ impl User {
             let allowed = self
                 .keys
                 .iter()
-                .any(|k| k.perm.contains(needed) && glob_match(&k.pattern, key));
+                // `allkeys` is the usual rule, and its match needs no walk over the key.
+                .any(|k| {
+                    k.perm.contains(needed) && (k.pattern == b"*" || glob_match(&k.pattern, key))
+                });
             if !allowed {
                 return Err(Denied::Key);
             }
@@ -172,16 +180,10 @@ mod tests {
     use super::*;
     use crate::cluster::route::KeyPerm;
 
-    fn cmd(parts: &[&str]) -> Command {
-        parts
-            .iter()
-            .map(|p| Bytes::copy_from_slice(p.as_bytes()))
-            .collect()
-    }
-
     fn check(user: &User, parts: &[&str]) -> Result<(), Denied> {
-        let c = cmd(parts);
-        user.check(crate::command::lookup(&c[0]).unwrap(), &c)
+        let c = crate::counter::cmd(parts);
+        let spec = crate::command::lookup(&c[0]).unwrap();
+        user.check(spec, spec.subcommand(&c), &c)
     }
 
     fn user(commands: &[&str], keys: &[(&str, KeyPerm)]) -> User {
@@ -231,7 +233,10 @@ mod tests {
             Bytes::from_static(b"GET"),
             Bytes::from_static(b"bin:\xff\x00"),
         ];
-        assert_eq!(u.check(crate::command::lookup(b"GET").unwrap(), &c), Ok(()));
+        assert_eq!(
+            u.check(crate::command::lookup(b"GET").unwrap(), None, &c),
+            Ok(())
+        );
     }
 
     #[test]

@@ -100,22 +100,18 @@ impl ConnAuth {
     /// `all` takes the intersection of the factors, so the strictest factor wins. `any`
     /// takes the union of the factors that are present.
     pub fn scopes(&self, policy: &Policy) -> Option<Scopes> {
-        match policy {
-            Policy::None => Some(Scopes::READ_WRITE),
-            Policy::All(factors) => {
-                if !factors.iter().all(|f| self.has(*f)) {
-                    return None;
-                }
-                factors
-                    .iter()
-                    .filter_map(|f| self.grant(*f))
-                    .reduce(Scopes::intersect)
-            }
-            Policy::Any(factors) => factors
-                .iter()
-                .filter_map(|f| self.grant(*f))
-                .reduce(Scopes::union),
+        let (factors, combine): (_, fn(Scopes, Scopes) -> Scopes) = match policy {
+            Policy::None => return Some(Scopes::READ_WRITE),
+            Policy::All(factors) => (factors, Scopes::intersect),
+            Policy::Any(factors) => (factors, Scopes::union),
+        };
+        if !self.authenticated(policy) {
+            return None;
         }
+        factors
+            .iter()
+            .filter_map(|f| self.grant(*f))
+            .reduce(combine)
     }
 }
 
