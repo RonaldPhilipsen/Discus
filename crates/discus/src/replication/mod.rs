@@ -770,6 +770,9 @@ impl Replicator {
             }
             let mut batch = Batch::new(node.epoch_id());
             batch.entries = fill(&self.store, &q, keys);
+            if let Some(label) = &q.label {
+                discus_telemetry::global().replication_batch(label, batch.entries.len() as u64);
+            }
             let started = Instant::now();
             match self.send(&node, q.peer, Message::Replicate(batch)).await {
                 Ok(_) => {
