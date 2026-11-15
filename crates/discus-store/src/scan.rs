@@ -54,13 +54,14 @@ impl Store {
             if examined >= count {
                 return (encode(shard_idx, from), examined);
             }
-            let want = count - examined;
             let guard = self.shards[shard_idx].inner.read();
             let Some(d) = guard.get(db) else {
                 shard_idx += 1;
                 from = 0;
                 continue;
             };
+            // `COUNT` has no upper limit, so the shard length bounds the allocations below.
+            let want = (count - examined).min(d.map.len()).max(1);
             // A max-heap of the `want` lowest orders so far. `picked` holds every entry at or
             // below its top, ties included, and is trimmed when it grows.
             let mut lowest: BinaryHeap<u64> = BinaryHeap::with_capacity(want + 1);
@@ -80,7 +81,7 @@ impl Store {
                     _ => lowest.push(o),
                 }
                 picked.push((o, k, e));
-                if picked.len() > 2 * want + 16 {
+                if picked.len() > want.saturating_mul(2).saturating_add(16) {
                     let top = lowest.peek().copied().unwrap_or(ORDER_MAX);
                     picked.retain(|p| p.0 <= top);
                 }
