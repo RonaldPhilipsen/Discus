@@ -1,5 +1,5 @@
 [tools]
-"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
+"aqua:EmbarkStudios/cargo-deny" = "0.21.0"
 "aqua:nextest-rs/nextest/cargo-nextest" = "0.9.151"
 prek = "0.5.11"
 flatc = "25.12.19-2026-02-06-03fffb2"
