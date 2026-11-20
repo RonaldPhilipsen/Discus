@@ -167,7 +167,7 @@ and 100.
 | `discus.local_health.multiplier` | gauge | none | The factor, from 1 to 9, that stretches the probe and suspicion timeouts. |
 | `discus.local_health.evidence_dropped` | counter | none | Data-path evidence dropped while the local health was at or above the evidence cutoff (multiplier 1.5). |
 | `discus.tombstones` | gauge | none | Stored tombstones (delete markers). |
-| `discus.primary_read.delete_unacked` | counter | none | Deleted keys under `--primary-read-prefix` with no secondary acknowledgment in `--replication-timeout-ms`. The delete still returned success. Exported as `discus_primary_read_delete_unacked_total`. |
+| `discus.primary_read.delete_unacked` | counter | none | Deleted keys under `--primary-read-prefix` with no secondary acknowledgment in `--replication-timeout-ms`. The delete still returned success. Exported as `discus_primary_read_delete_unacked_total`. With `--write-acks` of 1 or more, such a delete counts in `discus_write_unacked_total` instead. |
 | `discus.write.unacked` | counter | `mode` | Written keys with fewer than `--write-acks` secondary acknowledgments when the wait ended. The `mode` attribute is the `--write-ack-timeout` value: `open` or `closed`. With `open`, the write returned success. With `closed`, it returned `-NOREPLICAS`. Exported as `discus_write_unacked_total`. |
 | `discus.config.reloads` | counter | `outcome` | Reloads of the settings file, with `outcome` `applied` or `failed`. Exported as `discus_config_reloads_total`. |
 | `discus.config.pending` | gauge | none | 1 while a new value of a reloadable setting needs a restart. A lower `databases` value in the file does this. Exported as `discus_config_pending`. |

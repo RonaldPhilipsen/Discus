@@ -406,7 +406,7 @@ replication-ms = 1000          # a peer acknowledges a replication batch within 
 
 [replication]
 write-acks = 0                 # secondaries that store each write before the primary replies
-write-ack-timeout = "open"     # "open" replies +OK when they time out, "closed" replies with an error
+write-ack-timeout = "open"     # on a timeout, "open" replies normally and "closed" with an error
 
 [reads]
 from-replicas = true
@@ -571,7 +571,7 @@ restart.
 | `--replication-batch-keys` | 512 | Keys in one replication batch. |
 | `--replication-timeout-ms` | 1000 | Time for a peer to acknowledge a replication batch. |
 | `--write-acks` | 0 | Secondaries that store each write before the primary replies. It must be below `--replication-factor`. |
-| `--write-ack-timeout` | `open` | The reply to a write that the secondaries do not acknowledge in `--replication-timeout-ms`. `open` replies `+OK`. `closed` replies with an error. |
+| `--write-ack-timeout` | `open` | The reply to a write that the secondaries do not acknowledge in `--replication-timeout-ms`. `open` sends the normal reply of the command. `closed` replies with an error. |
 | `--replication-retry-ms` | 1000 | Time between probes of a peer that missed a batch. |
 | `--hint-max-entries` | 262144 | Hints for one peer, at most. |
 | `--hint-max-bytes` | 67108864 | Bytes of hints for one peer, at most. |
