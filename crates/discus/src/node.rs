@@ -70,7 +70,7 @@ pub struct Node {
     epochs: Arc<RwLock<EpochHistory>>,
     /// The current epoch of `epochs`, for reads on the command path without the lock. It changes
     /// only under the write lock, after the work that a reader must see with the new epoch.
-    current: ArcSwap<Epoch>,
+    current: Arc<ArcSwap<Epoch>>,
     /// The generation of `current`, unique across all nodes of the process. A thread keeps its
     /// last read of `current` while the generation stays, so a lookup costs one atomic load.
     current_generation: AtomicU64,
@@ -280,7 +280,7 @@ impl Node {
             config,
             id,
             hlc: Hlc::new(id, hlc_clock),
-            current: ArcSwap::new(epochs.current().clone()),
+            current: Arc::new(ArcSwap::new(epochs.current().clone())),
             current_generation: AtomicU64::new(next_generation()),
             epochs: Arc::new(RwLock::new(epochs)),
             started_at: Instant::now(),
@@ -545,7 +545,7 @@ impl Node {
             max_age: std::time::Duration::from_millis(c.write_set_ttl_ms),
         };
         ConnWrites {
-            record: Record::new(&limits, self.write_budget.clone()),
+            record: Record::new(&limits, self.write_budget.clone(), self.current.clone()),
             set: WriteSet::new(limits, self.write_budget.clone()),
         }
     }

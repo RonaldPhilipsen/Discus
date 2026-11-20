@@ -466,9 +466,68 @@ async fn a_flushed_key_does_not_block_wait() {
         .query_async(&mut other)
         .await
         .unwrap();
+    // A key that no owner holds counts 0, as a write lost with its primary does.
+    let (n, took) = wait(&mut conn, 1, 300).await;
+    assert_eq!(n, 0);
+    assert!(took >= Duration::from_millis(300), "{took:?}");
+    // A flush on the connection itself empties the record.
+    let _: () = redis::cmd("FLUSHALL").query_async(&mut conn).await.unwrap();
     let (n, took) = wait(&mut conn, 1, 0).await;
     assert!(n >= 1, "{n}");
     assert!(took < CAP, "{took:?}");
+}
+
+/// A gossip cluster of three nodes, a connection on the first, and a key whose primary is
+/// another node.
+async fn lost_primary(
+    net: &Net,
+    extra: &[&str],
+) -> (Vec<GossipNode>, MultiplexedConnection, u64, String) {
+    let mut args = RF3.to_vec();
+    args.extend_from_slice(extra);
+    let nodes = net.start_agreed(3, &args).await;
+    let (conn, id) = client(&nodes[0]).await;
+    let k = (0..)
+        .map(|i| format!("lost:{i}"))
+        .find(|k| nodes[0].primary(k.as_bytes()) == nodes[1].id)
+        .unwrap();
+    (nodes, conn, id, k)
+}
+
+#[tokio::test]
+async fn a_write_lost_with_its_primary_counts_zero() {
+    let net = Net::new();
+    let (nodes, mut conn, _, k) = lost_primary(&net, &[]).await;
+    nodes[1]
+        .node
+        .faults
+        .hold_replication
+        .store(true, Ordering::Relaxed);
+    let _: () = conn.set(&k, "v").await.unwrap();
+    nodes[1].kill();
+    let rest = [&nodes[0], &nodes[2]];
+    wait_agreed(&rest, Duration::from_secs(30)).await;
+    assert!(!nodes[0].node.epochs().current().is_normal(nodes[1].id));
+    let (n, took) = wait(&mut conn, 1, 2_000).await;
+    assert_eq!(n, 0);
+    assert!(took >= Duration::from_millis(2_000), "{took:?}");
+}
+
+#[tokio::test]
+async fn an_overflow_counts_zero_after_a_member_loss() {
+    let net = Net::new();
+    let (nodes, mut conn, id, _) = lost_primary(&net, &["--write-set-keys", "4"]).await;
+    for i in 0..5 {
+        let _: () = conn.set(format!("o{i}"), "v").await.unwrap();
+    }
+    let writes = nodes[0].node.conn_writes(id).unwrap();
+    assert!(writes.lock().record.overflowed());
+    nodes[2].kill();
+    let rest = [&nodes[0], &nodes[1]];
+    wait_agreed(&rest, Duration::from_secs(30)).await;
+    let (n, took) = wait(&mut conn, 1, 2_000).await;
+    assert_eq!(n, 0);
+    assert!(took >= Duration::from_millis(2_000), "{took:?}");
 }
 
 #[tokio::test]

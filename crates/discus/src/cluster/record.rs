@@ -4,8 +4,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use bytes::Bytes;
-use discus_placement::Version;
+use discus_placement::{Epoch, Version};
 use foldhash::fast::RandomState;
 
 use super::writeset::{Held, WriteSetBudget, WriteSetLimits};
@@ -26,10 +27,20 @@ pub struct Record {
     max_keys: usize,
     max_bytes: usize,
     held: Held,
+    /// The current epoch of the node.
+    current: Arc<ArcSwap<Epoch>>,
+    /// The epoch of the first note since the last [`Record::clear`].
+    since: Option<Arc<Epoch>>,
+    /// The epoch when the overflow started.
+    overflowed_in: Option<Arc<Epoch>>,
 }
 
 impl Record {
-    pub fn new(limits: &WriteSetLimits, budget: Arc<WriteSetBudget>) -> Record {
+    pub fn new(
+        limits: &WriteSetLimits,
+        budget: Arc<WriteSetBudget>,
+        current: Arc<ArcSwap<Epoch>>,
+    ) -> Record {
         Record {
             dbs: Vec::new(),
             len: 0,
@@ -38,6 +49,9 @@ impl Record {
             max_keys: limits.keys.max(1),
             max_bytes: limits.bytes,
             held: Held::new(budget),
+            current,
+            since: None,
+            overflowed_in: None,
         }
     }
 
@@ -46,6 +60,9 @@ impl Record {
     pub fn note(&mut self, db: u32, key: &Bytes, version: Version) {
         if self.overflow {
             return;
+        }
+        if self.since.is_none() {
+            self.since = Some(self.current.load_full());
         }
         let i = match self.dbs.iter().position(|(d, _)| *d == db) {
             Some(i) => i,
@@ -61,8 +78,11 @@ impl Record {
         let size = key.len() + ENTRY_OVERHEAD;
         let bytes = self.bytes + size;
         if self.len >= self.max_keys || bytes > self.max_bytes || !self.held.cover(bytes) {
+            let since = self.since.take();
             self.clear();
             self.overflow = true;
+            self.since = since;
+            self.overflowed_in = Some(self.current.load_full());
             return;
         }
         self.dbs[i].1.insert(key.clone(), version);
@@ -87,11 +107,23 @@ impl Record {
         self.len = 0;
         self.bytes = 0;
         self.overflow = false;
+        self.since = None;
+        self.overflowed_in = None;
         self.held.trim(0);
     }
 
     pub fn overflowed(&self) -> bool {
         self.overflow
+    }
+
+    /// The epochs of an overflowed record: the epoch of its first write and the epoch of the
+    /// overflow. A member of either one may hold a write that the record no longer names.
+    pub fn overflow_epochs(&self) -> Vec<Arc<Epoch>> {
+        self.since
+            .iter()
+            .chain(self.overflowed_in.iter())
+            .cloned()
+            .collect()
     }
 
     pub fn entries(&self) -> impl Iterator<Item = (u32, &Bytes, Version)> {
@@ -159,7 +191,9 @@ mod tests {
             bytes,
             max_age: Duration::from_secs(5),
         };
-        (Record::new(&limits, budget.clone()), budget)
+        let epoch = discus_membership::provisional_epoch(NodeId::from_u128(1));
+        let current = Arc::new(ArcSwap::from_pointee(epoch));
+        (Record::new(&limits, budget.clone(), current), budget)
     }
 
     fn k(s: &str) -> Bytes {
