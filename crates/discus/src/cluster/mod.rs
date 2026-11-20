@@ -10,6 +10,7 @@ pub mod rename;
 pub mod route;
 pub mod service;
 pub mod topology;
+pub mod wait;
 pub mod writeset;
 
 use std::collections::{HashMap, HashSet};
@@ -641,6 +642,11 @@ pub(crate) fn local_part(
 pub fn run(node: &Arc<Node>, job: Job, writes: Option<&Writes>, route: Span) -> Dispatch {
     // With one owner per key, a read reaches that owner whatever the write set requires.
     let writes = writes.filter(|_| node.config.replication_factor > 1);
+    // `WAIT` needs no owner and no link, so it never forwards and never gets `-MOVED`.
+    if job.spec.route == Route::Wait {
+        drop(route);
+        return wait::run(node, job, writes);
+    }
     let set_reply = job.spec.set_reply;
     let null_array = job.spec.null_array && job.cmd.len() > 2;
     let flushed = (job.spec.route == Route::Broadcast).then_some((job.spec.name, job.db));
@@ -745,7 +751,7 @@ pub fn run_hop(
             drop(route);
             copy::run(node, job, hop, writes)
         }
-        Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => {
+        Route::Connection | Route::Local | Route::Fanout | Route::Broadcast | Route::Wait => {
             drop(route);
             Dispatch::Ready(local(node, job.spec, job.db, &job.cmd))
         }
@@ -864,7 +870,7 @@ fn single(
     // The record also takes a primary-read key, but never a counter key.
     let noted = (write && writes.is_some() && !node.is_counter_key(&job.cmd[1]))
         .then(|| (job.db, job.cmd[1].clone()));
-    let by_key = per_key(job.spec);
+    let by_key = write && per_key(job.spec);
     let dispatch = single_planned(node, job, owners, hop, write, need, route);
     let Some(writes) = writes.filter(|_| key.is_some() || noted.is_some()) else {
         return dispatch;

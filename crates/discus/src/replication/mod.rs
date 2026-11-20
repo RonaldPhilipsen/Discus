@@ -364,6 +364,19 @@ impl Replicator {
         st.scanning || !st.pending.is_empty()
     }
 
+    /// Every write that this node took reached its other owners: each queue is up and empty with
+    /// no batch in flight, no hint or lost hint waits, and no handoff runs. `WAIT` asks this of
+    /// every member after its record overflowed.
+    pub fn drained(&self) -> bool {
+        self.peers
+            .read()
+            .values()
+            .all(|q| !q.is_down() && !q.busy())
+            && self.hints.lock().is_empty()
+            && !self.scanning()
+            && !self.handoff_pending()
+    }
+
     /// Handoff scans finished since start.
     pub fn scans(&self) -> u64 {
         self.scans.load(Ordering::Relaxed)
@@ -1005,6 +1018,16 @@ impl Replicator {
             .filter_map(|k| self.store.stored_version(k.db, &k.key).map(|v| (k, v)))
             .collect();
         self.unstored(node, q.peer, offers).await
+    }
+
+    /// The keys of `offers` that `peer` does not hold at the offered version or newer, for `WAIT`.
+    pub(crate) async fn missing(
+        &self,
+        node: &Arc<Node>,
+        peer: NodeId,
+        offers: Vec<(DbKey, Version)>,
+    ) -> Result<Vec<DbKey>, TransportError> {
+        self.unstored(node, peer, offers).await
     }
 
     /// The keys of `offers` that `peer` does not hold at the offered version or newer.

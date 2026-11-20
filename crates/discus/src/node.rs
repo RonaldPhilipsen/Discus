@@ -556,7 +556,7 @@ impl Node {
         self.faults.conns.lock().get(&id)?.upgrade()
     }
 
-    /// Bytes that every write set of this node holds.
+    /// Bytes that every write set and every `WAIT` record of this node holds.
     pub fn write_set_bytes(&self) -> u64 {
         self.write_budget.used()
     }

@@ -100,6 +100,18 @@ impl Record {
             .flat_map(|(db, keys)| keys.iter().map(move |(k, v)| (*db, k, *v)))
     }
 
+    /// [`Record::remove`], only while the entry still holds `version`.
+    pub fn remove_at(&mut self, db: u32, key: &[u8], version: Version) {
+        let current = self
+            .dbs
+            .iter()
+            .find(|(d, _)| *d == db)
+            .and_then(|(_, keys)| keys.get(key));
+        if current == Some(&version) {
+            self.remove(db, key);
+        }
+    }
+
     pub fn remove(&mut self, db: u32, key: &[u8]) {
         let Some(i) = self.dbs.iter().position(|(d, _)| *d == db) else {
             return;

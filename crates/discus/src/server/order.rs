@@ -33,7 +33,7 @@ impl Keys {
     pub fn of(route: Route, cmd: &Command) -> Keys {
         match route {
             Route::Connection => Keys::None,
-            Route::Local | Route::Fanout | Route::Broadcast => Keys::Barrier,
+            Route::Local | Route::Fanout | Route::Broadcast | Route::Wait => Keys::Barrier,
             Route::Single { .. } => Keys::One(xxh3_64(&cmd[1])),
             Route::MultiRead { .. } | Route::MultiWrite { .. } | Route::Rename | Route::Copy => {
                 Keys::Many(

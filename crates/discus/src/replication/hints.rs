@@ -277,6 +277,13 @@ impl HintStore {
             .retain(|_, t| !t.hints.is_empty() || !t.lost.is_empty());
     }
 
+    /// No target holds a hint or a lost bucket.
+    pub fn is_empty(&self) -> bool {
+        self.targets
+            .values()
+            .all(|t| t.hints.is_empty() && t.lost.is_empty())
+    }
+
     pub fn targets(&self) -> Vec<NodeId> {
         self.targets.keys().copied().collect()
     }

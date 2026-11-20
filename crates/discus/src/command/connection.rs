@@ -12,7 +12,7 @@ use super::error::CommandError;
 use super::table::{check, lookup, names, specs, Access, CommandSpec, Subcommand};
 use super::util::{error_text, glob_match, parse_i64, upper};
 use crate::build;
-use crate::cluster::route::key_args;
+use crate::cluster::route::{key_args, Route};
 use crate::cluster::topology;
 use crate::node::{ConnState, Node};
 
@@ -45,7 +45,16 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec::connection("READONLY", 1, readonly).with_fast(),
     CommandSpec::connection("READWRITE", 1, readwrite).with_fast(),
     CommandSpec::connection("ASKING", 1, asking).with_fast(),
+    CommandSpec::connection("WAIT", 3, entry_only)
+        .with_route(Route::Wait)
+        .with_categories(WAITS),
+    CommandSpec::connection("WAITAOF", 4, entry_only)
+        .with_route(Route::Wait)
+        .with_categories(WAITS),
 ];
+
+/// The categories of `WAIT` and `WAITAOF` in Valkey, without the `@slow` that the registry adds.
+const WAITS: Categories = Categories::CONNECTION.union(Categories::BLOCKING);
 
 /// The categories of Valkey for the subcommands that show or change the users.
 const ACL_ADMIN: Categories = Categories::ADMIN
@@ -71,6 +80,15 @@ const ACL_SUBCOMMANDS: &[Subcommand] = &[
 ];
 
 type Reply = Result<Value, CommandError>;
+
+/// The handler of a command that [`crate::cluster::run`] answers on the entry node before any
+/// handler runs. Only a forward could reach it, and no node forwards these commands.
+fn entry_only(_: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
+    Err(CommandError::Custom(format!(
+        "ERR {} runs on the entry node only",
+        String::from_utf8_lossy(&cmd[0])
+    )))
+}
 
 fn ping(_: &Node, _: &mut ConnState, cmd: &Command) -> Result<Value, CommandError> {
     match cmd.len() {
@@ -195,12 +213,14 @@ fn command(_: &Node, _: &mut ConnState, cmd: &Command) -> Reply {
     }
 }
 
-/// One `COMMAND` entry in the Redis 7 shape. The flag is `readonly` unless the command changes
-/// data. The ACL categories carry an `@` each. The tips, key specifications, and subcommands are
-/// empty.
+/// One `COMMAND` entry in the Redis 7 shape. The flag is `write` for a command that changes data,
+/// `blocking` for a command in `@blocking`, and `readonly` for any other. The ACL categories carry
+/// an `@` each. The tips, key specifications, and subcommands are empty.
 fn command_entry(spec: &CommandSpec) -> Value {
     let flag = if spec.access == Access::Write {
         "write"
+    } else if spec.categories.intersects(Categories::BLOCKING) {
+        "blocking"
     } else {
         "readonly"
     };
@@ -706,6 +726,7 @@ mod tests {
             Value::Array(vec![Value::simple("readonly"), Value::simple("fast")])
         );
         assert_eq!(flags("SET"), Value::Array(vec![Value::simple("write")]));
+        assert_eq!(flags("WAIT"), Value::Array(vec![Value::simple("blocking")]));
         assert_eq!(
             flags("SWAPDB"),
             Value::Array(vec![Value::simple("write"), Value::simple("fast")])
