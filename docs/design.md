@@ -810,8 +810,10 @@ directly but never gets `-MOVED`. That setting is for tests.
   owners that hold the key, minus 1 for the primary, at most `--replication-factor` minus 1. An
   owner that does not answer within `--replication-timeout-ms` holds none of the keys of that
   round. The reply is the lowest count over the keys.
-- A key that every owner holds leaves the record. A key that no owner holds was flushed,
-  evicted, or expired. It leaves the record and does not lower the count. If the count reaches
+- A key that every owner holds leaves the record. A key that no current owner holds counts 0 and
+  stays. It can be a write that was lost with its primary, so it must not leave. If another
+  connection flushed the key, or a node evicted it, the count is therefore too low until a flush on
+  the connection empties the record. The count is never too high. If the count reaches
   `numreplicas`, or the timeout passes, `WAIT` replies. Otherwise the next round starts after a
   pause that starts at 1 ms and doubles up to 100 ms. A timeout of 0 waits without an end. The
   wait ends when the client closes the connection.
@@ -820,6 +822,12 @@ directly but never gets `-MOVED`. That setting is for tests.
   A node is drained when each of its queues is up and empty with no batch in flight, it holds no
   hint and no lost hint, and no handoff scan runs or waits. If every node is drained, the count is
   the number of secondaries of a key, and the record is empty again. Otherwise the count is 0.
+  The record keeps the epoch of its first write and the epoch of the overflow. If a member of
+  either epoch is gone or not `NORMAL`, the count is 0: that member can have taken writes that
+  no other node holds. `WAIT` asks every member of the current epoch. A member that does not
+  answer makes the count 0.
+- `WAIT` uses the epoch of the entry node. If that epoch lags the cluster, the rounds ask the old
+  owners of a key until the new epoch arrives. This is a known limit.
 - `WAIT` and `WAITAOF` order as a barrier on the connection. They start after every earlier
   command ends, and later commands wait for them.
 - A queue keeps only the latest full entry per key. If the HLC of an entry is newer, the replica

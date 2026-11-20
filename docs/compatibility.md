@@ -302,7 +302,15 @@ In a cluster, replication adds these deviations:
   keeps a record of the keys that it wrote, at most `--write-set-keys` keys and
   `--write-set-bytes` bytes. If a connection writes more, its record overflows. `WAIT` then
   replies the full count only when every node has delivered every write. Otherwise it replies 0.
-  So after an overflow, the count can be too low, but it is never too high.
+- The count of `WAIT` is never too high. It can be too low in these cases:
+  - After an overflow of the record.
+  - After an overflow, if a member left the cluster or is not `NORMAL`. The count is then 0 until
+    a flush on the connection empties the record.
+  - After another connection flushed a key of the record, or a node evicted it. A key that no
+    owner holds counts 0, as a write lost with its primary does. A `FLUSHDB` or `FLUSHALL` on the
+    connection itself empties the record of the flushed databases.
+- `WAIT` uses the epoch of the entry node. If that epoch lags the cluster, `WAIT` asks the old
+  owners of a key until the new epoch arrives.
 - Without earlier writes, `WAIT` replies the number of secondaries of a key:
   `--replication-factor` minus 1, or the number of `NORMAL` members minus 1 if that is lower.
   With `--replication-factor 1`, the count is always 0.
