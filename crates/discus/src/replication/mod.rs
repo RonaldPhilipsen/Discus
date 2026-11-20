@@ -17,7 +17,7 @@ mod queue;
 pub mod repair;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -27,6 +27,7 @@ use discus_store::{refill_bucket, AsDbKey, DbKey, Entry, EntryCursor, Store};
 use discus_transport::{Lane, PeerInfo, TransportError};
 use discus_wire::{Batch, BatchAck, Message};
 use parking_lot::{Mutex, RwLock};
+use smallvec::SmallVec;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -84,6 +85,37 @@ impl Settings {
     }
 }
 
+/// A key that writes wait on, and the highest version that each peer stored by an acknowledged
+/// batch while it was watched.
+#[derive(Default)]
+struct Watched {
+    waiters: u32,
+    stored: SmallVec<[(NodeId, Version); 2]>,
+}
+
+/// The keys of one waiting write in the table of watched keys. The drop removes them.
+pub struct AckWatch {
+    replicator: Arc<Replicator>,
+    keys: Vec<DbKey>,
+}
+
+impl Drop for AckWatch {
+    fn drop(&mut self) {
+        let r = &self.replicator;
+        let mut watched = r.watched.lock();
+        for k in &self.keys {
+            let Some(w) = watched.get_mut(k) else {
+                continue;
+            };
+            w.waiters -= 1;
+            if w.waiters == 0 {
+                watched.remove(k);
+                r.watching.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 pub struct Replicator {
     me: Weak<Replicator>,
     node: Weak<Node>,
@@ -94,6 +126,12 @@ pub struct Replicator {
     hints: Mutex<HintStore>,
     /// Changes after a batch ends, so a command that waits for an acknowledgment looks again.
     progress: watch::Sender<u64>,
+    /// The keys that writes wait on (spec "When a peer acknowledged a write"). Lock order: after
+    /// `peers` and `hints`.
+    watched: Mutex<HashMap<DbKey, Watched>>,
+    /// The keys in `watched`, so the send loop skips the table while no write waits. It changes
+    /// only under the `watched` lock.
+    watching: AtomicUsize,
     /// The hint bytes charged to the store budget.
     charged: AtomicU64,
     /// The last message from each peer, to measure an absence on rejoin.
@@ -127,6 +165,8 @@ impl Replicator {
             peers: RwLock::new(HashMap::new()),
             hints: Mutex::new(HintStore::new(settings.hints)),
             progress: watch::Sender::new(0),
+            watched: Mutex::new(HashMap::new()),
+            watching: AtomicUsize::new(0),
             charged: AtomicU64::new(0),
             contacts: Mutex::new(HashMap::new()),
             started: Instant::now(),
@@ -604,13 +644,106 @@ impl Replicator {
         }
         let peers = self.peers.read();
         let hints = self.hints.lock();
-        others.any(|o| {
-            // No queue means that no write reached this owner, for example a new owner of the
-            // key, so it has acknowledged nothing.
-            peers
-                .get(o)
-                .is_some_and(|q| !q.is_down() && !q.holds(key) && !hints.holds_for(*o, key))
-        })
+        others.any(|o| delivered(&peers, &hints, *o, key))
+    }
+
+    /// Enter `keys` in the table of watched keys. A write calls this before it runs, so no
+    /// acknowledged batch carries its version before the table watches its keys.
+    pub fn watch(self: &Arc<Self>, keys: Vec<DbKey>) -> AckWatch {
+        {
+            let mut watched = self.watched.lock();
+            for k in &keys {
+                let w = watched.entry(k.clone()).or_insert_with(|| {
+                    self.watching.fetch_add(1, Ordering::Relaxed);
+                    Watched::default()
+                });
+                w.waiters += 1;
+            }
+        }
+        AckWatch {
+            replicator: self.clone(),
+            keys,
+        }
+    }
+
+    /// Wait until each of `keys` reached `need` other owners at its version or newer, for at
+    /// most the replication timeout. Returns the number of keys with fewer acknowledgments. The
+    /// keys must be watched through [`Self::watch`] since before their write. The wait ends at
+    /// once when a key cannot reach `need` before an owner reconnects (spec "Owners that cannot
+    /// acknowledge").
+    pub async fn wait_acks(&self, node: &Node, keys: &[(DbKey, Version)], need: usize) -> u64 {
+        let deadline = tokio::time::Instant::now() + node.live_settings.get().replication_timeout;
+        loop {
+            // Subscribed before the evaluation, so a batch that ends after it wakes the wait.
+            let mut progress = self.progress.subscribe();
+            let (short, stuck) = self.short_of(node, keys, need);
+            if short == 0 || stuck {
+                return short;
+            }
+            if tokio::time::timeout_at(deadline, progress.changed())
+                .await
+                .is_err()
+            {
+                return self.short_of(node, keys, need).0;
+            }
+        }
+    }
+
+    /// The number of `keys` with fewer than `need` acknowledging owners, and whether one of them
+    /// has fewer than `need` owners that acknowledged it or have a queue that is up.
+    fn short_of(&self, node: &Node, keys: &[(DbKey, Version)], need: usize) -> (u64, bool) {
+        // Read before the locks below: `adopt_epoch` takes them under the epoch lock.
+        let owners: Vec<_> = keys.iter().map(|(k, _)| node.owners(&k.key)).collect();
+        let peers = self.peers.read();
+        let hints = self.hints.lock();
+        let watched = self.watched.lock();
+        let (mut short, mut stuck) = (0, false);
+        for ((key, version), owners) in keys.iter().zip(&owners) {
+            let stored = watched.get(key).map_or(&[][..], |w| &w.stored[..]);
+            let (mut acked, mut reachable) = (0, 0);
+            for o in owners.iter().filter(|o| **o != self.id) {
+                if delivered(&peers, &hints, *o, key)
+                    || stored.iter().any(|(p, v)| p == o && v >= version)
+                {
+                    acked += 1;
+                    reachable += 1;
+                } else if peers.get(o).is_some_and(|q| !q.is_down()) {
+                    reachable += 1;
+                }
+            }
+            if acked < need {
+                short += 1;
+                stuck |= reachable < need;
+            }
+        }
+        (short, stuck)
+    }
+
+    /// Note that `peer` stored the entries of `stored` at their versions, after it acknowledged
+    /// a batch. Only watched keys keep the version, the highest for each peer.
+    pub(crate) fn record_stored<'a>(
+        &self,
+        peer: NodeId,
+        stored: impl Iterator<Item = (&'a DbKey, Version)>,
+    ) {
+        if self.watching.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let mut watched = self.watched.lock();
+        for (k, v) in stored {
+            let Some(w) = watched.get_mut(k) else {
+                continue;
+            };
+            match w.stored.iter_mut().find(|(p, _)| *p == peer) {
+                Some((_, held)) => *held = (*held).max(v),
+                None => w.stored.push((peer, v)),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn watching(&self) -> usize {
+        self.watching.load(Ordering::Relaxed)
     }
 
     /// Wake the commands in `unacked_after_wait`.
@@ -780,6 +913,17 @@ impl Replicator {
             }
             let mut batch = Batch::new(node.epoch_id());
             batch.entries = fill(&self.store, &q, keys);
+            // A write watches its keys before it runs. A fill that read the write therefore sees
+            // `watching` above 0, and a batch filled before the watch carries an older version.
+            let carried: Vec<(DbKey, Version)> = if self.watching.load(Ordering::Relaxed) > 0 {
+                batch
+                    .entries
+                    .iter()
+                    .map(|(k, e)| (k.clone(), e.version))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let sent = batch.entries.len();
             if let Some(label) = &q.label {
                 discus_telemetry::global().replication_batch(label, sent as u64);
@@ -797,6 +941,13 @@ impl Replicator {
             match reply {
                 Ok(unstored) => {
                     q.acked();
+                    self.record_stored(
+                        q.peer,
+                        carried
+                            .iter()
+                            .filter(|(k, _)| !unstored.contains(k))
+                            .map(|(k, v)| (k, *v)),
+                    );
                     if !unstored.is_empty() {
                         self.hint_all(&q, unstored);
                     }
@@ -924,6 +1075,8 @@ impl Replicator {
                 .filter(|(k, _)| !unstored.contains(k))
                 .collect();
             self.hints.lock().confirm(peer, &stored);
+            self.record_stored(peer, stored.iter().map(|(k, v)| (k, *v)));
+            self.bump_progress();
             self.sync_charge();
             if let Some(label) = crate::telemetry::node_label(peer) {
                 discus_telemetry::global().hint_replayed(&label, stored.len() as u64);
@@ -1285,6 +1438,20 @@ fn fill(store: &Store, q: &PeerQueue, keys: Vec<DbKey>) -> Vec<(DbKey, Entry)> {
     entries
 }
 
+/// The queue of `peer` is up and holds no copy of `key`, and no hint for `peer` holds it, so a
+/// batch delivered the latest write of `key` to `peer`. No queue means that no write reached this
+/// owner, for example a new owner of the key, so it has acknowledged nothing.
+fn delivered(
+    peers: &HashMap<NodeId, Arc<PeerQueue>>,
+    hints: &HintStore,
+    peer: NodeId,
+    key: &DbKey,
+) -> bool {
+    peers
+        .get(&peer)
+        .is_some_and(|q| !q.is_down() && !q.holds(key) && !hints.holds_for(peer, key))
+}
+
 /// This node holds database `db`. Inbound entries, offers, fetches, and digests of any other
 /// database are dropped, so a peer with more databases cannot create maps here.
 fn holds_db(node: &Node, db: u32) -> bool {
@@ -1461,6 +1628,111 @@ mod tests {
         q.acked();
         let wait = tokio::time::timeout(Duration::from_secs(10), r.idle()).await;
         assert!(wait.is_ok());
+    }
+
+    /// A node in a two-node epoch at replication factor 2, and the queue to its peer. No sender
+    /// task drains the queue, so it holds every written key.
+    fn two_owners(timeout_ms: &str) -> (Arc<Node>, Arc<Replicator>, NodeId, Arc<PeerQueue>) {
+        let config = crate::Config::parse_from([
+            "discus",
+            "--replication-factor",
+            "2",
+            "--replication-timeout-ms",
+            timeout_ms,
+        ])
+        .unwrap();
+        let live = crate::settings::Live::new(crate::settings::Reloadable::from_config(&config));
+        let security = Arc::new(crate::security::tests::security(&[]));
+        let node = Arc::new(Node::new(config, security, live));
+        let r = Replicator::new(&node);
+        let peer = NodeId::from_u128(9);
+        assert_ne!(peer, node.id);
+        let at = |id: NodeId, last: u8| Member {
+            addr: SocketAddr::from(([10, 0, 0, last], 7000)),
+            rpc_addr: SocketAddr::from(([10, 0, 0, last], 7000)),
+            ..member(id)
+        };
+        let id = EpochId {
+            generation: node.epoch_id().generation + 1,
+            origin: node.id,
+        };
+        let epoch = Epoch::new(id, node.cluster_id(), vec![at(node.id, 1), at(peer, 2)]).unwrap();
+        node.adopt_epoch(epoch).unwrap();
+        let q = Arc::new(PeerQueue::new(peer, 8));
+        r.peers.write().insert(peer, q.clone());
+        (node, r, peer, q)
+    }
+
+    #[tokio::test]
+    async fn a_stored_newer_version_acknowledges_a_queued_key() {
+        let (node, r, peer, q) = two_owners("60000");
+        let key = DbKey::new(0, Bytes::from_static(b"k"));
+        let watch = r.watch(vec![key.clone()]);
+        r.written(&node, 0, &key.key);
+        assert!(q.holds(&key));
+        let v = node.stamp().unwrap();
+        r.record_stored(peer, std::iter::once((&key, v)));
+        let started = Instant::now();
+        assert_eq!(r.wait_acks(&node, &[(key.clone(), v)], 1).await, 0);
+        assert!(started.elapsed() < Duration::from_secs(30));
+        drop(watch);
+    }
+
+    #[tokio::test]
+    async fn an_older_stored_version_does_not_acknowledge() {
+        let (node, r, peer, _q) = two_owners("200");
+        let key = DbKey::new(0, Bytes::from_static(b"k"));
+        let watch = r.watch(vec![key.clone()]);
+        let older = node.stamp().unwrap();
+        r.written(&node, 0, &key.key);
+        let v = node.stamp().unwrap();
+        assert!(older < v);
+        r.record_stored(peer, std::iter::once((&key, older)));
+        assert_eq!(r.wait_acks(&node, &[(key.clone(), v)], 1).await, 1);
+        drop(watch);
+    }
+
+    #[tokio::test]
+    async fn a_down_peer_ends_the_wait_at_once() {
+        let (node, r, _peer, q) = two_owners("60000");
+        let key = DbKey::new(0, Bytes::from_static(b"k"));
+        let watch = r.watch(vec![key.clone()]);
+        r.written(&node, 0, &key.key);
+        let v = node.stamp().unwrap();
+        q.failed();
+        assert!(q.is_down());
+        let started = Instant::now();
+        assert_eq!(r.wait_acks(&node, &[(key.clone(), v)], 1).await, 1);
+        assert!(started.elapsed() < Duration::from_secs(30));
+        drop(watch);
+    }
+
+    #[tokio::test]
+    async fn more_acks_than_other_owners_end_the_wait_at_once() {
+        let (node, r, peer, _q) = two_owners("60000");
+        let key = DbKey::new(0, Bytes::from_static(b"k"));
+        let watch = r.watch(vec![key.clone()]);
+        r.written(&node, 0, &key.key);
+        let v = node.stamp().unwrap();
+        r.record_stored(peer, std::iter::once((&key, v)));
+        let started = Instant::now();
+        assert_eq!(r.wait_acks(&node, &[(key.clone(), v)], 2).await, 1);
+        assert!(started.elapsed() < Duration::from_secs(30));
+        drop(watch);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_watch_empties_the_table() {
+        let (_node, r, peer, _q) = two_owners("200");
+        let key = DbKey::new(0, Bytes::from_static(b"k"));
+        let watch = r.watch(vec![key.clone()]);
+        let second = r.watch(vec![key.clone()]);
+        drop(watch);
+        assert_eq!(r.watching(), 1);
+        drop(second);
+        assert_eq!(r.watching(), 0);
+        r.record_stored(peer, std::iter::once((&key, Version::zero())));
+        assert!(r.watched.lock().is_empty());
     }
 
     #[test]
