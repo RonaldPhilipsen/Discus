@@ -19,10 +19,14 @@ pods. The clients and the Discus pods share the CPU of the nodes with other work
 ## Deploy the candidate
 
 1. Create the namespace `discus-rc`.
+
 2. Apply the manifests from [Deploy on Kubernetes](cluster.md#deploy-on-kubernetes) in that
    namespace. Set the image to the candidate. Add the Role of the cluster lease.
+
 3. Issue a node certificate with the URI SAN `spiffe://cluster.local/ns/discus-rc/sa/discus`.
+
 4. Set `--cluster-san` to the same value.
+
 5. Wait for the rollout:
 
    ```sh
@@ -99,6 +103,7 @@ errors come from the client, so do not count them against Discus.
 Follow these steps:
 
 1. Start the script, and wait 20 seconds.
+
 2. Start a rolling restart:
 
    ```sh
@@ -107,6 +112,7 @@ Follow these steps:
    ```
 
 3. Wait 20 seconds.
+
 4. Kill one Discus pod:
 
    ```sh
@@ -115,6 +121,7 @@ Follow these steps:
    ```
 
 5. Wait 30 seconds, and then stop the script.
+
 6. Read every recorded key, and read `cnt:rc`.
 
 The fault test passes when all of these conditions are true:
