@@ -1,7 +1,7 @@
 //! Metric attributes and the cardinality guard (spec §15.4).
 //!
 //! Every metric attribute is one of the twelve typed values of [`Attribute`], under one of the
-//! eight keys of [`ALLOWED_KEYS`]. A `command` value is a `&'static str` from the command table or
+//! nine keys of [`ALLOWED_KEYS`]. A `command` value is a `&'static str` from the command table or
 //! a [`TopologyCommand`], so it comes from the code, never from a client. A node or peer label is a short hex node ID, so the
 //! number of values is bounded by the cluster size. [`check`] validates raw pairs against the
 //! same rules. The metrics handle runs it in debug builds, and the tests run it on every exported
@@ -10,8 +10,8 @@
 use std::sync::Arc;
 
 /// The only attribute keys that a metric can carry.
-pub const ALLOWED_KEYS: [&str; 8] = [
-    "command", "status", "node", "peer", "state", "channel", "reason", "outcome",
+pub const ALLOWED_KEYS: [&str; 9] = [
+    "command", "status", "node", "peer", "state", "channel", "reason", "outcome", "mode",
 ];
 
 const MAX_COMMAND_LEN: usize = 32;
@@ -75,7 +75,7 @@ macro_rules! label_enum {
                 match self { $($name::$variant => $text),+ }
             }
 
-            fn parse(s: &str) -> Option<$name> {
+            pub(crate) fn parse(s: &str) -> Option<$name> {
                 match s { $($text => Some($name::$variant),)+ _ => None }
             }
         }
@@ -162,6 +162,14 @@ label_enum! {
     }
 }
 
+label_enum! {
+    /// The `--write-ack-timeout` mode of a write that ended without enough acknowledgments.
+    AckMode {
+        Open => "open",
+        Closed => "closed",
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Attribute {
     Command(CommandLabel),
@@ -178,6 +186,7 @@ pub enum Attribute {
     /// A topology subcommand under the key `command`.
     Topology(TopologyCommand),
     Outcome(ReloadOutcome),
+    AckMode(AckMode),
 }
 
 impl Attribute {
@@ -190,6 +199,7 @@ impl Attribute {
             Attribute::Channel(_) => "channel",
             Attribute::Reason(_) => "reason",
             Attribute::Outcome(_) => "outcome",
+            Attribute::AckMode(_) => "mode",
             Attribute::State(_) | Attribute::Role(_) | Attribute::Mode(_) => "state",
         }
     }
@@ -212,6 +222,7 @@ impl Attribute {
             Attribute::Reason(r) => r.as_str(),
             Attribute::Topology(t) => t.as_str(),
             Attribute::Outcome(o) => o.as_str(),
+            Attribute::AckMode(m) => m.as_str(),
         })
     }
 }
@@ -264,6 +275,7 @@ pub fn check<'a>(attrs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Result<
             "channel" => ("channel", TransportChannel::parse(value).is_some()),
             "reason" => ("reason", MisrouteReason::parse(value).is_some()),
             "outcome" => ("outcome", ReloadOutcome::parse(value).is_some()),
+            "mode" => ("mode", AckMode::parse(value).is_some()),
             other => return Err(GuardError::DisallowedKey(other.to_owned())),
         };
         if !ok {

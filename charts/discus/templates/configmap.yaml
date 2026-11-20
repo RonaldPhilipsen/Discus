@@ -5,6 +5,7 @@ overrides the file and blocks reloads, so the chart never renders those flags.
 {{- $s := .Values.settings -}}
 {{- $keys := dict
   "budget" (dict "forward-read-ms" $s.budget.forwardReadMs "forward-write-ms" $s.budget.forwardWriteMs "hold-ms" $s.budget.holdMs "replication-ms" $s.budget.replicationMs)
+  "replication" (dict "write-acks" $s.replication.writeAcks "write-ack-timeout" $s.replication.writeAckTimeout)
   "reads" (dict "from-replicas" $s.reads.fromReplicas)
   "handoff" (dict "rate-bytes" $s.handoff.rateBytes)
   "auth" (dict "max-failures-per-connection" $s.auth.maxFailuresPerConnection "max-failures-per-source" $s.auth.maxFailuresPerSource "failure-window-secs" $s.auth.failureWindowSecs "timeout-secs" $s.auth.timeoutSecs)
@@ -18,6 +19,8 @@ overrides the file and blocks reloads, so the chart never renders those flags.
 {{- if not (kindIs "invalid" $value) -}}
 {{- if kindIs "bool" $value -}}
 {{- $_ := set $set $key (toString $value) -}}
+{{- else if kindIs "string" $value -}}
+{{- $_ := set $set $key (quote $value) -}}
 {{- else -}}
 {{- $_ := set $set $key (toString (int64 $value)) -}}
 {{- end -}}

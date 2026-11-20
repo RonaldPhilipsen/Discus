@@ -125,6 +125,8 @@ fn value(r: &Reloadable, name: &str) -> String {
         "budget.forward-write-ms" => r.forward_write_timeout.as_millis().to_string(),
         "budget.hold-ms" => r.hold_budget.as_millis().to_string(),
         "budget.replication-ms" => r.replication_timeout.as_millis().to_string(),
+        "replication.write-acks" => r.write_acks.to_string(),
+        "replication.write-ack-timeout" => r.write_ack_timeout.as_str().to_string(),
         "reads.from-replicas" => r.read_from_replicas.to_string(),
         "handoff.rate-bytes" => r.handoff_rate_bytes.to_string(),
         "auth.max-failures-per-connection" => r.auth_max_failures_per_connection.to_string(),
@@ -163,6 +165,42 @@ mod tests {
         assert_eq!(applied, ["budget.hold-ms"]);
         assert_eq!(live_settings.get().hold_budget, Duration::from_millis(1500));
         assert_eq!(live_settings.version(), Some(1));
+    }
+
+    #[test]
+    fn a_reload_changes_the_write_acks() {
+        let (base, live_settings) = start(&["--replication-factor", "3"]);
+        let applied = reload(
+            &base,
+            &live_settings,
+            "version = 1\n[replication]\nwrite-acks = 1\nwrite-ack-timeout = \"closed\"",
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            applied,
+            ["replication.write-acks", "replication.write-ack-timeout"]
+        );
+        assert_eq!(live_settings.get().write_acks, 1);
+        assert_eq!(
+            live_settings.get().write_ack_timeout,
+            crate::config::AckTimeout::Closed
+        );
+    }
+
+    #[test]
+    fn write_acks_at_the_replication_factor_are_refused() {
+        let (base, live_settings) = start(&["--replication-factor", "3"]);
+        let err = reload(
+            &base,
+            &live_settings,
+            "version = 1\n[replication]\nwrite-acks = 3",
+            1,
+        )
+        .unwrap_err();
+        assert!(err.contains("--write-acks"), "{err}");
+        assert_eq!(live_settings.get().write_acks, 0);
+        assert_eq!(live_settings.generation(), 0);
     }
 
     #[test]
@@ -261,6 +299,8 @@ mod tests {
             forward_write_timeout: a.forward_write_timeout + Duration::from_millis(1),
             hold_budget: a.hold_budget + Duration::from_millis(1),
             replication_timeout: a.replication_timeout + Duration::from_millis(1),
+            write_acks: a.write_acks + 1,
+            write_ack_timeout: crate::config::AckTimeout::Closed,
             read_from_replicas: !a.read_from_replicas,
             handoff_rate_bytes: a.handoff_rate_bytes + 1,
             auth_max_failures_per_connection: a.auth_max_failures_per_connection + 1,

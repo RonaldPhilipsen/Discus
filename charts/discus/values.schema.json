@@ -66,6 +66,14 @@
           },
           "additionalProperties": false
         },
+        "replication": {
+          "type": "object",
+          "properties": {
+            "writeAcks": { "type": ["integer", "null"], "minimum": 0 },
+            "writeAckTimeout": { "type": ["string", "null"], "enum": ["open", "closed", null] }
+          },
+          "additionalProperties": false
+        },
         "reads": {
           "type": "object",
           "properties": {

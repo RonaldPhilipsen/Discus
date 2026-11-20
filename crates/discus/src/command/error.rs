@@ -36,8 +36,18 @@ pub enum CommandError {
         slot: u16,
         to: Endpoint,
     },
+    /// The write applied on the primary, but fewer secondaries than `--write-acks` stored it
+    /// before the replication timeout, with `--write-ack-timeout closed`.
+    NoReplicas,
     /// Raw error text, including its prefix such as `ERR` or `OOM`.
     Custom(String),
+}
+
+const NOREPLICAS_PREFIX: &[u8] = b"NOREPLICAS ";
+
+/// True for a `-NOREPLICAS` reply: the write applied, so it counts as a write of the connection.
+pub fn is_no_replicas(value: &Value) -> bool {
+    matches!(value, Value::Error(e) if e.starts_with(NOREPLICAS_PREFIX))
 }
 
 impl CommandError {
@@ -97,6 +107,7 @@ impl CommandError {
             CommandError::NoPermKey => "NOPERM this user has no permissions to access one of the \
                                           keys used as arguments"
                 .into(),
+            CommandError::NoReplicas => "NOREPLICAS Not enough good replicas to write.".into(),
             CommandError::Moved { slot, to } => format!("MOVED {slot} {}:{}", to.host, to.port),
             CommandError::Custom(s) => s.clone(),
         }
@@ -104,5 +115,20 @@ impl CommandError {
 
     pub fn to_value(&self) -> Value {
         Value::error(&self.text())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_replicas_is_recognized_by_its_prefix() {
+        assert!(is_no_replicas(&CommandError::NoReplicas.to_value()));
+        assert!(!is_no_replicas(&CommandError::ClusterTryAgain.to_value()));
+        assert!(!is_no_replicas(&Value::error("NOREPLICASX")));
+        assert!(!is_no_replicas(&Value::bulk(
+            "NOREPLICAS Not enough good replicas to write."
+        )));
     }
 }

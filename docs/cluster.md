@@ -404,6 +404,10 @@ forward-write-ms = 2000        # a forwarded write waits this long
 hold-ms = 1500                 # default 3000: a write to a failed primary waits for a new one
 replication-ms = 1000          # a peer acknowledges a replication batch within this time
 
+[replication]
+write-acks = 0                 # secondaries that store each write before the primary replies
+write-ack-timeout = "open"     # on a timeout, "open" replies normally and "closed" with an error
+
 [reads]
 from-replicas = true
 
@@ -435,6 +439,8 @@ are all the keys of version 1:
 | `[budget]` | `forward-write-ms` | `--forward-write-timeout-ms` |
 | `[budget]` | `hold-ms` | `--hold-budget-ms` |
 | `[budget]` | `replication-ms` | `--replication-timeout-ms` |
+| `[replication]` | `write-acks` | `--write-acks` |
+| `[replication]` | `write-ack-timeout` | `--write-ack-timeout` |
 | `[reads]` | `from-replicas` | `--read-from-replicas` |
 | `[handoff]` | `rate-bytes` | `--handoff-rate-bytes` |
 | `[auth]` | `max-failures-per-connection` | `--auth-max-failures-per-connection` |
@@ -493,6 +499,8 @@ restarts no pod. The node applies it after the kubelet syncs the file and the ne
 | `settings.budget.forwardWriteMs` | `[budget] forward-write-ms` |
 | `settings.budget.holdMs` | `[budget] hold-ms` |
 | `settings.budget.replicationMs` | `[budget] replication-ms` |
+| `settings.replication.writeAcks` | `[replication] write-acks` |
+| `settings.replication.writeAckTimeout` | `[replication] write-ack-timeout` |
 | `settings.reads.fromReplicas` | `[reads] from-replicas` |
 | `settings.handoff.rateBytes` | `[handoff] rate-bytes` |
 | `settings.auth.maxFailuresPerConnection` | `[auth] max-failures-per-connection` |
@@ -562,6 +570,8 @@ restart.
 | `--replication-queue-keys` | 65536 | Keys that wait in the replication queue of one peer. Past it, the oldest keys go to hints. |
 | `--replication-batch-keys` | 512 | Keys in one replication batch. |
 | `--replication-timeout-ms` | 1000 | Time for a peer to acknowledge a replication batch. |
+| `--write-acks` | 0 | Secondaries that store each write before the primary replies. It must be below `--replication-factor`. |
+| `--write-ack-timeout` | `open` | The reply to a write that the secondaries do not acknowledge in `--replication-timeout-ms`. `open` sends the normal reply of the command. `closed` replies with an error. |
 | `--replication-retry-ms` | 1000 | Time between probes of a peer that missed a batch. |
 | `--hint-max-entries` | 262144 | Hints for one peer, at most. |
 | `--hint-max-bytes` | 67108864 | Bytes of hints for one peer, at most. |
@@ -832,7 +842,7 @@ primary, and the others are secondaries. A cluster of one node has no secondarie
 of two nodes has one.
 
 1. A write goes to the primary. The primary applies the write, gives it an HLC timestamp (a
-   version from a hybrid logical clock), and replies at once.
+   version from a hybrid logical clock), and replies. With `--write-acks 0`, it replies at once.
 2. Then the primary puts the key in one queue per secondary. A queue holds each key once. As the
    queue drains, the primary sends the latest value of the key.
 3. A secondary ignores an entry that is not newer than the one it holds. So the order of the
@@ -850,6 +860,34 @@ agree within about 100 ms, so run NTP.
 
 When a new epoch changes the owners of a key, the queues stop carrying the key to nodes that no
 longer own it.
+
+### Write acknowledgment
+
+By default the primary replies before any secondary has the write. If the primary fails before
+its queue drains, the write is lost. To make the primary wait for secondaries, set
+`--write-acks` to a number from 1 to `--replication-factor` minus 1.
+
+With `--write-acks n`, each write that changed a key waits until `n` secondaries store it. A
+write that changed nothing, such as `SET NX` on a key that exists, does not wait. The wait lasts
+at most `--replication-timeout-ms`. `--write-ack-timeout` sets the reply when the wait ends short:
+
+- `open` (the default) replies normally. The write stays on the primary and replicates later.
+- `closed` replies `-NOREPLICAS Not enough good replicas to write.`
+
+The wait ends at once, without the timeout, in two cases. The key has fewer than `n` other owners,
+for example in a cluster with fewer nodes than the replication factor. Or fewer than `n` other
+owners have a queue that is up, for example while a secondary is down. Without this rule, each
+write waits the full timeout while a node is down.
+
+`-NOREPLICAS` does not undo the write. The write applied on the primary and can still reach the
+replicas. A client that retries the command applies it again. For `SET` that is harmless. For
+`INCR` or `LPUSH`, a retry adds the change twice. Read the key before a retry of such a command.
+
+A write that waits for secondaries needs more time when another node forwards it. The forward
+timeout of such a write is `--forward-write-timeout-ms` plus `--replication-timeout-ms`. The
+entry node passes `-NOREPLICAS` to the client. It does not retry it.
+
+Each key whose wait ended short counts in `discus_write_unacked_total`, with the attribute `mode`.
 
 ## Reads
 

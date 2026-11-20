@@ -269,7 +269,7 @@ pub fn multi(
     let writes = writes.filter(|_| write).cloned();
     let note = move |node: &Node, cmd: &Command, reply: &Reply| {
         if let (Some(w), Some(v)) = (&writes, reply.applied) {
-            if write && !matches!(reply.value, Value::Error(_)) {
+            if write && super::records(&reply.value) {
                 let mut w = w.lock();
                 for k in key_args(spec.route, cmd)
                     .into_iter()
