@@ -2,14 +2,14 @@
 
 use std::sync::{Arc, Weak};
 
-use discus_placement::EpochId;
+use discus_placement::{EpochId, Version};
 use discus_resp::{Parser, Value};
 use discus_transport::{Channel, Inbound, Service};
 use discus_wire::{Forward, ForwardMode, ForwardReply, Message, TraceContext};
 use futures::future::BoxFuture;
 
 use super::route::Route;
-use super::{local, local_acked, run_hop, Hop, Job, Reply};
+use super::{aligned, local, local_acked, per_key, run_hop, Hop, Job, Reply};
 use crate::command;
 use crate::node::Node;
 use crate::telemetry;
@@ -83,7 +83,7 @@ impl Service for NodeService {
                 Message::Forward(f) => {
                     let span =
                         telemetry::forwarded_span(discus_telemetry::global(), &inbound.trace);
-                    let reply = forwarded(&node, &inbound.peer, f, inbound.trace)
+                    let (reply, versions) = forwarded(&node, &inbound.peer, f, inbound.trace)
                         .instrument(span.clone())
                         .await;
                     // An error reply marks the command span.
@@ -94,6 +94,7 @@ impl Service for NodeService {
                         epoch: node.epoch_id(),
                         observed: reply.observed,
                         settled: reply.settled,
+                        versions,
                     })
                 }
                 other => unsupported(&other),
@@ -121,13 +122,13 @@ fn parse(node: &Node, raw: &[u8]) -> Result<discus_resp::Command, Value> {
     }
 }
 
-/// Run a forwarded command.
+/// Run a forwarded command. The versions of the reply are [`aligned`] for the wire.
 async fn forwarded(
     node: &Arc<Node>,
     sender: &discus_transport::PeerInfo,
     f: Forward,
     trace: TraceContext,
-) -> Reply {
+) -> (Reply, Vec<Option<Version>>) {
     if let Some(link) = node.link() {
         link.saw_peer_epoch(sender.node_id, sender.cluster_id, f.epoch);
     }
@@ -141,15 +142,16 @@ async fn forwarded(
     }
     if f.path.contains(&node.id) {
         tracing::debug!(path = ?f.path, "forwarding loop");
-        return Reply::try_again();
+        return (Reply::try_again(), Vec::new());
     }
     // The sender checked the database against the cluster count, but this node can hold fewer.
     if !node.databases.holds(f.db) {
-        return Reply::value(Value::error(crate::databases::OUT_OF_RANGE));
+        let reply = Reply::value(Value::error(crate::databases::OUT_OF_RANGE));
+        return (reply, Vec::new());
     }
     let cmd = match parse(node, &f.command) {
         Ok(cmd) => cmd,
-        Err(value) => return Reply::value(value),
+        Err(value) => return (Reply::value(value), Vec::new()),
     };
     let spec = command::lookup(&cmd[0]).or_else(|| command::lookup_internal(&cmd[0]));
     telemetry::record_operation(spec, &cmd);
@@ -157,30 +159,37 @@ async fn forwarded(
     // sender, so only the lookup and the arity run here.
     let spec = match command::check(spec, &cmd) {
         Ok(spec) => spec,
-        Err(e) => return Reply::error(e),
+        Err(e) => return (Reply::error(e), Vec::new()),
     };
-    if spec.route == Route::Connection {
-        return local(node, spec, f.db, &cmd);
-    }
-    if f.mode == ForwardMode::Local {
-        return local_acked(node, spec, f.db, cmd).finish().await;
-    }
-    // The hop keeps the inbound context. A further forward sends the context of its own span
-    // with `otel`, else this context unchanged.
-    let hop = Hop {
-        hops: f.hops,
-        path: f.path,
-        trace,
-        track: f.track,
-        held: false,
+    let db = f.db;
+    let slots = per_key(spec).then(|| cmd.clone());
+    let mut reply = if spec.route == Route::Connection {
+        local(node, spec, db, &cmd)
+    } else if f.mode == ForwardMode::Local {
+        local_acked(node, spec, db, cmd).finish().await
+    } else {
+        // The hop keeps the inbound context. A further forward sends the context of its own
+        // span with `otel`, else this context unchanged.
+        let hop = Hop {
+            hops: f.hops,
+            path: f.path,
+            trace,
+            track: f.track,
+            held: false,
+        };
+        run_hop(
+            node,
+            Job::plain(cmd, spec, db),
+            hop,
+            None,
+            telemetry::route_span(),
+        )
+        .finish()
+        .await
     };
-    run_hop(
-        node,
-        Job::plain(cmd, spec, f.db),
-        hop,
-        None,
-        telemetry::route_span(),
-    )
-    .finish()
-    .await
+    let versions = match slots {
+        Some(cmd) => aligned(spec, db, &cmd, &std::mem::take(&mut reply.versions)),
+        None => Vec::new(),
+    };
+    (reply, versions)
 }

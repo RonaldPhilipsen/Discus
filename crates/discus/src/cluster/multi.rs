@@ -307,7 +307,7 @@ pub fn multi(
             let unsent = failures.iter().all(|f| f.unsent);
             return Failure { unsent }.reply();
         }
-        let mut replies = Vec::with_capacity(parts.len());
+        let mut replies: Vec<Reply> = Vec::with_capacity(parts.len());
         for part in parts {
             match part {
                 Some(r) if !matches!(r.value, Value::Error(_)) => replies.push(r),
@@ -319,11 +319,16 @@ pub fn multi(
             }
         }
         let applied = newest(&replies);
+        let versions = replies
+            .iter_mut()
+            .flat_map(|r| std::mem::take(&mut r.versions))
+            .collect();
         let Some(value) = merge.apply(total, &groups, replies.into_iter().map(|r| r.value)) else {
             return Reply::try_again();
         };
         Reply {
             applied,
+            versions,
             ..Reply::value(value)
         }
     }))

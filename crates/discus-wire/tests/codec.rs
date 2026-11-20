@@ -119,6 +119,7 @@ fn every_message_round_trips() {
             epoch: epoch_id(4, 2),
             observed: None,
             settled: false,
+            versions: Vec::new(),
         }),
         Message::ForwardReply(ForwardReply {
             value: Value::Null,
@@ -126,6 +127,7 @@ fn every_message_round_trips() {
             epoch: epoch_id(1, 1),
             observed: None,
             settled: false,
+            versions: Vec::new(),
         }),
         Message::Ping { nonce: 11 },
         Message::Pong { nonce: 12 },
@@ -144,6 +146,7 @@ fn version_struct_is_the_uhlc_layout() {
         epoch: epoch_id(1, 1),
         observed: None,
         settled: false,
+        versions: Vec::new(),
     });
     let frame = Frame {
         request_id: 1,
@@ -204,6 +207,7 @@ fn deep_nesting_fails_the_depth_limit() {
             epoch: epoch_id(1, 1),
             observed: None,
             settled: false,
+            versions: Vec::new(),
         }),
     };
     assert!(matches!(

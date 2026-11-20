@@ -89,6 +89,11 @@ table ForwardReply {
   observed: Version (id: 3);
   /// A tracked read: no replication queue, batch in flight, or hint holds the key.
   settled: bool (id: 4);
+  /// A multi-key write part or MOVE: one version per key argument of the part, in order, and
+  /// for MOVE the key in the target database last. Only the keys that the part changed hold a
+  /// version: `changed` is true at their positions. Both are absent for any other command.
+  versions: [Version] (id: 5);
+  changed: [bool] (id: 6);
 }
 
 table Ping {

@@ -156,6 +156,24 @@ fn version_to(v: Version) -> fb::Version {
     fb::Version::new(v.time().0, &id128(v.as_uhlc().get_id().to_le_bytes()))
 }
 
+/// The versions of a forward reply. `changed` marks the positions that hold one.
+fn key_versions(
+    versions: Option<Vector<'_, fb::Version>>,
+    changed: Option<Vector<'_, bool>>,
+) -> Result<Vec<Option<Version>>, DecodeError> {
+    let (Some(versions), Some(changed)) = (versions, changed) else {
+        return Ok(Vec::new());
+    };
+    if versions.len() != changed.len() {
+        return Err(invalid("reply versions and changed differ in length"));
+    }
+    Ok(versions
+        .iter()
+        .zip(changed.iter())
+        .map(|(v, c)| c.then(|| version_of(v)))
+        .collect())
+}
+
 fn version_of(v: &fb::Version) -> Version {
     let origin = NodeId::from_u128(u128::from_le_bytes(v.id().bytes().into()));
     Version::new(NTP64(v.time()), origin)
@@ -657,6 +675,21 @@ fn build_body(fbb: &mut FlatBufferBuilder<'_>, message: &Message) {
             let value = to_wire(fbb, &r.value);
             let applied = r.applied.map(version_to);
             let observed = r.observed.map(version_to);
+            let (versions, changed) = if r.versions.is_empty() {
+                (None, None)
+            } else {
+                let zero = version_to(Version::zero());
+                let stamps: Vec<_> = r
+                    .versions
+                    .iter()
+                    .map(|v| v.map_or(zero, version_to))
+                    .collect();
+                let changed: Vec<bool> = r.versions.iter().map(Option::is_some).collect();
+                (
+                    Some(fbb.create_vector(&stamps)),
+                    Some(fbb.create_vector(&changed)),
+                )
+            };
             let t = fb::ForwardReply::create(
                 fbb,
                 &fb::ForwardReplyArgs {
@@ -665,6 +698,8 @@ fn build_body(fbb: &mut FlatBufferBuilder<'_>, message: &Message) {
                     epoch: Some(&epoch_id_to(r.epoch)),
                     observed: observed.as_ref(),
                     settled: r.settled,
+                    versions,
+                    changed,
                 },
             );
             fbb.finish_minimal(t);
@@ -878,6 +913,7 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
                 epoch: epoch_id_of(r.epoch().ok_or_else(|| invalid("reply without an epoch"))?),
                 observed: r.observed().map(version_of),
                 settled: r.settled(),
+                versions: key_versions(r.versions(), r.changed())?,
             })
         }
         T::PING | T::PONG => {

@@ -78,6 +78,9 @@ pub struct ForwardReply {
     pub observed: Option<Version>,
     /// A tracked read: no replication queue, batch in flight, or hint holds the key.
     pub settled: bool,
+    /// A multi-key write part or `MOVE`: the version of each key argument that the part changed,
+    /// in order, and for `MOVE` the key in the target database last. Empty for any other command.
+    pub versions: Vec<Option<Version>>,
 }
 
 /// The body of `REPLICATE`, `HINT_REPLAY`, `HANDOFF`, and `ENTRIES`.

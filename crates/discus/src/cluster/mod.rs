@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use discus_placement::{ClusterId, EpochId, NodeId, Owners, Version, NTP64};
 use discus_resp::{Command, Value};
 use discus_store::DbKey;
@@ -134,6 +135,9 @@ pub struct Reply {
     pub settled: bool,
     /// The forward of a write failed. Set only when no hold covers it.
     pub failed: Option<Failure>,
+    /// A multi-key write and `MOVE`: the database, key, and version of each key that the command
+    /// changed. Empty for any other command, whose one key has `applied`.
+    pub versions: Vec<(u32, Bytes, Version)>,
 }
 
 /// How a forwarded write failed (spec section 7.5).
@@ -166,6 +170,7 @@ impl Reply {
             observed: None,
             settled: false,
             failed: None,
+            versions: Vec::new(),
         }
     }
 
@@ -356,23 +361,100 @@ pub(crate) fn ack_plan(node: &Node, spec: &CommandSpec, db: u32, cmd: &Command) 
             mode,
         });
     }
-    let mut keys: Vec<DbKey> = route::key_args(spec.route, cmd)
-        .into_iter()
-        .flatten()
-        .filter(|k| !node.is_counter_key(k))
-        .map(|k| DbKey::new(db, k.clone()))
-        .collect();
-    if spec.name == "MOVE" && !node.is_counter_key(&cmd[1]) {
-        if let Some(target) = move_db(cmd) {
-            keys.push(DbKey::new(target, cmd[1].clone()));
-        }
-    }
+    let keys = written_keys(node, spec, db, cmd);
     (!keys.is_empty()).then_some(AckPlan {
         keys,
         need,
         legacy: false,
         mode,
     })
+}
+
+/// The keys that `cmd` in database `db` writes, in argument order: the key arguments, and for a
+/// `MOVE` its key in the target database last. A forward reply aligns its versions with them.
+fn key_slots<'a>(
+    spec: &CommandSpec,
+    db: u32,
+    cmd: &'a Command,
+) -> impl Iterator<Item = (u32, &'a Bytes)> {
+    let target = (spec.name == "MOVE").then(|| move_db(cmd)).flatten();
+    route::key_args(spec.route, cmd)
+        .into_iter()
+        .flatten()
+        .map(move |k| (db, k))
+        .chain(target.map(|t| (t, &cmd[1])))
+}
+
+/// The [`key_slots`] of `cmd` without counter keys.
+fn written_keys(node: &Node, spec: &CommandSpec, db: u32, cmd: &Command) -> Vec<DbKey> {
+    key_slots(spec, db, cmd)
+        .filter(|(_, k)| !node.is_counter_key(k))
+        .map(|(db, k)| DbKey::new(db, k.clone()))
+        .collect()
+}
+
+/// A command that reports the version of each key it changed in [`Reply::versions`]. A
+/// single-key command has only `applied`, so its reply does not grow.
+pub(crate) fn per_key(spec: &CommandSpec) -> bool {
+    matches!(spec.route, Route::MultiWrite { .. }) || spec.name == "MOVE"
+}
+
+fn key_versions(changed: &[(DbKey, Version)]) -> Vec<(u32, Bytes, Version)> {
+    changed
+        .iter()
+        .map(|(k, v)| (k.db, k.key.clone(), *v))
+        .collect()
+}
+
+/// Run `cmd` here like [`local`], and fill [`Reply::versions`] with the [`changed`] rule.
+fn local_versions(node: &Node, spec: &CommandSpec, db: u32, cmd: &Command) -> Reply {
+    if !per_key(spec) {
+        return local(node, spec, db, cmd);
+    }
+    let before = node.hlc.last();
+    let mut reply = local(node, spec, db, cmd);
+    if reply.applied.is_some() {
+        let keys = written_keys(node, spec, db, cmd);
+        reply.versions = key_versions(&changed(node, &keys, before));
+    }
+    reply
+}
+
+/// [`Reply::versions`] as a forward reply carries them: one entry per [`key_slots`] of `cmd`,
+/// `None` where the command changed nothing. Empty when `versions` is.
+pub(crate) fn aligned(
+    spec: &CommandSpec,
+    db: u32,
+    cmd: &Command,
+    versions: &[(u32, Bytes, Version)],
+) -> Vec<Option<Version>> {
+    if versions.is_empty() {
+        return Vec::new();
+    }
+    // A part that this node split again lists its versions by group, not in argument order.
+    let by_key: HashMap<(u32, &[u8]), Version> = versions
+        .iter()
+        .map(|(db, k, v)| ((*db, &k[..]), *v))
+        .collect();
+    key_slots(spec, db, cmd)
+        .map(|(db, k)| by_key.get(&(db, &k[..])).copied())
+        .collect()
+}
+
+/// The inverse of [`aligned`] on the entry node.
+pub(crate) fn unaligned(
+    spec: &CommandSpec,
+    db: u32,
+    cmd: &Command,
+    versions: Vec<Option<Version>>,
+) -> Vec<(u32, Bytes, Version)> {
+    if versions.is_empty() {
+        return Vec::new();
+    }
+    key_slots(spec, db, cmd)
+        .zip(versions)
+        .filter_map(|((db, k), v)| Some((db, k.clone(), v?)))
+        .collect()
 }
 
 /// Run `cmd` here like [`local`], then wait as [`ack_plan`] says. With `--write-acks 0`, a delete
@@ -387,16 +469,16 @@ pub fn local_acked(
     cmd: Command,
 ) -> Dispatch {
     let Some(plan) = ack_plan(node, spec, db, &cmd) else {
-        return Dispatch::Ready(local(node, spec, db, &cmd));
+        return Dispatch::Ready(local_versions(node, spec, db, &cmd));
     };
     let Some(replicator) = node.replicator().cloned() else {
         if plan.legacy {
-            return Dispatch::Ready(local(node, spec, db, &cmd));
+            return Dispatch::Ready(local_versions(node, spec, db, &cmd));
         }
         return Dispatch::Ready(unreplicated(node, spec, db, &cmd, &plan));
     };
     if plan.legacy {
-        let reply = local(node, spec, db, &cmd);
+        let reply = local_versions(node, spec, db, &cmd);
         if reply.applied.is_none() {
             return Dispatch::Ready(reply);
         }
@@ -411,11 +493,15 @@ pub fn local_acked(
     // (spec "When a peer acknowledged a write").
     let watch = replicator.watch(plan.keys);
     let before = node.hlc.last();
-    let reply = local(node, spec, db, &cmd);
+    let mut reply = local(node, spec, db, &cmd);
     if reply.applied.is_none() {
         return Dispatch::Ready(reply);
     }
+    // The watched keys are the `written_keys` of the command.
     let keys = changed(node, watch.keys(), before);
+    if per_key(spec) {
+        reply.versions = key_versions(&keys);
+    }
     if keys.is_empty() {
         return Dispatch::Ready(reply);
     }
@@ -432,12 +518,15 @@ pub fn local_acked(
 /// cannot acknowledge").
 fn unreplicated(node: &Node, spec: &CommandSpec, db: u32, cmd: &Command, plan: &AckPlan) -> Reply {
     let before = node.hlc.last();
-    let reply = local(node, spec, db, cmd);
+    let mut reply = local(node, spec, db, cmd);
     if reply.applied.is_none() {
         return reply;
     }
-    let short = changed(node, &plan.keys, before).len() as u64;
-    ended_short(reply, short, plan.mode)
+    let keys = changed(node, &plan.keys, before);
+    if per_key(spec) {
+        reply.versions = key_versions(&keys);
+    }
+    ended_short(reply, keys.len() as u64, plan.mode)
 }
 
 /// The keys of `keys` with a version newer than `before`, the HLC time before the command ran.
@@ -915,6 +1004,53 @@ mod tests {
             .map(|(k, _)| k)
             .collect();
         assert_eq!(waits, [keys[1].clone()]);
+    }
+
+    #[test]
+    fn versions_align_with_the_key_arguments() {
+        let v = |t: u64| Version::new(NTP64(t), NodeId::from_u128(1));
+        let key = |k: &'static str| bytes::Bytes::from_static(k.as_bytes());
+        let mset = crate::counter::cmd(&["MSET", "a", "1", "b", "2", "c", "3"]);
+        let spec = command::lookup(b"MSET").unwrap();
+        let versions = vec![(0, key("c"), v(3)), (0, key("a"), v(1))];
+        let wire = aligned(spec, 0, &mset, &versions);
+        assert_eq!(wire, [Some(v(1)), None, Some(v(3))]);
+        let back = unaligned(spec, 0, &mset, wire);
+        assert_eq!(back, [(0, key("a"), v(1)), (0, key("c"), v(3))]);
+
+        let mv = crate::counter::cmd(&["MOVE", "k", "3"]);
+        let spec = command::lookup(b"MOVE").unwrap();
+        let versions = vec![(2, key("k"), v(4)), (3, key("k"), v(4))];
+        let wire = aligned(spec, 2, &mv, &versions);
+        assert_eq!(wire, [Some(v(4)), Some(v(4))]);
+        assert_eq!(unaligned(spec, 2, &mv, wire), versions);
+    }
+
+    #[test]
+    fn only_a_multi_key_write_and_move_report_versions() {
+        let config = Config::parse_from(["discus", "--databases", "4"]).unwrap();
+        let live = Live::new(Reloadable::from_config(&config));
+        let security = Arc::new(crate::security::tests::security(&[]));
+        let node = Arc::new(Node::new(config, security, live));
+        let run_cmd = |parts: &[&str]| {
+            let cmd = crate::counter::cmd(parts);
+            let spec = command::lookup(&cmd[0]).unwrap();
+            let Dispatch::Ready(reply) = local_acked(&node, spec, 0, cmd) else {
+                panic!("the write waited");
+            };
+            reply
+        };
+        let set = run_cmd(&["SET", "k", "v"]);
+        assert!(set.applied.is_some());
+        assert!(set.versions.is_empty());
+        let moved = run_cmd(&["MOVE", "k", "1"]);
+        let keys: Vec<(u32, &[u8])> = moved
+            .versions
+            .iter()
+            .map(|(d, k, _)| (*d, &k[..]))
+            .collect();
+        assert_eq!(keys, [(0, &b"k"[..]), (1, &b"k"[..])]);
+        assert_eq!(moved.versions[1].2, node.store.version(1, b"k").unwrap());
     }
 
     #[test]

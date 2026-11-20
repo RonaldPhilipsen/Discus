@@ -143,6 +143,7 @@ fn a_forward_reply_keeps_observed_and_settled() {
         epoch: epoch(2),
         observed: Some(v(8)),
         settled: true,
+        versions: Vec::new(),
     });
     assert_eq!(round_trip(m.clone()), m);
     let plain = Message::ForwardReply(ForwardReply {
@@ -151,8 +152,22 @@ fn a_forward_reply_keeps_observed_and_settled() {
         epoch: epoch(2),
         observed: None,
         settled: false,
+        versions: Vec::new(),
     });
     assert_eq!(round_trip(plain.clone()), plain);
+}
+
+#[test]
+fn a_forward_reply_keeps_the_version_of_each_key() {
+    let m = Message::ForwardReply(ForwardReply {
+        value: Resp::Integer(2),
+        applied: Some(v(2)),
+        epoch: epoch(2),
+        observed: None,
+        settled: false,
+        versions: vec![Some(v(1)), None, Some(v(2))],
+    });
+    assert_eq!(round_trip(m.clone()), m);
 }
 
 #[test]
