@@ -18,9 +18,11 @@ use discus_telemetry::attrs::TopologyCommand;
 use discus_transport::TransportError;
 use parking_lot::{RwLock, RwLockReadGuard};
 
+use crate::cluster::record::Record;
 use crate::cluster::topology;
 use crate::cluster::writeset::{WriteSet, WriteSetBudget, WriteSetLimits};
 use crate::cluster::ClusterLink;
+use crate::cluster::ConnWrites;
 use crate::command::CommandError;
 use crate::config::{client_host, default_client_addr};
 use crate::counter::Counters;
@@ -150,6 +152,10 @@ pub struct Faults {
     /// The membership tick passes no view to `Databases` while this is set, as while a member of
     /// the epoch has no gossip record.
     pub withhold_view: std::sync::atomic::AtomicBool,
+    /// The writes of each open client connection, by `CLIENT ID`.
+    pub conns: parking_lot::Mutex<
+        std::collections::HashMap<u64, std::sync::Weak<parking_lot::Mutex<ConnWrites>>>,
+    >,
 }
 
 #[cfg(feature = "testing")]
@@ -529,17 +535,25 @@ impl Node {
         let _ = self.counters.set(counters);
     }
 
-    /// A new write set for a client connection (spec section 7.4).
-    pub fn new_write_set(&self) -> WriteSet {
+    /// A new write set (spec section 7.4) and record for a client connection. Both count against
+    /// the write-set caps and the node budget.
+    pub fn new_conn_writes(&self) -> ConnWrites {
         let c = &self.config;
-        WriteSet::new(
-            WriteSetLimits {
-                keys: c.write_set_keys.max(1),
-                bytes: c.write_set_bytes,
-                max_age: std::time::Duration::from_millis(c.write_set_ttl_ms),
-            },
-            self.write_budget.clone(),
-        )
+        let limits = WriteSetLimits {
+            keys: c.write_set_keys.max(1),
+            bytes: c.write_set_bytes,
+            max_age: std::time::Duration::from_millis(c.write_set_ttl_ms),
+        };
+        ConnWrites {
+            record: Record::new(&limits, self.write_budget.clone()),
+            set: WriteSet::new(limits, self.write_budget.clone()),
+        }
+    }
+
+    /// The writes of the client connection with `CLIENT ID` `id`, while it is open.
+    #[cfg(feature = "testing")]
+    pub fn conn_writes(&self, id: u64) -> Option<crate::cluster::Writes> {
+        self.faults.conns.lock().get(&id)?.upgrade()
     }
 
     /// Bytes that every write set of this node holds.
@@ -912,7 +926,7 @@ pub struct ConnState {
     /// The round-robin position for reads over replicas.
     rr: u64,
     /// The recent writes of a client connection in a cluster. Internal execution has none.
-    pub writes: Option<Arc<parking_lot::Mutex<WriteSet>>>,
+    pub writes: Option<crate::cluster::Writes>,
     /// A connection of the redirect listener: keys that another node serves get `-MOVED`.
     pub redirect: bool,
     /// Set by `READONLY`, cleared by `READWRITE`. Only a redirect connection reads it.

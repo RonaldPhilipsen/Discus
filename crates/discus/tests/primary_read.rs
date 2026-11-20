@@ -84,9 +84,15 @@ async fn a_listed_key_does_not_enter_the_write_set() {
     let k = c.key_on(0, "sess");
     let entry = outsider(&c, &k);
     let mut conn = entry.redis().await;
+    let id: u64 = redis::cmd("CLIENT")
+        .arg("ID")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
     let _: () = conn.set(&k, "v1").await.unwrap();
     let _: () = conn.mset(&[(&k, "v2")]).await.unwrap();
-    assert_eq!(entry.node.write_set_bytes(), 0);
+    let writes = entry.node.conn_writes(id).unwrap();
+    assert!(writes.lock().set.is_empty());
 }
 
 #[tokio::test]

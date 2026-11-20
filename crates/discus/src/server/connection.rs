@@ -410,7 +410,13 @@ async fn serve_until_closed<S: AsyncRead + AsyncWrite + Unpin>(
     conn.redirect = redirect;
     conn.local_addr = local_addr;
     if node.link().is_some() {
-        conn.writes = Some(Arc::new(parking_lot::Mutex::new(node.new_write_set())));
+        let writes = Arc::new(parking_lot::Mutex::new(node.new_conn_writes()));
+        #[cfg(feature = "testing")]
+        node.faults
+            .conns
+            .lock()
+            .insert(conn.id, Arc::downgrade(&writes));
+        conn.writes = Some(writes);
     }
     let mut p = Pipeline {
         node: node.clone(),

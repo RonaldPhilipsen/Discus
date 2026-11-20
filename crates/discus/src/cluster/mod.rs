@@ -4,6 +4,7 @@ pub mod copy;
 pub mod forward;
 pub mod hold;
 pub mod multi;
+pub mod record;
 pub mod redirect;
 pub mod rename;
 pub mod route;
@@ -211,7 +212,15 @@ pub struct Job {
     pub db: u32,
 }
 
-pub type Writes = Arc<Mutex<writeset::WriteSet>>;
+/// What a client connection keeps about its writes: the write set for its reads, and the record
+/// for `WAIT`.
+#[derive(Debug)]
+pub struct ConnWrites {
+    pub set: writeset::WriteSet,
+    pub record: record::Record,
+}
+
+pub type Writes = Arc<Mutex<ConnWrites>>;
 
 impl Job {
     /// A job without a client connection: a forwarded command or a held retry.
@@ -634,7 +643,20 @@ pub fn run(node: &Arc<Node>, job: Job, writes: Option<&Writes>, route: Span) -> 
     let writes = writes.filter(|_| node.config.replication_factor > 1);
     let set_reply = job.spec.set_reply;
     let null_array = job.spec.null_array && job.cmd.len() > 2;
-    let dispatch = run_hop(node, job, Hop::default(), writes, route);
+    let flushed = (job.spec.route == Route::Broadcast).then_some((job.spec.name, job.db));
+    let mut dispatch = run_hop(node, job, Hop::default(), writes, route);
+    if let (Some((name, db)), Some(writes)) = (flushed, writes) {
+        dispatch = dispatch.then(writes, move |writes, reply| {
+            if matches!(reply.value, Value::Error(_)) {
+                return;
+            }
+            let record = &mut writes.lock().record;
+            match name {
+                "FLUSHALL" => record.clear(),
+                _ => record.clear_db(db),
+            }
+        });
+    }
     if !set_reply && !null_array {
         return dispatch;
     }
@@ -832,28 +854,50 @@ fn single(
     let need = match (writes, write) {
         (Some(w), false) if tracked && owners.len() > 1 => w
             .lock()
+            .set
             .required(SetKey::of(job.db, &job.cmd[1]), std::time::Instant::now),
         _ => None,
     };
     // Only a write, or a read that must see an earlier write, changes the write set.
     let key = (tracked && (write || need.is_some())).then(|| SetKey::of(job.db, &job.cmd[1]));
     let target = tracked.then(|| move_target(&job)).flatten();
+    // The record also takes a primary-read key, but never a counter key.
+    let noted = (write && writes.is_some() && !node.is_counter_key(&job.cmd[1]))
+        .then(|| (job.db, job.cmd[1].clone()));
+    let by_key = per_key(job.spec);
     let dispatch = single_planned(node, job, owners, hop, write, need, route);
-    let (Some(writes), Some(key)) = (writes, key) else {
+    let Some(writes) = writes.filter(|_| key.is_some() || noted.is_some()) else {
         return dispatch;
     };
-    // The write set changes before the key order releases the next command on this key.
+    // The write set and the record change before the key order releases the next command on
+    // this key.
     dispatch.then(writes, move |writes, reply| {
         let mut w = writes.lock();
         match (write, reply.applied) {
             (true, Some(v)) if records(&reply.value) => {
                 let now = std::time::Instant::now();
-                w.record(key, v, now);
+                if let Some(key) = key {
+                    w.set.record(key, v, now);
+                }
                 if let Some(target) = target {
-                    w.record(target, v, now);
+                    w.set.record(target, v, now);
+                }
+                match noted {
+                    // `MOVE` changes its key in two databases, each with its own version.
+                    Some(_) if by_key => {
+                        for (db, k, v) in &reply.versions {
+                            w.record.note(*db, k, *v);
+                        }
+                    }
+                    Some((db, k)) => w.record.note(db, &k, v),
+                    None => {}
                 }
             }
-            (false, _) if need.is_some() => w.observed(key, reply.observed, reply.settled),
+            (false, _) if need.is_some() => {
+                if let Some(key) = key {
+                    w.set.observed(key, reply.observed, reply.settled);
+                }
+            }
             _ => {}
         }
     })

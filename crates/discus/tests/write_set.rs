@@ -124,8 +124,14 @@ async fn the_write_set_lets_go_once_replicas_catch_up() {
     let k = key(&c);
     let entry = outsider(&c, &k);
     let mut conn = entry.redis().await;
+    let id: u64 = redis::cmd("CLIENT")
+        .arg("ID")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let writes = entry.node.conn_writes(id).unwrap();
     let _: () = conn.set(&k, "v1").await.unwrap();
-    assert!(entry.node.write_set_bytes() > 0);
+    assert_eq!(writes.lock().set.len(), 1);
     let primary = c.by_id(c.nodes[0].primary(k.as_bytes()));
     let want = primary.node.store.version(0, k.as_bytes());
     assert!(
@@ -147,7 +153,7 @@ async fn the_write_set_lets_go_once_replicas_catch_up() {
     );
     let v: String = conn.get(&k).await.unwrap();
     assert_eq!(v, "v1");
-    assert_eq!(entry.node.write_set_bytes(), 0);
+    assert!(writes.lock().set.is_empty());
 }
 
 #[tokio::test]

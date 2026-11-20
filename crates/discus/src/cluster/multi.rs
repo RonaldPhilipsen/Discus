@@ -228,7 +228,7 @@ pub fn multi(
     }
     let now = Instant::now();
     let need = |key: &[u8]| match writes {
-        Some(w) if !write => w.lock().required(SetKey::of(db, key), || now),
+        Some(w) if !write => w.lock().set.required(SetKey::of(db, key), || now),
         _ => None,
     };
     if super::redirect::applies(redirect, &hop) {
@@ -260,7 +260,8 @@ pub fn multi(
     let Some(groups) = groups else {
         return Dispatch::Ready(Reply::try_again());
     };
-    // Each written key enters the write set with the stamp of its own part. Only a write notes.
+    // Each written key enters the write set with the stamp of its own part, and the record with
+    // its own version. Only a write notes.
     let writes = writes.filter(|_| write).cloned();
     let note = move |node: &Node, cmd: &Command, reply: &Reply| {
         if let (Some(w), Some(v)) = (&writes, reply.applied) {
@@ -271,7 +272,10 @@ pub fn multi(
                     .flatten()
                     .filter(|k| !node.is_primary_read_key(k))
                 {
-                    w.record(SetKey::of(db, k), v, Instant::now());
+                    w.set.record(SetKey::of(db, k), v, Instant::now());
+                }
+                for (db, k, v) in &reply.versions {
+                    w.record.note(*db, k, *v);
                 }
             }
         }
