@@ -499,6 +499,8 @@ restarts no pod. The node applies it after the kubelet syncs the file and the ne
 | `settings.budget.forwardWriteMs` | `[budget] forward-write-ms` |
 | `settings.budget.holdMs` | `[budget] hold-ms` |
 | `settings.budget.replicationMs` | `[budget] replication-ms` |
+| `settings.replication.writeAcks` | `[replication] write-acks` |
+| `settings.replication.writeAckTimeout` | `[replication] write-ack-timeout` |
 | `settings.reads.fromReplicas` | `[reads] from-replicas` |
 | `settings.handoff.rateBytes` | `[handoff] rate-bytes` |
 | `settings.auth.maxFailuresPerConnection` | `[auth] max-failures-per-connection` |

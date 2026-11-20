@@ -116,6 +116,13 @@ settings:
     holdMs: 3000
     # A peer acknowledges a replication batch within this time.
     replicationMs: 1000
+  replication:
+    # Secondaries that store each write before the primary replies. It must be below the
+    # replication factor.
+    writeAcks: 0
+    # The reply to a write that the secondaries do not acknowledge in time: "open" replies +OK,
+    # "closed" replies with an error.
+    writeAckTimeout: open
   reads:
     # Reads can go to a replica, not only to the primary.
     fromReplicas: true
