@@ -1,5 +1,5 @@
 use discus_telemetry::attrs::{
-    check, Attribute, CommandLabel, GuardError, MemberState, MisrouteReason, NodeLabel,
+    check, AckMode, Attribute, CommandLabel, GuardError, MemberState, MisrouteReason, NodeLabel,
     ReloadOutcome, Status, TopologyCommand, TransportChannel, ALLOWED_KEYS,
 };
 
@@ -75,7 +75,8 @@ fn every_typed_attribute_passes_the_guard() {
     .chain(TransportChannel::ALL.into_iter().map(Attribute::Channel))
     .chain(MisrouteReason::ALL.into_iter().map(Attribute::Reason))
     .chain(TopologyCommand::ALL.into_iter().map(Attribute::Topology))
-    .chain(ReloadOutcome::ALL.into_iter().map(Attribute::Outcome));
+    .chain(ReloadOutcome::ALL.into_iter().map(Attribute::Outcome))
+    .chain(AckMode::ALL.into_iter().map(Attribute::AckMode));
     for a in all {
         assert!(ALLOWED_KEYS.contains(&a.key()));
         check([(a.key(), a.value())]).unwrap();

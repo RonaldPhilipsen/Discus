@@ -99,6 +99,12 @@ pub struct AckWatch {
     keys: Vec<DbKey>,
 }
 
+impl AckWatch {
+    pub fn keys(&self) -> &[DbKey] {
+        &self.keys
+    }
+}
+
 impl Drop for AckWatch {
     fn drop(&mut self) {
         let r = &self.replicator;
@@ -746,7 +752,7 @@ impl Replicator {
         self.watching.load(Ordering::Relaxed)
     }
 
-    /// Wake the commands in `unacked_after_wait`.
+    /// Wake the commands in `unacked_after_wait` and `wait_acks`.
     fn bump_progress(&self) {
         self.progress.send_modify(|n| *n = n.wrapping_add(1));
     }

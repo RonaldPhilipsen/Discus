@@ -10,6 +10,7 @@ use bytes::Bytes;
 use discus_resp::{Command, Value};
 
 use super::{run_hop, Dispatch, Hop, Job, Reply, Writes};
+use crate::command::error::is_no_replicas;
 use crate::command::internal::{PUT, TAKE};
 use crate::command::util::check_key;
 use crate::command::{self, CommandError, CommandSpec};
@@ -82,6 +83,10 @@ async fn move_entry(steps: &Steps, from: Bytes, to: Bytes) -> Reply {
     };
     let name = Bytes::from_static(PUT.name.as_bytes());
     let put = steps.run(PUT, steps.db, vec![name, to, blob]).await;
+    // The put applied on the destination primary, so a retry would find no source.
+    if is_no_replicas(&put.value) {
+        return put;
+    }
     if matches!(put.value, Value::Error(_)) || put.failed.is_some() {
         return Reply::try_again();
     }

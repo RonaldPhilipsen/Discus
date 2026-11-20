@@ -19,7 +19,7 @@ use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 use opentelemetry::{KeyValue, StringValue, Value};
 
 #[cfg(feature = "otel")]
-use crate::attrs::{check, Attribute, ReloadOutcome};
+use crate::attrs::{check, AckMode, Attribute, ReloadOutcome};
 use crate::attrs::{
     CommandLabel, CounterMode, CounterRole, MemberState, MisrouteReason, NodeLabel, Status,
     TopologyCommand, TransportChannel,
@@ -154,6 +154,7 @@ struct Instruments {
     quic_failures: Counter<u64>,
     tombstones: Gauge<u64>,
     primary_read_delete_unacked: Counter<u64>,
+    write_unacked: Counter<u64>,
     counter_roles: Gauge<u64>,
     counter_memory: Gauge<u64>,
     counter_mode_switches: Counter<u64>,
@@ -430,6 +431,10 @@ impl Metrics {
             primary_read_delete_unacked: counter(
                 "discus.primary_read.delete_unacked",
                 "Deletes of listed keys that replied before a secondary acknowledged them",
+            ),
+            write_unacked: counter(
+                "discus.write.unacked",
+                "Written keys whose wait ended without enough acknowledgments",
             ),
             counter_roles: gauge(
                 "discus.counter.roles",
@@ -709,6 +714,18 @@ impl Metrics {
     pub fn primary_read_delete_unacked(&self, count: u64) {
         #[cfg(feature = "otel")]
         self.with(|i| i.primary_read_delete_unacked.add(count, &[]));
+    }
+
+    /// `mode` is the `--write-ack-timeout` value.
+    #[inline]
+    pub fn write_unacked(&self, count: u64, mode: &'static str) {
+        #[cfg(feature = "otel")]
+        {
+            debug_assert!(AckMode::parse(mode).is_some(), "{mode}");
+            if let Some(mode) = AckMode::parse(mode) {
+                self.with(|i| i.write_unacked.add(count, &[kv(Attribute::AckMode(mode))]));
+            }
+        }
     }
 
     #[inline]
