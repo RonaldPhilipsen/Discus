@@ -170,6 +170,46 @@ fn a_forward_reply_keeps_the_version_of_each_key() {
     assert_eq!(round_trip(m.clone()), m);
 }
 
+/// A raw forward reply with the given `versions` and `changed` fields.
+fn reply_frame(versions: Option<usize>, changed: Option<usize>) -> Vec<u8> {
+    let mut fbb = flatbuffers::FlatBufferBuilder::new();
+    let value = fb::RespValue::create(&mut fbb, &fb::RespValueArgs::default());
+    let zero = fb::Version::new(0, &fb::Id128::default());
+    let versions = versions.map(|n| fbb.create_vector(&vec![zero; n]));
+    let changed = changed.map(|n| fbb.create_vector(&vec![true; n]));
+    let epoch = fb::EpochId::new(1, &fb::Id128::default());
+    let t = fb::ForwardReply::create(
+        &mut fbb,
+        &fb::ForwardReplyArgs {
+            value: Some(value),
+            epoch: Some(&epoch),
+            versions,
+            changed,
+            ..Default::default()
+        },
+    );
+    fbb.finish_minimal(t);
+    discus_wire::encode_envelope(
+        fb::MessageType::FORWARD_REPLY.0,
+        1,
+        &TraceContext::default(),
+        fbb.finished_data(),
+    )
+}
+
+#[test]
+fn reply_versions_need_a_changed_flag_for_each_entry() {
+    let decode = |v, c| decode_frame(&reply_frame(v, c), &Limits::default());
+    assert!(decode(Some(2), Some(2)).is_ok());
+    assert!(decode(None, None).is_ok());
+    for (v, c) in [(Some(2), None), (None, Some(2)), (Some(2), Some(1))] {
+        assert!(
+            matches!(decode(v, c), Err(DecodeError::Invalid(_))),
+            "{v:?} {c:?}"
+        );
+    }
+}
+
 #[test]
 fn a_tracked_forward_round_trips() {
     let m = Message::Forward(Forward {

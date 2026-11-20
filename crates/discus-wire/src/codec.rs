@@ -161,8 +161,14 @@ fn key_versions(
     versions: Option<Vector<'_, fb::Version>>,
     changed: Option<Vector<'_, bool>>,
 ) -> Result<Vec<Option<Version>>, DecodeError> {
-    let (Some(versions), Some(changed)) = (versions, changed) else {
-        return Ok(Vec::new());
+    let (versions, changed) = match (versions, changed) {
+        (None, None) => return Ok(Vec::new()),
+        (Some(versions), Some(changed)) => (versions, changed),
+        _ => {
+            return Err(invalid(
+                "reply versions without changed, or changed without versions",
+            ))
+        }
     };
     if versions.len() != changed.len() {
         return Err(invalid("reply versions and changed differ in length"));

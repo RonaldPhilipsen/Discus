@@ -138,11 +138,6 @@ fn read_group<'a>(
     })
 }
 
-/// The newest applied stamp of the parts.
-fn newest(replies: &[Reply]) -> Option<discus_placement::Version> {
-    replies.iter().filter_map(|r| r.applied).max()
-}
-
 /// How the parts of a multi-key command merge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Merge {
@@ -307,23 +302,33 @@ pub fn multi(
             let unsent = failures.iter().all(|f| f.unsent);
             return Failure { unsent }.reply();
         }
-        let mut replies: Vec<Reply> = Vec::with_capacity(parts.len());
+        // A write part that ends with an error, such as `-NOREPLICAS`, can still have changed
+        // keys, so the reply keeps the stamps of every part that answered.
+        let mut parts = parts;
+        let applied = parts.iter().flatten().filter_map(|r| r.applied).max();
+        let versions: Vec<_> = parts
+            .iter_mut()
+            .flatten()
+            .flat_map(|r| std::mem::take(&mut r.versions))
+            .collect();
+        let mut values = Vec::with_capacity(parts.len());
         for part in parts {
             match part {
-                Some(r) if !matches!(r.value, Value::Error(_)) => replies.push(r),
+                Some(r) if !matches!(r.value, Value::Error(_)) => values.push(r.value),
                 // The error of a part, such as `-OOM`, is the reply. The other parts stay
                 // applied.
-                Some(r) => return Reply::value(r.value),
+                Some(r) => {
+                    return Reply {
+                        applied,
+                        versions,
+                        ..Reply::value(r.value)
+                    }
+                }
                 // No owner answered a read part.
                 None => return Reply::try_again(),
             }
         }
-        let applied = newest(&replies);
-        let versions = replies
-            .iter_mut()
-            .flat_map(|r| std::mem::take(&mut r.versions))
-            .collect();
-        let Some(value) = merge.apply(total, &groups, replies.into_iter().map(|r| r.value)) else {
+        let Some(value) = merge.apply(total, &groups, values) else {
             return Reply::try_again();
         };
         Reply {

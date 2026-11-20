@@ -73,11 +73,14 @@ pub async fn send(
                     // A timestamp too far ahead is dropped by the HLC. The reply still counts.
                     let _ = node.hlc.observe(applied);
                 }
-                let versions =
-                    match command::lookup(&cmd[0]).or_else(|| command::lookup_internal(&cmd[0])) {
-                        Some(spec) => super::unaligned(spec, db, cmd, reply.versions),
-                        None => Vec::new(),
-                    };
+                let versions = if reply.versions.is_empty() {
+                    Vec::new()
+                } else {
+                    command::lookup(&cmd[0])
+                        .or_else(|| command::lookup_internal(&cmd[0]))
+                        .map(|spec| super::unaligned(spec, db, cmd, reply.versions))
+                        .unwrap_or_default()
+                };
                 Ok(Reply {
                     value: reply.value,
                     applied: reply.applied,
