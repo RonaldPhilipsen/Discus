@@ -9,7 +9,6 @@
     clippy::all,
     clippy::unwrap_used,
     dead_code,
-    deprecated,
     non_camel_case_types,
     unused_imports,
     mismatched_lifetime_syntaxes,
