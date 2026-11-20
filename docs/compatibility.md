@@ -304,11 +304,11 @@ In a cluster, replication adds these deviations:
   replies the full count only when every node has delivered every write. Otherwise it replies 0.
 - The count of `WAIT` is never too high. It can be too low in these cases:
   - After an overflow of the record.
-  - After an overflow, if a member left the cluster or is not `NORMAL`. The count is then 0 until
-    a flush on the connection empties the record.
-  - After another connection flushed a key of the record, or a node evicted it. A key that no
-    owner holds counts 0, as a write lost with its primary does. A `FLUSHDB` or `FLUSHALL` on the
-    connection itself empties the record of the flushed databases.
+  - After an overflow, if a member left the cluster or left `NORMAL` since the record was last
+    empty. The count is then 0 until a flush on the connection empties the record.
+  - After an epoch change, for a key that no current owner holds. The key can be a write that was
+    lost with its primary, so it counts 0. Without an epoch change, such a key was removed by
+    expiry, a delete, an eviction, or a flush, and it does not lower the count.
 - `WAIT` uses the epoch of the entry node. If that epoch lags the cluster, `WAIT` asks the old
   owners of a key until the new epoch arrives.
 - Without earlier writes, `WAIT` replies the number of secondaries of a key:
