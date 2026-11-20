@@ -49,7 +49,9 @@ pub(crate) fn to_wire<'a>(
             args.kind = fb::RespKind::BULK;
             args.bytes = Some(fbb.create_vector(b));
         }
-        Value::Null => args.kind = fb::RespKind::NULL,
+        // The entry node restores a null array from the command (`cluster::run`), so the wire
+        // format stays the same.
+        Value::Null | Value::NullArray => args.kind = fb::RespKind::NULL,
         // A set crosses the wire as an array, so the wire format stays the same. The entry node
         // makes it a set again from the command (`cluster::run`).
         Value::Array(vs) | Value::Set(vs) => {

@@ -73,6 +73,9 @@ pub struct CommandSpec {
     pub subcommands: &'static [Subcommand],
     /// Valkey replies with a set (RESP3 `~`) where this command replies with an array.
     pub set_reply: bool,
+    /// With more than two arguments, Valkey replies nil with a null array (RESP2 `*-1`), as
+    /// `LPOP key count` does on a missing key.
+    pub null_array: bool,
 }
 
 impl CommandSpec {
@@ -90,6 +93,7 @@ impl CommandSpec {
             categories: Categories::EMPTY,
             subcommands: &[],
             set_reply: false,
+            null_array: false,
         }
     }
 
@@ -107,6 +111,7 @@ impl CommandSpec {
             categories: Categories::EMPTY,
             subcommands: &[],
             set_reply: false,
+            null_array: false,
         }
     }
 
@@ -124,6 +129,7 @@ impl CommandSpec {
             categories: Categories::EMPTY,
             subcommands: &[],
             set_reply: false,
+            null_array: false,
         }
     }
 
@@ -142,6 +148,13 @@ impl CommandSpec {
     pub const fn with_set_reply(self) -> CommandSpec {
         CommandSpec {
             set_reply: true,
+            ..self
+        }
+    }
+
+    pub const fn with_null_array(self) -> CommandSpec {
+        CommandSpec {
+            null_array: true,
             ..self
         }
     }
@@ -203,13 +216,14 @@ struct Registry {
 fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(|| {
-        let modules: [(&[CommandSpec], Categories); 6] = [
+        let modules: [(&[CommandSpec], Categories); 7] = [
             (super::connection::COMMANDS, Categories::CONNECTION),
             (super::string::COMMANDS, Categories::STRING),
             (super::keys::COMMANDS, Categories::KEYSPACE),
             (super::hash::COMMANDS, Categories::HASH),
             (super::set::COMMANDS, Categories::SET),
             (super::zset::COMMANDS, Categories::SORTEDSET),
+            (super::list::COMMANDS, Categories::LIST),
         ];
         let mut all: Vec<CommandSpec> = modules
             .into_iter()
@@ -401,6 +415,11 @@ mod tests {
         assert_eq!(cats(b"SISMEMBER"), ["read", "set", "fast"]);
         assert_eq!(cats(b"ZADD"), ["write", "sortedset", "fast"]);
         assert_eq!(cats(b"ZRANGE"), ["read", "sortedset", "slow"]);
+        assert_eq!(cats(b"LPUSH"), ["write", "list", "fast"]);
+        assert_eq!(cats(b"LPOP"), ["write", "list", "fast"]);
+        assert_eq!(cats(b"LLEN"), ["read", "list", "fast"]);
+        assert_eq!(cats(b"LRANGE"), ["read", "list", "slow"]);
+        assert_eq!(cats(b"LTRIM"), ["write", "list", "slow"]);
         assert_eq!(
             cats(b"FLUSHALL"),
             ["keyspace", "write", "slow", "dangerous"]

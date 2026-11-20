@@ -48,6 +48,7 @@ pub fn estimate_size(key: &[u8], entry: &Entry) -> u64 {
             .sum(),
         crate::Value::ZSet(z) => z.byte_size(),
         crate::Value::Set(s) => s.iter().map(|m| m.len() as u64 + ENTRY_OVERHEAD).sum(),
+        crate::Value::List(l) => l.iter().map(|m| m.len() as u64 + ENTRY_OVERHEAD).sum(),
     };
     key.len() as u64 + payload + ENTRY_OVERHEAD
 }

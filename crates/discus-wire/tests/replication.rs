@@ -2,7 +2,7 @@
 
 mod common;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
 use common::round_trip;
@@ -39,6 +39,7 @@ fn batch() -> Batch {
     let mut zset = ZSet::new();
     zset.insert(Bytes::from("m"), 1.5);
     zset.insert(Bytes::from("n"), -2.0);
+    let list: VecDeque<Bytes> = ["x", "", "x"].into_iter().map(Bytes::from).collect();
     let mut tomb = entry(Value::Str(Bytes::new()), v(5), Some(99));
     tomb.tombstone = true;
     let mut b = Batch::new(epoch(4));
@@ -50,6 +51,7 @@ fn batch() -> Batch {
         (DbKey::new(0, "h"), entry(Value::Hash(hash), v(2), None)),
         (DbKey::new(0, "set"), entry(Value::Set(set), v(3), None)),
         (DbKey::new(0, "z"), entry(Value::ZSet(zset), v(4), None)),
+        (DbKey::new(0, "l"), entry(Value::List(list), v(6), None)),
         (DbKey::new(0, "t"), tomb),
     ];
     b.offers = vec![(DbKey::new(0, "o"), v(7))];

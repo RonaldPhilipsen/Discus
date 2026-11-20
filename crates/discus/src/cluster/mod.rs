@@ -429,21 +429,24 @@ pub fn run(node: &Arc<Node>, job: Job, writes: Option<&Writes>, route: Span) -> 
     // With one owner per key, a read reaches that owner whatever the write set requires.
     let writes = writes.filter(|_| node.config.replication_factor > 1);
     let set_reply = job.spec.set_reply;
+    let null_array = job.spec.null_array && job.cmd.len() > 2;
     let dispatch = run_hop(node, job, Hop::default(), writes, route);
-    if !set_reply {
+    if !set_reply && !null_array {
         return dispatch;
     }
-    // A forwarded reply arrives as an array, so the entry node marks the set here, for local
-    // and forwarded replies alike.
-    let as_set = |mut reply: Reply| {
-        if let Value::Array(items) = reply.value {
-            reply.value = Value::Set(items);
-        }
+    // A forwarded reply arrives as an array or a plain nil, so the entry node restores the
+    // shape here, for local and forwarded replies alike.
+    let reshape = move |mut reply: Reply| {
+        reply.value = match reply.value {
+            Value::Array(items) if set_reply => Value::Set(items),
+            Value::Null if null_array => Value::NullArray,
+            other => other,
+        };
         reply
     };
     match dispatch {
-        Dispatch::Ready(reply) => Dispatch::Ready(as_set(reply)),
-        Dispatch::Pending(f) => Dispatch::Pending(Box::pin(async move { as_set(f.await) })),
+        Dispatch::Ready(reply) => Dispatch::Ready(reshape(reply)),
+        Dispatch::Pending(f) => Dispatch::Pending(Box::pin(async move { reshape(f.await) })),
     }
 }
 

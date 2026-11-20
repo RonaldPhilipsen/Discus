@@ -449,6 +449,10 @@ fn stored_to<'a>(
             let scores = fbb.create_vector(&scores);
             (fb::ValueKind::ZSET, None, Some(items), Some(scores))
         }
+        Value::List(l) => {
+            let items = blobs(fbb, l.iter().map(|m| &m[..]));
+            (fb::ValueKind::LIST, None, Some(items), None)
+        }
     };
     let version = version_to(e.version);
     fb::StoredEntry::create(
@@ -498,6 +502,7 @@ fn stored_of(s: fb::StoredEntry<'_>) -> Result<(DbKey, Entry), DecodeError> {
             }
             Value::ZSet(z)
         }
+        fb::ValueKind::LIST => Value::List(items.into()),
         other => return Err(invalid(format!("unknown value kind {}", other.0))),
     };
     let version = version_of(

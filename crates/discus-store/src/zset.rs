@@ -84,28 +84,16 @@ impl ZSet {
     /// Members by rank. `start` and `stop` follow Redis: inclusive, and negative counts from the
     /// end. With `reverse`, rank 0 is the highest score.
     pub fn range(&self, start: i64, stop: i64, reverse: bool) -> Vec<(&Bytes, f64)> {
-        let len = self.len() as i64;
-        let start = if start < 0 {
-            (len + start).max(0)
-        } else {
-            start
-        };
-        let stop = if stop < 0 {
-            len + stop
-        } else {
-            stop.min(len - 1)
-        };
-        if start > stop || start >= len {
+        let Some(ranks) = crate::rank::rank_range(self.len(), start, stop) else {
             return Vec::new();
-        }
-        let take = (stop - start + 1) as usize;
+        };
         let iter: Box<dyn Iterator<Item = &(Score, Bytes)>> = if reverse {
             Box::new(self.order.iter().rev())
         } else {
             Box::new(self.order.iter())
         };
-        iter.skip(start as usize)
-            .take(take)
+        iter.skip(*ranks.start())
+            .take(ranks.end() - ranks.start() + 1)
             .map(|(s, m)| (m, s.0))
             .collect()
     }
