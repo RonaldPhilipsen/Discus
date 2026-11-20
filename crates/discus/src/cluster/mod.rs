@@ -386,10 +386,14 @@ pub fn local_acked(
     db: u32,
     cmd: Command,
 ) -> Dispatch {
-    let Some((plan, replicator)) =
-        ack_plan(node, spec, db, &cmd).and_then(|plan| Some((plan, node.replicator()?.clone())))
-    else {
+    let Some(plan) = ack_plan(node, spec, db, &cmd) else {
         return Dispatch::Ready(local(node, spec, db, &cmd));
+    };
+    let Some(replicator) = node.replicator().cloned() else {
+        if plan.legacy {
+            return Dispatch::Ready(local(node, spec, db, &cmd));
+        }
+        return Dispatch::Ready(unreplicated(node, spec, db, &cmd, &plan));
     };
     if plan.legacy {
         let reply = local(node, spec, db, &cmd);
@@ -422,18 +426,40 @@ pub fn local_acked(
     Dispatch::Pending(Box::pin(async move {
         let short = replicator.wait_acks(&node, &keys, plan.need).await;
         drop(watch);
-        if short == 0 {
-            return reply;
-        }
-        discus_telemetry::global().write_unacked(short, plan.mode.as_str());
-        match plan.mode {
-            AckTimeout::Open => reply,
-            AckTimeout::Closed => Reply {
-                value: CommandError::NoReplicas.to_value(),
-                ..reply
-            },
-        }
+        ended_short(reply, short, plan.mode)
     }))
+}
+
+/// Run a write with a plan that is not legacy on a node without secondaries. No other owner can
+/// acknowledge it, so the wait ends at once and the mode decides the reply (spec "Owners that
+/// cannot acknowledge").
+fn unreplicated(node: &Node, spec: &CommandSpec, db: u32, cmd: &Command, plan: &AckPlan) -> Reply {
+    let reply = local(node, spec, db, cmd);
+    if reply.applied.is_none() {
+        return reply;
+    }
+    let short = plan
+        .keys
+        .iter()
+        .filter(|k| node.store.version(k.db, &k.key).is_some())
+        .count() as u64;
+    ended_short(reply, short, plan.mode)
+}
+
+/// The reply of a write whose wait left `short` keys without enough acknowledgments. An error
+/// reply keeps its own error: it says more than `-NOREPLICAS`.
+fn ended_short(reply: Reply, short: u64, mode: AckTimeout) -> Reply {
+    if short == 0 {
+        return reply;
+    }
+    discus_telemetry::global().write_unacked(short, mode.as_str());
+    match mode {
+        AckTimeout::Closed if !matches!(reply.value, Value::Error(_)) => Reply {
+            value: CommandError::NoReplicas.to_value(),
+            ..reply
+        },
+        _ => reply,
+    }
 }
 
 /// Fill `observed` and `settled` of a read of `key` that ran here.
@@ -558,7 +584,11 @@ pub fn run_hop(
     }
     if node.link().is_none() {
         drop(route);
-        return Dispatch::Ready(local(node, job.spec, job.db, &job.cmd));
+        let reply = match ack_plan(node, job.spec, job.db, &job.cmd).filter(|p| !p.legacy) {
+            Some(plan) => unreplicated(node, job.spec, job.db, &job.cmd, &plan),
+            None => local(node, job.spec, job.db, &job.cmd),
+        };
+        return Dispatch::Ready(reply);
     }
     match job.spec.route {
         Route::Single { write } => single(node, job, hop, write, writes, route),
@@ -834,6 +864,25 @@ mod tests {
     use crate::settings::Reloadable;
     use crate::Config;
 
+    #[test]
+    fn closed_mode_keeps_an_error_reply_and_replaces_success() {
+        let applied = Some(Version::zero());
+        let err = Reply {
+            applied,
+            ..Reply::value(Value::error("OOM command not allowed"))
+        };
+        let kept = ended_short(err, 1, AckTimeout::Closed);
+        assert_eq!(kept.value, Value::error("OOM command not allowed"));
+        let ok = Reply {
+            applied,
+            ..Reply::value(Value::ok())
+        };
+        let swapped = ended_short(ok, 1, AckTimeout::Closed);
+        assert_eq!(swapped.value, CommandError::NoReplicas.to_value());
+        assert_eq!(swapped.applied, applied);
+        let open = ended_short(Reply::value(Value::ok()), 1, AckTimeout::Open);
+        assert_eq!(open.value, Value::ok());
+    }
     #[test]
     fn a_data_command_in_a_database_above_the_cluster_count_is_refused() {
         let config = Config::parse_from(["discus"]).unwrap();

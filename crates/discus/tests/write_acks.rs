@@ -76,7 +76,19 @@ async fn everywhere(c: &Cluster, key: &str) {
 
 #[tokio::test]
 async fn a_write_returns_after_a_secondary_stores_it() {
-    let c = start_cluster(3, &args(&["--write-acks", "1"])).await;
+    // A long timeout and closed mode, so a slow machine shows a timeout as `-NOREPLICAS`.
+    let c = start_cluster(
+        3,
+        &args(&[
+            "--write-acks",
+            "1",
+            "--write-ack-timeout",
+            "closed",
+            "--replication-timeout-ms",
+            "60000",
+        ]),
+    )
+    .await;
     let k = c.key_on(0, "ack");
     everywhere(&c, &k).await;
     // A reply that does not wait comes before the slow secondaries store the write.
@@ -395,4 +407,19 @@ async fn zero_write_acks_keeps_a_stalled_write_fast() {
     let started = Instant::now();
     assert_eq!(set(&mut conn, &k, "v1").await.unwrap(), "OK");
     assert!(started.elapsed() < CAP, "{:?}", started.elapsed());
+}
+
+#[tokio::test]
+async fn a_node_without_peers_replies_noreplicas_at_once() {
+    let mut conn = common::connect(&args(&[
+        "--write-acks",
+        "1",
+        "--write-ack-timeout",
+        "closed",
+    ]))
+    .await;
+    let err = set(&mut conn, "alone", "v1").await.unwrap_err();
+    assert!(is_noreplicas(&err), "{err}");
+    let v: String = conn.get("alone").await.unwrap();
+    assert_eq!(v, "v1");
 }

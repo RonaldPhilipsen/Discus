@@ -876,8 +876,8 @@ at most `--replication-timeout-ms`. `--write-ack-timeout` sets the reply when th
 
 The wait ends at once, without the timeout, in two cases. The key has fewer than `n` other owners,
 for example in a cluster with fewer nodes than the replication factor. Or fewer than `n` other
-owners have a queue that is up, for example while a secondary is down. Each write would otherwise
-wait the full timeout while a node is down.
+owners have a queue that is up, for example while a secondary is down. Without this rule, each
+write waits the full timeout while a node is down.
 
 `-NOREPLICAS` does not undo the write. The write applied on the primary and can still reach the
 replicas. A client that retries the command applies it again. For `SET` that is harmless. For
