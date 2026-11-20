@@ -785,9 +785,18 @@ directly but never gets `-MOVED`. That setting is for tests.
 
 ### 8.2 Replication
 
-- The primary acknowledges after it applies the write locally (`W = 1`) and then enqueues it per
-  peer. There is no `WAIT`. The one exception is a delete of a primary-read key: it waits up to
-  `--replication-timeout-ms` for one secondary, then replies with success anyway (§19).
+- The primary applies the write locally and then enqueues it per peer. With `--write-acks 0`
+  (the default), the primary replies at once (`W = 1`). The one exception is a delete of a
+  primary-read key: it waits up to `--replication-timeout-ms` for one secondary, then replies with
+  success anyway (§19).
+- With `--write-acks n` above 0, a write that changed a key waits until `n` secondaries store it,
+  for at most `--replication-timeout-ms`. A secondary stored the write when its queue no longer
+  holds the key, or when it acknowledged a batch with the version of the write or a newer one. The
+  wait ends at once when fewer than `n` other owners exist or have a queue that is up. With
+  `--write-ack-timeout open`, a wait that ends short replies normally. With `closed`, it replies
+  `-NOREPLICAS Not enough good replicas to write.` That error means that the write applied on the
+  primary and can still reach the replicas. The write is not undone. The connection records it in
+  its write set. A write that changed nothing does not wait. There is no `WAIT` command.
 - A queue keeps only the latest full entry per key. If the HLC of an entry is newer, the replica
   applies it. Replication is therefore idempotent and order-tolerant.
 - On queue overflow, the primary drops the oldest entries, marks the peer lagging, and records
