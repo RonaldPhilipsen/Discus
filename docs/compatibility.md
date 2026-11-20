@@ -22,8 +22,25 @@ leading zero is a protocol error, and an array header of zero or fewer items is 
 | Hashes | `HSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HINCRBY`, `HKEYS`, `HVALS` |
 | Sets | `SADD`, `SREM`, `SMEMBERS`, `SISMEMBER`, `SMISMEMBER`, `SCARD`, `SPOP`, `SRANDMEMBER` |
 | Sorted sets | `ZADD` (`NX`, `XX`, `CH`), `ZSCORE`, `ZMSCORE`, `ZREM`, `ZCARD`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE` (`WITHSCORES`, `LIMIT`), `ZINCRBY`, `ZCOUNT` |
+| Lists | `LPUSH`, `RPUSH`, `LPOP` (count), `RPOP` (count), `LLEN`, `LRANGE`, `LINDEX`, `LTRIM` |
 
 `SWAPDB` returns `-ERR SWAPDB is not allowed in cluster mode`, as a Valkey cluster does.
+
+## Lists
+
+A list has the same member limit as the other collections, `--max-collection-members`. A push
+that takes a list past the limit returns `-ERR collection too large` and changes nothing.
+
+Lists are safe for cache data, such as recent items or a capped feed. Lists are not safe as
+durable work queues. A write goes to the primary, and the primary copies it to the other owners in
+the background. If the primary stops right after a push, the pushed items can be lost. A pop that
+the primary acknowledged can also come back after a failover.
+
+Each write to a list sends the whole list to the other owners. So each push on a long list sends
+all of its items again. The member limit bounds this cost.
+
+The blocking commands `BLPOP`, `BRPOP`, `BLMOVE`, and `BRPOPLPUSH` are not supported. A blocking
+command needs a client to wait on a key that another node can own.
 
 ## Numbered databases
 

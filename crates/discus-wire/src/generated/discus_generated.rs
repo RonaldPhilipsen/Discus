@@ -781,14 +781,15 @@ impl ::flatbuffers::SimpleToVerifyInSlice for GossipKind {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_VALUE_KIND: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_VALUE_KIND: u8 = 3;
+pub const ENUM_MAX_VALUE_KIND: u8 = 4;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_VALUE_KIND: [ValueKind; 4] = [
+pub const ENUM_VALUES_VALUE_KIND: [ValueKind; 5] = [
   ValueKind::STRING,
   ValueKind::HASH,
   ValueKind::SET,
   ValueKind::ZSET,
+  ValueKind::LIST,
 ];
 
 /// Append-only.
@@ -801,14 +802,16 @@ impl ValueKind {
   pub const HASH: Self = Self(1);
   pub const SET: Self = Self(2);
   pub const ZSET: Self = Self(3);
+  pub const LIST: Self = Self(4);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 3;
+  pub const ENUM_MAX: u8 = 4;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::STRING,
     Self::HASH,
     Self::SET,
     Self::ZSET,
+    Self::LIST,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -817,6 +820,7 @@ impl ValueKind {
       Self::HASH => Some("HASH"),
       Self::SET => Some("SET"),
       Self::ZSET => Some("ZSET"),
+      Self::LIST => Some("LIST"),
       _ => None,
     }
   }
@@ -4296,7 +4300,8 @@ impl<'a> StoredEntry<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(StoredEntry::VT_BYTES, None)}
   }
-  /// HASH: field and value pairs, flattened. SET and ZSET: the members.
+  /// HASH: field and value pairs, flattened. SET and ZSET: the members. LIST: the elements,
+  /// head first.
   #[inline]
   pub fn items(&self) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<Blob<'a>>>> {
     // Safety:

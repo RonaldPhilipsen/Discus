@@ -1,6 +1,6 @@
 //! Typed access to collection values under the shard lock.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
 use discus_store::entry::ENTRY_OVERHEAD;
@@ -16,7 +16,8 @@ pub trait Collection: Default {
     fn from_ref(v: &Stored) -> Option<&Self>;
     fn into_stored(self) -> Stored;
     fn count(&self) -> usize;
-    fn contains(&self, member: &[u8]) -> bool;
+    /// How many members the collection gains from `adds` at most.
+    fn fresh(&self, adds: Vec<&Bytes>) -> usize;
 }
 
 macro_rules! collection {
@@ -40,9 +41,15 @@ macro_rules! collection {
             fn count(&self) -> usize {
                 self.len()
             }
-            fn contains(&self, $m: &[u8]) -> bool {
+            fn fresh(&self, adds: Vec<&Bytes>) -> usize {
                 let $c = self;
-                $contains
+                adds.into_iter()
+                    .filter(|m| {
+                        let $m: &[u8] = m;
+                        !$contains
+                    })
+                    .collect::<HashSet<_>>()
+                    .len()
             }
         }
     };
@@ -52,6 +59,31 @@ collection!(HashMap<Bytes, Bytes>, Hash, |h, m| h.contains_key(m));
 collection!(HashSet<Bytes>, Set, |s, m| s.contains(m));
 collection!(ZSet, ZSet, |z, m| z.score(m).is_some());
 
+impl Collection for VecDeque<Bytes> {
+    fn from_mut(v: &mut Stored) -> Option<&mut Self> {
+        match v {
+            Stored::List(l) => Some(l),
+            _ => None,
+        }
+    }
+    fn from_ref(v: &Stored) -> Option<&Self> {
+        match v {
+            Stored::List(l) => Some(l),
+            _ => None,
+        }
+    }
+    fn into_stored(self) -> Stored {
+        Stored::List(self)
+    }
+    fn count(&self) -> usize {
+        self.len()
+    }
+    /// A list keeps duplicates, so every add is a new member.
+    fn fresh(&self, adds: Vec<&Bytes>) -> usize {
+        adds.len()
+    }
+}
+
 /// Mutate the collection at `key`. A missing key gives `f` an empty collection, and a collection
 /// that ends up empty is deleted. A key of another type gives `WrongType`.
 ///
@@ -59,8 +91,8 @@ collection!(ZSet, ZSet, |z, m| z.score(m).is_some());
 /// unchanged, keeps its version, and does not replicate.
 ///
 /// `grow_bytes` is the payload that the call can add. It is admitted against `maxmemory` first.
-/// `adds` are the members that `f` may add. The distinct ones that are absent must fit under the
-/// member limit before `f` runs.
+/// `adds` are the members that `f` may add. The ones that [`Collection::fresh`] counts must fit
+/// under the member limit before `f` runs.
 pub fn mutate<'a, C: Collection, R>(
     node: &Node,
     db: u32,
@@ -87,8 +119,8 @@ pub fn mutate<'a, C: Collection, R>(
             *slot.untracked() = Some(entry);
             return Err(CommandError::WrongType);
         };
-        let fresh: HashSet<&Bytes> = adds.into_iter().filter(|m| !coll.contains(m)).collect();
-        let result = guard(node, coll.count() + fresh.len()).and_then(|()| f(coll));
+        let fresh = coll.fresh(adds);
+        let result = guard(node, coll.count() + fresh).and_then(|()| f(coll));
         let keep = coll.count() > 0;
         if keep {
             *slot.untracked() = Some(entry);

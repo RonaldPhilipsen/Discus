@@ -12,6 +12,7 @@ enum ValueKind: ubyte {
   HASH = 1,
   SET = 2,
   ZSET = 3,
+  LIST = 4,
 }
 
 table Blob {
@@ -24,7 +25,8 @@ table StoredEntry {
   kind: ValueKind (id: 1);
   /// STRING: the value.
   bytes: [ubyte] (id: 2);
-  /// HASH: field and value pairs, flattened. SET and ZSET: the members.
+  /// HASH: field and value pairs, flattened. SET and ZSET: the members. LIST: the elements,
+  /// head first.
   items: [Blob] (id: 3);
   /// ZSET: the score of each member in `items`, in the same order.
   scores: [double] (id: 4);

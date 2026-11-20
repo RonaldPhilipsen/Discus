@@ -17,6 +17,9 @@ pub enum Value {
     Integer(i64),
     Bulk(Bytes),
     Null,
+    /// RESP2 `*-1`, where Valkey answers nil to a command that otherwise returns an array. RESP3
+    /// has one null.
+    NullArray,
     Array(Vec<Value>),
     /// An unordered collection of distinct values: `~` in RESP3, an array in RESP2.
     Set(Vec<Value>),

@@ -7,6 +7,7 @@ pub mod entry;
 pub mod evict;
 pub mod glob;
 mod keymap;
+pub mod rank;
 pub mod scan;
 pub mod store;
 pub mod ttl;
@@ -18,6 +19,7 @@ pub use discus_placement::{NodeId, Version, NTP64};
 pub use entry::{estimate_size, Entry};
 pub use evict::Admit;
 pub use glob::glob_match;
+pub use rank::rank_range;
 pub use store::{
     refill_bucket, AsDbKey, DbKey, EntryCursor, Keyspace, Pressure, Slot, Store, StoreConfig,
     DEFAULT_TOMBSTONE_TTL_MS, HASH_SEED,

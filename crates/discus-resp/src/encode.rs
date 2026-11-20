@@ -42,8 +42,9 @@ pub fn encode(value: &Value, protocol: Protocol, out: &mut BytesMut) {
         Value::Error(s) => text_line(out, b'-', s),
         Value::Integer(i) => header(out, b':', *i),
         Value::Bulk(b) => bulk(out, b),
-        Value::Null if resp3 => out.put_slice(b"_\r\n"),
+        Value::Null | Value::NullArray if resp3 => out.put_slice(b"_\r\n"),
         Value::Null => out.put_slice(b"$-1\r\n"),
+        Value::NullArray => out.put_slice(b"*-1\r\n"),
         Value::Array(items) => {
             header(out, b'*', items.len());
             for item in items {
@@ -111,5 +112,13 @@ mod tests {
         encode(&set, Protocol::Resp3, &mut out);
         encode(&set, Protocol::Resp2, &mut out);
         assert_eq!(&out[..], b"~1\r\n$1\r\na\r\n*1\r\n$1\r\na\r\n");
+    }
+
+    #[test]
+    fn a_null_array_is_one_null_in_resp3() {
+        let mut out = BytesMut::new();
+        encode(&Value::NullArray, Protocol::Resp2, &mut out);
+        encode(&Value::NullArray, Protocol::Resp3, &mut out);
+        assert_eq!(&out[..], b"*-1\r\n_\r\n");
     }
 }

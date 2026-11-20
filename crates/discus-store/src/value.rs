@@ -1,6 +1,6 @@
 //! The value types that a key can hold.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
 
@@ -13,6 +13,7 @@ pub enum Value {
     Hash(HashMap<Bytes, Bytes>),
     Set(HashSet<Bytes>),
     ZSet(ZSet),
+    List(VecDeque<Bytes>),
 }
 
 impl Value {
@@ -23,6 +24,7 @@ impl Value {
             Value::Hash(_) => "hash",
             Value::Set(_) => "set",
             Value::ZSet(_) => "zset",
+            Value::List(_) => "list",
         }
     }
 }

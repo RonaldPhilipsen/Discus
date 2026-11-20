@@ -88,7 +88,11 @@ fn wire_estimate(value: &Value) -> usize {
                 .iter()
                 .map(|(k, v)| wire_estimate(k) + wire_estimate(v))
                 .sum(),
-            Value::Integer(_) | Value::Null | Value::Boolean(_) | Value::Double(_) => 0,
+            Value::Integer(_)
+            | Value::Null
+            | Value::NullArray
+            | Value::Boolean(_)
+            | Value::Double(_) => 0,
         }
 }
 

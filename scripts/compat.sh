@@ -180,6 +180,17 @@ ok ZINCRBY '^2$' ZINCRBY "$p:z" 1 a
 ok ZCOUNT '^2$' ZCOUNT "$p:z" 0 5
 ok ZREM '^1$' ZREM "$p:z" a
 
+# Lists
+ok RPUSH '^3$' RPUSH "$p:l" a b c
+ok LPUSH '^4$' LPUSH "$p:l" z
+ok LLEN '^4$' LLEN "$p:l"
+ok LRANGE 'z' LRANGE "$p:l" 0 -1
+ok LINDEX '^c$' LINDEX "$p:l" -1
+ok LPOP '^z$' LPOP "$p:l"
+ok RPOP '^c$' RPOP "$p:l" 1
+ok LTRIM '^OK$' LTRIM "$p:l" 0 0
+ok "TYPE list" '^list$' TYPE "$p:l"
+
 # Counter keys
 c="cnt:$p"
 ok "INCR counter" '^1$' INCR "$c:n"
@@ -226,7 +237,7 @@ if [ "${COMPAT_ALLOW_FLUSH:-0}" = 1 ]; then
   ok FLUSHALL '^OK$' FLUSHALL
 else
   echo "skip FLUSHDB and FLUSHALL (set COMPAT_ALLOW_FLUSH=1 to run them)"
-  cli DEL "$p:s" "$p:n" "$p:h" "$p:set" "$p:z" >/dev/null
+  cli DEL "$p:s" "$p:n" "$p:h" "$p:set" "$p:z" "$p:l" >/dev/null
 fi
 
 # Cluster
