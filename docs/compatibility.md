@@ -16,7 +16,7 @@ leading zero is a protocol error, and an array header of zero or fewer items is 
 
 | Family | Commands |
 | --- | --- |
-| Connection | `PING`, `ECHO`, `QUIT`, `AUTH`, `HELLO` (RESP2 and RESP3), `SELECT` (every database), `COMMAND` (`COUNT`, `INFO`, `GETKEYS`, and the full list), `READONLY`, `READWRITE`, `ASKING`, `CLUSTER` (see below), `ACL` (`WHOAMI`, `CAT`, `LIST`, `USERS`, `GETUSER`), `CLIENT` (`SETNAME`, `GETNAME`, `ID`, `SETINFO`), `INFO`, `CONFIG GET` (`maxmemory`, `databases`, `maxclients`) |
+| Connection | `PING`, `ECHO`, `QUIT`, `AUTH`, `HELLO` (RESP2 and RESP3), `SELECT` (every database), `COMMAND` (`COUNT`, `INFO`, `GETKEYS`, and the full list), `READONLY`, `READWRITE`, `ASKING`, `WAIT`, `WAITAOF`, `CLUSTER` (see below), `ACL` (`WHOAMI`, `CAT`, `LIST`, `USERS`, `GETUSER`), `CLIENT` (`SETNAME`, `GETNAME`, `ID`, `SETINFO`), `INFO`, `CONFIG GET` (`maxmemory`, `databases`, `maxclients`) |
 | Strings | `GET`, `SET` (`EX`, `PX`, `EXAT`, `PXAT`, `NX`, `XX`, `KEEPTTL`, `GET`), `GETDEL`, `GETEX`, `MGET`, `MSET`, `INCR`, `DECR`, `INCRBY`, `DECRBY`, `INCRBYFLOAT`, `APPEND`, `STRLEN` |
 | Keys and expiry | `DEL`, `EXISTS`, `TYPE`, `RENAME`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `MOVE`, `COPY` (`DB`, `REPLACE`), `SCAN` (`MATCH`, `COUNT`), `RANDOMKEY`, `DBSIZE`, `FLUSHDB`, `FLUSHALL` |
 | Hashes | `HSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HINCRBY`, `HKEYS`, `HVALS` |
@@ -73,7 +73,7 @@ These commands return `-ERR command not supported by Discus`:
 `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH`, `EVAL`, `EVALSHA`, `SCRIPT`, `FUNCTION`,
 `SUBSCRIBE`, `PSUBSCRIBE`, `PUBLISH`, `PUBSUB`, `BLPOP`, `BRPOP`, `BLMOVE`, `BRPOPLPUSH`, `SORT`,
 `RENAMENX`, `SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE`, `BITOP`, `BITFIELD`, `PFADD`,
-`PFCOUNT`, `MIGRATE`, `WAIT`, `DEBUG`, every stream command that starts with `X`, and every
+`PFCOUNT`, `MIGRATE`, `DEBUG`, every stream command that starts with `X`, and every
 command that starts with `GEO`.
 
 `CLUSTER` answers only on a node with a redirect listener or with `--cluster-topology on`. See
@@ -273,6 +273,8 @@ Run `mise run build-matrix` to check every supported combination.
   `Could not fetch server CONFIG` and continues.
 - `FLUSHDB` and `FLUSHALL` accept `ASYNC` or `SYNC` and ignore it.
 - `SWAPDB` is refused, as in a Valkey cluster.
+- `WAITAOF` answers as Valkey does with `appendonly no`. A `numlocal` of 1 returns an error. The
+  reply is `[0, 0]`. If `numreplicas` is above 0, the reply comes after the timeout.
 - `MOVE` and `COPY` are not atomic across a failover. In a cluster, `SCAN` and `RANDOMKEY` stay
   local, and `DBSIZE` stays an estimate, for each database.
 - Collections keep the whole value under one lock. Every write to a very large collection costs
@@ -296,6 +298,14 @@ In a cluster, replication adds these deviations:
 - `MSET` and multi-key `DEL` hold their failed parts like single writes. If a part still fails,
   the command returns `-TRYAGAIN` with the other parts applied.
 - `RENAME` is not atomic. A failure in a cluster can lose the value.
+- `WAIT` counts the secondaries that hold every earlier write of the connection. Each connection
+  keeps a record of the keys that it wrote, at most `--write-set-keys` keys and
+  `--write-set-bytes` bytes. If a connection writes more, its record overflows. `WAIT` then
+  replies the full count only when every node has delivered every write. Otherwise it replies 0.
+  So after an overflow, the count can be too low, but it is never too high.
+- Without earlier writes, `WAIT` replies the number of secondaries of a key:
+  `--replication-factor` minus 1, or the number of `NORMAL` members minus 1 if that is lower.
+  With `--replication-factor 1`, the count is always 0.
 - A cluster `RENAME` refuses a value whose encoded form is larger than `--max-value-bytes`. The
   source then stays unchanged.
 

@@ -580,9 +580,9 @@ restart.
 | `--handoff-timeout-ms` | 300000 | Time after which a node gives up on an incoming handoff. |
 | `--tombstone-ttl-ms` | 3600000 | How long a delete marker lives. |
 | `--tombstone-reserve-percent` | 5 | The share of `--max-memory` for tombstones. |
-| `--write-set-keys` | 4096 | Keys in the write set of one connection, at most. |
-| `--write-set-bytes` | 1048576 | Bytes in the write set of one connection, at most. |
-| `--write-set-memory-percent` | 1 | The share of `--max-memory` for all write sets. |
+| `--write-set-keys` | 4096 | Keys in the write set of one connection, at most. The `WAIT` record has the same cap. |
+| `--write-set-bytes` | 1048576 | Bytes in the write set of one connection, at most. The `WAIT` record has the same cap. |
+| `--write-set-memory-percent` | 1 | The share of `--max-memory` for all write sets and `WAIT` records. |
 | `--write-set-ttl-ms` | 5000 | Time that a written key stays in the write set. |
 | `--hold-budget-ms` | 3000 | Time that a write to a failed primary waits for a new primary. |
 | `--counter-prefix` | `cnt:` | Keys with this prefix are counter keys. The counter groups serve them. |
@@ -888,6 +888,14 @@ timeout of such a write is `--forward-write-timeout-ms` plus `--replication-time
 entry node passes `-NOREPLICAS` to the client. It does not retry it.
 
 Each key whose wait ended short counts in `discus_write_unacked_total`, with the attribute `mode`.
+
+`WAIT` is the choice for each request. `--write-acks` makes every write wait. `WAIT numreplicas
+timeout` makes the client wait only when it asks. The client sends its writes, then `WAIT`. The
+reply is the number of secondaries that hold every earlier write of the connection. `WAIT` does
+not change the writes, and it never returns `-NOREPLICAS`. If the count is too low, the client
+decides what to do. A `WAIT` costs one round trip to each owner of the written keys. If a
+connection writes more keys than `--write-set-keys` between two `WAIT` commands, the count is
+exact only when the whole cluster has delivered every write. Otherwise it is 0.
 
 ## Reads
 
