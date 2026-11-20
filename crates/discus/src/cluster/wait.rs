@@ -2,15 +2,18 @@
 //!
 //! `WAIT` counts in rounds. Each round offers every key of the connection's record, at its
 //! recorded version, to the current owners of the key. The reply is the lowest count over the
-//! keys. A count is never too high: an owner that does not answer holds none of the round's keys,
-//! and a key that no current owner holds counts 0, as a write lost with its primary does.
+//! keys. A count is never too high: an owner that does not answer holds none of the round's keys.
+//! A key that no current owner holds leaves the record only while the epoch has not changed since
+//! the record was last empty. Then its primary took the write and removed the key since, by
+//! expiry, delete, eviction, or flush. After an epoch change it counts 0, as a write lost with
+//! its primary does.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use discus_placement::{Epoch, NodeId, Owners, Version};
+use discus_placement::{NodeId, Owners, Version};
 use discus_resp::{Command, Value};
 use discus_store::DbKey;
 use discus_wire::ForwardMode;
@@ -148,11 +151,10 @@ async fn round(node: &Arc<Node>, writes: Option<&Writes>) -> i64 {
             .entries()
             .map(|(db, k, v)| (DbKey::new(db, k.clone()), v))
             .collect();
-        let overflow = w.record.overflowed().then(|| w.record.overflow_epochs());
-        (entries, overflow)
+        (entries, w.record.overflowed())
     };
-    if let Some(epochs) = overflow {
-        return drained(node, writes, &epochs).await;
+    if overflow {
+        return drained(node, writes).await;
     }
     if entries.is_empty() {
         return secondaries(node);
@@ -187,6 +189,8 @@ async fn round(node: &Arc<Node>, writes: Option<&Writes>) -> i64 {
         }
         answers.get(&owner).map(|missing| !missing.contains(k))
     };
+    // Read after the answers, so an epoch change during the round counts.
+    let stable = !writes.lock().record.epoch_changed();
     let most = node.config.replication_factor.saturating_sub(1);
     let mut lowest: Option<i64> = None;
     let mut leave = Vec::new();
@@ -198,6 +202,10 @@ async fn round(node: &Arc<Node>, writes: Option<&Writes>) -> i64 {
         let held: Vec<Option<bool>> = owners.iter().map(|o| holds(*o, &k, v)).collect();
         let holders = held.iter().filter(|h| **h == Some(true)).count();
         let answered = held.iter().all(Option::is_some);
+        if answered && holders == 0 && stable {
+            leave.push((k, v));
+            continue;
+        }
         // One holder is subtracted for the primary, also when the primary is the owner that
         // lacks the key, as a new primary does before its handoff ends.
         let count = holders.saturating_sub(1).min(most) as i64;
@@ -216,19 +224,16 @@ async fn round(node: &Arc<Node>, writes: Option<&Writes>) -> i64 {
 }
 
 /// The count of an overflowed record: the number of secondaries when this node and every other
-/// member delivered every write, else 0. The full count ends the overflow. A member of `epochs`
-/// that is gone or not `NORMAL` now can have taken writes that no other node holds, so the count
+/// member delivered every write, else 0. The full count ends the overflow. A member that left
+/// since the record was last empty can have taken writes that no other node holds, so the count
 /// is then 0.
-async fn drained(node: &Arc<Node>, writes: &Writes, epochs: &[Arc<Epoch>]) -> i64 {
-    let current = node.epochs().current().clone();
-    let lost = epochs
-        .iter()
-        .flat_map(|e| e.members())
-        .any(|m| !current.is_normal(m.id));
-    if lost || !node.replicator().is_some_and(|r| r.drained()) {
+async fn drained(node: &Arc<Node>, writes: &Writes) -> i64 {
+    if writes.lock().record.departed() || !node.replicator().is_some_and(|r| r.drained()) {
         return 0;
     }
-    let others: Vec<NodeId> = current
+    let others: Vec<NodeId> = node
+        .epochs()
+        .current()
         .members()
         .iter()
         .map(|m| m.id)
@@ -259,10 +264,12 @@ async fn drained(node: &Arc<Node>, writes: &Writes, epochs: &[Arc<Epoch>]) -> i6
             })
         )
     });
-    if !all {
+    let mut w = writes.lock();
+    if !all || w.record.departed() {
         return 0;
     }
-    writes.lock().record.clear();
+    w.record.clear();
+    drop(w);
     secondaries(node)
 }
 

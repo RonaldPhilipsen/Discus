@@ -466,15 +466,38 @@ async fn a_flushed_key_does_not_block_wait() {
         .query_async(&mut other)
         .await
         .unwrap();
-    // A key that no owner holds counts 0, as a write lost with its primary does.
-    let (n, took) = wait(&mut conn, 1, 300).await;
-    assert_eq!(n, 0);
-    assert!(took >= Duration::from_millis(300), "{took:?}");
-    // A flush on the connection itself empties the record.
-    let _: () = redis::cmd("FLUSHALL").query_async(&mut conn).await.unwrap();
+    // In a stable epoch, a key that no owner holds was removed, not lost. It leaves the record.
     let (n, took) = wait(&mut conn, 1, 0).await;
     assert!(n >= 1, "{n}");
     assert!(took < CAP, "{took:?}");
+}
+
+#[tokio::test]
+async fn an_expired_key_does_not_block_wait() {
+    let c = start_cluster(3, RF3).await;
+    let k = c.key_on(1, "k");
+    let mut conn = c.nodes[0].redis().await;
+    // The secondaries never get the key, so only its removal on the primary ends the wait.
+    stall(&c, &k, true);
+    let _: () = redis::cmd("SET")
+        .arg(&k)
+        .arg("v")
+        .arg("PX")
+        .arg(200)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let p = c.by_id(c.nodes[0].primary(k.as_bytes()));
+    assert!(
+        wait_until(Duration::from_secs(20), || p
+            .node
+            .store
+            .stored_version(0, k.as_bytes())
+            .is_none())
+        .await
+    );
+    let (n, _) = wait(&mut conn, 1, 5_000).await;
+    assert!(n >= 1, "{n}");
 }
 
 /// A gossip cluster of three nodes, a connection on the first, and a key whose primary is

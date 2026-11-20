@@ -18,7 +18,7 @@ use discus_telemetry::attrs::TopologyCommand;
 use discus_transport::TransportError;
 use parking_lot::{RwLock, RwLockReadGuard};
 
-use crate::cluster::record::Record;
+use crate::cluster::record::{Placement, Record};
 use crate::cluster::topology;
 use crate::cluster::writeset::{WriteSet, WriteSetBudget, WriteSetLimits};
 use crate::cluster::ClusterLink;
@@ -74,6 +74,8 @@ pub struct Node {
     /// The generation of `current`, unique across all nodes of the process. A thread keeps its
     /// last read of `current` while the generation stays, so a lookup costs one atomic load.
     current_generation: AtomicU64,
+    /// Bumped each time a published epoch removes a member or makes one leave `NORMAL`.
+    departures: Arc<AtomicU64>,
     pub started_at: Instant,
     pub store: Arc<Store>,
     /// The database counts of this node and of the cluster, and the `MULTI_DB` gate.
@@ -281,6 +283,7 @@ impl Node {
             id,
             hlc: Hlc::new(id, hlc_clock),
             current: Arc::new(ArcSwap::new(epochs.current().clone())),
+            departures: Arc::new(AtomicU64::new(0)),
             current_generation: AtomicU64::new(next_generation()),
             epochs: Arc::new(RwLock::new(epochs)),
             started_at: Instant::now(),
@@ -545,7 +548,14 @@ impl Node {
             max_age: std::time::Duration::from_millis(c.write_set_ttl_ms),
         };
         ConnWrites {
-            record: Record::new(&limits, self.write_budget.clone(), self.current.clone()),
+            record: Record::new(
+                &limits,
+                self.write_budget.clone(),
+                Placement {
+                    current: self.current.clone(),
+                    departures: self.departures.clone(),
+                },
+            ),
             set: WriteSet::new(limits, self.write_budget.clone()),
         }
     }
@@ -825,7 +835,17 @@ impl Node {
     /// Make `epoch` the current epoch for readers without the lock. The caller holds the write
     /// lock of `epochs`.
     fn publish(&self, epoch: Arc<Epoch>) {
+        let old = self.current.load();
+        let departed = old.members().iter().any(|m| {
+            epoch.member(m.id).is_none() || (old.is_normal(m.id) && !epoch.is_normal(m.id))
+        });
+        drop(old);
+        // The count moves after the store, so a record that reads the new count also reads the
+        // new epoch, and a record that reads the old count sees the move later.
         self.current.store(epoch);
+        if departed {
+            self.departures.fetch_add(1, Ordering::AcqRel);
+        }
         self.current_generation
             .store(next_generation(), Ordering::Release);
     }

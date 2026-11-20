@@ -2,11 +2,12 @@
 //! after the write. `WAIT` offers these versions to the owners of the keys.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use discus_placement::{Epoch, Version};
+use discus_placement::{Epoch, EpochId, Version};
 use foldhash::fast::RandomState;
 
 use super::writeset::{Held, WriteSetBudget, WriteSetLimits};
@@ -15,6 +16,31 @@ use super::writeset::{Held, WriteSetBudget, WriteSetLimits};
 const ENTRY_OVERHEAD: usize = 64;
 
 type Keys = HashMap<Bytes, Version, RandomState>;
+
+/// The placement state of the node that a record compares against.
+#[derive(Clone)]
+pub struct Placement {
+    pub current: Arc<ArcSwap<Epoch>>,
+    /// Bumped each time an installed epoch removes a member or makes one leave `NORMAL`.
+    pub departures: Arc<AtomicU64>,
+}
+
+impl Placement {
+    fn mark(&self) -> Mark {
+        Mark {
+            departures: self.departures.load(Ordering::Acquire),
+            epoch: self.current.load().id(),
+        }
+    }
+}
+
+/// The placement state when a record was last empty without an overflow. Every write in the
+/// record came after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Mark {
+    departures: u64,
+    epoch: EpochId,
+}
 
 pub struct Record {
     /// The entries by database. A connection writes to few databases, so a scan finds one.
@@ -27,21 +53,19 @@ pub struct Record {
     max_keys: usize,
     max_bytes: usize,
     held: Held,
-    /// The current epoch of the node.
-    current: Arc<ArcSwap<Epoch>>,
-    /// The epoch of the first note since the last [`Record::clear`].
-    since: Option<Arc<Epoch>>,
-    /// The epoch when the overflow started.
-    overflowed_in: Option<Arc<Epoch>>,
+    placement: Placement,
+    mark: Mark,
 }
 
 impl Record {
     pub fn new(
         limits: &WriteSetLimits,
         budget: Arc<WriteSetBudget>,
-        current: Arc<ArcSwap<Epoch>>,
+        placement: Placement,
     ) -> Record {
         Record {
+            mark: placement.mark(),
+            placement,
             dbs: Vec::new(),
             len: 0,
             bytes: 0,
@@ -49,9 +73,6 @@ impl Record {
             max_keys: limits.keys.max(1),
             max_bytes: limits.bytes,
             held: Held::new(budget),
-            current,
-            since: None,
-            overflowed_in: None,
         }
     }
 
@@ -60,9 +81,6 @@ impl Record {
     pub fn note(&mut self, db: u32, key: &Bytes, version: Version) {
         if self.overflow {
             return;
-        }
-        if self.since.is_none() {
-            self.since = Some(self.current.load_full());
         }
         let i = match self.dbs.iter().position(|(d, _)| *d == db) {
             Some(i) => i,
@@ -78,11 +96,11 @@ impl Record {
         let size = key.len() + ENTRY_OVERHEAD;
         let bytes = self.bytes + size;
         if self.len >= self.max_keys || bytes > self.max_bytes || !self.held.cover(bytes) {
-            let since = self.since.take();
+            // The mark stays: the writes before the overflow came after it.
+            let mark = self.mark;
             self.clear();
             self.overflow = true;
-            self.since = since;
-            self.overflowed_in = Some(self.current.load_full());
+            self.mark = mark;
             return;
         }
         self.dbs[i].1.insert(key.clone(), version);
@@ -99,6 +117,13 @@ impl Record {
         self.len -= keys.len();
         self.bytes -= keys.keys().map(|k| k.len() + ENTRY_OVERHEAD).sum::<usize>();
         self.held.trim(self.bytes);
+        self.mark_if_empty();
+    }
+
+    fn mark_if_empty(&mut self) {
+        if self.len == 0 && !self.overflow {
+            self.mark = self.placement.mark();
+        }
     }
 
     /// Drop every entry and end the overflow.
@@ -107,23 +132,23 @@ impl Record {
         self.len = 0;
         self.bytes = 0;
         self.overflow = false;
-        self.since = None;
-        self.overflowed_in = None;
         self.held.trim(0);
+        self.mark = self.placement.mark();
     }
 
     pub fn overflowed(&self) -> bool {
         self.overflow
     }
 
-    /// The epochs of an overflowed record: the epoch of its first write and the epoch of the
-    /// overflow. A member of either one may hold a write that the record no longer names.
-    pub fn overflow_epochs(&self) -> Vec<Arc<Epoch>> {
-        self.since
-            .iter()
-            .chain(self.overflowed_in.iter())
-            .cloned()
-            .collect()
+    /// The epoch changed since the record was last empty.
+    pub fn epoch_changed(&self) -> bool {
+        self.placement.current.load().id() != self.mark.epoch
+    }
+
+    /// A member left or left `NORMAL` since the record was last empty. It can have taken writes
+    /// that no other node holds.
+    pub fn departed(&self) -> bool {
+        self.placement.departures.load(Ordering::Acquire) != self.mark.departures
     }
 
     pub fn entries(&self) -> impl Iterator<Item = (u32, &Bytes, Version)> {
@@ -157,6 +182,7 @@ impl Record {
         self.len -= 1;
         self.bytes -= key.len() + ENTRY_OVERHEAD;
         self.held.trim(self.bytes);
+        self.mark_if_empty();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -192,8 +218,11 @@ mod tests {
             max_age: Duration::from_secs(5),
         };
         let epoch = discus_membership::provisional_epoch(NodeId::from_u128(1));
-        let current = Arc::new(ArcSwap::from_pointee(epoch));
-        (Record::new(&limits, budget.clone(), current), budget)
+        let placement = Placement {
+            current: Arc::new(ArcSwap::from_pointee(epoch)),
+            departures: Arc::new(AtomicU64::new(0)),
+        };
+        (Record::new(&limits, budget.clone(), placement), budget)
     }
 
     fn k(s: &str) -> Bytes {
@@ -255,6 +284,24 @@ mod tests {
         assert_eq!(entries(&r), vec![(0, k("c"), v(2))]);
         r.clear();
         assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn a_departure_counts_until_the_record_is_empty_again() {
+        let (mut r, _) = record(4, 1 << 20, 1 << 20);
+        r.note(0, &k("a"), v(1));
+        r.placement.departures.fetch_add(1, Ordering::AcqRel);
+        assert!(r.departed());
+        for i in 0..5 {
+            r.note(0, &k(&format!("o{i}")), v(2));
+        }
+        assert!(r.overflowed() && r.departed());
+        r.clear();
+        assert!(!r.departed());
+        r.note(0, &k("b"), v(3));
+        r.placement.departures.fetch_add(1, Ordering::AcqRel);
+        r.remove(0, b"b");
+        assert!(!r.departed());
     }
 
     #[test]
