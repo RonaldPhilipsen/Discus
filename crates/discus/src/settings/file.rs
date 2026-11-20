@@ -17,6 +17,7 @@ pub struct Key {
 pub enum Kind {
     Integer,
     Boolean,
+    String,
 }
 
 const fn integer(section: &'static str, key: &'static str, flag: &'static str) -> Key {
@@ -37,6 +38,15 @@ const fn boolean(section: &'static str, key: &'static str, flag: &'static str) -
     }
 }
 
+const fn text(section: &'static str, key: &'static str, flag: &'static str) -> Key {
+    Key {
+        section: Some(section),
+        key,
+        flag,
+        kind: Kind::String,
+    }
+}
+
 const fn top_level_integer(key: &'static str, flag: &'static str) -> Key {
     Key {
         section: None,
@@ -51,6 +61,8 @@ pub const KEYS: &[Key] = &[
     integer("budget", "forward-write-ms", "forward_write_timeout_ms"),
     integer("budget", "hold-ms", "hold_budget_ms"),
     integer("budget", "replication-ms", "replication_timeout_ms"),
+    integer("replication", "write-acks", "write_acks"),
+    text("replication", "write-ack-timeout", "write_ack_timeout"),
     boolean("reads", "from-replicas", "read_from_replicas"),
     integer("handoff", "rate-bytes", "handoff_rate_bytes"),
     integer(
@@ -224,6 +236,8 @@ mod tests {
             (Some("budget"), "forward-write-ms"),
             (Some("budget"), "hold-ms"),
             (Some("budget"), "replication-ms"),
+            (Some("replication"), "write-acks"),
+            (Some("replication"), "write-ack-timeout"),
             (Some("reads"), "from-replicas"),
             (Some("handoff"), "rate-bytes"),
             (Some("auth"), "max-failures-per-connection"),
@@ -234,7 +248,7 @@ mod tests {
             (Some("tls"), "reload-secs"),
             (None, "databases"),
         ];
-        assert_eq!(KEYS.len(), 13);
+        assert_eq!(KEYS.len(), 15);
         for (key, (section, name)) in KEYS.iter().zip(expected) {
             assert_eq!((key.section, key.key), (section, name));
         }

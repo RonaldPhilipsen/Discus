@@ -404,6 +404,10 @@ forward-write-ms = 2000        # a forwarded write waits this long
 hold-ms = 1500                 # default 3000: a write to a failed primary waits for a new one
 replication-ms = 1000          # a peer acknowledges a replication batch within this time
 
+[replication]
+write-acks = 0                 # secondaries that store each write before the primary replies
+write-ack-timeout = "open"     # "open" replies +OK when they time out, "closed" replies with an error
+
 [reads]
 from-replicas = true
 
@@ -435,6 +439,8 @@ are all the keys of version 1:
 | `[budget]` | `forward-write-ms` | `--forward-write-timeout-ms` |
 | `[budget]` | `hold-ms` | `--hold-budget-ms` |
 | `[budget]` | `replication-ms` | `--replication-timeout-ms` |
+| `[replication]` | `write-acks` | `--write-acks` |
+| `[replication]` | `write-ack-timeout` | `--write-ack-timeout` |
 | `[reads]` | `from-replicas` | `--read-from-replicas` |
 | `[handoff]` | `rate-bytes` | `--handoff-rate-bytes` |
 | `[auth]` | `max-failures-per-connection` | `--auth-max-failures-per-connection` |
@@ -562,6 +568,8 @@ restart.
 | `--replication-queue-keys` | 65536 | Keys that wait in the replication queue of one peer. Past it, the oldest keys go to hints. |
 | `--replication-batch-keys` | 512 | Keys in one replication batch. |
 | `--replication-timeout-ms` | 1000 | Time for a peer to acknowledge a replication batch. |
+| `--write-acks` | 0 | Secondaries that store each write before the primary replies. It must be below `--replication-factor`. |
+| `--write-ack-timeout` | `open` | The reply to a write that the secondaries do not acknowledge in `--replication-timeout-ms`. `open` replies `+OK`. `closed` replies with an error. |
 | `--replication-retry-ms` | 1000 | Time between probes of a peer that missed a batch. |
 | `--hint-max-entries` | 262144 | Hints for one peer, at most. |
 | `--hint-max-bytes` | 67108864 | Bytes of hints for one peer, at most. |

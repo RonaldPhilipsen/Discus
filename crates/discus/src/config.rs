@@ -60,6 +60,30 @@ impl LeaseKind {
     }
 }
 
+/// The reply to a write whose secondaries do not acknowledge in time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AckTimeout {
+    /// Reply `+OK` anyway. The write stays on the primary and replicates later.
+    Open,
+    /// Reply with an error.
+    Closed,
+}
+
+impl AckTimeout {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AckTimeout::Open => "open",
+            AckTimeout::Closed => "closed",
+        }
+    }
+}
+
+impl std::fmt::Display for AckTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl std::fmt::Display for LeaseKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
@@ -277,6 +301,12 @@ pub struct Config {
     /// Time for a peer to acknowledge a replication batch, in milliseconds.
     #[arg(long, default_value_t = 1_000)]
     pub replication_timeout_ms: u64,
+    /// Secondaries that store each write before the primary replies.
+    #[arg(long, default_value_t = 0)]
+    pub write_acks: usize,
+    /// The reply to a write that the secondaries do not acknowledge in `--replication-timeout-ms`.
+    #[arg(long, value_enum, default_value_t = AckTimeout::Open)]
+    pub write_ack_timeout: AckTimeout,
     /// Time that a write to a failed primary waits for a new primary, in milliseconds. Then it
     /// returns `-TRYAGAIN`.
     #[arg(long, default_value_t = 3_000)]
@@ -470,8 +500,10 @@ impl Config {
             let text = match (key.kind, value) {
                 (Kind::Integer, toml::Value::Integer(i)) => i.to_string(),
                 (Kind::Boolean, toml::Value::Boolean(b)) => b.to_string(),
+                (Kind::String, toml::Value::String(s)) => s.clone(),
                 (Kind::Integer, _) => return Err(format!("{path}: must be an integer")),
                 (Kind::Boolean, _) => return Err(format!("{path}: must be a boolean")),
+                (Kind::String, _) => return Err(format!("{path}: must be a string")),
             };
             let argument = format!("--{}={text}", key.flag.replace('_', "-"));
             let parsed = command
@@ -552,6 +584,9 @@ impl Config {
                 missing.join(", ")
             ))
         };
+        if self.write_acks >= self.replication_factor.max(1) {
+            return Err("--write-acks must be below --replication-factor".into());
+        }
         if self.membership == MembershipMode::Static && self.databases > 1 {
             return Err("--databases above 1 needs --membership gossip".into());
         }
@@ -701,6 +736,8 @@ fn copy_flag(to: &mut Config, from: &Config, flag: &str) {
         "forward_write_timeout_ms" => to.forward_write_timeout_ms = from.forward_write_timeout_ms,
         "hold_budget_ms" => to.hold_budget_ms = from.hold_budget_ms,
         "replication_timeout_ms" => to.replication_timeout_ms = from.replication_timeout_ms,
+        "write_acks" => to.write_acks = from.write_acks,
+        "write_ack_timeout" => to.write_ack_timeout = from.write_ack_timeout,
         "read_from_replicas" => to.read_from_replicas = from.read_from_replicas,
         "handoff_rate_bytes" => to.handoff_rate_bytes = from.handoff_rate_bytes,
         "auth_max_failures_per_connection" => {
@@ -1210,9 +1247,41 @@ mod tests {
                 .find(|a| a.get_id() == key.flag)
                 .unwrap();
             let default = arg.get_default_values()[0].to_str().unwrap();
-            let boolean = default.parse::<bool>().is_ok();
-            assert_eq!(boolean, key.kind == Kind::Boolean, "--{}", key.flag);
+            let expected = if default.parse::<bool>().is_ok() {
+                Kind::Boolean
+            } else if default.parse::<i64>().is_ok() {
+                Kind::Integer
+            } else {
+                Kind::String
+            };
+            assert_eq!(expected, key.kind, "--{}", key.flag);
         }
+    }
+
+    #[test]
+    fn write_acks_must_be_below_the_replication_factor() {
+        let c = Config::parse_from(["discus", "--replication-factor", "3", "--write-acks", "3"])
+            .unwrap();
+        assert_eq!(
+            c.validate().unwrap_err(),
+            "--write-acks must be below --replication-factor"
+        );
+        let c = Config::parse_from(["discus", "--replication-factor", "3", "--write-acks", "2"])
+            .unwrap();
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn the_ack_timeout_mode_comes_from_the_file() {
+        let c = load_with_file(
+            "version = 1\n[replication]\nwrite-ack-timeout = \"closed\"",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(c.write_ack_timeout, AckTimeout::Closed);
+        let e =
+            load_with_file("version = 1\n[replication]\nwrite-ack-timeout = 1", &[]).unwrap_err();
+        assert!(e.ends_with("must be a string"), "{e}");
     }
 
     #[test]
@@ -1252,6 +1321,7 @@ mod tests {
         let text = "version = 1\ndatabases = 20\n\
             [budget]\nforward-read-ms = 11\nforward-write-ms = 12\nhold-ms = 13\n\
             replication-ms = 14\n\
+            [replication]\nwrite-acks = 1\nwrite-ack-timeout = \"closed\"\n\
             [reads]\nfrom-replicas = false\n\
             [handoff]\nrate-bytes = 15\n\
             [auth]\nmax-failures-per-connection = 16\nmax-failures-per-source = 17\n\
@@ -1263,6 +1333,8 @@ mod tests {
         assert_eq!(config.forward_write_timeout_ms, 12);
         assert_eq!(config.hold_budget_ms, 13);
         assert_eq!(config.replication_timeout_ms, 14);
+        assert_eq!(config.write_acks, 1);
+        assert_eq!(config.write_ack_timeout, AckTimeout::Closed);
         assert!(!config.read_from_replicas);
         assert_eq!(config.handoff_rate_bytes, 15);
         assert_eq!(config.security.auth_max_failures_per_connection, 16);
