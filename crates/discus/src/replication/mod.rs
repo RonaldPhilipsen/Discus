@@ -1728,6 +1728,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_key_queued_again_while_in_flight_waits_for_its_own_version() {
+        let (node, r, peer, q) = two_owners("200");
+        let key = DbKey::new(0, Bytes::from_static(b"k"));
+        let watch = r.watch(vec![key.clone()]);
+        r.written(&node, 0, &key.key);
+        let carried = node.stamp().unwrap();
+        assert_eq!(q.take(8), std::slice::from_ref(&key));
+        r.written(&node, 0, &key.key);
+        let v = node.stamp().unwrap();
+        q.acked();
+        r.record_stored(peer, std::iter::once((&key, carried)));
+        assert!(q.holds(&key));
+        assert_eq!(r.wait_acks(&node, &[(key.clone(), v)], 1).await, 1);
+        assert_eq!(q.take(8), std::slice::from_ref(&key));
+        q.acked();
+        r.record_stored(peer, std::iter::once((&key, v)));
+        assert_eq!(r.wait_acks(&node, &[(key.clone(), v)], 1).await, 0);
+        drop(watch);
+    }
+
+    #[tokio::test]
+    async fn a_hint_for_the_peer_keeps_the_key_unacknowledged() {
+        let (node, r, peer, q) = two_owners("200");
+        let key = DbKey::new(0, Bytes::from_static(b"k"));
+        let watch = r.watch(vec![key.clone()]);
+        let v = node.stamp().unwrap();
+        r.hints.lock().record(
+            peer,
+            key.clone(),
+            Entry::new(Value::Str(Bytes::from_static(b"v")), None),
+            Instant::now(),
+        );
+        assert!(!q.holds(&key) && !q.is_down());
+        assert_eq!(r.wait_acks(&node, &[(key.clone(), v)], 1).await, 1);
+        drop(watch);
+    }
+
+    #[tokio::test]
     async fn a_dropped_watch_empties_the_table() {
         let (_node, r, peer, _q) = two_owners("200");
         let key = DbKey::new(0, Bytes::from_static(b"k"));

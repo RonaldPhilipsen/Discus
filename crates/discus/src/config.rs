@@ -63,7 +63,7 @@ impl LeaseKind {
 /// The reply to a write whose secondaries do not acknowledge in time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum AckTimeout {
-    /// Reply `+OK` anyway. The write stays on the primary and replicates later.
+    /// Send the normal reply anyway. The write stays on the primary and replicates later.
     Open,
     /// Reply with an error.
     Closed,

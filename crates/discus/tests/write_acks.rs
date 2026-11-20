@@ -108,6 +108,14 @@ async fn a_write_returns_after_a_secondary_stores_it() {
 
 #[tokio::test]
 async fn open_mode_replies_ok_when_replication_stalls() {
+    // The only test here that installs the global metrics. Other tests add to the counter too, so
+    // the test asserts a lower bound.
+    #[cfg(feature = "otel")]
+    let h = {
+        let h = discus_telemetry::testing::MetricHarness::new();
+        assert!(discus_telemetry::install_global(h.metrics.clone()));
+        h
+    };
     let c = start_cluster(
         3,
         &args(&["--write-acks", "1", "--replication-timeout-ms", "300"]),
@@ -119,6 +127,15 @@ async fn open_mode_replies_ok_when_replication_stalls() {
     let started = Instant::now();
     assert_eq!(set(&mut conn, &k, "v1").await.unwrap(), "OK");
     assert!(started.elapsed() >= Duration::from_millis(300));
+    #[cfg(feature = "otel")]
+    {
+        let points = h.points();
+        let open = points.iter().find(|p| {
+            p.name == "discus.write.unacked"
+                && p.attrs.iter().any(|(k, v)| k == "mode" && v == "open")
+        });
+        assert!(open.is_some_and(|p| p.value >= 1.0), "{points:?}");
+    }
 }
 
 #[tokio::test]
@@ -366,6 +383,46 @@ async fn a_multi_key_write_waits_at_each_primary() {
         .hold_replication
         .store(false, Ordering::Relaxed);
     let _: () = conn.mset(&[(&a, "a2"), (&b, "b2")]).await.unwrap();
+}
+
+/// Set `--write-ack-timeout` on every node, as a reload of the settings file does.
+fn set_mode(c: &Cluster, mode: discus::config::AckTimeout) {
+    for n in &c.nodes {
+        let mut next = (**n.node.live_settings.get()).clone();
+        next.write_ack_timeout = mode;
+        n.node.live_settings.apply(next);
+    }
+}
+
+#[tokio::test]
+async fn a_multi_key_delete_waits_at_each_primary_in_both_modes() {
+    let c = start_cluster(
+        4,
+        &args(&[
+            "--write-acks",
+            "1",
+            "--write-ack-timeout",
+            "closed",
+            "--replication-timeout-ms",
+            "300",
+        ]),
+    )
+    .await;
+    let (a, b) = (c.key_on(0, "da"), c.key_on(1, "db"));
+    let mut conn = c.nodes[3].redis().await;
+    let _: () = conn.mset(&[(&a, "a"), (&b, "b")]).await.unwrap();
+    stall(&c, &b);
+    let err = conn.del::<_, i64>(&[&a, &b]).await.unwrap_err();
+    assert!(is_noreplicas(&err), "{err}");
+    for key in [&a, &b] {
+        let mut on_primary = primary(&c, key).redis().await;
+        let exists: i64 = on_primary.exists(key).await.unwrap();
+        assert_eq!(exists, 0, "{key}");
+    }
+    set_mode(&c, discus::config::AckTimeout::Open);
+    let _: () = conn.mset(&[(&a, "a"), (&b, "b")]).await.unwrap();
+    let deleted: i64 = conn.del(&[&a, &b]).await.unwrap();
+    assert_eq!(deleted, 2);
 }
 
 #[tokio::test]

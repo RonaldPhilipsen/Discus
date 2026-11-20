@@ -189,6 +189,21 @@ mod tests {
     }
 
     #[test]
+    fn write_acks_at_the_replication_factor_are_refused() {
+        let (base, live_settings) = start(&["--replication-factor", "3"]);
+        let err = reload(
+            &base,
+            &live_settings,
+            "version = 1\n[replication]\nwrite-acks = 3",
+            1,
+        )
+        .unwrap_err();
+        assert!(err.contains("--write-acks"), "{err}");
+        assert_eq!(live_settings.get().write_acks, 0);
+        assert_eq!(live_settings.generation(), 0);
+    }
+
+    #[test]
     fn a_bad_value_changes_nothing() {
         let (base, live_settings) = start(&[]);
         let before = live_settings.get();

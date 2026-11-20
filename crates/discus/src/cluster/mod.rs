@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use discus_placement::{ClusterId, EpochId, NodeId, Owners, Version};
+use discus_placement::{ClusterId, EpochId, NodeId, Owners, Version, NTP64};
 use discus_resp::{Command, Value};
 use discus_store::DbKey;
 use discus_transport::Transport;
@@ -410,15 +410,12 @@ pub fn local_acked(
     // Watched before the store write, so no acknowledged batch carries the new version unseen
     // (spec "When a peer acknowledged a write").
     let watch = replicator.watch(plan.keys);
+    let before = node.hlc.last();
     let reply = local(node, spec, db, &cmd);
     if reply.applied.is_none() {
         return Dispatch::Ready(reply);
     }
-    let keys: Vec<(DbKey, Version)> = watch
-        .keys()
-        .iter()
-        .filter_map(|k| Some((k.clone(), node.store.version(k.db, &k.key)?)))
-        .collect();
+    let keys = changed(node, watch.keys(), before);
     if keys.is_empty() {
         return Dispatch::Ready(reply);
     }
@@ -434,16 +431,25 @@ pub fn local_acked(
 /// acknowledge it, so the wait ends at once and the mode decides the reply (spec "Owners that
 /// cannot acknowledge").
 fn unreplicated(node: &Node, spec: &CommandSpec, db: u32, cmd: &Command, plan: &AckPlan) -> Reply {
+    let before = node.hlc.last();
     let reply = local(node, spec, db, cmd);
     if reply.applied.is_none() {
         return reply;
     }
-    let short = plan
-        .keys
-        .iter()
-        .filter(|k| node.store.version(k.db, &k.key).is_some())
-        .count() as u64;
+    let short = changed(node, &plan.keys, before).len() as u64;
     ended_short(reply, short, plan.mode)
+}
+
+/// The keys of `keys` with a version newer than `before`, the HLC time before the command ran.
+/// Every stamp of the command is newer, so a key that the command did not change, such as an old
+/// tombstone in a multi-key `DEL`, does not wait.
+fn changed(node: &Node, keys: &[DbKey], before: NTP64) -> Vec<(DbKey, Version)> {
+    keys.iter()
+        .filter_map(|k| {
+            let v = node.store.version(k.db, &k.key)?;
+            (v.time() > before).then(|| (k.clone(), v))
+        })
+        .collect()
 }
 
 /// The reply of a write whose wait left `short` keys without enough acknowledgments. An error
@@ -883,6 +889,34 @@ mod tests {
         let open = ended_short(Reply::value(Value::ok()), 1, AckTimeout::Open);
         assert_eq!(open.value, Value::ok());
     }
+
+    #[test]
+    fn only_keys_that_the_command_changed_wait() {
+        let config = Config::parse_from(["discus"]).unwrap();
+        let live = Live::new(Reloadable::from_config(&config));
+        let security = Arc::new(crate::security::tests::security(&[]));
+        let node = Arc::new(Node::new(config, security, live));
+        let run_cmd = |parts: &[&str]| {
+            let cmd = crate::counter::cmd(parts);
+            local(&node, command::lookup(&cmd[0]).unwrap(), 0, &cmd)
+        };
+        run_cmd(&["SET", "old", "v"]);
+        run_cmd(&["DEL", "old"]);
+        assert!(node.store.version(0, b"old").is_some());
+        run_cmd(&["SET", "new", "v"]);
+        let before = node.hlc.last();
+        run_cmd(&["DEL", "old", "new", "missing"]);
+        let keys: Vec<DbKey> = ["old", "new", "missing"]
+            .iter()
+            .map(|k| DbKey::new(0, bytes::Bytes::from_static(k.as_bytes())))
+            .collect();
+        let waits: Vec<DbKey> = changed(&node, &keys, before)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(waits, [keys[1].clone()]);
+    }
+
     #[test]
     fn a_data_command_in_a_database_above_the_cluster_count_is_refused() {
         let config = Config::parse_from(["discus"]).unwrap();
