@@ -446,6 +446,10 @@ mod otel {
             ),
             1.0
         );
+        // The last node to start owns the replication source, and it replicated its warm key.
+        for name in ["discus.replication.queue.depth", "discus.replication.lag"] {
+            assert!(points.iter().any(|p| p.name == name), "{name}: {points:?}");
+        }
         for p in &points {
             check(p.attrs.iter().map(|(k, v)| (k.as_str(), v.as_str()))).unwrap();
         }

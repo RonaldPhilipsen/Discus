@@ -6,7 +6,7 @@ use discus_telemetry::attrs::{
     check, CommandLabel, CounterMode, CounterRole, MemberState, NodeLabel, Status,
     TransportChannel, ALLOWED_KEYS,
 };
-use discus_telemetry::metrics::{StoreStats, TransportCounts, LATENCY_BUCKETS_MS};
+use discus_telemetry::metrics::{PeerReplication, StoreStats, TransportCounts, LATENCY_BUCKETS_MS};
 use discus_telemetry::testing::{MetricHarness, Point};
 
 fn find<'a>(points: &'a [Point], name: &str, attr: Option<(&str, &str)>) -> Option<&'a Point> {
@@ -183,8 +183,14 @@ fn later_plan_instruments_record_with_bounded_attributes() {
     let m = &h.metrics;
     m.epoch(4);
     m.members(MemberState::Normal, 3);
-    m.replication_depth(&peer, 10);
-    m.replication_lag(&peer, Duration::from_millis(5));
+    let source = peer.clone();
+    m.observe_replication(move || {
+        vec![PeerReplication {
+            peer: source.clone(),
+            depth: 10,
+            lag: Some(Duration::from_millis(5)),
+        }]
+    });
     m.replication_batch(&peer, 12);
     m.hint_recorded(&peer);
     m.hint_replayed(&peer, 2);
@@ -336,5 +342,63 @@ fn unacked_writes_carry_the_mode() {
     let closed = find(&points, "discus.write.unacked", Some(("mode", "closed"))).unwrap();
     assert_eq!(closed.value, 3.0);
     assert!(check([("mode", "sometimes")]).is_err());
+    assert_bounded(&points);
+}
+
+#[test]
+fn a_departed_peer_leaves_the_replication_gauges() {
+    use std::sync::{Arc, Mutex};
+
+    let h = MetricHarness::new();
+    let (a, b) = (NodeLabel::new("aa").unwrap(), NodeLabel::new("bb").unwrap());
+    let peers = Arc::new(Mutex::new(vec![
+        PeerReplication {
+            peer: a.clone(),
+            depth: 1234,
+            lag: Some(Duration::from_millis(80)),
+        },
+        PeerReplication {
+            peer: b.clone(),
+            depth: 3,
+            lag: None,
+        },
+    ]));
+    let source = peers.clone();
+    h.metrics
+        .observe_replication(move || source.lock().unwrap().clone());
+    let points = h.points();
+    let depth = find(
+        &points,
+        "discus.replication.queue.depth",
+        Some(("peer", "aa")),
+    )
+    .unwrap();
+    assert_eq!(depth.value, 1234.0);
+    let lag = find(&points, "discus.replication.lag", Some(("peer", "aa"))).unwrap();
+    assert_eq!(lag.value, 80.0);
+    assert!(find(
+        &points,
+        "discus.replication.queue.depth",
+        Some(("peer", "bb"))
+    )
+    .is_some());
+    // A peer without a finished batch has no lag yet.
+    assert!(find(&points, "discus.replication.lag", Some(("peer", "bb"))).is_none());
+
+    peers.lock().unwrap().remove(0);
+    let points = h.points();
+    assert!(find(
+        &points,
+        "discus.replication.queue.depth",
+        Some(("peer", "aa"))
+    )
+    .is_none());
+    assert!(find(&points, "discus.replication.lag", Some(("peer", "aa"))).is_none());
+    assert!(find(
+        &points,
+        "discus.replication.queue.depth",
+        Some(("peer", "bb"))
+    )
+    .is_some());
     assert_bounded(&points);
 }

@@ -156,8 +156,8 @@ and 100.
 | `discus.transport.handshake.failures` | counter | `channel` | Failed QUIC handshakes and `HELLO` exchanges. |
 | `discus.transport.requests.in` | counter | `channel` | Node-to-node requests that this node served. |
 | `discus.transport.requests.out` | counter | `channel` | Node-to-node requests that this node sent. |
-| `discus.replication.queue.depth` | gauge | `peer` | Keys that wait in the replication queue of a peer. |
-| `discus.replication.lag` | gauge (ms) | `peer` | The time that the last replication batch to a peer took. |
+| `discus.replication.queue.depth` | gauge | `peer` | Keys that wait in the replication queue of a peer. A peer that left the epoch is not reported. |
+| `discus.replication.lag` | gauge (ms) | `peer` | The time that the last acknowledged replication batch to a peer took. A peer without an acknowledged batch, or one that left the epoch, is not reported. |
 | `discus.replication.batch.entries` | histogram | `peer` | The number of entries in each replication batch to a peer. Hint replays and refills do not count. |
 | `discus.hints.recorded` | counter | `peer` | Hints that the primary recorded for a peer that it cannot reach. |
 | `discus.hints.replayed` | counter | `peer` | Hints that a peer acknowledged after a replay. |
