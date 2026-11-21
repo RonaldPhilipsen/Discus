@@ -14,6 +14,7 @@ fn guard_accepts_the_allowed_keys() {
     ])
     .unwrap();
     check([("command", "unknown"), ("command", "unsupported")]).unwrap();
+    check([("command", "DISCUS.PUT")]).unwrap();
 }
 
 #[test]
@@ -37,6 +38,8 @@ fn guard_rejects_disallowed_keys() {
 fn guard_rejects_values_outside_their_domain() {
     for (key, value) in [
         ("command", "get user:42"),
+        ("command", ".PUT"),
+        ("command", "DISCUS..PUT"),
         ("command", ""),
         ("command", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
         ("status", "ERR wrong type"),

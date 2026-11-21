@@ -120,7 +120,8 @@ The node exports metrics every 10 seconds. A metric attribute is always one of t
 metric never carries a key, a value, a client ID, a connection ID, or an error message.
 
 The `command` attribute is the command name from the command table. An unknown command records
-`unknown`. A command that Discus rejects on purpose records `unsupported`.
+`unknown`. A command that Discus rejects on purpose records `unsupported`. A forward of a command
+that only nodes send to each other records its internal name, for example `DISCUS.PUT`.
 
 Latency histograms use these bucket bounds in milliseconds: 0.1, 0.25, 0.5, 1, 2, 5, 10, 25, 50,
 and 100.
