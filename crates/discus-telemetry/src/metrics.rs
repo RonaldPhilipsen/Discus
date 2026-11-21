@@ -64,6 +64,16 @@ pub struct TransportCounts {
     pub requests_out: u64,
 }
 
+/// The replication state toward one peer, read at each metric collection.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PeerReplication {
+    pub peer: NodeLabel,
+    /// Keys that wait in the queue of the peer.
+    pub depth: u64,
+    /// The time that the last acknowledged batch took. `None` before the first one.
+    pub lag: Option<Duration>,
+}
+
 /// Counters that the export pipeline updates and the metrics read.
 #[derive(Debug, Default)]
 pub struct Counters {
@@ -137,8 +147,6 @@ struct Instruments {
     auth: Counter<u64>,
     epoch: Gauge<u64>,
     members: Gauge<u64>,
-    replication_depth: Gauge<u64>,
-    replication_lag: Gauge<f64>,
     replication_batch: Histogram<u64>,
     hints_recorded: Counter<u64>,
     hints_replayed: Counter<u64>,
@@ -165,6 +173,7 @@ struct Instruments {
     config_pending: Gauge<u64>,
     store: Arc<Slot<StoreStats>>,
     health: Arc<Slot<HealthStats>>,
+    replication: Arc<Slot<Vec<PeerReplication>>>,
     transport: Arc<TransportSources>,
 }
 
@@ -367,6 +376,33 @@ impl Metrics {
             |t| t.requests_out,
         );
 
+        // Observable, so a peer that left the epoch, and with it the queue, drops out of the
+        // export. A sync gauge would export its last value for as long as the process runs.
+        let replication = Slot::<Vec<PeerReplication>>::new();
+        let peers = replication.clone();
+        meter
+            .u64_observable_gauge("discus.replication.queue.depth")
+            .with_description("Entries waiting in a replication queue")
+            .with_callback(move |o| {
+                for p in peers.get().unwrap_or_default() {
+                    o.observe(p.depth, &[kv(Attribute::Peer(p.peer))]);
+                }
+            })
+            .build();
+        let peers = replication.clone();
+        meter
+            .f64_observable_gauge("discus.replication.lag")
+            .with_description("Replication lag toward a peer")
+            .with_unit("ms")
+            .with_callback(move |o| {
+                for p in peers.get().unwrap_or_default() {
+                    if let Some(lag) = p.lag {
+                        o.observe(ms(lag), &[kv(Attribute::Peer(p.peer))]);
+                    }
+                }
+            })
+            .build();
+
         let latency = |name: &'static str, desc: &'static str| {
             meter
                 .f64_histogram(name)
@@ -388,15 +424,6 @@ impl Metrics {
             auth: counter("discus.auth.attempts", "Authentication attempts by result"),
             epoch: gauge("discus.ring.epoch", "The generation of the current epoch"),
             members: gauge("discus.members", "Members by state"),
-            replication_depth: gauge(
-                "discus.replication.queue.depth",
-                "Entries waiting in a replication queue",
-            ),
-            replication_lag: meter
-                .f64_gauge("discus.replication.lag")
-                .with_description("Replication lag toward a peer")
-                .with_unit("ms")
-                .build(),
             replication_batch: meter
                 .u64_histogram("discus.replication.batch.entries")
                 .with_description("Entries in a replication batch")
@@ -471,6 +498,7 @@ impl Metrics {
             ),
             store,
             health,
+            replication,
             transport,
         };
         Metrics {
@@ -574,22 +602,16 @@ impl Metrics {
         self.with(|i| i.members.record(count, &[kv(Attribute::State(state))]));
     }
 
+    /// Read the replication state of every current peer from `source` at each collection. A
+    /// peer that `source` no longer returns drops out of the export. A later call replaces the
+    /// source.
     #[inline]
-    pub fn replication_depth(&self, peer: &NodeLabel, depth: u64) {
+    pub fn observe_replication(
+        &self,
+        source: impl Fn() -> Vec<PeerReplication> + Send + Sync + 'static,
+    ) {
         #[cfg(feature = "otel")]
-        self.with(|i| {
-            i.replication_depth
-                .record(depth, &[kv(Attribute::Peer(peer.clone()))])
-        });
-    }
-
-    #[inline]
-    pub fn replication_lag(&self, peer: &NodeLabel, lag: Duration) {
-        #[cfg(feature = "otel")]
-        self.with(|i| {
-            i.replication_lag
-                .record(ms(lag), &[kv(Attribute::Peer(peer.clone()))])
-        });
+        self.with(|i| i.replication.set(source));
     }
 
     /// One replication batch of `entries` entries went to `peer`.

@@ -120,7 +120,8 @@ The node exports metrics every 10 seconds. A metric attribute is always one of t
 metric never carries a key, a value, a client ID, a connection ID, or an error message.
 
 The `command` attribute is the command name from the command table. An unknown command records
-`unknown`. A command that Discus rejects on purpose records `unsupported`.
+`unknown`. A command that Discus rejects on purpose records `unsupported`. A forward of a command
+that only nodes send to each other records its internal name, for example `DISCUS.PUT`.
 
 Latency histograms use these bucket bounds in milliseconds: 0.1, 0.25, 0.5, 1, 2, 5, 10, 25, 50,
 and 100.
@@ -155,8 +156,8 @@ and 100.
 | `discus.transport.handshake.failures` | counter | `channel` | Failed QUIC handshakes and `HELLO` exchanges. |
 | `discus.transport.requests.in` | counter | `channel` | Node-to-node requests that this node served. |
 | `discus.transport.requests.out` | counter | `channel` | Node-to-node requests that this node sent. |
-| `discus.replication.queue.depth` | gauge | `peer` | Keys that wait in the replication queue of a peer. |
-| `discus.replication.lag` | gauge (ms) | `peer` | The time that the last replication batch to a peer took. |
+| `discus.replication.queue.depth` | gauge | `peer` | Keys that wait in the replication queue of a peer. A peer that left the epoch is not reported. |
+| `discus.replication.lag` | gauge (ms) | `peer` | The time that the last acknowledged replication batch to a peer took. A peer without an acknowledged batch, or one that left the epoch, is not reported. |
 | `discus.replication.batch.entries` | histogram | `peer` | The number of entries in each replication batch to a peer. Hint replays and refills do not count. |
 | `discus.hints.recorded` | counter | `peer` | Hints that the primary recorded for a peer that it cannot reach. |
 | `discus.hints.replayed` | counter | `peer` | Hints that a peer acknowledged after a replay. |
