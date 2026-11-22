@@ -5,6 +5,8 @@
 //! in the queue once.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use foldhash::fast::RandomState;
 use hashlink::LinkedHashMap;
@@ -23,6 +25,8 @@ pub struct PeerQueue {
     state: Mutex<QueueState>,
     pub notify: Notify,
     cap: usize,
+    /// The nanoseconds that the last acknowledged batch took, 0 before the first one.
+    lag_nanos: AtomicU64,
 }
 
 struct QueueState {
@@ -57,6 +61,7 @@ impl PeerQueue {
             }),
             notify: Notify::new(),
             cap: cap.max(1),
+            lag_nanos: AtomicU64::new(0),
         }
     }
 
@@ -120,6 +125,18 @@ impl PeerQueue {
     /// The batch in flight was acknowledged.
     pub fn acked(&self) {
         self.state.lock().inflight.clear();
+    }
+
+    /// The last acknowledged batch took `took`.
+    pub fn set_lag(&self, took: Duration) {
+        let nanos = u64::try_from(took.as_nanos()).unwrap_or(u64::MAX).max(1);
+        self.lag_nanos.store(nanos, Ordering::Relaxed);
+    }
+
+    /// The time that the last acknowledged batch took, `None` before the first one.
+    pub fn lag(&self) -> Option<Duration> {
+        let nanos = self.lag_nanos.load(Ordering::Relaxed);
+        (nanos > 0).then(|| Duration::from_nanos(nanos))
     }
 
     /// The batch in flight failed. Its keys and the queued keys come back for hints, and the

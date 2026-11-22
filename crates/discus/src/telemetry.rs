@@ -412,7 +412,9 @@ pub fn record_forward(
         Err(discus_transport::TransportError::Timeout) => Status::Timeout,
         Err(_) => Status::Error,
     };
-    let spec = cmd.first().and_then(|name| crate::command::lookup(name));
+    let spec = cmd.first().and_then(|name| {
+        crate::command::lookup(name).or_else(|| crate::command::lookup_internal(name))
+    });
     metrics.forward(command_label(spec, cmd), status, hops);
 }
 
@@ -498,5 +500,34 @@ pub fn record_operation(spec: Option<&CommandSpec>, cmd: &Command) {
 pub fn record_reply(reply: &Value) {
     if matches!(reply, Value::Error(_)) {
         tracing::Span::current().record("otel.status_code", "ERROR");
+    }
+}
+
+#[cfg(all(test, feature = "otel"))]
+mod tests {
+    use bytes::Bytes;
+    use discus_telemetry::testing::MetricHarness;
+
+    use super::*;
+
+    #[test]
+    fn a_forwarded_internal_command_keeps_its_name() {
+        let h = MetricHarness::new();
+        let ok = Ok(crate::cluster::Reply::value(Value::ok()));
+        for name in ["DISCUS.PUT", "discus.take"] {
+            let cmd: Command = vec![Bytes::from_static(name.as_bytes())];
+            record_forward(&h.metrics, &cmd, &ok, 1);
+        }
+        let points = h.points();
+        let labels: Vec<&str> = points
+            .iter()
+            .filter(|p| p.name == "discus.forwards")
+            .flat_map(|p| p.attrs.iter())
+            .filter(|(k, _)| k == "command")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert!(labels.contains(&"DISCUS.PUT"), "{labels:?}");
+        assert!(labels.contains(&"DISCUS.TAKE"), "{labels:?}");
+        assert!(!labels.contains(&"unknown"), "{labels:?}");
     }
 }

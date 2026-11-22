@@ -197,6 +197,10 @@ impl Replicator {
     /// Run the gauge reporter and the rejoin listener until `stop`. Sender tasks start with
     /// their first key.
     pub fn spawn(self: &Arc<Self>, stop: CancellationToken) {
+        let weak = Arc::downgrade(self);
+        discus_telemetry::global().observe_replication(move || {
+            weak.upgrade().map(|r| r.peer_metrics()).unwrap_or_default()
+        });
         let me = self.clone();
         let s = stop.clone();
         tokio::spawn(async move { me.scan_loop(s).await });
@@ -225,14 +229,25 @@ impl Replicator {
         }));
     }
 
+    /// The replication gauges of every peer with a queue. `on_epoch` drops the queue of a peer
+    /// that left, so the peer leaves the export too.
+    fn peer_metrics(&self) -> Vec<discus_telemetry::metrics::PeerReplication> {
+        self.peers
+            .read()
+            .values()
+            .filter_map(|q| {
+                Some(discus_telemetry::metrics::PeerReplication {
+                    peer: q.label.clone()?,
+                    depth: q.len() as u64,
+                    lag: q.lag(),
+                })
+            })
+            .collect()
+    }
+
     fn tick(&self) {
         let metrics = discus_telemetry::global();
         metrics.tombstones(self.store.tombstones() as u64);
-        for q in self.peers.read().values() {
-            if let Some(label) = &q.label {
-                metrics.replication_depth(label, q.len() as u64);
-            }
-        }
         let evicted = self.hints.lock().expire(Instant::now());
         self.count_evicted(&evicted);
         self.sync_charge();
@@ -959,9 +974,7 @@ impl Replicator {
                     }
                     self.bump_progress();
                     self.touch(q.peer);
-                    if let Some(label) = &q.label {
-                        discus_telemetry::global().replication_lag(label, started.elapsed());
-                    }
+                    q.set_lag(started.elapsed());
                     if q.take_drained() && !self.replay(&node, q.peer).await {
                         self.hint_all(&q, q.failed());
                         self.bump_progress();
