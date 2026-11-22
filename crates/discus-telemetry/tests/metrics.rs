@@ -322,3 +322,19 @@ fn config_metrics_export() {
     );
     assert_bounded(&points);
 }
+
+#[test]
+fn unacked_writes_carry_the_mode() {
+    let h = MetricHarness::new();
+    let m = &h.metrics;
+    m.write_unacked(2, "open");
+    m.write_unacked(1, "open");
+    m.write_unacked(3, "closed");
+    let points = h.points();
+    let open = find(&points, "discus.write.unacked", Some(("mode", "open"))).unwrap();
+    assert_eq!(open.value, 3.0);
+    let closed = find(&points, "discus.write.unacked", Some(("mode", "closed"))).unwrap();
+    assert_eq!(closed.value, 3.0);
+    assert!(check([("mode", "sometimes")]).is_err());
+    assert_bounded(&points);
+}

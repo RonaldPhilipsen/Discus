@@ -55,16 +55,17 @@ pub fn resendable(cmd: &Command, failure: Failure) -> bool {
     failure.unsent || idempotent(cmd)
 }
 
-/// The forward timeout of a delete of a listed key. The owner waits for a secondary before it
-/// replies, so a timeout without this allowance would turn a fail-open delete into `-TRYAGAIN`.
-fn delete_timeout(
+/// The forward timeout of a write that waits for secondaries (`super::ack_plan`). The owner waits
+/// up to the replication timeout before it replies, so a timeout without this allowance would turn
+/// a slow acknowledgment into `-TRYAGAIN`.
+fn ack_timeout(
     node: &Node,
     spec: &CommandSpec,
     db: u32,
     cmd: &Command,
     write: bool,
 ) -> Option<Duration> {
-    if !write || super::acked_delete_keys(node, spec, db, cmd).is_empty() {
+    if !write || super::ack_plan(node, spec, db, cmd).is_none() {
         return None;
     }
     let live_settings = node.live_settings.get();
@@ -83,7 +84,7 @@ pub async fn send_or_hold(
     hop: &Hop,
     write: bool,
 ) -> Option<Reply> {
-    let timeout = delete_timeout(node, spec, db, cmd, write);
+    let timeout = ack_timeout(node, spec, db, cmd, write);
     let sent = super::forward::send(
         node,
         target,

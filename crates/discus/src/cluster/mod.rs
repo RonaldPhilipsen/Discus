@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use discus_placement::{ClusterId, EpochId, NodeId, Owners, Version};
+use discus_placement::{ClusterId, EpochId, NodeId, Owners, Version, NTP64};
 use discus_resp::{Command, Value};
 use discus_store::DbKey;
 use discus_transport::Transport;
@@ -24,7 +24,9 @@ use futures::future::BoxFuture;
 use parking_lot::{Mutex, RwLock};
 use tracing::Span;
 
+use crate::command::table::Access;
 use crate::command::{self, CommandError, CommandSpec};
+use crate::config::AckTimeout;
 use crate::databases;
 use crate::node::{ConnState, Node};
 use crate::settings::Live;
@@ -313,12 +315,7 @@ pub fn local(node: &Node, spec: &CommandSpec, db: u32, cmd: &Command) -> Reply {
 /// The keys of `cmd` in database `db` that must reach a secondary before the reply: the listed
 /// keys of a command that deletes them. A deleted session must stay deleted when the primary
 /// fails.
-pub(crate) fn acked_delete_keys(
-    node: &Node,
-    spec: &CommandSpec,
-    db: u32,
-    cmd: &Command,
-) -> Vec<DbKey> {
+fn acked_delete_keys(node: &Node, spec: &CommandSpec, db: u32, cmd: &Command) -> Vec<DbKey> {
     if !matches!(spec.name, "DEL" | "GETDEL" | "DISCUS.TAKE") {
         return Vec::new();
     }
@@ -329,28 +326,146 @@ pub(crate) fn acked_delete_keys(
         .collect()
 }
 
-/// Run `cmd` here like [`local`]. A delete of a listed key then waits for one secondary. After
-/// the wait it replies with success anyway (fail open), and the hints deliver the tombstone.
+/// The keys of a write that wait for secondaries before the reply (spec "Which keys wait").
+pub(crate) struct AckPlan {
+    pub keys: Vec<DbKey>,
+    /// The other owners that must store each key.
+    pub need: usize,
+    /// `--write-acks 0`: only a primary-read delete waits, and it fails open.
+    pub legacy: bool,
+    pub mode: AckTimeout,
+}
+
+/// The wait of `cmd` in database `db`, or `None` when nothing waits. It reads the live settings
+/// once.
+pub(crate) fn ack_plan(node: &Node, spec: &CommandSpec, db: u32, cmd: &Command) -> Option<AckPlan> {
+    // Every command of `acked_delete_keys` is a write too, so a read skips the settings.
+    if spec.access != Access::Write {
+        return None;
+    }
+    let (need, mode) = {
+        let live = node.live_settings.get();
+        (live.write_acks, live.write_ack_timeout)
+    };
+    if need == 0 {
+        let keys = acked_delete_keys(node, spec, db, cmd);
+        return (!keys.is_empty()).then_some(AckPlan {
+            keys,
+            need: 1,
+            legacy: true,
+            mode,
+        });
+    }
+    let mut keys: Vec<DbKey> = route::key_args(spec.route, cmd)
+        .into_iter()
+        .flatten()
+        .filter(|k| !node.is_counter_key(k))
+        .map(|k| DbKey::new(db, k.clone()))
+        .collect();
+    if spec.name == "MOVE" && !node.is_counter_key(&cmd[1]) {
+        if let Some(target) = move_db(cmd) {
+            keys.push(DbKey::new(target, cmd[1].clone()));
+        }
+    }
+    (!keys.is_empty()).then_some(AckPlan {
+        keys,
+        need,
+        legacy: false,
+        mode,
+    })
+}
+
+/// Run `cmd` here like [`local`], then wait as [`ack_plan`] says. With `--write-acks 0`, a delete
+/// of a listed key waits for one secondary and then replies with success anyway (fail open): the
+/// hints deliver the tombstone. With `--write-acks` above 0, a write that changed something waits
+/// for that many secondaries. A wait that ends short replies normally in `open` mode and with
+/// `-NOREPLICAS` in `closed` mode. Both keep the `applied` stamp, because the write applied here.
 pub fn local_acked(
     node: &Arc<Node>,
     spec: &'static CommandSpec,
     db: u32,
     cmd: Command,
 ) -> Dispatch {
+    let Some(plan) = ack_plan(node, spec, db, &cmd) else {
+        return Dispatch::Ready(local(node, spec, db, &cmd));
+    };
+    let Some(replicator) = node.replicator().cloned() else {
+        if plan.legacy {
+            return Dispatch::Ready(local(node, spec, db, &cmd));
+        }
+        return Dispatch::Ready(unreplicated(node, spec, db, &cmd, &plan));
+    };
+    if plan.legacy {
+        let reply = local(node, spec, db, &cmd);
+        if reply.applied.is_none() {
+            return Dispatch::Ready(reply);
+        }
+        let node = node.clone();
+        return Dispatch::Pending(Box::pin(async move {
+            let unacked = replicator.unacked_after_wait(&node, &plan.keys).await;
+            discus_telemetry::global().primary_read_delete_unacked(unacked);
+            reply
+        }));
+    }
+    // Watched before the store write, so no acknowledged batch carries the new version unseen
+    // (spec "When a peer acknowledged a write").
+    let watch = replicator.watch(plan.keys);
+    let before = node.hlc.last();
     let reply = local(node, spec, db, &cmd);
     if reply.applied.is_none() {
         return Dispatch::Ready(reply);
     }
-    let keys = acked_delete_keys(node, spec, db, &cmd);
-    let Some(replicator) = node.replicator().filter(|_| !keys.is_empty()).cloned() else {
+    let keys = changed(node, watch.keys(), before);
+    if keys.is_empty() {
         return Dispatch::Ready(reply);
-    };
+    }
     let node = node.clone();
     Dispatch::Pending(Box::pin(async move {
-        let unacked = replicator.unacked_after_wait(&node, &keys).await;
-        discus_telemetry::global().primary_read_delete_unacked(unacked);
-        reply
+        let short = replicator.wait_acks(&node, &keys, plan.need).await;
+        drop(watch);
+        ended_short(reply, short, plan.mode)
     }))
+}
+
+/// Run a write with a plan that is not legacy on a node without secondaries. No other owner can
+/// acknowledge it, so the wait ends at once and the mode decides the reply (spec "Owners that
+/// cannot acknowledge").
+fn unreplicated(node: &Node, spec: &CommandSpec, db: u32, cmd: &Command, plan: &AckPlan) -> Reply {
+    let before = node.hlc.last();
+    let reply = local(node, spec, db, cmd);
+    if reply.applied.is_none() {
+        return reply;
+    }
+    let short = changed(node, &plan.keys, before).len() as u64;
+    ended_short(reply, short, plan.mode)
+}
+
+/// The keys of `keys` with a version newer than `before`, the HLC time before the command ran.
+/// Every stamp of the command is newer, so a key that the command did not change, such as an old
+/// tombstone in a multi-key `DEL`, does not wait.
+fn changed(node: &Node, keys: &[DbKey], before: NTP64) -> Vec<(DbKey, Version)> {
+    keys.iter()
+        .filter_map(|k| {
+            let v = node.store.version(k.db, &k.key)?;
+            (v.time() > before).then(|| (k.clone(), v))
+        })
+        .collect()
+}
+
+/// The reply of a write whose wait left `short` keys without enough acknowledgments. An error
+/// reply keeps its own error: it says more than `-NOREPLICAS`.
+fn ended_short(reply: Reply, short: u64, mode: AckTimeout) -> Reply {
+    if short == 0 {
+        return reply;
+    }
+    discus_telemetry::global().write_unacked(short, mode.as_str());
+    match mode {
+        AckTimeout::Closed if !matches!(reply.value, Value::Error(_)) => Reply {
+            value: CommandError::NoReplicas.to_value(),
+            ..reply
+        },
+        _ => reply,
+    }
 }
 
 /// Fill `observed` and `settled` of a read of `key` that ran here.
@@ -475,7 +590,11 @@ pub fn run_hop(
     }
     if node.link().is_none() {
         drop(route);
-        return Dispatch::Ready(local(node, job.spec, job.db, &job.cmd));
+        let reply = match ack_plan(node, job.spec, job.db, &job.cmd).filter(|p| !p.legacy) {
+            Some(plan) => unreplicated(node, job.spec, job.db, &job.cmd, &plan),
+            None => local(node, job.spec, job.db, &job.cmd),
+        };
+        return Dispatch::Ready(reply);
     }
     match job.spec.route {
         Route::Single { write } => single(node, job, hop, write, writes, route),
@@ -638,7 +757,7 @@ fn single(
     dispatch.then(writes, move |writes, reply| {
         let mut w = writes.lock();
         match (write, reply.applied) {
-            (true, Some(v)) if !matches!(reply.value, Value::Error(_)) => {
+            (true, Some(v)) if records(&reply.value) => {
                 let now = std::time::Instant::now();
                 w.record(key, v, now);
                 if let Some(target) = target {
@@ -651,16 +770,26 @@ fn single(
     })
 }
 
+/// A write with this reply enters the write set. A `-NOREPLICAS` write applied on its primary, so
+/// a later read on the connection must see it (spec section 7.4).
+pub(crate) fn records(value: &Value) -> bool {
+    !matches!(value, Value::Error(_)) || command::error::is_no_replicas(value)
+}
+
 /// The key in the target database of a `MOVE`, which writes its key in two databases. A `COPY`
 /// needs no such key: its put records the destination as a write of its own.
 fn move_target(job: &Job) -> Option<SetKey> {
     if job.spec.name != "MOVE" {
         return None;
     }
-    let db = command::util::parse_i64(&job.cmd[2])
+    Some(SetKey::of(move_db(&job.cmd)?, &job.cmd[1]))
+}
+
+/// The target database of a `MOVE`.
+fn move_db(cmd: &Command) -> Option<u32> {
+    command::util::parse_i64(&cmd[2])
         .ok()
-        .and_then(|n| u32::try_from(n).ok())?;
-    Some(SetKey::of(db, &job.cmd[1]))
+        .and_then(|n| u32::try_from(n).ok())
 }
 
 fn single_planned(
@@ -740,6 +869,53 @@ mod tests {
     use super::*;
     use crate::settings::Reloadable;
     use crate::Config;
+
+    #[test]
+    fn closed_mode_keeps_an_error_reply_and_replaces_success() {
+        let applied = Some(Version::zero());
+        let err = Reply {
+            applied,
+            ..Reply::value(Value::error("OOM command not allowed"))
+        };
+        let kept = ended_short(err, 1, AckTimeout::Closed);
+        assert_eq!(kept.value, Value::error("OOM command not allowed"));
+        let ok = Reply {
+            applied,
+            ..Reply::value(Value::ok())
+        };
+        let swapped = ended_short(ok, 1, AckTimeout::Closed);
+        assert_eq!(swapped.value, CommandError::NoReplicas.to_value());
+        assert_eq!(swapped.applied, applied);
+        let open = ended_short(Reply::value(Value::ok()), 1, AckTimeout::Open);
+        assert_eq!(open.value, Value::ok());
+    }
+
+    #[test]
+    fn only_keys_that_the_command_changed_wait() {
+        let config = Config::parse_from(["discus"]).unwrap();
+        let live = Live::new(Reloadable::from_config(&config));
+        let security = Arc::new(crate::security::tests::security(&[]));
+        let node = Arc::new(Node::new(config, security, live));
+        let run_cmd = |parts: &[&str]| {
+            let cmd = crate::counter::cmd(parts);
+            local(&node, command::lookup(&cmd[0]).unwrap(), 0, &cmd)
+        };
+        run_cmd(&["SET", "old", "v"]);
+        run_cmd(&["DEL", "old"]);
+        assert!(node.store.version(0, b"old").is_some());
+        run_cmd(&["SET", "new", "v"]);
+        let before = node.hlc.last();
+        run_cmd(&["DEL", "old", "new", "missing"]);
+        let keys: Vec<DbKey> = ["old", "new", "missing"]
+            .iter()
+            .map(|k| DbKey::new(0, bytes::Bytes::from_static(k.as_bytes())))
+            .collect();
+        let waits: Vec<DbKey> = changed(&node, &keys, before)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(waits, [keys[1].clone()]);
+    }
 
     #[test]
     fn a_data_command_in_a_database_above_the_cluster_count_is_refused() {

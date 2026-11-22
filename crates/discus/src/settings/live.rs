@@ -5,7 +5,7 @@ use std::time::Duration;
 use arc_swap::{ArcSwap, Guard};
 use parking_lot::Mutex;
 
-use crate::config::Config;
+use crate::config::{AckTimeout, Config};
 
 /// The settings that a running node can change without a restart.
 #[derive(Clone, Debug, PartialEq)]
@@ -14,6 +14,8 @@ pub struct Reloadable {
     pub forward_write_timeout: Duration,
     pub hold_budget: Duration,
     pub replication_timeout: Duration,
+    pub write_acks: usize,
+    pub write_ack_timeout: AckTimeout,
     pub read_from_replicas: bool,
     pub handoff_rate_bytes: u64,
     pub auth_max_failures_per_connection: u32,
@@ -34,6 +36,8 @@ impl Reloadable {
             forward_write_timeout: Duration::from_millis(c.forward_write_timeout_ms),
             hold_budget: Duration::from_millis(c.hold_budget_ms),
             replication_timeout: Duration::from_millis(c.replication_timeout_ms),
+            write_acks: c.write_acks,
+            write_ack_timeout: c.write_ack_timeout,
             read_from_replicas: c.read_from_replicas,
             handoff_rate_bytes: c.handoff_rate_bytes,
             auth_max_failures_per_connection: c.security.auth_max_failures_per_connection,
@@ -61,6 +65,14 @@ impl Reloadable {
             (
                 "budget.replication-ms",
                 self.replication_timeout != other.replication_timeout,
+            ),
+            (
+                "replication.write-acks",
+                self.write_acks != other.write_acks,
+            ),
+            (
+                "replication.write-ack-timeout",
+                self.write_ack_timeout != other.write_ack_timeout,
             ),
             (
                 "reads.from-replicas",
