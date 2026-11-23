@@ -54,7 +54,7 @@ serde_json = { version = "1", optional = true }
 sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 mimalloc = "0.1.52"
 pyroscope = { version = "2.1.5", default-features = false, features = ["backend-pprof-rs", "rustls-no-provider"], optional = true }
-rlimit = "0.11.0"
+rlimit = "0.12.0"
 smallvec = "1"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio", "server", "service", "http1"] }
