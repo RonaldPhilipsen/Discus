@@ -814,12 +814,19 @@ directly but never gets `-MOVED`. That setting is for tests.
   epoch that removes a member or makes a member leave `NORMAL`. The mark is set when the record
   is created, cleared, or becomes empty without an overflow, so every write in the record comes
   after it.
-- A key that every owner holds leaves the record. A key that no current owner holds leaves the
-  record only if the epoch is still the epoch of the mark. Then the primary that took the write
-  is still the primary, so expiry, a delete, an eviction, or a flush removed the key. After an
-  epoch change, such a key can be a write that was lost with its primary. It counts 0 and stays,
-  so the count is too low until a flush on the connection empties the record. The count is never
-  too high. If the count reaches
+- Each node draws a random boot id at process start, also when it keeps its node id. The answer
+  to an offer carries the boot id and the epoch of the owner. A forward reply carries the boot id
+  of the node that ran the command itself, or 0 when that node forwarded or split it again. Each
+  record entry keeps the node that ran the write and its boot id, when they are known.
+- A key that every owner holds leaves the record. A key that no current owner holds counts 0. It
+  leaves the record only with proof from the node that ran the write. That node must be a
+  current owner, it must answer the round with the boot id of the write and in the epoch of the
+  mark, and the entry node must still be in that epoch. Then expiry, a delete, an eviction, or a
+  flush removed the key on that node, and the key does not lower the count. A node that
+  restarted with an empty store has a new boot id, and a node that discarded its store for an
+  epoch change answers in a newer epoch. In every other case the key stays, so the count is too
+  low until a flush on the connection empties the record. The count is never too high. If the
+  count reaches
   `numreplicas`, or the timeout passes, `WAIT` replies. Otherwise the next round starts after a
   pause that starts at 1 ms and doubles up to 100 ms. A timeout of 0 waits without an end. The
   wait ends when the client closes the connection.

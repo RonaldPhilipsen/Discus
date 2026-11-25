@@ -306,9 +306,10 @@ In a cluster, replication adds these deviations:
   - After an overflow of the record.
   - After an overflow, if a member left the cluster or left `NORMAL` since the record was last
     empty. The count is then 0 until a flush on the connection empties the record.
-  - After an epoch change, for a key that no current owner holds. The key can be a write that was
-    lost with its primary, so it counts 0. Without an epoch change, such a key was removed by
-    expiry, a delete, an eviction, or a flush, and it does not lower the count.
+  - For a key that no current owner holds. The key can be a write that was lost with its
+    primary, so it counts 0 and stays. It leaves the record only when the node that took the write
+    confirms, as the same process and in the same epoch, that it no longer holds the key. Then
+    expiry, a delete, an eviction, or a flush removed it, and it does not lower the count.
 - `WAIT` uses the epoch of the entry node. If that epoch lags the cluster, `WAIT` asks the old
   owners of a key until the new epoch arrives.
 - Without earlier writes, `WAIT` replies the number of secondaries of a key:
