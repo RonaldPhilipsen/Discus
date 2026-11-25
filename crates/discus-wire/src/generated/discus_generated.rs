@@ -3179,6 +3179,9 @@ impl<'a> ForwardReply<'a> {
   pub const VT_EPOCH: ::flatbuffers::VOffsetT = 8;
   pub const VT_OBSERVED: ::flatbuffers::VOffsetT = 10;
   pub const VT_SETTLED: ::flatbuffers::VOffsetT = 12;
+  pub const VT_VERSIONS: ::flatbuffers::VOffsetT = 14;
+  pub const VT_CHANGED: ::flatbuffers::VOffsetT = 16;
+  pub const VT_BOOT: ::flatbuffers::VOffsetT = 18;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -3190,6 +3193,9 @@ impl<'a> ForwardReply<'a> {
     args: &'args ForwardReplyArgs<'args>
   ) -> ::flatbuffers::WIPOffset<ForwardReply<'bldr>> {
     let mut builder = ForwardReplyBuilder::new(_fbb);
+    builder.add_boot(args.boot);
+    if let Some(x) = args.changed { builder.add_changed(x); }
+    if let Some(x) = args.versions { builder.add_versions(x); }
     if let Some(x) = args.observed { builder.add_observed(x); }
     if let Some(x) = args.epoch { builder.add_epoch(x); }
     if let Some(x) = args.applied { builder.add_applied(x); }
@@ -3238,6 +3244,32 @@ impl<'a> ForwardReply<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<bool>(ForwardReply::VT_SETTLED, Some(false)).unwrap()}
   }
+  /// A multi-key write part or MOVE: one version per key argument of the part, in order, and
+  /// for MOVE the key in the target database last. Only the keys that the part changed hold a
+  /// version: `changed` is true at their positions. Both are absent for any other command.
+  #[inline]
+  pub fn versions(&self) -> Option<::flatbuffers::Vector<'a, Version>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, Version>>>(ForwardReply::VT_VERSIONS, None)}
+  }
+  #[inline]
+  pub fn changed(&self) -> Option<::flatbuffers::Vector<'a, bool>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, bool>>>(ForwardReply::VT_CHANGED, None)}
+  }
+  /// The boot id of the receiver when it ran the command itself. 0 when it forwarded or split
+  /// the command again.
+  #[inline]
+  pub fn boot(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(ForwardReply::VT_BOOT, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ForwardReply<'_> {
@@ -3251,6 +3283,9 @@ impl ::flatbuffers::Verifiable for ForwardReply<'_> {
      .visit_field::<EpochId>("epoch", Self::VT_EPOCH, false)?
      .visit_field::<Version>("observed", Self::VT_OBSERVED, false)?
      .visit_field::<bool>("settled", Self::VT_SETTLED, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, Version>>>("versions", Self::VT_VERSIONS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, bool>>>("changed", Self::VT_CHANGED, false)?
+     .visit_field::<u64>("boot", Self::VT_BOOT, false)?
      .finish();
     Ok(())
   }
@@ -3261,6 +3296,9 @@ pub struct ForwardReplyArgs<'a> {
     pub epoch: Option<&'a EpochId>,
     pub observed: Option<&'a Version>,
     pub settled: bool,
+    pub versions: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, Version>>>,
+    pub changed: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, bool>>>,
+    pub boot: u64,
 }
 impl<'a> Default for ForwardReplyArgs<'a> {
   #[inline]
@@ -3271,6 +3309,9 @@ impl<'a> Default for ForwardReplyArgs<'a> {
       epoch: None,
       observed: None,
       settled: false,
+      versions: None,
+      changed: None,
+      boot: 0,
     }
   }
 }
@@ -3301,6 +3342,18 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ForwardReplyBuilder<'a, 'b, A
     self.fbb_.push_slot::<bool>(ForwardReply::VT_SETTLED, settled, false);
   }
   #[inline]
+  pub fn add_versions(&mut self, versions: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , Version>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ForwardReply::VT_VERSIONS, versions);
+  }
+  #[inline]
+  pub fn add_changed(&mut self, changed: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , bool>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(ForwardReply::VT_CHANGED, changed);
+  }
+  #[inline]
+  pub fn add_boot(&mut self, boot: u64) {
+    self.fbb_.push_slot::<u64>(ForwardReply::VT_BOOT, boot, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ForwardReplyBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ForwardReplyBuilder {
@@ -3323,6 +3376,9 @@ impl ::core::fmt::Debug for ForwardReply<'_> {
       ds.field("epoch", &self.epoch());
       ds.field("observed", &self.observed());
       ds.field("settled", &self.settled());
+      ds.field("versions", &self.versions());
+      ds.field("changed", &self.changed());
+      ds.field("boot", &self.boot());
       ds.finish()
   }
 }
@@ -4805,6 +4861,7 @@ impl<'a> BatchAck<'a> {
   pub const VT_EPOCH: ::flatbuffers::VOffsetT = 8;
   pub const VT_IDLE: ::flatbuffers::VOffsetT = 10;
   pub const VT_WANT_DBS: ::flatbuffers::VOffsetT = 12;
+  pub const VT_BOOT: ::flatbuffers::VOffsetT = 14;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -4816,6 +4873,7 @@ impl<'a> BatchAck<'a> {
     args: &'args BatchAckArgs<'args>
   ) -> ::flatbuffers::WIPOffset<BatchAck<'bldr>> {
     let mut builder = BatchAckBuilder::new(_fbb);
+    builder.add_boot(args.boot);
     if let Some(x) = args.want_dbs { builder.add_want_dbs(x); }
     if let Some(x) = args.epoch { builder.add_epoch(x); }
     if let Some(x) = args.want { builder.add_want(x); }
@@ -4864,6 +4922,14 @@ impl<'a> BatchAck<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u32>>>(BatchAck::VT_WANT_DBS, None)}
   }
+  /// The boot id of the receiver: a random number that each process start draws again.
+  #[inline]
+  pub fn boot(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(BatchAck::VT_BOOT, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for BatchAck<'_> {
@@ -4877,6 +4943,7 @@ impl ::flatbuffers::Verifiable for BatchAck<'_> {
      .visit_field::<EpochId>("epoch", Self::VT_EPOCH, false)?
      .visit_field::<bool>("idle", Self::VT_IDLE, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u32>>>("want_dbs", Self::VT_WANT_DBS, false)?
+     .visit_field::<u64>("boot", Self::VT_BOOT, false)?
      .finish();
     Ok(())
   }
@@ -4887,6 +4954,7 @@ pub struct BatchAckArgs<'a> {
     pub epoch: Option<&'a EpochId>,
     pub idle: bool,
     pub want_dbs: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u32>>>,
+    pub boot: u64,
 }
 impl<'a> Default for BatchAckArgs<'a> {
   #[inline]
@@ -4897,6 +4965,7 @@ impl<'a> Default for BatchAckArgs<'a> {
       epoch: None,
       idle: false,
       want_dbs: None,
+      boot: 0,
     }
   }
 }
@@ -4927,6 +4996,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BatchAckBuilder<'a, 'b, A> {
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BatchAck::VT_WANT_DBS, want_dbs);
   }
   #[inline]
+  pub fn add_boot(&mut self, boot: u64) {
+    self.fbb_.push_slot::<u64>(BatchAck::VT_BOOT, boot, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> BatchAckBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     BatchAckBuilder {
@@ -4949,6 +5022,7 @@ impl ::core::fmt::Debug for BatchAck<'_> {
       ds.field("epoch", &self.epoch());
       ds.field("idle", &self.idle());
       ds.field("want_dbs", &self.want_dbs());
+      ds.field("boot", &self.boot());
       ds.finish()
   }
 }

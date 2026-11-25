@@ -1,6 +1,6 @@
 //! Commands that only nodes of the cluster send to each other. They run the two halves of a
 //! `RENAME` or a `COPY` whose keys have different primaries, and the counter part of a flush on
-//! the leader of a counter group.
+//! the leader of a counter group, and they ask whether a node delivered every write for `WAIT`.
 //!
 //! These specs stay out of the command table, so `prepare` never finds them for a client.
 
@@ -29,7 +29,13 @@ pub const PEEK: &CommandSpec =
 pub const COUNTER_FLUSH: &CommandSpec =
     &CommandSpec::write("DISCUS.COUNTERFLUSH", 3, no_counters).with_route(Route::Local);
 
-const COMMANDS: &[&CommandSpec] = &[TAKE, PUT, PEEK, COUNTER_FLUSH];
+/// `DISCUS.DRAINED`: 1 when this node delivered every write it took to the other owners
+/// ([`crate::replication::Replicator::drained`]), else 0. `WAIT` asks every member after the
+/// record of its connection overflowed.
+pub const DRAINED: &CommandSpec =
+    &CommandSpec::read("DISCUS.DRAINED", 1, drained).with_route(Route::Local);
+
+const COMMANDS: &[&CommandSpec] = &[TAKE, PUT, PEEK, COUNTER_FLUSH, DRAINED];
 
 /// Look up an internal command by name, ignoring case. Only the forward path calls this.
 pub fn lookup_internal(name: &[u8]) -> Option<&'static CommandSpec> {
@@ -40,6 +46,11 @@ pub fn lookup_internal(name: &[u8]) -> Option<&'static CommandSpec> {
 }
 
 type Reply = Result<Value, CommandError>;
+
+fn drained(node: &Node, _: &mut ConnState, _: &Command) -> Reply {
+    let drained = node.replicator().is_some_and(|r| r.drained());
+    Ok(Value::Integer(i64::from(drained)))
+}
 
 fn no_counters(_: &Node, _: &mut ConnState, _: &Command) -> Reply {
     Err(CommandError::Custom(

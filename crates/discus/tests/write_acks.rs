@@ -480,3 +480,53 @@ async fn a_node_without_peers_replies_noreplicas_at_once() {
     let v: String = conn.get("alone").await.unwrap();
     assert_eq!(v, "v1");
 }
+
+#[tokio::test]
+async fn a_multi_key_write_with_a_failed_part_keeps_the_versions_of_every_part() {
+    let c = start_cluster(
+        4,
+        &args(&[
+            "--write-acks",
+            "1",
+            "--write-ack-timeout",
+            "closed",
+            "--replication-timeout-ms",
+            "300",
+        ]),
+    )
+    .await;
+    let (a, b) = (c.key_on(0, "va"), c.key_on(1, "vb"));
+    stall(&c, &b);
+    let cmd = common::cmd(&["MSET", &a, "a1", &b, "b1"]);
+    let spec = discus::command::lookup(&cmd[0]).unwrap();
+    let reply = discus::cluster::run(
+        &c.nodes[3].node,
+        discus::cluster::Job::plain(cmd, spec, 0),
+        None,
+        tracing::Span::none(),
+    )
+    .finish()
+    .await;
+    assert_eq!(
+        reply.value,
+        discus_resp::Value::error(NOREPLICAS),
+        "{:?}",
+        reply.value
+    );
+    let version = |key: &str| {
+        primary(&c, key)
+            .node
+            .store
+            .version(0, key.as_bytes())
+            .unwrap()
+    };
+    let mut got = reply.versions.clone();
+    got.sort();
+    let mut want = vec![
+        (0, bytes::Bytes::from(a.clone()), version(&a)),
+        (0, bytes::Bytes::from(b.clone()), version(&b)),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+    assert_eq!(reply.applied, want.iter().map(|(_, _, v)| *v).max());
+}

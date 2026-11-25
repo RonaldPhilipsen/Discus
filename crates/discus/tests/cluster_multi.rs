@@ -358,3 +358,44 @@ async fn a_part_error_passes_through() {
         .unwrap_err();
     assert_eq!(err.code(), Some("OOM"), "{err}");
 }
+
+/// Run `parts` from the entry node `entry` and return the reply that the entry node built.
+async fn entry_reply(
+    entry: &common::cluster::ClusterNode,
+    parts: &[&str],
+) -> discus::cluster::Reply {
+    let cmd = common::cmd(parts);
+    let spec = discus::command::lookup(&cmd[0]).unwrap();
+    discus::cluster::run(
+        &entry.node,
+        discus::cluster::Job::plain(cmd, spec, 0),
+        None,
+        tracing::Span::none(),
+    )
+    .finish()
+    .await
+}
+
+#[tokio::test]
+async fn a_multi_key_write_reports_the_version_of_each_changed_key() {
+    let c = start_cluster(4, &[]).await;
+    let a = c.key_on(1, "va");
+    let b = c.key_on(2, "vb");
+    let reply = entry_reply(&c.nodes[0], &["MSET", &a, "1", &b, "2"]).await;
+    assert_eq!(reply.value, discus_resp::Value::ok());
+    let version = |owner: usize, key: &str| c.nodes[owner].node.store.version(0, key.as_bytes());
+    let (va, vb) = (version(1, &a).unwrap(), version(2, &b).unwrap());
+    let mut got = reply.versions.clone();
+    got.sort();
+    let mut want = vec![
+        (0, bytes::Bytes::from(a.clone()), va),
+        (0, bytes::Bytes::from(b.clone()), vb),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+
+    let reply = entry_reply(&c.nodes[0], &["DEL", &a, "vmissing"]).await;
+    assert_eq!(reply.value, discus_resp::Value::Integer(1));
+    let va = version(1, &a).unwrap();
+    assert_eq!(reply.versions, [(0, bytes::Bytes::from(a.clone()), va)]);
+}

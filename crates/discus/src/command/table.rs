@@ -339,7 +339,6 @@ const UNSUPPORTED: &[&str] = &[
     "SUNIONSTORE",
     "SDIFFSTORE",
     "UNWATCH",
-    "WAIT",
     "WATCH",
 ];
 
@@ -429,6 +428,8 @@ mod tests {
         assert_eq!(cats(b"INFO"), ["slow", "dangerous"]);
         assert_eq!(cats(b"CONFIG"), ["admin", "slow", "dangerous"]);
         assert_eq!(cats(b"CLUSTER"), ["slow", "connection"]);
+        assert_eq!(cats(b"WAIT"), ["slow", "blocking", "connection"]);
+        assert_eq!(cats(b"WAITAOF"), ["slow", "blocking", "connection"]);
     }
 
     #[test]

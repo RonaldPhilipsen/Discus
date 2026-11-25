@@ -10,6 +10,7 @@ use discus_wire::{encode_command, Forward, ForwardMode, Message};
 use tracing::Instrument;
 
 use super::{Hop, Reply};
+use crate::command;
 use crate::node::Node;
 use crate::telemetry;
 
@@ -72,12 +73,22 @@ pub async fn send(
                     // A timestamp too far ahead is dropped by the HLC. The reply still counts.
                     let _ = node.hlc.observe(applied);
                 }
+                let versions = if reply.versions.is_empty() {
+                    Vec::new()
+                } else {
+                    command::lookup(&cmd[0])
+                        .or_else(|| command::lookup_internal(&cmd[0]))
+                        .map(|spec| super::unaligned(spec, db, cmd, reply.versions))
+                        .unwrap_or_default()
+                };
                 Ok(Reply {
                     value: reply.value,
                     applied: reply.applied,
                     observed: reply.observed,
                     settled: reply.settled,
                     failed: None,
+                    versions,
+                    served: (reply.boot != 0).then_some((target, reply.boot)),
                 })
             }
             other => Err(TransportError::Frame(format!(

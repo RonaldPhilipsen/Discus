@@ -78,6 +78,11 @@ pub struct ForwardReply {
     pub observed: Option<Version>,
     /// A tracked read: no replication queue, batch in flight, or hint holds the key.
     pub settled: bool,
+    /// A multi-key write part or `MOVE`: the version of each key argument that the part changed,
+    /// in order, and for `MOVE` the key in the target database last. Empty for any other command.
+    pub versions: Vec<Option<Version>>,
+    /// The boot id of the receiver when it ran the command itself, else 0.
+    pub boot: u64,
 }
 
 /// The body of `REPLICATE`, `HINT_REPLAY`, `HANDOFF`, and `ENTRIES`.
@@ -115,6 +120,8 @@ pub struct BatchAck {
     pub epoch: EpochId,
     /// The answer to an empty `HANDOFF`: no handoff scan runs or waits on the sender.
     pub idle: bool,
+    /// The boot id of the receiver: a random number that each process start draws again.
+    pub boot: u64,
 }
 
 /// One leadership of a counter group: a leader-follower lease term or a Raft instance (spec

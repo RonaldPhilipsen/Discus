@@ -364,6 +364,19 @@ impl Replicator {
         st.scanning || !st.pending.is_empty()
     }
 
+    /// Every write that this node took reached its other owners: each queue is up and empty with
+    /// no batch in flight, no hint or lost hint waits, and no handoff runs. `WAIT` asks this of
+    /// every member after its record overflowed.
+    pub fn drained(&self) -> bool {
+        self.peers
+            .read()
+            .values()
+            .all(|q| !q.is_down() && !q.busy())
+            && self.hints.lock().is_empty()
+            && !self.scanning()
+            && !self.handoff_pending()
+    }
+
     /// Handoff scans finished since start.
     pub fn scans(&self) -> u64 {
         self.scans.load(Ordering::Relaxed)
@@ -1007,6 +1020,25 @@ impl Replicator {
         self.unstored(node, q.peer, offers).await
     }
 
+    /// The answer of `peer` to `offers`, for `WAIT`: the keys that it does not hold at the offered
+    /// version or newer, with its epoch and boot id.
+    pub(crate) async fn missing(
+        &self,
+        node: &Arc<Node>,
+        peer: NodeId,
+        offers: Vec<(DbKey, Version)>,
+    ) -> Result<BatchAck, TransportError> {
+        let mut batch = Batch::new(node.epoch_id());
+        batch.offers = offers;
+        match self.send(node, peer, Message::Handoff(batch)).await? {
+            Message::BatchAck(a) => Ok(a),
+            other => Err(TransportError::Frame(format!(
+                "an offer got message type {}",
+                other.type_code()
+            ))),
+        }
+    }
+
     /// The keys of `offers` that `peer` does not hold at the offered version or newer.
     async fn unstored(
         &self,
@@ -1017,15 +1049,7 @@ impl Replicator {
         if offers.is_empty() {
             return Ok(Vec::new());
         }
-        let mut batch = Batch::new(node.epoch_id());
-        batch.offers = offers;
-        match self.send(node, peer, Message::Handoff(batch)).await? {
-            Message::BatchAck(a) => Ok(a.want),
-            other => Err(TransportError::Frame(format!(
-                "an offer got message type {}",
-                other.type_code()
-            ))),
-        }
+        Ok(self.missing(node, peer, offers).await?.want)
     }
 
     /// Replay the hints of `peer` (spec section 9). The refill buckets of lost hints come
@@ -1228,6 +1252,7 @@ impl Replicator {
                     want: Vec::new(),
                     epoch: node.epoch_id(),
                     idle: !self.scanning(),
+                    boot: node.boot,
                 })
             }
             Message::Handoff(b) => {
@@ -1491,6 +1516,7 @@ fn ack(node: &Node, applied: u32, want: Vec<DbKey>) -> Message {
         want,
         epoch,
         idle: false,
+        boot: node.boot,
     })
 }
 

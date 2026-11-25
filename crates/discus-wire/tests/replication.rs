@@ -87,6 +87,7 @@ fn a_batch_ack_round_trips() {
         want: vec![DbKey::new(0, "k1"), DbKey::new(0, "k2")],
         epoch: epoch(3),
         idle: true,
+        boot: 9,
     });
     assert_eq!(round_trip(m.clone()), m);
 }
@@ -118,6 +119,7 @@ fn new_types_are_9_to_15() {
             want: vec![],
             epoch: epoch(1),
             idle: false,
+            boot: 9,
         })
         .type_code(),
         Message::Fetch { keys: vec![] }.type_code(),
@@ -143,6 +145,8 @@ fn a_forward_reply_keeps_observed_and_settled() {
         epoch: epoch(2),
         observed: Some(v(8)),
         settled: true,
+        versions: Vec::new(),
+        boot: 7,
     });
     assert_eq!(round_trip(m.clone()), m);
     let plain = Message::ForwardReply(ForwardReply {
@@ -151,8 +155,64 @@ fn a_forward_reply_keeps_observed_and_settled() {
         epoch: epoch(2),
         observed: None,
         settled: false,
+        versions: Vec::new(),
+        boot: 7,
     });
     assert_eq!(round_trip(plain.clone()), plain);
+}
+
+#[test]
+fn a_forward_reply_keeps_the_version_of_each_key() {
+    let m = Message::ForwardReply(ForwardReply {
+        value: Resp::Integer(2),
+        applied: Some(v(2)),
+        epoch: epoch(2),
+        observed: None,
+        settled: false,
+        versions: vec![Some(v(1)), None, Some(v(2))],
+        boot: 7,
+    });
+    assert_eq!(round_trip(m.clone()), m);
+}
+
+/// A raw forward reply with the given `versions` and `changed` fields.
+fn reply_frame(versions: Option<usize>, changed: Option<usize>) -> Vec<u8> {
+    let mut fbb = flatbuffers::FlatBufferBuilder::new();
+    let value = fb::RespValue::create(&mut fbb, &fb::RespValueArgs::default());
+    let zero = fb::Version::new(0, &fb::Id128::default());
+    let versions = versions.map(|n| fbb.create_vector(&vec![zero; n]));
+    let changed = changed.map(|n| fbb.create_vector(&vec![true; n]));
+    let epoch = fb::EpochId::new(1, &fb::Id128::default());
+    let t = fb::ForwardReply::create(
+        &mut fbb,
+        &fb::ForwardReplyArgs {
+            value: Some(value),
+            epoch: Some(&epoch),
+            versions,
+            changed,
+            ..Default::default()
+        },
+    );
+    fbb.finish_minimal(t);
+    discus_wire::encode_envelope(
+        fb::MessageType::FORWARD_REPLY.0,
+        1,
+        &TraceContext::default(),
+        fbb.finished_data(),
+    )
+}
+
+#[test]
+fn reply_versions_need_a_changed_flag_for_each_entry() {
+    let decode = |v, c| decode_frame(&reply_frame(v, c), &Limits::default());
+    assert!(decode(Some(2), Some(2)).is_ok());
+    assert!(decode(None, None).is_ok());
+    for (v, c) in [(Some(2), None), (None, Some(2)), (Some(2), Some(1))] {
+        assert!(
+            matches!(decode(v, c), Err(DecodeError::Invalid(_))),
+            "{v:?} {c:?}"
+        );
+    }
 }
 
 #[test]
@@ -281,6 +341,7 @@ fn entries_offers_wants_and_fetches_keep_their_databases() {
             want: vec![DbKey::new(0, "w"), DbKey::new(5, "w")],
             epoch: epoch(4),
             idle: false,
+            boot: 9,
         }),
         Message::Fetch {
             keys: vec![DbKey::new(0, "f"), DbKey::new(2, "f")],

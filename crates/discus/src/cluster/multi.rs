@@ -138,11 +138,6 @@ fn read_group<'a>(
     })
 }
 
-/// The newest applied stamp of the parts.
-fn newest(replies: &[Reply]) -> Option<discus_placement::Version> {
-    replies.iter().filter_map(|r| r.applied).max()
-}
-
 /// How the parts of a multi-key command merge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Merge {
@@ -233,7 +228,7 @@ pub fn multi(
     }
     let now = Instant::now();
     let need = |key: &[u8]| match writes {
-        Some(w) if !write => w.lock().required(SetKey::of(db, key), || now),
+        Some(w) if !write => w.lock().set.required(SetKey::of(db, key), || now),
         _ => None,
     };
     if super::redirect::applies(redirect, &hop) {
@@ -265,7 +260,8 @@ pub fn multi(
     let Some(groups) = groups else {
         return Dispatch::Ready(Reply::try_again());
     };
-    // Each written key enters the write set with the stamp of its own part. Only a write notes.
+    // Each written key enters the write set with the stamp of its own part, and the record with
+    // its own version. Only a write notes.
     let writes = writes.filter(|_| write).cloned();
     let note = move |node: &Node, cmd: &Command, reply: &Reply| {
         if let (Some(w), Some(v)) = (&writes, reply.applied) {
@@ -276,7 +272,10 @@ pub fn multi(
                     .flatten()
                     .filter(|k| !node.is_primary_read_key(k))
                 {
-                    w.record(SetKey::of(db, k), v, Instant::now());
+                    w.set.record(SetKey::of(db, k), v, Instant::now());
+                }
+                for (db, k, v) in &reply.versions {
+                    w.record.note(*db, k, *v, reply.served);
                 }
             }
         }
@@ -307,23 +306,38 @@ pub fn multi(
             let unsent = failures.iter().all(|f| f.unsent);
             return Failure { unsent }.reply();
         }
-        let mut replies = Vec::with_capacity(parts.len());
+        // A write part that ends with an error, such as `-NOREPLICAS`, can still have changed
+        // keys, so the reply keeps the stamps of every part that answered.
+        let mut parts = parts;
+        let applied = parts.iter().flatten().filter_map(|r| r.applied).max();
+        let versions: Vec<_> = parts
+            .iter_mut()
+            .flatten()
+            .flat_map(|r| std::mem::take(&mut r.versions))
+            .collect();
+        let mut values = Vec::with_capacity(parts.len());
         for part in parts {
             match part {
-                Some(r) if !matches!(r.value, Value::Error(_)) => replies.push(r),
+                Some(r) if !matches!(r.value, Value::Error(_)) => values.push(r.value),
                 // The error of a part, such as `-OOM`, is the reply. The other parts stay
                 // applied.
-                Some(r) => return Reply::value(r.value),
+                Some(r) => {
+                    return Reply {
+                        applied,
+                        versions,
+                        ..Reply::value(r.value)
+                    }
+                }
                 // No owner answered a read part.
                 None => return Reply::try_again(),
             }
         }
-        let applied = newest(&replies);
-        let Some(value) = merge.apply(total, &groups, replies.into_iter().map(|r| r.value)) else {
+        let Some(value) = merge.apply(total, &groups, values) else {
             return Reply::try_again();
         };
         Reply {
             applied,
+            versions,
             ..Reply::value(value)
         }
     }))

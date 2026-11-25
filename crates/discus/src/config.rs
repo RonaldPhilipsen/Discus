@@ -311,13 +311,16 @@ pub struct Config {
     /// returns `-TRYAGAIN`.
     #[arg(long, default_value_t = 3_000)]
     pub hold_budget_ms: u64,
-    /// Keys in the write set of one connection, at most.
+    /// Keys in the write set of one connection, at most. The `WAIT` record of the connection has
+    /// the same cap.
     #[arg(long, default_value_t = 4_096)]
     pub write_set_keys: usize,
-    /// Bytes in the write set of one connection, at most.
+    /// Bytes in the write set of one connection, at most. The `WAIT` record of the connection has
+    /// the same cap.
     #[arg(long, default_value_t = 1_048_576)]
     pub write_set_bytes: usize,
-    /// The share of the memory budget for the write sets of every connection, in percent.
+    /// The share of the memory budget for the write sets and the `WAIT` records of every
+    /// connection, in percent.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=100))]
     pub write_set_memory_percent: u64,
     /// Time that a written key stays in the write set, in milliseconds.

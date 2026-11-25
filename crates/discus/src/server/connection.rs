@@ -33,10 +33,13 @@ use futures::stream::{FuturesOrdered, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use super::order::{KeyOrder, Keys, WaitFor};
+use crate::cluster::route::Route;
 use crate::cluster::{self, Dispatch, Prepared};
+use crate::command::CommandSpec;
 use crate::node::{ConnState, Node};
 use crate::security::ConnAuth;
 use crate::telemetry::CommandTrace;
@@ -218,6 +221,26 @@ struct Pipeline {
     out: Output,
     /// A closing reply is queued: parse nothing more.
     closing: bool,
+    /// The client stopped writing. A pending `WAIT` ends then, so it cannot hold the connection
+    /// open without an end.
+    eof: CancellationToken,
+}
+
+/// End the reply of a pending `WAIT` or `WAITAOF` once `eof` fires.
+fn until_eof(spec: &'static CommandSpec, eof: &CancellationToken, dispatch: Dispatch) -> Dispatch {
+    let Dispatch::Pending(reply) = dispatch else {
+        return dispatch;
+    };
+    if spec.route != Route::Wait {
+        return Dispatch::Pending(reply);
+    }
+    let eof = eof.clone();
+    Dispatch::Pending(Box::pin(async move {
+        tokio::select! {
+            reply = reply => reply,
+            () = eof.cancelled() => cluster::wait::closed(spec),
+        }
+    }))
 }
 
 impl Pipeline {
@@ -284,8 +307,10 @@ impl Pipeline {
             let (wait, done) = self.order.admit(&keys);
             (wait, Some(done), None)
         };
+        let spec = job.spec;
         if wait.is_ready() {
-            match cluster::run(&self.node, job, self.conn.writes.as_ref(), route) {
+            let dispatch = cluster::run(&self.node, job, self.conn.writes.as_ref(), route);
+            match until_eof(spec, &self.eof, dispatch) {
                 Dispatch::Ready(reply) => {
                     drop(done);
                     trace.finish(&reply.value);
@@ -309,12 +334,12 @@ impl Pipeline {
         drop(route);
         let node = self.node.clone();
         let writes = self.conn.writes.clone();
+        let eof = self.eof.clone();
         self.pending.push_back(Box::pin(
             async move {
                 wait.wait().await;
-                let reply = cluster::run(&node, job, writes.as_ref(), trace.route_span())
-                    .finish()
-                    .await;
+                let dispatch = cluster::run(&node, job, writes.as_ref(), trace.route_span());
+                let reply = until_eof(spec, &eof, dispatch).finish().await;
                 drop(done);
                 trace.finish(&reply.value);
                 Slot::reply(protocol, reply.value)
@@ -410,7 +435,13 @@ async fn serve_until_closed<S: AsyncRead + AsyncWrite + Unpin>(
     conn.redirect = redirect;
     conn.local_addr = local_addr;
     if node.link().is_some() {
-        conn.writes = Some(Arc::new(parking_lot::Mutex::new(node.new_write_set())));
+        let writes = Arc::new(parking_lot::Mutex::new(node.new_conn_writes()));
+        #[cfg(feature = "testing")]
+        node.faults
+            .conns
+            .lock()
+            .insert(conn.id, Arc::downgrade(&writes));
+        conn.writes = Some(writes);
     }
     let mut p = Pipeline {
         node: node.clone(),
@@ -420,6 +451,7 @@ async fn serve_until_closed<S: AsyncRead + AsyncWrite + Unpin>(
         pending: FuturesOrdered::new(),
         out: Output::default(),
         closing: false,
+        eof: CancellationToken::new(),
     };
 
     loop {
@@ -502,7 +534,10 @@ async fn serve_until_closed<S: AsyncRead + AsyncWrite + Unpin>(
             }
             read = stream.read_buf(parser.buffer()), if can_read => match read {
                 // The client stopped writing: finish the pending replies, then end.
-                Ok(0) => p.closing = true,
+                Ok(0) => {
+                    p.closing = true;
+                    p.eof.cancel();
+                }
                 Err(_) => return,
                 Ok(_) => {}
             },

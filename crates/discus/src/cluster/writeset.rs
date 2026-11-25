@@ -104,6 +104,51 @@ impl SetKey {
     }
 }
 
+/// The share of the node budget that one write set or one record holds. It takes the budget in
+/// chunks and gives it back on drop.
+pub(crate) struct Held {
+    held: usize,
+    budget: Arc<WriteSetBudget>,
+}
+
+impl Held {
+    pub(crate) fn new(budget: Arc<WriteSetBudget>) -> Held {
+        Held { held: 0, budget }
+    }
+
+    /// Hold room for `bytes` in use, taking a whole chunk more when the budget has room.
+    pub(crate) fn cover(&mut self, bytes: usize) -> bool {
+        let short = bytes.saturating_sub(self.held);
+        if short == 0 {
+            return true;
+        }
+        let got = [short.max(BUDGET_CHUNK), short]
+            .into_iter()
+            .find(|&m| self.budget.try_add(m as u64));
+        if let Some(m) = got {
+            self.held += m;
+        }
+        got.is_some()
+    }
+
+    /// Give back the unused budget beyond one chunk, or all of it when `bytes` is 0.
+    pub(crate) fn trim(&mut self, bytes: usize) {
+        let spare = self.held - bytes;
+        let keep = if bytes == 0 { 0 } else { BUDGET_CHUNK };
+        if spare > 2 * BUDGET_CHUNK || (bytes == 0 && spare > 0) {
+            let give = spare - keep;
+            self.budget.sub(give as u64);
+            self.held -= give;
+        }
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.budget.sub(self.held as u64);
+    }
+}
+
 pub struct WriteSet {
     /// Oldest key first, at most `limits.keys` keys. A removed key leaves its node on the free
     /// list of the map, so a write that evicts the oldest key allocates nothing.
@@ -111,9 +156,8 @@ pub struct WriteSet {
     /// The bytes of the recorded keys.
     bytes: usize,
     /// The node budget that this set holds, at least `bytes`.
-    held: usize,
+    held: Held,
     limits: WriteSetLimits,
-    budget: Arc<WriteSetBudget>,
 }
 
 impl WriteSet {
@@ -121,9 +165,8 @@ impl WriteSet {
         WriteSet {
             map: LinkedHashMap::new(),
             bytes: 0,
-            held: 0,
+            held: Held::new(budget),
             limits,
-            budget,
         }
     }
 
@@ -154,26 +197,8 @@ impl WriteSet {
         true
     }
 
-    /// Take `n` more bytes of the node budget, a whole chunk when the budget has room.
-    fn reserve(&mut self, n: usize) -> bool {
-        let got = [n.max(BUDGET_CHUNK), n]
-            .into_iter()
-            .find(|&m| self.budget.try_add(m as u64));
-        if let Some(m) = got {
-            self.held += m;
-        }
-        got.is_some()
-    }
-
-    /// Give back the unused budget beyond one chunk, or all of it when the set is empty.
     fn trim(&mut self) {
-        let spare = self.held - self.bytes;
-        let keep = if self.bytes == 0 { 0 } else { BUDGET_CHUNK };
-        if spare > 2 * BUDGET_CHUNK || (self.bytes == 0 && spare > 0) {
-            let give = spare - keep;
-            self.budget.sub(give as u64);
-            self.held -= give;
-        }
+        self.held.trim(self.bytes);
     }
 
     /// Record a write of `key` that the primary acknowledged at `version`. A key that does not
@@ -198,8 +223,7 @@ impl WriteSet {
                 true => self.map.front().map_or(0, |(_, r)| r.size),
                 false => 0,
             };
-            let short = (self.bytes - pushed_out + size).saturating_sub(self.held);
-            if short == 0 || self.reserve(short) {
+            if self.held.cover(self.bytes - pushed_out + size) {
                 break;
             }
             if !self.evict_oldest() {
@@ -251,12 +275,6 @@ impl std::fmt::Debug for WriteSet {
             .field("keys", &self.map.len())
             .field("bytes", &self.bytes)
             .finish()
-    }
-}
-
-impl Drop for WriteSet {
-    fn drop(&mut self) {
-        self.budget.sub(self.held as u64);
     }
 }
 
@@ -377,12 +395,12 @@ mod tests {
                 if len % 7 == 0 {
                     w.observed(key, Some(v(u64::MAX)), true);
                 }
-                proptest::prop_assert_eq!(budget.used(), (one.held + two.held) as u64);
+                proptest::prop_assert_eq!(budget.used(), (one.held.held + two.held.held) as u64);
                 proptest::prop_assert!(budget.used() <= cap);
                 for w in [&one, &two] {
                     proptest::prop_assert!(w.map.len() <= keys && w.bytes <= 600);
-                    proptest::prop_assert!(w.bytes <= w.held && w.held - w.bytes <= 2 * BUDGET_CHUNK);
-                    proptest::prop_assert!(w.bytes > 0 || w.held == 0);
+                    proptest::prop_assert!(w.bytes <= w.held.held && w.held.held - w.bytes <= 2 * BUDGET_CHUNK);
+                    proptest::prop_assert!(w.bytes > 0 || w.held.held == 0);
                 }
             }
             drop(one);

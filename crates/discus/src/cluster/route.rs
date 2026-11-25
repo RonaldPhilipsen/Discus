@@ -29,6 +29,8 @@ pub enum Route {
     Fanout,
     /// `FLUSHDB` and `FLUSHALL`: every member, best-effort.
     Broadcast,
+    /// `WAIT` and `WAITAOF`: the entry node only, after every earlier command of the connection.
+    Wait,
 }
 
 impl Route {
@@ -40,7 +42,9 @@ impl Route {
             Route::MultiRead { .. } | Route::MultiWrite { pairs: false } => (1, -1, 1),
             Route::MultiWrite { pairs: true } => (1, -1, 2),
             Route::Rename | Route::Copy => (1, 2, 1),
-            Route::Connection | Route::Local | Route::Fanout | Route::Broadcast => (0, 0, 0),
+            Route::Connection | Route::Local | Route::Fanout | Route::Broadcast | Route::Wait => {
+                (0, 0, 0)
+            }
         }
     }
 }
@@ -146,6 +150,7 @@ mod tests {
             Route::Local,
             Route::Fanout,
             Route::Broadcast,
+            Route::Wait,
         ] {
             assert_eq!(args(route, &mget), None);
         }

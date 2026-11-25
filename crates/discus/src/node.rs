@@ -18,9 +18,11 @@ use discus_telemetry::attrs::TopologyCommand;
 use discus_transport::TransportError;
 use parking_lot::{RwLock, RwLockReadGuard};
 
+use crate::cluster::record::{Placement, Record};
 use crate::cluster::topology;
 use crate::cluster::writeset::{WriteSet, WriteSetBudget, WriteSetLimits};
 use crate::cluster::ClusterLink;
+use crate::cluster::ConnWrites;
 use crate::command::CommandError;
 use crate::config::{client_host, default_client_addr};
 use crate::counter::Counters;
@@ -63,15 +65,20 @@ pub struct Node {
     pub config: Config,
     /// This process's identity. A restart is a new node.
     pub id: NodeId,
+    /// A random number that each process start draws again, also with the same `--node-id`. A
+    /// node that answers with another boot id lost its store since.
+    pub boot: u64,
     /// The clock that stamps every write.
     pub hlc: Hlc,
     epochs: Arc<RwLock<EpochHistory>>,
     /// The current epoch of `epochs`, for reads on the command path without the lock. It changes
     /// only under the write lock, after the work that a reader must see with the new epoch.
-    current: ArcSwap<Epoch>,
+    current: Arc<ArcSwap<Epoch>>,
     /// The generation of `current`, unique across all nodes of the process. A thread keeps its
     /// last read of `current` while the generation stays, so a lookup costs one atomic load.
     current_generation: AtomicU64,
+    /// Bumped each time a published epoch removes a member or makes one leave `NORMAL`.
+    departures: Arc<AtomicU64>,
     pub started_at: Instant,
     pub store: Arc<Store>,
     /// The database counts of this node and of the cluster, and the `MULTI_DB` gate.
@@ -150,6 +157,10 @@ pub struct Faults {
     /// The membership tick passes no view to `Databases` while this is set, as while a member of
     /// the epoch has no gossip record.
     pub withhold_view: std::sync::atomic::AtomicBool,
+    /// The writes of each open client connection, by `CLIENT ID`.
+    pub conns: parking_lot::Mutex<
+        std::collections::HashMap<u64, std::sync::Weak<parking_lot::Mutex<ConnWrites>>>,
+    >,
 }
 
 #[cfg(feature = "testing")]
@@ -273,8 +284,10 @@ impl Node {
         Node {
             config,
             id,
+            boot: fastrand::u64(1..),
             hlc: Hlc::new(id, hlc_clock),
-            current: ArcSwap::new(epochs.current().clone()),
+            current: Arc::new(ArcSwap::new(epochs.current().clone())),
+            departures: Arc::new(AtomicU64::new(0)),
             current_generation: AtomicU64::new(next_generation()),
             epochs: Arc::new(RwLock::new(epochs)),
             started_at: Instant::now(),
@@ -529,20 +542,35 @@ impl Node {
         let _ = self.counters.set(counters);
     }
 
-    /// A new write set for a client connection (spec section 7.4).
-    pub fn new_write_set(&self) -> WriteSet {
+    /// A new write set (spec section 7.4) and record for a client connection. Both count against
+    /// the write-set caps and the node budget.
+    pub fn new_conn_writes(&self) -> ConnWrites {
         let c = &self.config;
-        WriteSet::new(
-            WriteSetLimits {
-                keys: c.write_set_keys.max(1),
-                bytes: c.write_set_bytes,
-                max_age: std::time::Duration::from_millis(c.write_set_ttl_ms),
-            },
-            self.write_budget.clone(),
-        )
+        let limits = WriteSetLimits {
+            keys: c.write_set_keys.max(1),
+            bytes: c.write_set_bytes,
+            max_age: std::time::Duration::from_millis(c.write_set_ttl_ms),
+        };
+        ConnWrites {
+            record: Record::new(
+                &limits,
+                self.write_budget.clone(),
+                Placement {
+                    current: self.current.clone(),
+                    departures: self.departures.clone(),
+                },
+            ),
+            set: WriteSet::new(limits, self.write_budget.clone()),
+        }
     }
 
-    /// Bytes that every write set of this node holds.
+    /// The writes of the client connection with `CLIENT ID` `id`, while it is open.
+    #[cfg(feature = "testing")]
+    pub fn conn_writes(&self, id: u64) -> Option<crate::cluster::Writes> {
+        self.faults.conns.lock().get(&id)?.upgrade()
+    }
+
+    /// Bytes that every write set and every `WAIT` record of this node holds.
     pub fn write_set_bytes(&self) -> u64 {
         self.write_budget.used()
     }
@@ -811,7 +839,17 @@ impl Node {
     /// Make `epoch` the current epoch for readers without the lock. The caller holds the write
     /// lock of `epochs`.
     fn publish(&self, epoch: Arc<Epoch>) {
+        let old = self.current.load();
+        let departed = old.members().iter().any(|m| {
+            epoch.member(m.id).is_none() || (old.is_normal(m.id) && !epoch.is_normal(m.id))
+        });
+        drop(old);
+        // The count moves after the store, so a record that reads the new count also reads the
+        // new epoch, and a record that reads the old count sees the move later.
         self.current.store(epoch);
+        if departed {
+            self.departures.fetch_add(1, Ordering::AcqRel);
+        }
         self.current_generation
             .store(next_generation(), Ordering::Release);
     }
@@ -912,7 +950,7 @@ pub struct ConnState {
     /// The round-robin position for reads over replicas.
     rr: u64,
     /// The recent writes of a client connection in a cluster. Internal execution has none.
-    pub writes: Option<Arc<parking_lot::Mutex<WriteSet>>>,
+    pub writes: Option<crate::cluster::Writes>,
     /// A connection of the redirect listener: keys that another node serves get `-MOVED`.
     pub redirect: bool,
     /// Set by `READONLY`, cleared by `READWRITE`. Only a redirect connection reads it.
