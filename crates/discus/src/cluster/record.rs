@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use discus_placement::{Epoch, EpochId, Version};
+use discus_placement::{Epoch, EpochId, NodeId, Version};
 use foldhash::fast::RandomState;
 
 use super::writeset::{Held, WriteSetBudget, WriteSetLimits};
@@ -15,7 +15,10 @@ use super::writeset::{Held, WriteSetBudget, WriteSetLimits};
 /// The bookkeeping cost of one entry on top of the key bytes.
 const ENTRY_OVERHEAD: usize = 64;
 
-type Keys = HashMap<Bytes, Version, RandomState>;
+/// The node that ran a write itself, with its boot id.
+pub type Server = (NodeId, u64);
+
+type Keys = HashMap<Bytes, (Version, Option<Server>), RandomState>;
 
 /// The placement state of the node that a record compares against.
 #[derive(Clone)]
@@ -76,9 +79,10 @@ impl Record {
         }
     }
 
-    /// Note that a write changed `key` in database `db` to `version`. An entry that a cap or the
-    /// budget refuses ends every entry and marks the overflow: no write leaves without notice.
-    pub fn note(&mut self, db: u32, key: &Bytes, version: Version) {
+    /// Note that a write changed `key` in database `db` to `version`. `served` is the node that
+    /// ran the write itself, if it is known. An entry that a cap or the budget refuses ends every
+    /// entry and marks the overflow: no write leaves without notice.
+    pub fn note(&mut self, db: u32, key: &Bytes, version: Version, served: Option<Server>) {
         if self.overflow {
             return;
         }
@@ -90,7 +94,7 @@ impl Record {
             }
         };
         if let Some(v) = self.dbs[i].1.get_mut(&key[..]) {
-            *v = version;
+            *v = (version, served);
             return;
         }
         let size = key.len() + ENTRY_OVERHEAD;
@@ -103,7 +107,7 @@ impl Record {
             self.mark = mark;
             return;
         }
-        self.dbs[i].1.insert(key.clone(), version);
+        self.dbs[i].1.insert(key.clone(), (version, served));
         self.len += 1;
         self.bytes = bytes;
     }
@@ -140,11 +144,6 @@ impl Record {
         self.overflow
     }
 
-    /// The epoch changed since the record was last empty.
-    pub fn epoch_changed(&self) -> bool {
-        self.placement.current.load().id() != self.mark.epoch
-    }
-
     /// A member left or left `NORMAL` since the record was last empty. It can have taken writes
     /// that no other node holds.
     pub fn departed(&self) -> bool {
@@ -152,9 +151,19 @@ impl Record {
     }
 
     pub fn entries(&self) -> impl Iterator<Item = (u32, &Bytes, Version)> {
+        self.served().map(|(db, k, v, _)| (db, k, v))
+    }
+
+    /// [`Record::entries`] with the node that ran each write.
+    pub fn served(&self) -> impl Iterator<Item = (u32, &Bytes, Version, Option<Server>)> {
         self.dbs
             .iter()
-            .flat_map(|(db, keys)| keys.iter().map(move |(k, v)| (*db, k, *v)))
+            .flat_map(|(db, keys)| keys.iter().map(move |(k, (v, s))| (*db, k, *v, *s)))
+    }
+
+    /// The epoch of the mark: the current epoch when the record was last empty.
+    pub fn mark_epoch(&self) -> EpochId {
+        self.mark.epoch
     }
 
     /// [`Record::remove`], only while the entry still holds `version`.
@@ -164,7 +173,7 @@ impl Record {
             .iter()
             .find(|(d, _)| *d == db)
             .and_then(|(_, keys)| keys.get(key));
-        if current == Some(&version) {
+        if current.map(|(v, _)| *v) == Some(version) {
             self.remove(db, key);
         }
     }
@@ -238,22 +247,22 @@ mod tests {
     #[test]
     fn a_rewrite_replaces_the_entry() {
         let (mut r, _) = record(10, 1 << 20, u64::MAX);
-        r.note(0, &k("a"), v(1));
-        r.note(0, &k("a"), v(2));
+        r.note(0, &k("a"), v(1), None);
+        r.note(0, &k("a"), v(2), None);
         assert_eq!(entries(&r), vec![(0, k("a"), v(2))]);
     }
 
     #[test]
     fn the_key_cap_drops_every_entry_and_overflows() {
         let (mut r, budget) = record(2, 1 << 20, u64::MAX);
-        r.note(0, &k("a"), v(1));
-        r.note(0, &k("b"), v(2));
+        r.note(0, &k("a"), v(1), None);
+        r.note(0, &k("b"), v(2), None);
         assert!(!r.overflowed());
-        r.note(0, &k("c"), v(3));
+        r.note(0, &k("c"), v(3), None);
         assert!(r.overflowed());
         assert!(r.is_empty());
         assert_eq!(budget.used(), 0);
-        r.note(0, &k("d"), v(4));
+        r.note(0, &k("d"), v(4), None);
         assert!(r.is_empty());
     }
 
@@ -261,13 +270,13 @@ mod tests {
     fn the_byte_cap_and_the_budget_overflow() {
         let (mut r, _) = record(10, 2 * (1 + ENTRY_OVERHEAD), u64::MAX);
         for s in ["a", "b", "c"] {
-            r.note(0, &k(s), v(1));
+            r.note(0, &k(s), v(1), None);
         }
         assert!(r.overflowed() && r.is_empty());
         let (mut r, budget) = record(10, 1 << 20, (1 + ENTRY_OVERHEAD) as u64);
-        r.note(0, &k("a"), v(1));
+        r.note(0, &k("a"), v(1), None);
         assert!(!r.overflowed());
-        r.note(0, &k("b"), v(1));
+        r.note(0, &k("b"), v(1), None);
         assert!(r.overflowed() && r.is_empty());
         assert_eq!(budget.used(), 0);
     }
@@ -275,12 +284,12 @@ mod tests {
     #[test]
     fn clear_resets_the_record() {
         let (mut r, budget) = record(1, 1 << 20, u64::MAX);
-        r.note(0, &k("a"), v(1));
-        r.note(0, &k("b"), v(1));
+        r.note(0, &k("a"), v(1), None);
+        r.note(0, &k("b"), v(1), None);
         assert!(r.overflowed());
         r.clear();
         assert!(!r.overflowed() && r.is_empty());
-        r.note(0, &k("c"), v(2));
+        r.note(0, &k("c"), v(2), None);
         assert_eq!(entries(&r), vec![(0, k("c"), v(2))]);
         r.clear();
         assert_eq!(budget.used(), 0);
@@ -289,16 +298,16 @@ mod tests {
     #[test]
     fn a_departure_counts_until_the_record_is_empty_again() {
         let (mut r, _) = record(4, 1 << 20, 1 << 20);
-        r.note(0, &k("a"), v(1));
+        r.note(0, &k("a"), v(1), None);
         r.placement.departures.fetch_add(1, Ordering::AcqRel);
         assert!(r.departed());
         for i in 0..5 {
-            r.note(0, &k(&format!("o{i}")), v(2));
+            r.note(0, &k(&format!("o{i}")), v(2), None);
         }
         assert!(r.overflowed() && r.departed());
         r.clear();
         assert!(!r.departed());
-        r.note(0, &k("b"), v(3));
+        r.note(0, &k("b"), v(3), None);
         r.placement.departures.fetch_add(1, Ordering::AcqRel);
         r.remove(0, b"b");
         assert!(!r.departed());
@@ -307,20 +316,20 @@ mod tests {
     #[test]
     fn clear_db_keeps_other_databases() {
         let (mut r, _) = record(10, 1 << 20, u64::MAX);
-        r.note(0, &k("a"), v(1));
-        r.note(1, &k("a"), v(2));
-        r.note(2, &k("b"), v(3));
+        r.note(0, &k("a"), v(1), None);
+        r.note(1, &k("a"), v(2), None);
+        r.note(2, &k("b"), v(3), None);
         r.clear_db(1);
         assert_eq!(entries(&r), vec![(0, k("a"), v(1)), (2, k("b"), v(3))]);
-        r.note(1, &k("c"), v(4));
+        r.note(1, &k("c"), v(4), None);
         assert_eq!(r.entries().count(), 3);
     }
 
     #[test]
     fn remove_drops_one_entry() {
         let (mut r, budget) = record(10, 1 << 20, u64::MAX);
-        r.note(0, &k("a"), v(1));
-        r.note(0, &k("b"), v(2));
+        r.note(0, &k("a"), v(1), None);
+        r.note(0, &k("b"), v(2), None);
         r.remove(0, b"a");
         r.remove(1, b"b");
         assert_eq!(entries(&r), vec![(0, k("b"), v(2))]);
@@ -332,7 +341,7 @@ mod tests {
     #[test]
     fn the_budget_comes_back_on_drop() {
         let (mut r, budget) = record(10, 1 << 20, u64::MAX);
-        r.note(0, &k("a"), v(1));
+        r.note(0, &k("a"), v(1), None);
         assert!(budget.used() > 0);
         drop(r);
         assert_eq!(budget.used(), 0);

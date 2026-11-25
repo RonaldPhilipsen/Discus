@@ -95,6 +95,10 @@ impl Service for NodeService {
                         observed: reply.observed,
                         settled: reply.settled,
                         versions,
+                        boot: reply
+                            .served
+                            .filter(|(n, _)| *n == node.id)
+                            .map_or(0, |(_, b)| b),
                     })
                 }
                 other => unsupported(&other),

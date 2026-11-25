@@ -706,6 +706,7 @@ fn build_body(fbb: &mut FlatBufferBuilder<'_>, message: &Message) {
                     settled: r.settled,
                     versions,
                     changed,
+                    boot: r.boot,
                 },
             );
             fbb.finish_minimal(t);
@@ -729,6 +730,7 @@ fn build_body(fbb: &mut FlatBufferBuilder<'_>, message: &Message) {
                     epoch: Some(&epoch_id_to(a.epoch)),
                     idle: a.idle,
                     want_dbs,
+                    boot: a.boot,
                 },
             );
             fbb.finish_minimal(t);
@@ -920,6 +922,7 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
                 observed: r.observed().map(version_of),
                 settled: r.settled(),
                 versions: key_versions(r.versions(), r.changed())?,
+                boot: r.boot(),
             })
         }
         T::PING | T::PONG => {
@@ -951,6 +954,7 @@ pub fn decode_frame(bytes: &[u8], limits: &Limits) -> Result<Frame, DecodeError>
                 want: keys_of(a.want(), a.want_dbs()),
                 epoch: epoch_id_of(a.epoch().ok_or_else(|| invalid("ack without an epoch"))?),
                 idle: a.idle(),
+                boot: a.boot(),
             })
         }
         T::FETCH => {

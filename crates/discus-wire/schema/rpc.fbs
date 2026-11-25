@@ -94,6 +94,9 @@ table ForwardReply {
   /// version: `changed` is true at their positions. Both are absent for any other command.
   versions: [Version] (id: 5);
   changed: [bool] (id: 6);
+  /// The boot id of the receiver when it ran the command itself. 0 when it forwarded or split
+  /// the command again.
+  boot: ulong (id: 7);
 }
 
 table Ping {

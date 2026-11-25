@@ -65,6 +65,9 @@ pub struct Node {
     pub config: Config,
     /// This process's identity. A restart is a new node.
     pub id: NodeId,
+    /// A random number that each process start draws again, also with the same `--node-id`. A
+    /// node that answers with another boot id lost its store since.
+    pub boot: u64,
     /// The clock that stamps every write.
     pub hlc: Hlc,
     epochs: Arc<RwLock<EpochHistory>>,
@@ -281,6 +284,7 @@ impl Node {
         Node {
             config,
             id,
+            boot: fastrand::u64(1..),
             hlc: Hlc::new(id, hlc_clock),
             current: Arc::new(ArcSwap::new(epochs.current().clone())),
             departures: Arc::new(AtomicU64::new(0)),

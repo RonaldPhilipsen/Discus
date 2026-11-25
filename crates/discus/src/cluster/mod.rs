@@ -140,6 +140,9 @@ pub struct Reply {
     /// A multi-key write and `MOVE`: the database, key, and version of each key that the command
     /// changed. Empty for any other command, whose one key has `applied`.
     pub versions: Vec<(u32, Bytes, Version)>,
+    /// The node that ran the command itself, with its boot id. `None` for a reply that merges
+    /// parts or that a node split again.
+    pub served: Option<(NodeId, u64)>,
 }
 
 /// How a forwarded write failed (spec section 7.5).
@@ -173,6 +176,7 @@ impl Reply {
             settled: false,
             failed: None,
             versions: Vec::new(),
+            served: None,
         }
     }
 
@@ -323,6 +327,7 @@ pub fn local(node: &Node, spec: &CommandSpec, db: u32, cmd: &Command) -> Reply {
     let value = command::execute_local(node, spec, db, cmd);
     Reply {
         applied: Node::take_applied(),
+        served: Some((node.id, node.boot)),
         ..Reply::value(value)
     }
 }
@@ -892,10 +897,10 @@ fn single(
                     // `MOVE` changes its key in two databases, each with its own version.
                     Some(_) if by_key => {
                         for (db, k, v) in &reply.versions {
-                            w.record.note(*db, k, *v);
+                            w.record.note(*db, k, *v, reply.served);
                         }
                     }
-                    Some((db, k)) => w.record.note(db, &k, v),
+                    Some((db, k)) => w.record.note(db, &k, v, reply.served),
                     None => {}
                 }
             }

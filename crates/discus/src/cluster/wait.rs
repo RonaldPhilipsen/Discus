@@ -3,23 +3,24 @@
 //! `WAIT` counts in rounds. Each round offers every key of the connection's record, at its
 //! recorded version, to the current owners of the key. The reply is the lowest count over the
 //! keys. A count is never too high: an owner that does not answer holds none of the round's keys.
-//! A key that no current owner holds leaves the record only while the epoch has not changed since
-//! the record was last empty. Then its primary took the write and removed the key since, by
-//! expiry, delete, eviction, or flush. After an epoch change it counts 0, as a write lost with
-//! its primary does.
+//! A key that no current owner holds counts 0, as a write lost with its primary does. It leaves
+//! the record only when the node that ran the write answers, with the same boot id and the epoch
+//! of the record's mark, that it no longer holds the key. Then that node removed the key by
+//! expiry, delete, eviction, or flush, and did not lose it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use discus_placement::{NodeId, Owners, Version};
+use discus_placement::{EpochId, NodeId, Owners, Version};
 use discus_resp::{Command, Value};
 use discus_store::DbKey;
 use discus_wire::ForwardMode;
 use futures::future::join_all;
 use tokio::time::Instant;
 
+use super::record::Server;
 use super::{forward, Dispatch, Hop, Job, Reply, Writes};
 use crate::command::internal::DRAINED;
 use crate::command::util::parse_i64;
@@ -146,10 +147,10 @@ async fn round(node: &Arc<Node>, writes: Option<&Writes>) -> i64 {
     };
     let (entries, overflow) = {
         let w = writes.lock();
-        let entries: Vec<(DbKey, Version)> = w
+        let entries: Vec<(DbKey, Version, Option<Server>)> = w
             .record
-            .entries()
-            .map(|(db, k, v)| (DbKey::new(db, k.clone()), v))
+            .served()
+            .map(|(db, k, v, s)| (DbKey::new(db, k.clone()), v, s))
             .collect();
         (entries, w.record.overflowed())
     };
@@ -162,17 +163,22 @@ async fn round(node: &Arc<Node>, writes: Option<&Writes>) -> i64 {
     let Some(replicator) = node.replicator() else {
         return 0;
     };
-    let owners: Vec<Owners> = entries.iter().map(|(k, _)| node.owners(&k.key)).collect();
+    let owners: Vec<Owners> = entries.iter().map(|(k, ..)| node.owners(&k.key)).collect();
     let mut offers: HashMap<NodeId, Vec<(DbKey, Version)>> = HashMap::new();
-    for ((k, v), owners) in entries.iter().zip(&owners) {
+    for ((k, v, _), owners) in entries.iter().zip(&owners) {
         for o in owners.iter().filter(|o| **o != node.id) {
             offers.entry(*o).or_default().push((k.clone(), *v));
         }
     }
-    let answers: HashMap<NodeId, HashSet<DbKey>> =
+    let answers: HashMap<NodeId, Answer> =
         join_all(offers.into_iter().map(|(peer, offers)| async move {
-            let missing = replicator.missing(node, peer, offers).await.ok()?;
-            Some((peer, missing.into_iter().collect()))
+            let ack = replicator.missing(node, peer, offers).await.ok()?;
+            let answer = Answer {
+                missing: ack.want.into_iter().collect(),
+                epoch: ack.epoch,
+                boot: ack.boot,
+            };
+            Some((peer, answer))
         }))
         .await
         .into_iter()
@@ -187,14 +193,20 @@ async fn round(node: &Arc<Node>, writes: Option<&Writes>) -> i64 {
                     .is_some_and(|s| s >= v),
             );
         }
-        answers.get(&owner).map(|missing| !missing.contains(k))
+        answers.get(&owner).map(|a| !a.missing.contains(k))
     };
     // Read after the answers, so an epoch change during the round counts.
-    let stable = !writes.lock().record.epoch_changed();
+    let (here, mark) = (node.epoch_id(), writes.lock().record.mark_epoch());
+    let answered_by = |owner: NodeId| -> Option<(EpochId, u64)> {
+        if owner == node.id {
+            return Some((here, node.boot));
+        }
+        answers.get(&owner).map(|a| (a.epoch, a.boot))
+    };
     let most = node.config.replication_factor.saturating_sub(1);
     let mut lowest: Option<i64> = None;
     let mut leave = Vec::new();
-    for ((k, v), owners) in entries.into_iter().zip(owners) {
+    for ((k, v, served), owners) in entries.into_iter().zip(owners) {
         if owners.is_empty() {
             lowest = Some(0);
             continue;
@@ -202,7 +214,7 @@ async fn round(node: &Arc<Node>, writes: Option<&Writes>) -> i64 {
         let held: Vec<Option<bool>> = owners.iter().map(|o| holds(*o, &k, v)).collect();
         let holders = held.iter().filter(|h| **h == Some(true)).count();
         let answered = held.iter().all(Option::is_some);
-        if answered && holders == 0 && stable {
+        if answered && holders == 0 && removed(served, &owners, answered_by, mark, here) {
             leave.push((k, v));
             continue;
         }
@@ -221,6 +233,31 @@ async fn round(node: &Arc<Node>, writes: Option<&Writes>) -> i64 {
         }
     }
     lowest.unwrap_or_else(|| secondaries(node))
+}
+
+/// The answer of one owner in a round.
+struct Answer {
+    missing: HashSet<DbKey>,
+    epoch: EpochId,
+    boot: u64,
+}
+
+/// A key that no current owner holds was removed, not lost, only with proof from the node that
+/// ran the write: it is a current owner and answered this round with the boot id of the write,
+/// in the epoch of the mark, and this node is still in that epoch too. A restart with the same
+/// node id draws a new boot id, and a store that an epoch change discarded comes with a new
+/// epoch. `answered_by` gives the epoch and the boot id of an owner's answer.
+fn removed(
+    served: Option<Server>,
+    owners: &[NodeId],
+    answered_by: impl Fn(NodeId) -> Option<(EpochId, u64)>,
+    mark: EpochId,
+    here: EpochId,
+) -> bool {
+    let Some((n, boot)) = served else {
+        return false;
+    };
+    here == mark && owners.contains(&n) && answered_by(n) == Some((mark, boot))
 }
 
 /// The count of an overflowed record: the number of secondaries when this node and every other
@@ -312,6 +349,26 @@ mod tests {
 
     fn text(r: Result<Option<Instant>, CommandError>) -> String {
         r.map(|_| String::new()).unwrap_or_else(|e| e.text())
+    }
+
+    #[test]
+    fn only_the_node_that_ran_the_write_proves_a_removal() {
+        let (p, q) = (NodeId::from_u128(1), NodeId::from_u128(2));
+        let e = |g| EpochId {
+            generation: g,
+            origin: p,
+        };
+        let owners = [p, q];
+        let answers = |boot| move |n: NodeId| (n == p).then_some((e(1), boot));
+        assert!(removed(Some((p, 7)), &owners, answers(7), e(1), e(1)));
+        // The node restarted with the same id and an empty store.
+        assert!(!removed(Some((p, 7)), &owners, answers(8), e(1), e(1)));
+        assert!(!removed(None, &owners, answers(7), e(1), e(1)));
+        assert!(!removed(Some((p, 7)), &[q], answers(7), e(1), e(1)));
+        // The answer or this node is in another epoch than the mark.
+        assert!(!removed(Some((p, 7)), &owners, answers(7), e(2), e(2)));
+        assert!(!removed(Some((p, 7)), &owners, answers(7), e(1), e(2)));
+        assert!(!removed(Some((q, 7)), &owners, answers(7), e(1), e(1)));
     }
 
     #[test]

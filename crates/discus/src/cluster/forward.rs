@@ -88,6 +88,7 @@ pub async fn send(
                     settled: reply.settled,
                     failed: None,
                     versions,
+                    served: (reply.boot != 0).then_some((target, reply.boot)),
                 })
             }
             other => Err(TransportError::Frame(format!(

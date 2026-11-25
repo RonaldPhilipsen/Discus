@@ -155,6 +155,7 @@ fn messages() -> Vec<(&'static str, Message)> {
                 want: vec![DbKey::new(0, "k")],
                 epoch: epoch(3),
                 idle: false,
+                boot: 0,
             }),
         ),
         (

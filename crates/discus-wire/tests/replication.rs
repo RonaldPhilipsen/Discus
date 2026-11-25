@@ -87,6 +87,7 @@ fn a_batch_ack_round_trips() {
         want: vec![DbKey::new(0, "k1"), DbKey::new(0, "k2")],
         epoch: epoch(3),
         idle: true,
+        boot: 9,
     });
     assert_eq!(round_trip(m.clone()), m);
 }
@@ -118,6 +119,7 @@ fn new_types_are_9_to_15() {
             want: vec![],
             epoch: epoch(1),
             idle: false,
+            boot: 9,
         })
         .type_code(),
         Message::Fetch { keys: vec![] }.type_code(),
@@ -144,6 +146,7 @@ fn a_forward_reply_keeps_observed_and_settled() {
         observed: Some(v(8)),
         settled: true,
         versions: Vec::new(),
+        boot: 7,
     });
     assert_eq!(round_trip(m.clone()), m);
     let plain = Message::ForwardReply(ForwardReply {
@@ -153,6 +156,7 @@ fn a_forward_reply_keeps_observed_and_settled() {
         observed: None,
         settled: false,
         versions: Vec::new(),
+        boot: 7,
     });
     assert_eq!(round_trip(plain.clone()), plain);
 }
@@ -166,6 +170,7 @@ fn a_forward_reply_keeps_the_version_of_each_key() {
         observed: None,
         settled: false,
         versions: vec![Some(v(1)), None, Some(v(2))],
+        boot: 7,
     });
     assert_eq!(round_trip(m.clone()), m);
 }
@@ -336,6 +341,7 @@ fn entries_offers_wants_and_fetches_keep_their_databases() {
             want: vec![DbKey::new(0, "w"), DbKey::new(5, "w")],
             epoch: epoch(4),
             idle: false,
+            boot: 9,
         }),
         Message::Fetch {
             keys: vec![DbKey::new(0, "f"), DbKey::new(2, "f")],

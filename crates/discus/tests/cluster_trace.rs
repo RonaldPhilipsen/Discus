@@ -48,6 +48,7 @@ impl Service for Capture {
                 observed: None,
                 settled: false,
                 versions: Vec::new(),
+                boot: 7,
             })
         })
     }

@@ -120,6 +120,7 @@ fn every_message_round_trips() {
             observed: None,
             settled: false,
             versions: Vec::new(),
+            boot: 7,
         }),
         Message::ForwardReply(ForwardReply {
             value: Value::Null,
@@ -128,6 +129,7 @@ fn every_message_round_trips() {
             observed: None,
             settled: false,
             versions: Vec::new(),
+            boot: 7,
         }),
         Message::Ping { nonce: 11 },
         Message::Pong { nonce: 12 },
@@ -147,6 +149,7 @@ fn version_struct_is_the_uhlc_layout() {
         observed: None,
         settled: false,
         versions: Vec::new(),
+        boot: 7,
     });
     let frame = Frame {
         request_id: 1,
@@ -208,6 +211,7 @@ fn deep_nesting_fails_the_depth_limit() {
             observed: None,
             settled: false,
             versions: Vec::new(),
+            boot: 7,
         }),
     };
     assert!(matches!(

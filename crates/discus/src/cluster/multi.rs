@@ -275,7 +275,7 @@ pub fn multi(
                     w.set.record(SetKey::of(db, k), v, Instant::now());
                 }
                 for (db, k, v) in &reply.versions {
-                    w.record.note(*db, k, *v);
+                    w.record.note(*db, k, *v, reply.served);
                 }
             }
         }

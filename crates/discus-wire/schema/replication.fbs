@@ -69,6 +69,8 @@ table BatchAck {
   /// The database of the key at the same position in `want`. A missing vector or a missing
   /// position means 0.
   want_dbs: [uint] (id: 4);
+  /// The boot id of the receiver: a random number that each process start draws again.
+  boot: ulong (id: 5);
 }
 
 /// Read repair and previous-epoch fallback. The reply is ENTRIES.
